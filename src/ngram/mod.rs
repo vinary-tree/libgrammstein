@@ -11,6 +11,17 @@
 //! - Streaming corpus training with Rayon parallelism
 //! - Efficient probability queries via trie navigation
 //!
+//! # Dictionary Backend Type Aliases
+//!
+//! Two type aliases are provided for common use cases:
+//!
+//! - [`SerializableNgramModel`]: Uses `DynamicDawgChar` backend for models that need
+//!   to be saved/loaded. This backend supports full serde serialization.
+//!
+//! - [`PathMapNgramModel`]: Uses `PathMapDictionary` backend for integration with
+//!   lling-llang's shared lattice architecture. This backend does NOT support serde
+//!   serialization but provides better memory sharing characteristics.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -29,7 +40,52 @@ pub mod smoothing;
 mod trainer;
 mod trie;
 
-pub use entry::NgramEntry;
+pub use entry::{NgramEntry, NgramEntrySnapshot};
 pub use model::NgramModel;
 pub use trainer::{NgramTrainer, TrainerBuilder, TrainingConfig, TrainingProgress, TrainingStats};
 pub use trie::NgramTrie;
+
+// Dictionary backend type aliases for common use cases
+
+/// Serializable n-gram model using DynamicDawgChar backend.
+///
+/// Use this when you need to save/load models to/from disk.
+/// This backend supports full serde serialization.
+///
+/// # Example
+///
+/// ```ignore
+/// use libgrammstein::ngram::SerializableNgramModel;
+/// use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+///
+/// // Train and save
+/// let dictionary = DynamicDawgChar::<NgramEntry>::new();
+/// let model = TrainerBuilder::new(dictionary).order(5).train(&reader)?;
+/// model.save("model.bin")?;
+///
+/// // Load later
+/// let model: SerializableNgramModel = SerializableNgramModel::load("model.bin")?;
+/// ```
+pub type SerializableNgramModel =
+    NgramModel<liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<NgramEntry>>;
+
+/// Memory-efficient n-gram model using PathMapDictionary backend.
+///
+/// Use this for lling-llang integration with shared lattice structures.
+/// This backend does NOT support serde serialization but provides
+/// better memory sharing characteristics.
+///
+/// # Example
+///
+/// ```ignore
+/// use libgrammstein::ngram::PathMapNgramModel;
+/// use liblevenshtein::dictionary::pathmap::PathMapDictionary;
+///
+/// let dictionary = PathMapDictionary::<NgramEntry>::new();
+/// let model = TrainerBuilder::new(dictionary).order(5).train(&reader)?;
+///
+/// // Use with lling-llang's LanguageModelLayer
+/// let lm = GrammsteinLanguageModel::from_ngram(model);
+/// ```
+pub type PathMapNgramModel =
+    NgramModel<liblevenshtein::dictionary::pathmap::PathMapDictionary<NgramEntry>>;

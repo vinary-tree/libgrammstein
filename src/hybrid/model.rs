@@ -12,8 +12,12 @@ use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
+#[cfg(feature = "serde")]
+use std::path::Path;
+
 /// Interpolation strategy for combining n-gram and embedding scores.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum InterpolationStrategy {
     /// Linear interpolation: α * ngram + (1-α) * embedding
     Linear {
@@ -50,6 +54,7 @@ impl Default for InterpolationStrategy {
 
 /// Configuration for hybrid language model.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HybridConfig {
     /// Interpolation strategy.
     pub strategy: InterpolationStrategy,
@@ -77,9 +82,19 @@ impl Default for HybridConfig {
 
 /// Cache key for combined scores.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct CacheKey {
     word: String,
     context: Vec<String>,
+}
+
+/// Default cache constructor for serde deserialization.
+/// Uses the default cache size from HybridConfig.
+#[cfg(feature = "serde")]
+fn default_cache() -> Mutex<LruCache<CacheKey, f64>> {
+    let cache_size = NonZeroUsize::new(HybridConfig::default().cache_size)
+        .expect("Default cache size must be non-zero");
+    Mutex::new(LruCache::new(cache_size))
 }
 
 /// Hybrid language model combining n-gram and embedding models.
@@ -99,6 +114,11 @@ struct CacheKey {
 /// // Score a word in context
 /// let score = hybrid.score("fox", &["the", "quick", "brown"]);
 /// ```
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(bound = "D: serde::Serialize + serde::de::DeserializeOwned")
+)]
 pub struct HybridLanguageModel<D>
 where
     D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
@@ -112,7 +132,8 @@ where
     /// Configuration.
     config: HybridConfig,
 
-    /// Score cache.
+    /// Score cache (not serialized - reconstructed on load).
+    #[cfg_attr(feature = "serde", serde(skip, default = "default_cache"))]
     cache: Mutex<LruCache<CacheKey, f64>>,
 }
 
@@ -357,6 +378,43 @@ where
 {
 }
 
+// Serialization support
+#[cfg(feature = "serde")]
+impl<D> HybridLanguageModel<D>
+where
+    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync + serde::Serialize + serde::de::DeserializeOwned,
+{
+    /// Save the hybrid model to a binary file.
+    ///
+    /// Uses bincode for efficient binary serialization.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// model.save("hybrid_model.bin")?;
+    /// ```
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
+        let file = std::fs::File::create(path)?;
+        let writer = std::io::BufWriter::new(file);
+        bincode::serialize_into(writer, self)?;
+        Ok(())
+    }
+
+    /// Load a hybrid model from a binary file.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let model: HybridLanguageModel<DynamicDawgChar<NgramEntry>> = HybridLanguageModel::load("hybrid_model.bin")?;
+    /// ```
+    pub fn load<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        let model = bincode::deserialize_from(reader)?;
+        Ok(model)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,5 +558,101 @@ mod tests {
         let (word, score) = result.unwrap();
         assert!(candidates.contains(&word.as_str()));
         assert!(score.is_finite());
+    }
+
+    #[cfg(feature = "serde")]
+    mod serde_tests {
+        use super::*;
+        use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+
+        fn create_serializable_test_models() -> (NgramModel<DynamicDawgChar<NgramEntry>>, SubwordEmbedding) {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            let content = "the quick brown fox the quick brown dog the lazy fox \
+                           the quick brown fox the quick brown dog the lazy fox \
+                           the quick brown fox the quick brown dog the lazy fox";
+            let path = create_test_corpus(dir.path(), content);
+            let reader = PlaintextReader::from_file(&path).expect("Failed to create reader");
+
+            // Train n-gram model with DynamicDawgChar (serializable backend)
+            let dictionary = DynamicDawgChar::<NgramEntry>::new();
+            let ngram_model = TrainerBuilder::new(dictionary)
+                .order(3)
+                .train(&reader)
+                .expect("N-gram training failed");
+
+            // Train embedding model
+            let reader2 = PlaintextReader::from_file(&path).expect("Failed to create reader");
+            let embedding_model = EmbeddingTrainerBuilder::new()
+                .dim(10)
+                .window_size(2)
+                .min_count(1)
+                .epochs(2)
+                .train(&reader2)
+                .expect("Embedding training failed");
+
+            (ngram_model, embedding_model)
+        }
+
+        #[test]
+        fn test_hybrid_save_load_roundtrip() {
+            let (ngram, embedding) = create_serializable_test_models();
+            let config = HybridConfig {
+                strategy: InterpolationStrategy::Linear { alpha: 0.7 },
+                cache_size: 1000,
+                ..Default::default()
+            };
+            let hybrid = HybridLanguageModel::new(ngram, embedding, config);
+            let temp_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+
+            // Save the model
+            hybrid.save(temp_file.path()).expect("Failed to save hybrid model");
+
+            // Verify file was created with content
+            let metadata = std::fs::metadata(temp_file.path()).expect("Failed to get file metadata");
+            assert!(metadata.len() > 0, "Saved model file should not be empty");
+
+            // Load the model
+            let loaded: HybridLanguageModel<DynamicDawgChar<NgramEntry>> =
+                HybridLanguageModel::load(temp_file.path()).expect("Failed to load hybrid model");
+
+            // Verify config matches
+            assert_eq!(hybrid.config().cache_size, loaded.config().cache_size);
+            match (hybrid.config().strategy, loaded.config().strategy) {
+                (InterpolationStrategy::Linear { alpha: a1 }, InterpolationStrategy::Linear { alpha: a2 }) => {
+                    assert!((a1 - a2).abs() < 1e-10, "Alpha should match");
+                }
+                _ => panic!("Strategy should match"),
+            }
+
+            // Verify scores match
+            let orig_score = hybrid.score("fox", &["the", "quick"]);
+            let loaded_score = loaded.score("fox", &["the", "quick"]);
+            assert!(
+                (orig_score - loaded_score).abs() < 1e-10,
+                "Scores should match after roundtrip: {} vs {}",
+                orig_score,
+                loaded_score
+            );
+
+            // Verify sentence scores match
+            let orig_sentence = hybrid.sentence_log_prob(&["the", "quick", "brown", "fox"]);
+            let loaded_sentence = loaded.sentence_log_prob(&["the", "quick", "brown", "fox"]);
+            assert!(
+                (orig_sentence - loaded_sentence).abs() < 1e-10,
+                "Sentence scores should match: {} vs {}",
+                orig_sentence,
+                loaded_sentence
+            );
+
+            // Verify perplexity matches
+            let orig_ppl = hybrid.perplexity(&["the", "quick", "brown", "fox"]);
+            let loaded_ppl = loaded.perplexity(&["the", "quick", "brown", "fox"]);
+            assert!(
+                (orig_ppl - loaded_ppl).abs() < 1e-8,
+                "Perplexity should match: {} vs {}",
+                orig_ppl,
+                loaded_ppl
+            );
+        }
     }
 }

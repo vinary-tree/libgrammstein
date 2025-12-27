@@ -10,6 +10,9 @@ use ordered_float::OrderedFloat;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(feature = "serde")]
+use std::path::Path;
+
 /// Default embedding dimension.
 pub const DEFAULT_EMBEDDING_DIM: usize = 100;
 
@@ -43,6 +46,7 @@ pub const DEFAULT_MAX_SUBWORD_LEN: usize = 6;
 /// let similar = model.most_similar("king", 10);
 /// ```
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SubwordEmbedding {
     /// Word embeddings [vocab_size, dim].
     word_embeddings: Array2<f32>,
@@ -71,7 +75,8 @@ pub struct SubwordEmbedding {
     /// Optional BPE tokenizer for tokenization.
     tokenizer: Option<BpeTokenizer>,
 
-    /// Cache for computed word vectors.
+    /// Cache for computed word vectors (not serialized - reconstructed on load).
+    #[cfg_attr(feature = "serde", serde(skip))]
     cache: Arc<DashMap<String, Array1<f32>>>,
 
     /// Maximum cache size.
@@ -435,6 +440,40 @@ impl Clone for SubwordEmbedding {
     }
 }
 
+// Serialization support
+#[cfg(feature = "serde")]
+impl SubwordEmbedding {
+    /// Save the embedding model to a binary file.
+    ///
+    /// Uses bincode for efficient binary serialization.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// model.save("embeddings.bin")?;
+    /// ```
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
+        let file = std::fs::File::create(path)?;
+        let writer = std::io::BufWriter::new(file);
+        bincode::serialize_into(writer, self)?;
+        Ok(())
+    }
+
+    /// Load an embedding model from a binary file.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let model = SubwordEmbedding::load("embeddings.bin")?;
+    /// ```
+    pub fn load<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        let model = bincode::deserialize_from(reader)?;
+        Ok(model)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,5 +601,52 @@ mod tests {
         assert_eq!(model.dim(), cloned.dim());
         assert_eq!(model.vocab_size(), cloned.vocab_size());
         assert_eq!(model.word_embeddings, cloned.word_embeddings);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_embedding_save_load_roundtrip() {
+        let model = create_test_model();
+        let temp_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+
+        // Save the model
+        model.save(temp_file.path()).expect("Failed to save model");
+
+        // Verify file was created with content
+        let metadata = std::fs::metadata(temp_file.path()).expect("Failed to get file metadata");
+        assert!(metadata.len() > 0, "Saved model file should not be empty");
+
+        // Load the model
+        let loaded = SubwordEmbedding::load(temp_file.path()).expect("Failed to load model");
+
+        // Verify properties match
+        assert_eq!(model.dim(), loaded.dim());
+        assert_eq!(model.vocab_size(), loaded.vocab_size());
+        assert_eq!(model.bucket_count(), loaded.bucket_count());
+
+        // Verify embeddings match
+        assert_eq!(model.word_embeddings, loaded.word_embeddings);
+        assert_eq!(model.subword_embeddings, loaded.subword_embeddings);
+
+        // Verify vocabulary matches
+        for word in &model.idx_to_word {
+            assert!(loaded.contains(word), "Word '{}' should be in loaded model", word);
+            assert_eq!(
+                model.word_index(word),
+                loaded.word_index(word),
+                "Word indices should match for '{}'",
+                word
+            );
+        }
+
+        // Verify similarity computations match
+        let orig_sim = model.similarity("king", "queen");
+        let loaded_sim = loaded.similarity("king", "queen");
+        assert!(
+            (orig_sim - loaded_sim).abs() < 1e-6,
+            "Similarity should match after roundtrip: {} vs {}",
+            orig_sim,
+            loaded_sim
+        );
     }
 }

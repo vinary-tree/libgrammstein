@@ -31,6 +31,7 @@ pub const BPE_UNKNOWN: &str = "<unk>";
 
 /// A merge operation: (left, right) -> merged.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MergeOp {
     /// Left symbol.
     pub left: String,
@@ -50,6 +51,7 @@ impl MergeOp {
 
 /// BPE tokenizer with learned vocabulary and merge operations.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BpeTokenizer {
     /// Vocabulary: token -> index.
     vocab: HashMap<String, u32>,
@@ -59,7 +61,8 @@ pub struct BpeTokenizer {
     merges: Vec<MergeOp>,
     /// Merge lookup for fast encoding: (left, right) -> priority (lower = earlier).
     merge_ranks: HashMap<(String, String), usize>,
-    /// Cache for encoded words.
+    /// Cache for encoded words (not serialized - reconstructed on load).
+    #[cfg_attr(feature = "serde", serde(skip))]
     cache: DashMap<String, Vec<String>>,
     /// Maximum cache size.
     max_cache_size: usize,

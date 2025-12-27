@@ -36,6 +36,11 @@ pub const NGRAM_SEPARATOR: char = '|';
 /// trie.insert(&["the", "quick", "brown"]);
 /// assert_eq!(trie.get(&["the", "quick", "brown"]).map(|e| e.count()), Some(1));
 /// ```
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(bound = "D: serde::Serialize + serde::de::DeserializeOwned")
+)]
 pub struct NgramTrie<D>
 where
     D: MutableMappedDictionary<Value = NgramEntry>,
@@ -47,6 +52,7 @@ where
     max_order: usize,
 
     /// Phantom data for type parameter.
+    #[cfg_attr(feature = "serde", serde(skip))]
     _marker: PhantomData<D>,
 }
 

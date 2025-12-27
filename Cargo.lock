@@ -729,9 +729,12 @@ name = "liblevenshtein"
 version = "0.8.0"
 dependencies = [
  "arc-swap",
+ "bincode",
  "parking_lot",
  "pathmap",
  "rustc-hash",
+ "serde",
+ "serde_json",
  "smallvec",
  "thiserror",
 ]
@@ -838,6 +841,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "rawpointer",
+ "serde",
 ]
 
 [[package]]

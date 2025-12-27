@@ -145,6 +145,7 @@ impl DictionaryValue for NgramEntry {}
 /// Used when we need to pass n-gram data across thread boundaries
 /// or when atomic operations are not needed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NgramEntrySnapshot {
     /// Raw corpus count.
     pub count: u64,

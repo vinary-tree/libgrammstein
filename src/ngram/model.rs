@@ -7,6 +7,9 @@ use crate::ngram::smoothing::KneserNeySmoothing;
 use crate::ngram::{NgramEntry, NgramTrie};
 use liblevenshtein::dictionary::MutableMappedDictionary;
 
+#[cfg(feature = "serde")]
+use std::path::Path;
+
 /// N-gram language model with Modified Kneser-Ney smoothing.
 ///
 /// This is the main interface for training and querying n-gram language models.
@@ -32,6 +35,11 @@ use liblevenshtein::dictionary::MutableMappedDictionary;
 /// // Score a sentence
 /// let sentence_log_prob = model.sentence_log_prob(&["the", "quick", "brown", "fox"]);
 /// ```
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(bound = "D: serde::Serialize + serde::de::DeserializeOwned")
+)]
 pub struct NgramModel<D>
 where
     D: MutableMappedDictionary<Value = NgramEntry>,
@@ -201,9 +209,175 @@ where
     }
 }
 
+// Serialization support
+#[cfg(feature = "serde")]
+impl<D> NgramModel<D>
+where
+    D: MutableMappedDictionary<Value = NgramEntry> + serde::Serialize + serde::de::DeserializeOwned,
+{
+    /// Save the model to a binary file.
+    ///
+    /// Uses bincode for efficient binary serialization.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// model.save("model.bin")?;
+    /// ```
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
+        let file = std::fs::File::create(path)?;
+        let writer = std::io::BufWriter::new(file);
+        bincode::serialize_into(writer, self)?;
+        Ok(())
+    }
+
+    /// Load a model from a binary file.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let model: NgramModel<DynamicDawgChar<NgramEntry>> = NgramModel::load("model.bin")?;
+    /// ```
+    pub fn load<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        let model = bincode::deserialize_from(reader)?;
+        Ok(model)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::corpus::PlaintextReader;
+    use crate::ngram::TrainerBuilder;
+    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+    use liblevenshtein::dictionary::pathmap::PathMapDictionary;
+    use std::io::Write;
+    use tempfile::TempDir;
 
-    // Tests will be added once the full training pipeline is implemented
+    fn create_test_corpus(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
+        let path = dir.join("test.txt");
+        let mut file = std::fs::File::create(&path).expect("Failed to create test file");
+        write!(file, "{}", content).expect("Failed to write test file");
+        path
+    }
+
+    fn create_test_ngram_model() -> NgramModel<DynamicDawgChar<NgramEntry>> {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let content = "the quick brown fox the quick brown dog the lazy fox \
+                       the quick brown fox the quick brown dog the lazy fox \
+                       the quick brown fox the quick brown dog the lazy fox";
+        let path = create_test_corpus(dir.path(), content);
+        let reader = PlaintextReader::from_file(&path).expect("Failed to create reader");
+
+        let dictionary = DynamicDawgChar::<NgramEntry>::new();
+        TrainerBuilder::new(dictionary)
+            .order(3)
+            .train(&reader)
+            .expect("N-gram training failed")
+    }
+
+    #[test]
+    fn test_model_properties() {
+        let model = create_test_ngram_model();
+        assert_eq!(model.order(), 3);
+        assert!(model.vocab_size() > 0);
+        assert!(model.total_count() > 0);
+    }
+
+    #[test]
+    fn test_log_prob() {
+        let model = create_test_ngram_model();
+
+        // Test known n-gram
+        let log_prob = model.log_prob("fox", &["brown"]);
+        assert!(log_prob.is_finite());
+        assert!(log_prob <= 0.0);
+
+        // Test unigram
+        let unigram_prob = model.log_prob("the", &[]);
+        assert!(unigram_prob.is_finite());
+    }
+
+    #[test]
+    fn test_sentence_log_prob() {
+        let model = create_test_ngram_model();
+
+        let log_prob = model.sentence_log_prob(&["the", "quick", "brown", "fox"]);
+        assert!(log_prob.is_finite());
+        assert!(log_prob < 0.0);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_ngram_save_load_roundtrip() {
+        let model = create_test_ngram_model();
+        let temp_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+
+        // Save the model
+        model.save(temp_file.path()).expect("Failed to save model");
+
+        // Verify file was created with content
+        let metadata = std::fs::metadata(temp_file.path()).expect("Failed to get file metadata");
+        assert!(metadata.len() > 0, "Saved model file should not be empty");
+
+        // Load the model
+        let loaded: NgramModel<DynamicDawgChar<NgramEntry>> =
+            NgramModel::load(temp_file.path()).expect("Failed to load model");
+
+        // Verify properties match
+        assert_eq!(model.order(), loaded.order());
+        assert_eq!(model.vocab_size(), loaded.vocab_size());
+        assert_eq!(model.total_count(), loaded.total_count());
+
+        // Verify probabilities match
+        let orig_prob = model.log_prob("fox", &["the", "quick"]);
+        let loaded_prob = loaded.log_prob("fox", &["the", "quick"]);
+        assert!(
+            probs_equal(orig_prob, loaded_prob),
+            "Log probabilities should match after roundtrip: {} vs {}",
+            orig_prob,
+            loaded_prob
+        );
+
+        // Verify sentence probabilities match
+        let orig_sentence_prob = model.sentence_log_prob(&["the", "quick", "brown", "fox"]);
+        let loaded_sentence_prob = loaded.sentence_log_prob(&["the", "quick", "brown", "fox"]);
+        assert!(
+            probs_equal(orig_sentence_prob, loaded_sentence_prob),
+            "Sentence log probabilities should match: {} vs {}",
+            orig_sentence_prob,
+            loaded_sentence_prob
+        );
+    }
+
+    /// Helper to compare probabilities that may be -inf
+    fn probs_equal(a: f64, b: f64) -> bool {
+        if a.is_infinite() && b.is_infinite() {
+            a.signum() == b.signum() // Both -inf or both +inf
+        } else if a.is_nan() || b.is_nan() {
+            false
+        } else {
+            (a - b).abs() < 1e-10
+        }
+    }
+
+    #[test]
+    fn test_pathmap_model() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let content = "the quick brown fox";
+        let path = create_test_corpus(dir.path(), content);
+        let reader = PlaintextReader::from_file(&path).expect("Failed to create reader");
+
+        let dictionary = PathMapDictionary::<NgramEntry>::new();
+        let model = TrainerBuilder::new(dictionary)
+            .order(3)
+            .train(&reader)
+            .expect("N-gram training failed");
+
+        // Basic functionality check
+        let log_prob = model.log_prob("fox", &["brown"]);
+        assert!(log_prob.is_finite());
+    }
 }
