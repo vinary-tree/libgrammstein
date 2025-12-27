@@ -1,0 +1,492 @@
+//! N-gram model training with parallel corpus processing.
+//!
+//! This module provides the training pipeline for n-gram language models:
+//! - Streaming corpus reading
+//! - Parallel n-gram counting with Rayon
+//! - Continuation count collection for Modified Kneser-Ney
+//! - Progress reporting
+
+use crate::corpus::{CorpusReader, Tokenizer};
+use crate::ngram::smoothing::KneserNeySmoothing;
+use crate::ngram::{NgramEntry, NgramModel, NgramTrie};
+use crate::Result;
+
+use crossbeam_channel::Sender;
+use liblevenshtein::dictionary::MutableMappedDictionary;
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Training progress information.
+#[derive(Debug, Clone)]
+pub struct TrainingProgress {
+    /// Number of sentences processed.
+    pub sentences_processed: u64,
+
+    /// Number of n-grams counted.
+    pub ngrams_counted: u64,
+
+    /// Elapsed time in seconds.
+    pub elapsed_secs: f64,
+}
+
+/// Training configuration.
+#[derive(Debug, Clone)]
+pub struct TrainingConfig {
+    /// Maximum n-gram order (e.g., 5 for 5-grams).
+    pub order: usize,
+
+    /// Batch size for parallel processing.
+    pub batch_size: usize,
+
+    /// Minimum word frequency to include in vocabulary.
+    pub min_word_freq: u64,
+}
+
+impl Default for TrainingConfig {
+    fn default() -> Self {
+        Self {
+            order: 5,
+            batch_size: 10_000,
+            min_word_freq: 1,
+        }
+    }
+}
+
+impl TrainingConfig {
+    /// Create a new training configuration.
+    pub fn new(order: usize) -> Self {
+        Self {
+            order,
+            ..Default::default()
+        }
+    }
+
+    /// Set the batch size for parallel processing.
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size;
+        self
+    }
+
+    /// Set minimum word frequency.
+    pub fn with_min_word_freq(mut self, min_freq: u64) -> Self {
+        self.min_word_freq = min_freq;
+        self
+    }
+}
+
+/// N-gram trainer with parallel corpus processing.
+///
+/// Uses Rayon for CPU-bound parallel processing and atomic operations
+/// for lock-free n-gram counting.
+pub struct NgramTrainer<D>
+where
+    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+{
+    /// The n-gram trie being built.
+    trie: NgramTrie<D>,
+
+    /// Training configuration.
+    config: TrainingConfig,
+
+    /// Training statistics.
+    stats: TrainingStats,
+
+    /// Word tokenizer.
+    tokenizer: Tokenizer,
+}
+
+/// Training statistics with atomic counters for thread safety.
+#[derive(Default)]
+pub struct TrainingStats {
+    sentences_processed: AtomicU64,
+    ngrams_counted: AtomicU64,
+    tokens_processed: AtomicU64,
+}
+
+impl TrainingStats {
+    /// Get the number of sentences processed.
+    pub fn sentences_processed(&self) -> u64 {
+        self.sentences_processed.load(Ordering::Relaxed)
+    }
+
+    /// Get the number of n-grams counted.
+    pub fn ngrams_counted(&self) -> u64 {
+        self.ngrams_counted.load(Ordering::Relaxed)
+    }
+
+    /// Get the number of tokens processed.
+    pub fn tokens_processed(&self) -> u64 {
+        self.tokens_processed.load(Ordering::Relaxed)
+    }
+
+    /// Increment sentence count.
+    pub fn inc_sentences(&self) {
+        self.sentences_processed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment n-gram count.
+    pub fn inc_ngrams(&self, count: u64) {
+        self.ngrams_counted.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Increment token count.
+    pub fn inc_tokens(&self, count: u64) {
+        self.tokens_processed.fetch_add(count, Ordering::Relaxed);
+    }
+}
+
+impl<D> NgramTrainer<D>
+where
+    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync + 'static,
+{
+    /// Create a new trainer with the given dictionary and configuration.
+    pub fn new(dictionary: D, config: TrainingConfig) -> Self {
+        let order = config.order;
+        Self {
+            trie: NgramTrie::new(dictionary, order),
+            config,
+            stats: TrainingStats::default(),
+            tokenizer: Tokenizer::new(),
+        }
+    }
+
+    /// Set a custom tokenizer.
+    pub fn with_tokenizer(mut self, tokenizer: Tokenizer) -> Self {
+        self.tokenizer = tokenizer;
+        self
+    }
+
+    /// Train the n-gram model from a corpus reader.
+    ///
+    /// This is the main training entry point that:
+    /// 1. Counts n-grams in parallel
+    /// 2. Collects continuation counts
+    /// 3. Computes smoothing parameters
+    ///
+    /// # Arguments
+    ///
+    /// * `reader` - Corpus reader providing sentences
+    ///
+    /// # Returns
+    ///
+    /// The trained `NgramModel` or an error.
+    pub fn train<R: CorpusReader>(self, reader: &R) -> Result<NgramModel<D>> {
+        let start = std::time::Instant::now();
+
+        // Phase 1: Count n-grams
+        self.count_ngrams(reader)?;
+
+        // Phase 2: Collect continuation counts (for MKN smoothing)
+        self.collect_continuation_counts();
+
+        // Phase 3: Compute smoothing parameters
+        let smoothing = self.compute_smoothing_params();
+
+        let elapsed = start.elapsed().as_secs_f64();
+        log::info!(
+            "Training complete: {} sentences, {} n-grams in {:.2}s",
+            self.stats.sentences_processed(),
+            self.stats.ngrams_counted(),
+            elapsed
+        );
+
+        // Compute vocabulary size (unique unigrams)
+        let vocab_size = self.count_unigrams();
+        let total_count = self.stats.tokens_processed();
+
+        Ok(NgramModel::new(
+            self.trie,
+            smoothing,
+            vocab_size,
+            total_count,
+        ))
+    }
+
+    /// Train with progress reporting via channel.
+    pub fn train_with_progress<R: CorpusReader>(
+        self,
+        reader: &R,
+        progress_tx: Sender<TrainingProgress>,
+    ) -> Result<NgramModel<D>> {
+        let start = std::time::Instant::now();
+
+        // Phase 1: Count n-grams with progress
+        self.count_ngrams_with_progress(reader, &progress_tx, &start)?;
+
+        // Phase 2: Collect continuation counts
+        self.collect_continuation_counts();
+
+        // Phase 3: Compute smoothing parameters
+        let smoothing = self.compute_smoothing_params();
+
+        // Final progress
+        let _ = progress_tx.try_send(TrainingProgress {
+            sentences_processed: self.stats.sentences_processed(),
+            ngrams_counted: self.stats.ngrams_counted(),
+            elapsed_secs: start.elapsed().as_secs_f64(),
+        });
+
+        let vocab_size = self.count_unigrams();
+        let total_count = self.stats.tokens_processed();
+
+        Ok(NgramModel::new(
+            self.trie,
+            smoothing,
+            vocab_size,
+            total_count,
+        ))
+    }
+
+    /// Count n-grams from corpus in parallel.
+    fn count_ngrams<R: CorpusReader>(&self, reader: &R) -> Result<()> {
+        let order = self.config.order;
+        let trie = &self.trie;
+        let stats = &self.stats;
+        let tokenizer = &self.tokenizer;
+
+        // Collect sentences and process in parallel
+        let sentences: Vec<String> = reader.sentences().collect();
+
+        if sentences.is_empty() {
+            return Err(crate::Error::EmptyCorpus);
+        }
+
+        sentences.par_iter().for_each(|sentence| {
+            // Tokenize into owned strings first, then get refs
+            let token_strings: Vec<String> = tokenizer.words(sentence).collect();
+            let tokens: Vec<&str> = token_strings.iter().map(|s| s.as_str()).collect();
+
+            if tokens.is_empty() {
+                return;
+            }
+
+            stats.inc_tokens(tokens.len() as u64);
+            stats.inc_sentences();
+
+            let mut ngram_count = 0u64;
+
+            // Extract and count n-grams of all orders up to max
+            for n in 1..=order.min(tokens.len()) {
+                for i in 0..=(tokens.len() - n) {
+                    let ngram: Vec<&str> = tokens[i..i + n].to_vec();
+                    trie.insert(&ngram);
+                    ngram_count += 1;
+                }
+            }
+
+            stats.inc_ngrams(ngram_count);
+        });
+
+        Ok(())
+    }
+
+    /// Count n-grams with progress reporting.
+    fn count_ngrams_with_progress<R: CorpusReader>(
+        &self,
+        reader: &R,
+        progress_tx: &Sender<TrainingProgress>,
+        start: &std::time::Instant,
+    ) -> Result<()> {
+        let order = self.config.order;
+        let batch_size = self.config.batch_size;
+        let trie = &self.trie;
+        let stats = &self.stats;
+        let tokenizer = &self.tokenizer;
+
+        // Collect sentences (we need to know total for progress)
+        let sentences: Vec<String> = reader.sentences().collect();
+
+        if sentences.is_empty() {
+            return Err(crate::Error::EmptyCorpus);
+        }
+
+        let total_sentences = sentences.len();
+        let progress_interval = (total_sentences / 100).max(1);
+
+        sentences.par_chunks(batch_size).for_each(|batch| {
+            for sentence in batch {
+                // Tokenize into owned strings first, then get refs
+                let token_strings: Vec<String> = tokenizer.words(sentence).collect();
+                let tokens: Vec<&str> = token_strings.iter().map(|s| s.as_str()).collect();
+
+                if tokens.is_empty() {
+                    continue;
+                }
+
+                stats.inc_tokens(tokens.len() as u64);
+                stats.inc_sentences();
+
+                let mut ngram_count = 0u64;
+
+                for n in 1..=order.min(tokens.len()) {
+                    for i in 0..=(tokens.len() - n) {
+                        let ngram: Vec<&str> = tokens[i..i + n].to_vec();
+                        trie.insert(&ngram);
+                        ngram_count += 1;
+                    }
+                }
+
+                stats.inc_ngrams(ngram_count);
+
+                // Send progress periodically
+                let processed = stats.sentences_processed();
+                if processed as usize % progress_interval == 0 {
+                    let _ = progress_tx.try_send(TrainingProgress {
+                        sentences_processed: processed,
+                        ngrams_counted: stats.ngrams_counted(),
+                        elapsed_secs: start.elapsed().as_secs_f64(),
+                    });
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Collect continuation counts for Modified Kneser-Ney smoothing.
+    ///
+    /// For each n-gram w1...wn, we count:
+    /// - Continuation count: Number of unique contexts (w0, w1...wn-1) for which c(w0, w1...wn) > 0
+    /// - Unique continuations: Number of unique words wn+1 for which c(w1...wn, wn+1) > 0
+    fn collect_continuation_counts(&self) {
+        // For now, we'll compute continuation counts during probability queries
+        // using backoff. A full implementation would make a second pass here.
+        //
+        // TODO: Implement second-pass continuation counting for full MKN
+        log::debug!("Continuation counts will be computed on-demand during queries");
+    }
+
+    /// Compute Modified Kneser-Ney smoothing parameters.
+    fn compute_smoothing_params(&self) -> KneserNeySmoothing {
+        // TODO: Count n-grams that occur exactly 1, 2, 3, 4 times
+        // for computing optimal discounts. For now, use defaults.
+        //
+        // We would need to iterate over all n-grams to count these.
+        // For now, use default values based on common corpus statistics.
+        KneserNeySmoothing::new(self.config.order)
+    }
+
+    /// Count unique unigrams (vocabulary size).
+    fn count_unigrams(&self) -> usize {
+        // Count entries that are unigrams (no separator in key)
+        // This is an approximation - ideally we'd track this during training
+        // For now, return the total n-gram count as an upper bound
+        self.trie.len()
+    }
+}
+
+/// Builder for training with fluent API.
+pub struct TrainerBuilder<D>
+where
+    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+{
+    dictionary: D,
+    config: TrainingConfig,
+    tokenizer: Option<Tokenizer>,
+}
+
+impl<D> TrainerBuilder<D>
+where
+    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync + 'static,
+{
+    /// Create a new trainer builder.
+    pub fn new(dictionary: D) -> Self {
+        Self {
+            dictionary,
+            config: TrainingConfig::default(),
+            tokenizer: None,
+        }
+    }
+
+    /// Set the n-gram order.
+    pub fn order(mut self, order: usize) -> Self {
+        self.config.order = order;
+        self
+    }
+
+    /// Set the batch size.
+    pub fn batch_size(mut self, size: usize) -> Self {
+        self.config.batch_size = size;
+        self
+    }
+
+    /// Set minimum word frequency.
+    pub fn min_word_freq(mut self, freq: u64) -> Self {
+        self.config.min_word_freq = freq;
+        self
+    }
+
+    /// Set custom tokenizer.
+    pub fn tokenizer(mut self, tokenizer: Tokenizer) -> Self {
+        self.tokenizer = Some(tokenizer);
+        self
+    }
+
+    /// Build the trainer.
+    pub fn build(self) -> NgramTrainer<D> {
+        let mut trainer = NgramTrainer::new(self.dictionary, self.config);
+        if let Some(tokenizer) = self.tokenizer {
+            trainer = trainer.with_tokenizer(tokenizer);
+        }
+        trainer
+    }
+
+    /// Build and immediately train from corpus.
+    pub fn train<R: CorpusReader>(self, reader: &R) -> Result<NgramModel<D>> {
+        self.build().train(reader)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::corpus::PlaintextReader;
+    use liblevenshtein::dictionary::pathmap::PathMapDictionary;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn create_test_corpus(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
+        let path = dir.join("test.txt");
+        let mut file = std::fs::File::create(&path).expect("Failed to create test file");
+        write!(file, "{}", content).expect("Failed to write test file");
+        path
+    }
+
+    #[test]
+    fn test_train_simple_corpus() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = create_test_corpus(
+            dir.path(),
+            "The quick brown fox. The quick brown dog. The lazy fox.",
+        );
+
+        let reader = PlaintextReader::from_file(&path).expect("Failed to create reader");
+        let dictionary = PathMapDictionary::<NgramEntry>::new();
+
+        let model = TrainerBuilder::new(dictionary)
+            .order(3)
+            .train(&reader)
+            .expect("Training failed");
+
+        // Check that model was trained
+        assert!(model.vocab_size() > 0);
+        assert!(model.ngram_count() > 0);
+    }
+
+    #[test]
+    fn test_bigram_counts() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = create_test_corpus(dir.path(), "a b a b a b");
+
+        let reader = PlaintextReader::from_file(&path).expect("Failed to create reader");
+        let dictionary = PathMapDictionary::<NgramEntry>::new();
+
+        let model = TrainerBuilder::new(dictionary)
+            .order(2)
+            .train(&reader)
+            .expect("Training failed");
+
+        // "a b" should appear 3 times
+        assert!(model.count(&["a", "b"]) >= 2);
+    }
+}

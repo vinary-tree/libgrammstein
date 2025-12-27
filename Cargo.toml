@@ -1,0 +1,83 @@
+[package]
+name = "libgrammstein"
+version = "0.1.0"
+edition = "2021"
+description = "Hybrid language model (N-gram + Embeddings) for WFST text correction"
+license = "MIT OR Apache-2.0"
+authors = ["Dylon Edwards"]
+repository = "https://github.com/f1r3fly-io/libgrammstein"
+keywords = ["nlp", "language-model", "ngram", "embeddings", "wfst"]
+categories = ["text-processing", "science"]
+
+[dependencies]
+# Core dependencies
+liblevenshtein = { path = "../liblevenshtein-rust", features = ["pathmap-backend"] }
+ndarray = "0.16"
+ordered-float = "4.0"
+smallvec = "1.13"
+memmap2 = "0.9"
+rand = "0.8"
+thiserror = "2.0"
+log = "0.4"
+
+# Parallelism (Rayon - primary choice for CPU-bound LM training)
+rayon = "1.10"
+
+# Lock-free concurrency (patterns from MeTTaTron & rholang-language-server)
+dashmap = "6.1"
+arc-swap = "1.7"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+
+# Hashing (collision reduction from MeTTaTron)
+gxhash = "3.4"
+
+# Caching
+lru = "0.12"
+
+# Corpus streaming
+quick-xml = "0.37"
+bzip2 = "0.5"
+regex = "1.11"
+unicode-normalization = "0.1"
+
+# lling-llang integration (optional)
+lling-llang = { path = "../lling-llang", features = ["lm-rerank"], optional = true }
+
+# Async runtime (optional - if profiling shows I/O bottlenecks)
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"], optional = true }
+futures = { version = "0.3", optional = true }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"], optional = true }
+bincode = { version = "1.3", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.4"
+tempfile = "3.14"
+env_logger = "0.11"
+
+[features]
+default = []
+
+# lling-llang integration for LanguageModel trait
+lling-llang-integration = ["dep:lling-llang"]
+
+# Async runtime (enable if I/O bottlenecks identified via profiling)
+async = ["dep:tokio", "dep:futures"]
+
+# Serialization support
+serde = ["dep:serde", "dep:bincode"]
+
+[[bench]]
+name = "ngram_query"
+harness = false
+
+[[bench]]
+name = "embedding_similarity"
+harness = false
+
+[[bench]]
+name = "training"
+harness = false
