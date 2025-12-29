@@ -12,12 +12,11 @@ use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
-#[cfg(feature = "serde")]
+#[cfg(feature = "serde-extras")]
 use std::path::Path;
 
 /// Interpolation strategy for combining n-gram and embedding scores.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum InterpolationStrategy {
     /// Linear interpolation: α * ngram + (1-α) * embedding
     Linear {
@@ -53,8 +52,7 @@ impl Default for InterpolationStrategy {
 }
 
 /// Configuration for hybrid language model.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HybridConfig {
     /// Interpolation strategy.
     pub strategy: InterpolationStrategy,
@@ -81,8 +79,7 @@ impl Default for HybridConfig {
 }
 
 /// Cache key for combined scores.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct CacheKey {
     word: String,
     context: Vec<String>,
@@ -90,7 +87,6 @@ struct CacheKey {
 
 /// Default cache constructor for serde deserialization.
 /// Uses the default cache size from HybridConfig.
-#[cfg(feature = "serde")]
 fn default_cache() -> Mutex<LruCache<CacheKey, f64>> {
     let cache_size = NonZeroUsize::new(HybridConfig::default().cache_size)
         .expect("Default cache size must be non-zero");
@@ -114,11 +110,8 @@ fn default_cache() -> Mutex<LruCache<CacheKey, f64>> {
 /// // Score a word in context
 /// let score = hybrid.score("fox", &["the", "quick", "brown"]);
 /// ```
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
-    serde(bound = "D: serde::Serialize + serde::de::DeserializeOwned")
-)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound = "D: serde::Serialize + serde::de::DeserializeOwned")]
 pub struct HybridLanguageModel<D>
 where
     D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
@@ -133,7 +126,7 @@ where
     config: HybridConfig,
 
     /// Score cache (not serialized - reconstructed on load).
-    #[cfg_attr(feature = "serde", serde(skip, default = "default_cache"))]
+    #[serde(skip, default = "default_cache")]
     cache: Mutex<LruCache<CacheKey, f64>>,
 }
 
@@ -378,8 +371,8 @@ where
 {
 }
 
-// Serialization support
-#[cfg(feature = "serde")]
+// Serialization support (requires D: Serialize + DeserializeOwned and bincode via serde-extras)
+#[cfg(feature = "serde-extras")]
 impl<D> HybridLanguageModel<D>
 where
     D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync + serde::Serialize + serde::de::DeserializeOwned,
@@ -387,6 +380,7 @@ where
     /// Save the hybrid model to a binary file.
     ///
     /// Uses bincode for efficient binary serialization.
+    /// Requires the dictionary to implement serde traits.
     ///
     /// # Example
     ///
@@ -412,6 +406,99 @@ where
         let reader = std::io::BufReader::new(file);
         let model = bincode::deserialize_from(reader)?;
         Ok(model)
+    }
+}
+
+/// Portable hybrid model format for serialization.
+///
+/// This format doesn't require the dictionary to implement serde traits,
+/// making it compatible with all dictionary backends.
+#[cfg(feature = "serde-extras")]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PortableHybridModel {
+    /// N-gram model in portable format.
+    pub ngram: crate::ngram::PortableNgramModel,
+    /// Embedding model (already serializable).
+    pub embedding: SubwordEmbedding,
+    /// Hybrid configuration.
+    pub config: HybridConfig,
+}
+
+// Portable serialization support (works with any dictionary, requires bincode via serde-extras)
+#[cfg(feature = "serde-extras")]
+impl<D> HybridLanguageModel<D>
+where
+    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+{
+    /// Export to portable format for serialization.
+    ///
+    /// This method exports the model in a format that doesn't require
+    /// the dictionary type to implement serde traits.
+    pub fn to_portable(&self) -> PortableHybridModel
+    where
+        D: crate::ngram::IterableDictionary,
+    {
+        PortableHybridModel {
+            ngram: self.ngram.to_portable(),
+            embedding: self.embedding.clone(),
+            config: self.config.clone(),
+        }
+    }
+
+    /// Save model to a portable binary file.
+    ///
+    /// This format can be loaded into any dictionary backend.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// model.save_portable("hybrid_model.bin")?;
+    /// ```
+    pub fn save_portable<P: AsRef<Path>>(&self, path: P) -> crate::Result<()>
+    where
+        D: crate::ngram::IterableDictionary,
+    {
+        let portable = self.to_portable();
+        let file = std::fs::File::create(path)?;
+        let writer = std::io::BufWriter::new(file);
+        bincode::serialize_into(writer, &portable)?;
+        Ok(())
+    }
+
+    /// Load model from a portable binary file.
+    ///
+    /// Reconstructs the model using the provided dictionary factory.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let model: HybridLanguageModel<DynamicDawgChar<NgramEntry>> =
+    ///     HybridLanguageModel::load_portable("hybrid_model.bin", DynamicDawgChar::new)?;
+    /// ```
+    pub fn load_portable<P, F>(path: P, dictionary_factory: F) -> crate::Result<Self>
+    where
+        P: AsRef<Path>,
+        F: FnOnce() -> D,
+    {
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        let portable: PortableHybridModel = bincode::deserialize_from(reader)?;
+
+        // Reconstruct N-gram model
+        let ngram = crate::ngram::NgramModel::load_portable_from_portable(
+            portable.ngram,
+            dictionary_factory,
+        )?;
+
+        let cache_size = std::num::NonZeroUsize::new(portable.config.cache_size)
+            .unwrap_or(std::num::NonZeroUsize::new(1).unwrap());
+
+        Ok(Self {
+            ngram,
+            embedding: portable.embedding,
+            config: portable.config,
+            cache: Mutex::new(LruCache::new(cache_size)),
+        })
     }
 }
 
@@ -560,7 +647,7 @@ mod tests {
         assert!(score.is_finite());
     }
 
-    #[cfg(feature = "serde")]
+    #[cfg(feature = "serde-extras")]
     mod serde_tests {
         use super::*;
         use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;

@@ -10,7 +10,7 @@ use ordered_float::OrderedFloat;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[cfg(feature = "serde")]
+#[cfg(feature = "serde-extras")]
 use std::path::Path;
 
 /// Default embedding dimension.
@@ -45,8 +45,7 @@ pub const DEFAULT_MAX_SUBWORD_LEN: usize = 6;
 /// // Find similar words
 /// let similar = model.most_similar("king", 10);
 /// ```
-#[derive(Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SubwordEmbedding {
     /// Word embeddings [vocab_size, dim].
     word_embeddings: Array2<f32>,
@@ -76,7 +75,7 @@ pub struct SubwordEmbedding {
     tokenizer: Option<BpeTokenizer>,
 
     /// Cache for computed word vectors (not serialized - reconstructed on load).
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[serde(skip)]
     cache: Arc<DashMap<String, Array1<f32>>>,
 
     /// Maximum cache size.
@@ -440,8 +439,8 @@ impl Clone for SubwordEmbedding {
     }
 }
 
-// Serialization support
-#[cfg(feature = "serde")]
+// Serialization support (requires bincode via serde-extras feature)
+#[cfg(feature = "serde-extras")]
 impl SubwordEmbedding {
     /// Save the embedding model to a binary file.
     ///
@@ -603,7 +602,7 @@ mod tests {
         assert_eq!(model.word_embeddings, cloned.word_embeddings);
     }
 
-    #[cfg(feature = "serde")]
+    #[cfg(feature = "serde-extras")]
     #[test]
     fn test_embedding_save_load_roundtrip() {
         let model = create_test_model();

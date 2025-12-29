@@ -4,6 +4,7 @@
 //! in liblevenshtein-rust dictionary backends.
 
 use liblevenshtein::dictionary::value::DictionaryValue;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Entry stored for each n-gram in the dictionary.
@@ -135,17 +136,53 @@ impl Clone for NgramEntry {
     }
 }
 
+// Custom Serialize implementation for NgramEntry.
+// Atomics don't implement Serialize by default, so we serialize their values.
+impl Serialize for NgramEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("NgramEntry", 3)?;
+        state.serialize_field("count", &self.count.load(Ordering::Relaxed))?;
+        state.serialize_field("continuation_count", &self.continuation_count.load(Ordering::Relaxed))?;
+        state.serialize_field("unique_continuations", &self.unique_continuations.load(Ordering::Relaxed))?;
+        state.end()
+    }
+}
+
+// Custom Deserialize implementation for NgramEntry.
+impl<'de> Deserialize<'de> for NgramEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct NgramEntryData {
+            count: u64,
+            continuation_count: u32,
+            unique_continuations: u32,
+        }
+
+        let data = NgramEntryData::deserialize(deserializer)?;
+        Ok(NgramEntry {
+            count: AtomicU64::new(data.count),
+            continuation_count: AtomicU32::new(data.continuation_count),
+            unique_continuations: AtomicU32::new(data.unique_continuations),
+        })
+    }
+}
+
 // Implement DictionaryValue for storage in liblevenshtein dictionaries.
-// Note: DictionaryValue requires Clone + Send + Sync + Unpin + 'static.
-// NgramEntry satisfies all these via atomic types.
+// DictionaryValue requires Clone + Send + Sync + Unpin + Serialize + DeserializeOwned + 'static.
 impl DictionaryValue for NgramEntry {}
 
 /// Snapshot of NgramEntry for non-atomic access.
 ///
 /// Used when we need to pass n-gram data across thread boundaries
 /// or when atomic operations are not needed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NgramEntrySnapshot {
     /// Raw corpus count.
     pub count: u64,
@@ -172,43 +209,6 @@ impl From<NgramEntrySnapshot> for NgramEntry {
             snapshot.continuation_count,
             snapshot.unique_continuations,
         )
-    }
-}
-
-#[cfg(feature = "serde")]
-impl serde::Serialize for NgramEntry {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("NgramEntry", 3)?;
-        state.serialize_field("count", &self.count())?;
-        state.serialize_field("continuation_count", &self.continuation_count())?;
-        state.serialize_field("unique_continuations", &self.unique_continuations())?;
-        state.end()
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'de> serde::Deserialize<'de> for NgramEntry {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        struct Helper {
-            count: u64,
-            continuation_count: u32,
-            unique_continuations: u32,
-        }
-
-        let helper = Helper::deserialize(deserializer)?;
-        Ok(Self::with_stats(
-            helper.count,
-            helper.continuation_count,
-            helper.unique_continuations,
-        ))
     }
 }
 

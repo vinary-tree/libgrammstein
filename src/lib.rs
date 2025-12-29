@@ -61,6 +61,7 @@
 #![warn(rustdoc::missing_crate_level_docs)]
 
 pub mod corpus;
+pub mod dictionary;
 pub mod embedding;
 pub mod generation;
 pub mod hybrid;
@@ -69,6 +70,12 @@ pub mod scoring;
 
 #[cfg(feature = "lling-llang-integration")]
 pub mod integration;
+
+#[cfg(feature = "cli")]
+pub mod cli;
+
+#[cfg(feature = "cli")]
+pub mod language;
 
 /// Error types for libgrammstein operations.
 pub mod error {
@@ -98,7 +105,7 @@ pub mod error {
         NotTrained(String),
 
         /// Serialization error.
-        #[cfg(feature = "serde")]
+        #[cfg(feature = "serde-extras")]
         #[error("Serialization error: {0}")]
         Serialization(#[from] bincode::Error),
     }

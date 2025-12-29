@@ -40,10 +40,18 @@ pub mod smoothing;
 mod trainer;
 mod trie;
 
+#[cfg(feature = "serde-extras")]
+pub mod accumulator;
+
 pub use entry::{NgramEntry, NgramEntrySnapshot};
 pub use model::NgramModel;
+#[cfg(feature = "serde-extras")]
+pub use model::PortableNgramModel;
 pub use trainer::{NgramTrainer, TrainerBuilder, TrainingConfig, TrainingProgress, TrainingStats};
-pub use trie::NgramTrie;
+pub use trie::{IterableDictionary, NgramTrie};
+
+#[cfg(feature = "serde-extras")]
+pub use accumulator::{AccumulatorError, AccumulatorResult, NgramAccumulator};
 
 // Dictionary backend type aliases for common use cases
 

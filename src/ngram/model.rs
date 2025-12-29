@@ -7,7 +7,7 @@ use crate::ngram::smoothing::KneserNeySmoothing;
 use crate::ngram::{NgramEntry, NgramTrie};
 use liblevenshtein::dictionary::MutableMappedDictionary;
 
-#[cfg(feature = "serde")]
+#[cfg(feature = "serde-extras")]
 use std::path::Path;
 
 /// N-gram language model with Modified Kneser-Ney smoothing.
@@ -35,11 +35,8 @@ use std::path::Path;
 /// // Score a sentence
 /// let sentence_log_prob = model.sentence_log_prob(&["the", "quick", "brown", "fox"]);
 /// ```
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
-    serde(bound = "D: serde::Serialize + serde::de::DeserializeOwned")
-)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound = "D: serde::Serialize + serde::de::DeserializeOwned")]
 pub struct NgramModel<D>
 where
     D: MutableMappedDictionary<Value = NgramEntry>,
@@ -209,8 +206,8 @@ where
     }
 }
 
-// Serialization support
-#[cfg(feature = "serde")]
+// Serialization support (requires bincode via serde-extras feature)
+#[cfg(feature = "serde-extras")]
 impl<D> NgramModel<D>
 where
     D: MutableMappedDictionary<Value = NgramEntry> + serde::Serialize + serde::de::DeserializeOwned,
@@ -243,6 +240,112 @@ where
         let reader = std::io::BufReader::new(file);
         let model = bincode::deserialize_from(reader)?;
         Ok(model)
+    }
+}
+
+// Portable serialization that doesn't require D: Serialize
+// This exports the model as a list of (key, entry) pairs
+
+/// Portable N-gram model format for serialization.
+///
+/// This format doesn't require the dictionary to implement serde traits,
+/// making it compatible with all dictionary backends.
+#[cfg(feature = "serde-extras")]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PortableNgramModel {
+    /// N-gram entries as (key, snapshot) pairs.
+    pub entries: Vec<(String, crate::ngram::NgramEntrySnapshot)>,
+    /// Maximum n-gram order.
+    pub max_order: usize,
+    /// Vocabulary size (unique unigrams).
+    pub vocab_size: usize,
+    /// Total token count.
+    pub total_count: u64,
+    /// Smoothing parameters.
+    pub smoothing: KneserNeySmoothing,
+}
+
+#[cfg(feature = "serde-extras")]
+impl<D> NgramModel<D>
+where
+    D: MutableMappedDictionary<Value = NgramEntry>,
+{
+    /// Export to portable format for serialization.
+    ///
+    /// This method iterates over all dictionary entries and exports them
+    /// as (key, snapshot) pairs, allowing serialization without requiring
+    /// the dictionary type to implement serde traits.
+    pub fn to_portable(&self) -> PortableNgramModel
+    where
+        D: crate::ngram::trie::IterableDictionary,
+    {
+        let entries: Vec<(String, crate::ngram::NgramEntrySnapshot)> = self
+            .trie
+            .iter_entries()
+            .map(|(key, entry)| (key, crate::ngram::NgramEntrySnapshot::from(&entry)))
+            .collect();
+
+        PortableNgramModel {
+            entries,
+            max_order: self.trie.max_order(),
+            vocab_size: self.vocab_size,
+            total_count: self.total_count,
+            smoothing: self.smoothing.clone(),
+        }
+    }
+
+    /// Save model to a portable binary file.
+    ///
+    /// This format can be loaded into any dictionary backend.
+    pub fn save_portable<P: AsRef<Path>>(&self, path: P) -> crate::Result<()>
+    where
+        D: crate::ngram::trie::IterableDictionary,
+    {
+        let portable = self.to_portable();
+        let file = std::fs::File::create(path)?;
+        let writer = std::io::BufWriter::new(file);
+        bincode::serialize_into(writer, &portable)?;
+        Ok(())
+    }
+
+    /// Load model from a portable binary file.
+    ///
+    /// Reconstructs the model using the provided dictionary factory.
+    pub fn load_portable<P, F>(path: P, dictionary_factory: F) -> crate::Result<Self>
+    where
+        P: AsRef<Path>,
+        F: FnOnce() -> D,
+    {
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        let portable: PortableNgramModel = bincode::deserialize_from(reader)?;
+
+        Self::load_portable_from_portable(portable, dictionary_factory)
+    }
+
+    /// Reconstruct model from a portable format struct.
+    ///
+    /// This is used internally by HybridLanguageModel to load embedded N-gram models.
+    pub fn load_portable_from_portable<F>(
+        portable: PortableNgramModel,
+        dictionary_factory: F,
+    ) -> crate::Result<Self>
+    where
+        F: FnOnce() -> D,
+    {
+        let dictionary = dictionary_factory();
+        for (key, snapshot) in portable.entries {
+            dictionary.insert_with_value(&key, NgramEntry::from(snapshot));
+        }
+
+        let trie = NgramTrie::new(dictionary, portable.max_order);
+
+        Ok(Self {
+            trie,
+            smoothing: portable.smoothing,
+            vocab_size: portable.vocab_size,
+            total_count: portable.total_count,
+        })
     }
 }
 
@@ -309,7 +412,7 @@ mod tests {
         assert!(log_prob < 0.0);
     }
 
-    #[cfg(feature = "serde")]
+    #[cfg(feature = "serde-extras")]
     #[test]
     fn test_ngram_save_load_roundtrip() {
         let model = create_test_ngram_model();

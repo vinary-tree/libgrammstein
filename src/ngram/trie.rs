@@ -10,6 +10,22 @@ use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+/// Trait for dictionaries that support iteration over (key, value) pairs.
+///
+/// This is used for portable serialization, allowing models to be saved
+/// and loaded without requiring the dictionary to implement serde traits.
+pub trait IterableDictionary: MutableMappedDictionary<Value = NgramEntry> {
+    /// Iterate over all (key, value) pairs in the dictionary.
+    fn iter_all(&self) -> Box<dyn Iterator<Item = (String, NgramEntry)> + '_>;
+}
+
+// Implement IterableDictionary for DynamicDawgChar
+impl IterableDictionary for liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<NgramEntry> {
+    fn iter_all(&self) -> Box<dyn Iterator<Item = (String, NgramEntry)> + '_> {
+        Box::new(self.iter())
+    }
+}
+
 /// Separator used between tokens in n-gram keys.
 ///
 /// Using pipe character as it's unlikely to appear in natural text tokens.
@@ -36,11 +52,8 @@ pub const NGRAM_SEPARATOR: char = '|';
 /// trie.insert(&["the", "quick", "brown"]);
 /// assert_eq!(trie.get(&["the", "quick", "brown"]).map(|e| e.count()), Some(1));
 /// ```
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
-    serde(bound = "D: serde::Serialize + serde::de::DeserializeOwned")
-)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound = "D: serde::Serialize + serde::de::DeserializeOwned")]
 pub struct NgramTrie<D>
 where
     D: MutableMappedDictionary<Value = NgramEntry>,
@@ -52,7 +65,7 @@ where
     max_order: usize,
 
     /// Phantom data for type parameter.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[serde(skip)]
     _marker: PhantomData<D>,
 }
 
@@ -184,6 +197,16 @@ where
     /// Check if the trie is empty.
     pub fn is_empty(&self) -> bool {
         self.dictionary.len().map_or(true, |len| len == 0)
+    }
+
+    /// Iterate over all (key, entry) pairs in the trie.
+    ///
+    /// This is available when the dictionary implements `IterableDictionary`.
+    pub fn iter_entries(&self) -> impl Iterator<Item = (String, NgramEntry)> + '_
+    where
+        D: IterableDictionary,
+    {
+        self.dictionary.iter_all()
     }
 }
 

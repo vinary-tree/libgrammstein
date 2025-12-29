@@ -35,6 +35,9 @@ mod bpe;
 mod model;
 mod trainer;
 
+#[cfg(feature = "gpu")]
+pub mod gpu;
+
 pub use bpe::{
     extract_subwords, hash_subword, BpeTokenizer, BpeTrainer, MergeOp,
     BPE_END_OF_WORD, BPE_UNKNOWN,
@@ -49,6 +52,8 @@ pub use trainer::{
     EmbeddingConfig, EmbeddingProgress, EmbeddingTrainer, EmbeddingTrainerBuilder,
 };
 
-// TODO: Implement in Phase 8
-// mod simd;
-// mod serialization;
+#[cfg(feature = "gpu")]
+pub use gpu::{
+    GpuAccelerator, GpuBatchDotProduct, GpuContext, GpuError, GpuGradientAccum,
+    GpuSigmoid, GpuSimilaritySearch,
+};

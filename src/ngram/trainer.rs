@@ -170,7 +170,7 @@ where
     /// # Returns
     ///
     /// The trained `NgramModel` or an error.
-    pub fn train<R: CorpusReader>(self, reader: &R) -> Result<NgramModel<D>> {
+    pub fn train<R: CorpusReader + ?Sized>(self, reader: &R) -> Result<NgramModel<D>> {
         let start = std::time::Instant::now();
 
         // Phase 1: Count n-grams
@@ -238,7 +238,7 @@ where
     }
 
     /// Count n-grams from corpus in parallel.
-    fn count_ngrams<R: CorpusReader>(&self, reader: &R) -> Result<()> {
+    fn count_ngrams<R: CorpusReader + ?Sized>(&self, reader: &R) -> Result<()> {
         let order = self.config.order;
         let trie = &self.trie;
         let stats = &self.stats;
@@ -281,7 +281,7 @@ where
     }
 
     /// Count n-grams with progress reporting.
-    fn count_ngrams_with_progress<R: CorpusReader>(
+    fn count_ngrams_with_progress<R: CorpusReader + ?Sized>(
         &self,
         reader: &R,
         progress_tx: &Sender<TrainingProgress>,
@@ -432,7 +432,7 @@ where
     }
 
     /// Build and immediately train from corpus.
-    pub fn train<R: CorpusReader>(self, reader: &R) -> Result<NgramModel<D>> {
+    pub fn train<R: CorpusReader + ?Sized>(self, reader: &R) -> Result<NgramModel<D>> {
         self.build().train(reader)
     }
 }

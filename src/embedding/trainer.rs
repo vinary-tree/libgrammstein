@@ -225,7 +225,7 @@ impl EmbeddingTrainer {
     /// # Returns
     ///
     /// Trained `SubwordEmbedding` model.
-    pub fn train<R: CorpusReader>(&self, reader: &R) -> Result<SubwordEmbedding> {
+    pub fn train<R: CorpusReader + ?Sized>(&self, reader: &R) -> Result<SubwordEmbedding> {
         // Phase 1: Build vocabulary
         log::info!("Building vocabulary...");
         let (vocab, word_counts, total_words) = self.build_vocabulary(reader)?;
@@ -254,7 +254,7 @@ impl EmbeddingTrainer {
     }
 
     /// Train with progress reporting.
-    pub fn train_with_progress<R: CorpusReader>(
+    pub fn train_with_progress<R: CorpusReader + ?Sized>(
         &self,
         reader: &R,
         progress_tx: Sender<EmbeddingProgress>,
@@ -286,7 +286,7 @@ impl EmbeddingTrainer {
     }
 
     /// Build vocabulary from corpus.
-    fn build_vocabulary<R: CorpusReader>(
+    fn build_vocabulary<R: CorpusReader + ?Sized>(
         &self,
         reader: &R,
     ) -> Result<(Vec<String>, Vec<u64>, u64)> {
@@ -339,7 +339,7 @@ impl EmbeddingTrainer {
     }
 
     /// Train for multiple epochs.
-    fn train_epochs<R: CorpusReader>(
+    fn train_epochs<R: CorpusReader + ?Sized>(
         &self,
         reader: &R,
         model: &mut SubwordEmbedding,
@@ -374,7 +374,7 @@ impl EmbeddingTrainer {
     }
 
     /// Train for multiple epochs with progress reporting.
-    fn train_epochs_with_progress<R: CorpusReader>(
+    fn train_epochs_with_progress<R: CorpusReader + ?Sized>(
         &self,
         reader: &R,
         model: &mut SubwordEmbedding,
@@ -411,7 +411,7 @@ impl EmbeddingTrainer {
     }
 
     /// Train a single epoch.
-    fn train_epoch<R: CorpusReader>(
+    fn train_epoch<R: CorpusReader + ?Sized>(
         &self,
         reader: &R,
         model: &mut SubwordEmbedding,
@@ -643,7 +643,7 @@ impl EmbeddingTrainerBuilder {
     }
 
     /// Build and train from corpus.
-    pub fn train<R: CorpusReader>(self, reader: &R) -> Result<SubwordEmbedding> {
+    pub fn train<R: CorpusReader + ?Sized>(self, reader: &R) -> Result<SubwordEmbedding> {
         self.build().train(reader)
     }
 }

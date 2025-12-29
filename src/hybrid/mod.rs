@@ -40,6 +40,8 @@ mod model;
 mod oov;
 
 pub use model::{HybridConfig, HybridLanguageModel, InterpolationStrategy};
+#[cfg(feature = "serde-extras")]
+pub use model::PortableHybridModel;
 pub use oov::{OovHandler, OovStrategy};
 
 use crate::ngram::NgramEntry;

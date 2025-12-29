@@ -45,3 +45,24 @@ docs/optimization/*.txt
 
 # Claude temporary files
 .claude/plans/*.bak
+
+# Trained model files (user-generated, not test fixtures)
+*.bin
+!test_data/**/*.bin
+
+# Dictionary files
+*.dict
+*.dict.bin
+
+# Checkpoint files
+checkpoints/
+*.artrie
+*_ckpt_*.bin
+*_latest.bin
+embedding_latest.bin
+
+# BPE tokenizer outputs
+tokenizer.json
+
+# GPU shader cache
+.wgpu/

@@ -27,8 +27,7 @@ use liblevenshtein::dictionary::MutableMappedDictionary;
 /// ```
 ///
 /// where n1, n2, n3, n4 are counts of n-grams occurring exactly 1, 2, 3, 4 times.
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct KneserNeySmoothing {
     /// Discount for n-grams with count = 1.
     d1: f64,

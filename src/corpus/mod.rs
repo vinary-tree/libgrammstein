@@ -5,8 +5,8 @@
 //!
 //! # Supported Formats
 //!
-//! - **Wikipedia**: XML dump format with bz2 compression
-//! - **Project Gutenberg**: Plain text files
+//! - **Wikipedia**: XML dump format with bz2 compression (streaming)
+//! - **Project Gutenberg**: Plain text files with boilerplate stripping
 //! - **Plaintext**: Generic text files or directories
 //!
 //! # Example
@@ -24,14 +24,31 @@ mod reader;
 mod tokenizer;
 mod normalizer;
 mod plaintext;
+mod wikipedia;
+mod gutenberg;
+mod quality;
+mod dedup;
+mod preprocessing;
+
+#[cfg(feature = "subword")]
+mod subword;
 
 pub use reader::{CorpusReader, Document};
 pub use tokenizer::Tokenizer;
 pub use normalizer::Normalizer;
 pub use plaintext::PlaintextReader;
+pub use wikipedia::{WikipediaReader, WikipediaConfig};
+pub use gutenberg::GutenbergReader;
+pub use quality::{QualityFilter, QualityFilterBuilder, QualityMetrics, QualityStats, RejectionReason};
+pub use dedup::{Deduplicator, DeduplicatorBuilder, DeduplicationMode, DeduplicationStats};
+pub use preprocessing::{
+    TextPreprocessor, TextPreprocessorBuilder, UnicodeNorm,
+    PreprocessingPipeline, PreprocessingPipelineBuilder,
+    tokens,
+};
 
-// These will be implemented in later phases
-// mod wikipedia;
-// mod gutenberg;
-// pub use wikipedia::WikipediaReader;
-// pub use gutenberg::GutenbergReader;
+#[cfg(feature = "http-corpus")]
+pub use wikipedia::LoadStrategy;
+
+#[cfg(feature = "subword")]
+pub use subword::{SubwordTokenizer, SubwordError, BpeConfig, special_tokens, TokenizeExt};
