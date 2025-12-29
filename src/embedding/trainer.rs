@@ -8,7 +8,7 @@
 
 use super::bpe::{extract_subwords, hash_subword};
 use super::model::{SubwordEmbedding, DEFAULT_BUCKET_COUNT, DEFAULT_EMBEDDING_DIM};
-use crate::corpus::CorpusReader;
+use crate::corpus::{CorpusReader, PrefetchConfig, PrefetchingReader};
 use crate::Result;
 
 use crossbeam_channel::Sender;
@@ -220,20 +220,28 @@ impl EmbeddingTrainer {
     ///
     /// # Arguments
     ///
-    /// * `reader` - Corpus reader providing sentences
+    /// * `reader` - Corpus reader providing sentences (takes ownership)
     ///
     /// # Returns
     ///
     /// Trained `SubwordEmbedding` model.
-    pub fn train<R: CorpusReader + ?Sized>(&self, reader: &R) -> Result<SubwordEmbedding> {
-        // Phase 1: Build vocabulary
+    ///
+    /// # Note
+    ///
+    /// Embedding training requires multiple passes over the corpus. The first
+    /// pass builds the vocabulary using prefetched streaming, but subsequent
+    /// training epochs collect sentences into memory for efficient gradient
+    /// updates. For very large corpora, consider using online learning approaches.
+    pub fn train<R: CorpusReader + 'static>(&self, reader: R) -> Result<SubwordEmbedding> {
+        // Phase 1: Build vocabulary with prefetched streaming
         log::info!("Building vocabulary...");
-        let (vocab, word_counts, total_words) = self.build_vocabulary(reader)?;
+        let (vocab, word_counts, total_words, sentences) = self.build_vocabulary_and_collect(reader)?;
 
         log::info!(
-            "Vocabulary: {} words, {} total tokens",
+            "Vocabulary: {} words, {} total tokens, {} sentences",
             vocab.len(),
-            total_words
+            total_words,
+            sentences.len()
         );
 
         // Phase 2: Initialize model
@@ -246,21 +254,21 @@ impl EmbeddingTrainer {
         // Phase 3: Create negative sampler
         let sampler = Arc::new(NegativeSampler::new(&word_counts, 10_000_000));
 
-        // Phase 4: Train
+        // Phase 4: Train on collected sentences
         log::info!("Training {} epochs...", self.config.epochs);
-        self.train_epochs(reader, &mut model, &vocab, &word_counts, total_words, &sampler)?;
+        self.train_epochs_on_sentences(&sentences, &mut model, &vocab, &word_counts, total_words, &sampler)?;
 
         Ok(model)
     }
 
     /// Train with progress reporting.
-    pub fn train_with_progress<R: CorpusReader + ?Sized>(
+    pub fn train_with_progress<R: CorpusReader + 'static>(
         &self,
-        reader: &R,
+        reader: R,
         progress_tx: Sender<EmbeddingProgress>,
     ) -> Result<SubwordEmbedding> {
-        // Phase 1: Build vocabulary
-        let (vocab, word_counts, total_words) = self.build_vocabulary(reader)?;
+        // Phase 1: Build vocabulary with prefetched streaming
+        let (vocab, word_counts, total_words, sentences) = self.build_vocabulary_and_collect(reader)?;
 
         // Phase 2: Initialize model
         let mut model = SubwordEmbedding::new(vocab.clone(), self.config.dim, self.config.bucket_count)
@@ -272,8 +280,8 @@ impl EmbeddingTrainer {
         let sampler = Arc::new(NegativeSampler::new(&word_counts, 10_000_000));
 
         // Phase 4: Train with progress
-        self.train_epochs_with_progress(
-            reader,
+        self.train_epochs_on_sentences_with_progress(
+            &sentences,
             &mut model,
             &vocab,
             &word_counts,
@@ -285,20 +293,34 @@ impl EmbeddingTrainer {
         Ok(model)
     }
 
-    /// Build vocabulary from corpus.
-    fn build_vocabulary<R: CorpusReader + ?Sized>(
+    /// Build vocabulary from corpus using prefetched streaming.
+    ///
+    /// Returns (vocabulary, word_counts, total_words, collected_sentences).
+    /// Sentences are collected for subsequent multi-pass training.
+    fn build_vocabulary_and_collect<R: CorpusReader + 'static>(
         &self,
-        reader: &R,
-    ) -> Result<(Vec<String>, Vec<u64>, u64)> {
+        reader: R,
+    ) -> Result<(Vec<String>, Vec<u64>, u64, Vec<String>)> {
         let mut word_counts: HashMap<String, u64> = HashMap::new();
         let mut total_words = 0u64;
+        let mut sentences = Vec::new();
 
-        // Count words
-        for sentence in reader.sentences() {
-            for word in sentence.split_whitespace() {
-                let word = word.to_lowercase();
-                *word_counts.entry(word).or_insert(0) += 1;
-                total_words += 1;
+        // Configure prefetch for vocabulary building
+        let config = PrefetchConfig::new()
+            .with_batch_size(self.config.batch_size)
+            .with_ram_fraction(0.10);
+
+        let prefetch = PrefetchingReader::with_config(reader, config);
+
+        // Count words and collect sentences
+        for batch in prefetch.batches() {
+            for sentence in batch {
+                for word in sentence.split_whitespace() {
+                    let word = word.to_lowercase();
+                    *word_counts.entry(word).or_insert(0) += 1;
+                    total_words += 1;
+                }
+                sentences.push(sentence);
             }
         }
 
@@ -317,7 +339,7 @@ impl EmbeddingTrainer {
             return Err(crate::Error::EmptyCorpus);
         }
 
-        Ok((vocab, counts, total_words))
+        Ok((vocab, counts, total_words, sentences))
     }
 
     /// Initialize embeddings with small random values.
@@ -338,10 +360,10 @@ impl EmbeddingTrainer {
         }
     }
 
-    /// Train for multiple epochs.
-    fn train_epochs<R: CorpusReader + ?Sized>(
+    /// Train for multiple epochs on collected sentences.
+    fn train_epochs_on_sentences(
         &self,
-        reader: &R,
+        sentences: &[String],
         model: &mut SubwordEmbedding,
         vocab: &[String],
         word_counts: &[u64],
@@ -360,8 +382,8 @@ impl EmbeddingTrainer {
 
             log::info!("Epoch {}/{}, lr={:.6}", epoch + 1, self.config.epochs, lr);
 
-            self.train_epoch(
-                reader, model, &word_to_idx, word_counts, total_words, sampler, lr, &stats,
+            self.train_epoch_on_sentences(
+                sentences, model, &word_to_idx, word_counts, total_words, sampler, lr, &stats,
             )?;
 
             log::info!(
@@ -374,9 +396,9 @@ impl EmbeddingTrainer {
     }
 
     /// Train for multiple epochs with progress reporting.
-    fn train_epochs_with_progress<R: CorpusReader + ?Sized>(
+    fn train_epochs_on_sentences_with_progress(
         &self,
-        reader: &R,
+        sentences: &[String],
         model: &mut SubwordEmbedding,
         vocab: &[String],
         word_counts: &[u64],
@@ -394,8 +416,8 @@ impl EmbeddingTrainer {
             let stats = TrainingStats::default();
             let lr = self.config.learning_rate * (1.0 - epoch as f32 / self.config.epochs as f32);
 
-            self.train_epoch(
-                reader, model, &word_to_idx, word_counts, total_words, sampler, lr, &stats,
+            self.train_epoch_on_sentences(
+                sentences, model, &word_to_idx, word_counts, total_words, sampler, lr, &stats,
             )?;
 
             let _ = progress_tx.try_send(EmbeddingProgress {
@@ -410,10 +432,10 @@ impl EmbeddingTrainer {
         Ok(())
     }
 
-    /// Train a single epoch.
-    fn train_epoch<R: CorpusReader + ?Sized>(
+    /// Train a single epoch on collected sentences.
+    fn train_epoch_on_sentences(
         &self,
-        reader: &R,
+        sentences: &[String],
         model: &mut SubwordEmbedding,
         word_to_idx: &HashMap<&str, usize>,
         word_counts: &[u64],
@@ -425,13 +447,10 @@ impl EmbeddingTrainer {
         let config = &self.config;
         let subsample_threshold = config.subsample_threshold;
 
-        // Collect sentences (needed for parallel processing)
-        let sentences: Vec<String> = reader.sentences().collect();
-
-        // Process sentences in parallel
+        // Process sentences
         // Note: For full parallelism, we'd need thread-safe model updates.
         // This simplified version processes sequentially with parallel subword extraction.
-        for sentence in &sentences {
+        for sentence in sentences {
             let words: Vec<&str> = sentence.split_whitespace().collect();
             let word_indices: Vec<Option<usize>> = words
                 .iter()
@@ -643,7 +662,7 @@ impl EmbeddingTrainerBuilder {
     }
 
     /// Build and train from corpus.
-    pub fn train<R: CorpusReader + ?Sized>(self, reader: &R) -> Result<SubwordEmbedding> {
+    pub fn train<R: CorpusReader + 'static>(self, reader: R) -> Result<SubwordEmbedding> {
         self.build().train(reader)
     }
 }
@@ -718,7 +737,7 @@ mod tests {
             .window_size(2)
             .min_count(1)
             .epochs(2)
-            .train(&reader)
+            .train(reader)
             .expect("Training failed");
 
         // Check model was trained

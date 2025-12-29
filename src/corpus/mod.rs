@@ -29,6 +29,7 @@ mod gutenberg;
 mod quality;
 mod dedup;
 mod preprocessing;
+mod prefetch;
 
 #[cfg(feature = "subword")]
 mod subword;
@@ -46,6 +47,7 @@ pub use preprocessing::{
     PreprocessingPipeline, PreprocessingPipelineBuilder,
     tokens,
 };
+pub use prefetch::{PrefetchingReader, PrefetchConfig, PrefetchBatchIterator};
 
 #[cfg(feature = "http-corpus")]
 pub use wikipedia::LoadStrategy;

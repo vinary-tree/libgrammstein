@@ -394,7 +394,7 @@ mod tests {
 
         TrainerBuilder::new(dictionary)
             .order(3)
-            .train(&reader)
+            .train(reader)
             .expect("Training failed")
     }
 

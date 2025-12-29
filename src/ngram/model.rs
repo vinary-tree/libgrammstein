@@ -377,7 +377,7 @@ mod tests {
         let dictionary = DynamicDawgChar::<NgramEntry>::new();
         TrainerBuilder::new(dictionary)
             .order(3)
-            .train(&reader)
+            .train(reader)
             .expect("N-gram training failed")
     }
 
@@ -476,7 +476,7 @@ mod tests {
         let dictionary = PathMapDictionary::<NgramEntry>::new();
         let model = TrainerBuilder::new(dictionary)
             .order(3)
-            .train(&reader)
+            .train(reader)
             .expect("N-gram training failed");
 
         // Basic functionality check

@@ -68,7 +68,7 @@ pub use accumulator::{AccumulatorError, AccumulatorResult, NgramAccumulator};
 ///
 /// // Train and save
 /// let dictionary = DynamicDawgChar::<NgramEntry>::new();
-/// let model = TrainerBuilder::new(dictionary).order(5).train(&reader)?;
+/// let model = TrainerBuilder::new(dictionary).order(5).train(reader)?;
 /// model.save("model.bin")?;
 ///
 /// // Load later
@@ -90,7 +90,7 @@ pub type SerializableNgramModel =
 /// use liblevenshtein::dictionary::pathmap::PathMapDictionary;
 ///
 /// let dictionary = PathMapDictionary::<NgramEntry>::new();
-/// let model = TrainerBuilder::new(dictionary).order(5).train(&reader)?;
+/// let model = TrainerBuilder::new(dictionary).order(5).train(reader)?;
 ///
 /// // Use with lling-llang's LanguageModelLayer
 /// let lm = GrammsteinLanguageModel::from_ngram(model);

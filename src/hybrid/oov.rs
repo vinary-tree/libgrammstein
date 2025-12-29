@@ -178,7 +178,7 @@ mod tests {
             .window_size(2)
             .min_count(1)
             .epochs(2)
-            .train(&reader)
+            .train(reader)
             .expect("Training failed")
     }
 

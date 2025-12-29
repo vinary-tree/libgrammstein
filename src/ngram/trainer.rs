@@ -6,7 +6,7 @@
 //! - Continuation count collection for Modified Kneser-Ney
 //! - Progress reporting
 
-use crate::corpus::{CorpusReader, Tokenizer};
+use crate::corpus::{CorpusReader, PrefetchConfig, PrefetchingReader, Tokenizer};
 use crate::ngram::smoothing::KneserNeySmoothing;
 use crate::ngram::trie::{IterableDictionary, NGRAM_SEPARATOR};
 use crate::ngram::{NgramEntry, NgramModel, NgramTrie};
@@ -16,7 +16,7 @@ use crossbeam_channel::Sender;
 use liblevenshtein::dictionary::MutableMappedDictionary;
 use rayon::prelude::*;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 
 /// Training progress information.
 #[derive(Debug, Clone)]
@@ -161,21 +161,21 @@ where
     /// Train the n-gram model from a corpus reader.
     ///
     /// This is the main training entry point that:
-    /// 1. Counts n-grams in parallel
+    /// 1. Counts n-grams in parallel using prefetched batches
     /// 2. Collects continuation counts
     /// 3. Computes smoothing parameters
     ///
     /// # Arguments
     ///
-    /// * `reader` - Corpus reader providing sentences
+    /// * `reader` - Corpus reader providing sentences (takes ownership)
     ///
     /// # Returns
     ///
     /// The trained `NgramModel` or an error.
-    pub fn train<R: CorpusReader + ?Sized>(self, reader: &R) -> Result<NgramModel<D>> {
+    pub fn train<R: CorpusReader + 'static>(self, reader: R) -> Result<NgramModel<D>> {
         let start = std::time::Instant::now();
 
-        // Phase 1: Count n-grams
+        // Phase 1: Count n-grams with prefetched streaming
         self.count_ngrams(reader)?;
 
         // Phase 2: Collect continuation counts (for MKN smoothing)
@@ -205,14 +205,14 @@ where
     }
 
     /// Train with progress reporting via channel.
-    pub fn train_with_progress<R: CorpusReader>(
+    pub fn train_with_progress<R: CorpusReader + 'static>(
         self,
-        reader: &R,
+        reader: R,
         progress_tx: Sender<TrainingProgress>,
     ) -> Result<NgramModel<D>> {
         let start = std::time::Instant::now();
 
-        // Phase 1: Count n-grams with progress
+        // Phase 1: Count n-grams with progress using prefetched streaming
         self.count_ngrams_with_progress(reader, &progress_tx, &start)?;
 
         // Phase 2: Collect continuation counts
@@ -239,80 +239,99 @@ where
         ))
     }
 
-    /// Count n-grams from corpus in parallel.
-    fn count_ngrams<R: CorpusReader + ?Sized>(&self, reader: &R) -> Result<()> {
+    /// Count n-grams from corpus in parallel using prefetched streaming.
+    ///
+    /// Uses `PrefetchingReader` to decouple I/O from processing, processing
+    /// batches in parallel with Rayon.
+    fn count_ngrams<R: CorpusReader + 'static>(&self, reader: R) -> Result<()> {
         let order = self.config.order;
         let trie = &self.trie;
         let stats = &self.stats;
         let tokenizer = &self.tokenizer;
 
-        // Collect sentences and process in parallel
-        let sentences: Vec<String> = reader.sentences().collect();
+        // Configure prefetch for this training run
+        let config = PrefetchConfig::new()
+            .with_batch_size(self.config.batch_size)
+            .with_ram_fraction(0.10);
 
-        if sentences.is_empty() {
-            return Err(crate::Error::EmptyCorpus);
-        }
+        let prefetch = PrefetchingReader::with_config(reader, config);
+        let mut received_any = false;
 
-        sentences.par_iter().for_each(|sentence| {
-            // Tokenize into owned strings first, then get refs
-            let token_strings: Vec<String> = tokenizer.words(sentence).collect();
-            let tokens: Vec<&str> = token_strings.iter().map(|s| s.as_str()).collect();
+        // Process prefetched batches in parallel
+        for batch in prefetch.batches() {
+            received_any = true;
 
-            if tokens.is_empty() {
-                return;
-            }
-
-            stats.inc_tokens(tokens.len() as u64);
-            stats.inc_sentences();
-
-            let mut ngram_count = 0u64;
-
-            // Extract and count n-grams of all orders up to max
-            for n in 1..=order.min(tokens.len()) {
-                for i in 0..=(tokens.len() - n) {
-                    let ngram: Vec<&str> = tokens[i..i + n].to_vec();
-                    trie.insert(&ngram);
-                    ngram_count += 1;
-                }
-            }
-
-            stats.inc_ngrams(ngram_count);
-        });
-
-        Ok(())
-    }
-
-    /// Count n-grams with progress reporting.
-    fn count_ngrams_with_progress<R: CorpusReader + ?Sized>(
-        &self,
-        reader: &R,
-        progress_tx: &Sender<TrainingProgress>,
-        start: &std::time::Instant,
-    ) -> Result<()> {
-        let order = self.config.order;
-        let batch_size = self.config.batch_size;
-        let trie = &self.trie;
-        let stats = &self.stats;
-        let tokenizer = &self.tokenizer;
-
-        // Collect sentences (we need to know total for progress)
-        let sentences: Vec<String> = reader.sentences().collect();
-
-        if sentences.is_empty() {
-            return Err(crate::Error::EmptyCorpus);
-        }
-
-        let total_sentences = sentences.len();
-        let progress_interval = (total_sentences / 100).max(1);
-
-        sentences.par_chunks(batch_size).for_each(|batch| {
-            for sentence in batch {
+            batch.par_iter().for_each(|sentence| {
                 // Tokenize into owned strings first, then get refs
                 let token_strings: Vec<String> = tokenizer.words(sentence).collect();
                 let tokens: Vec<&str> = token_strings.iter().map(|s| s.as_str()).collect();
 
                 if tokens.is_empty() {
-                    continue;
+                    return;
+                }
+
+                stats.inc_tokens(tokens.len() as u64);
+                stats.inc_sentences();
+
+                let mut ngram_count = 0u64;
+
+                // Extract and count n-grams of all orders up to max
+                for n in 1..=order.min(tokens.len()) {
+                    for i in 0..=(tokens.len() - n) {
+                        let ngram: Vec<&str> = tokens[i..i + n].to_vec();
+                        trie.insert(&ngram);
+                        ngram_count += 1;
+                    }
+                }
+
+                stats.inc_ngrams(ngram_count);
+            });
+        }
+
+        if !received_any {
+            return Err(crate::Error::EmptyCorpus);
+        }
+
+        Ok(())
+    }
+
+    /// Count n-grams with progress reporting using prefetched streaming.
+    ///
+    /// Uses `PrefetchingReader` to decouple I/O from processing while
+    /// providing regular progress updates.
+    fn count_ngrams_with_progress<R: CorpusReader + 'static>(
+        &self,
+        reader: R,
+        progress_tx: &Sender<TrainingProgress>,
+        start: &std::time::Instant,
+    ) -> Result<()> {
+        let order = self.config.order;
+        let trie = &self.trie;
+        let stats = &self.stats;
+        let tokenizer = &self.tokenizer;
+
+        // Configure prefetch for this training run
+        let config = PrefetchConfig::new()
+            .with_batch_size(self.config.batch_size)
+            .with_ram_fraction(0.10);
+
+        let prefetch = PrefetchingReader::with_config(reader, config);
+        let mut received_any = false;
+
+        // Send progress every 10,000 sentences
+        let progress_interval = 10_000usize;
+
+        // Process prefetched batches in parallel
+        for batch in prefetch.batches() {
+            received_any = true;
+
+            batch.par_iter().for_each(|sentence| {
+                // Tokenize into owned strings first, then get refs
+                let token_strings: Vec<String> = tokenizer.words(sentence).collect();
+                let tokens: Vec<&str> = token_strings.iter().map(|s| s.as_str()).collect();
+
+                if tokens.is_empty() {
+                    return;
                 }
 
                 stats.inc_tokens(tokens.len() as u64);
@@ -339,8 +358,12 @@ where
                         elapsed_secs: start.elapsed().as_secs_f64(),
                     });
                 }
-            }
-        });
+            });
+        }
+
+        if !received_any {
+            return Err(crate::Error::EmptyCorpus);
+        }
 
         Ok(())
     }
@@ -533,7 +556,7 @@ where
     }
 
     /// Build and immediately train from corpus.
-    pub fn train<R: CorpusReader + ?Sized>(self, reader: &R) -> Result<NgramModel<D>> {
+    pub fn train<R: CorpusReader + 'static>(self, reader: R) -> Result<NgramModel<D>> {
         self.build().train(reader)
     }
 }
@@ -566,7 +589,7 @@ mod tests {
 
         let model = TrainerBuilder::new(dictionary)
             .order(3)
-            .train(&reader)
+            .train(reader)
             .expect("Training failed");
 
         // Check that model was trained
@@ -584,7 +607,7 @@ mod tests {
 
         let model = TrainerBuilder::new(dictionary)
             .order(2)
-            .train(&reader)
+            .train(reader)
             .expect("Training failed");
 
         // "a b" should appear 3 times

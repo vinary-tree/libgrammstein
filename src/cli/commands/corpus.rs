@@ -1,18 +1,21 @@
 //! Corpus utility command implementations.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use console::style;
 use rand::prelude::{Rng, SeedableRng, StdRng};
+use serde::{Deserialize, Serialize};
 
 use crate::cli::args::{
-    CorpusCommands, CorpusDetectArgs, CorpusDownloadArgs, CorpusFormat,
-    CorpusSampleArgs, CorpusSource, CorpusStatsArgs,
+    CorpusCleanArgs, CorpusCommands, CorpusDetectArgs, CorpusDownloadArgs, CorpusFormat,
+    CorpusListArgs, CorpusSampleArgs, CorpusSource, CorpusStatsArgs, OutputFormat,
 };
 use crate::cli::error::{CliError, CliResult};
 use crate::cli::output;
-use crate::corpus::{CorpusReader, PlaintextReader, WikipediaReader, GutenbergReader, Tokenizer};
+use crate::corpus::{CorpusReader, GutenbergReader, PlaintextReader, Tokenizer, WikipediaReader};
 
 /// Run the corpus command.
 pub fn run(cmd: CorpusCommands, verbose: bool) -> CliResult<()> {
@@ -21,6 +24,8 @@ pub fn run(cmd: CorpusCommands, verbose: bool) -> CliResult<()> {
         CorpusCommands::Sample(args) => corpus_sample(args, verbose),
         CorpusCommands::Download(args) => corpus_download(args, verbose),
         CorpusCommands::Detect(args) => corpus_detect(args, verbose),
+        CorpusCommands::List(args) => corpus_list(args, verbose),
+        CorpusCommands::Clean(args) => corpus_clean(args, verbose),
     }
 }
 
@@ -464,4 +469,395 @@ fn lang_name(lang: whatlang::Lang) -> &'static str {
         Lat => "Latin",
         _ => "Unknown",
     }
+}
+
+// =============================================================================
+// Corpus Cache Management
+// =============================================================================
+
+/// Metadata for a cached corpus file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheEntry {
+    /// Source type of the corpus.
+    pub source: CorpusSource,
+    /// Path where the corpus is stored.
+    pub path: PathBuf,
+    /// File size in bytes.
+    pub size_bytes: u64,
+    /// When the corpus was downloaded.
+    pub downloaded_at: DateTime<Utc>,
+    /// Whether the corpus was streamed (not stored locally).
+    pub was_streamed: bool,
+    /// Language code (if known).
+    pub language: Option<String>,
+    /// Model names trained on this corpus.
+    pub used_by_models: Vec<String>,
+}
+
+impl CacheEntry {
+    /// Create a new cache entry.
+    pub fn new(source: CorpusSource, path: PathBuf, size_bytes: u64, language: Option<String>) -> Self {
+        Self {
+            source,
+            path,
+            size_bytes,
+            downloaded_at: Utc::now(),
+            was_streamed: false,
+            language,
+            used_by_models: Vec::new(),
+        }
+    }
+
+    /// Format size as human-readable string.
+    pub fn format_size(&self) -> String {
+        format_bytes(self.size_bytes)
+    }
+
+    /// Get age in days.
+    pub fn age_days(&self) -> i64 {
+        (Utc::now() - self.downloaded_at).num_days()
+    }
+}
+
+/// Cache metadata for downloaded corpus files.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CorpusCache {
+    /// Cached corpus entries.
+    pub entries: Vec<CacheEntry>,
+}
+
+impl CorpusCache {
+    /// Get the default cache directory.
+    pub fn cache_dir() -> PathBuf {
+        dirs::cache_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("grammstein")
+    }
+
+    /// Get the cache metadata file path.
+    pub fn cache_file() -> PathBuf {
+        Self::cache_dir().join("corpus_cache.json")
+    }
+
+    /// Load cache from disk.
+    pub fn load() -> CliResult<Self> {
+        let path = Self::cache_file();
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+
+        let content = fs::read_to_string(&path)
+            .map_err(|e| CliError::io(format!("{}: {}", path.display(), e)))?;
+
+        serde_json::from_str(&content)
+            .map_err(|e| CliError::corpus(format!("Failed to parse cache file: {}", e)))
+    }
+
+    /// Save cache to disk.
+    pub fn save(&self) -> CliResult<()> {
+        let path = Self::cache_file();
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| CliError::io(format!("{}: {}", parent.display(), e)))?;
+        }
+
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| CliError::corpus(format!("Failed to serialize cache: {}", e)))?;
+
+        fs::write(&path, content)
+            .map_err(|e| CliError::io(format!("{}: {}", path.display(), e)))?;
+
+        Ok(())
+    }
+
+    /// Register a new cache entry.
+    pub fn register(&mut self, entry: CacheEntry) {
+        // Remove any existing entry for the same path
+        self.entries.retain(|e| e.path != entry.path);
+        self.entries.push(entry);
+    }
+
+    /// Remove entries matching a filter.
+    pub fn remove_matching<F>(&mut self, predicate: F) -> Vec<CacheEntry>
+    where
+        F: Fn(&CacheEntry) -> bool,
+    {
+        let mut removed = Vec::new();
+        self.entries.retain(|e| {
+            if predicate(e) {
+                removed.push(e.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+
+    /// Total cached size in bytes.
+    pub fn total_size(&self) -> u64 {
+        self.entries.iter().map(|e| e.size_bytes).sum()
+    }
+
+    /// Number of cached entries.
+    pub fn count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// Format bytes as human-readable string.
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// List cached corpus files.
+fn corpus_list(args: CorpusListArgs, verbose: bool) -> CliResult<()> {
+    if verbose {
+        eprintln!("Loading corpus cache...");
+    }
+
+    let cache = CorpusCache::load()?;
+
+    if cache.entries.is_empty() {
+        println!("{}", style("No cached corpora found.").dim());
+        println!();
+        println!("Download corpora with:");
+        println!("  grammstein corpus download <language>");
+        return Ok(());
+    }
+
+    match args.format {
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(&cache.entries)
+                .map_err(|e| CliError::corpus(format!("Failed to serialize: {}", e)))?;
+            println!("{}", json);
+        }
+        OutputFormat::Table => {
+            println!("{}", style("Cached Corpora").bold().underlined());
+            println!();
+
+            if args.verbose {
+                // Detailed table
+                println!(
+                    "{:<12} {:<10} {:<12} {:<8} {}",
+                    style("Source").bold(),
+                    style("Language").bold(),
+                    style("Size").bold(),
+                    style("Age").bold(),
+                    style("Path").bold(),
+                );
+                println!("{}", "-".repeat(70));
+
+                for entry in &cache.entries {
+                    let lang = entry.language.as_deref().unwrap_or("-");
+                    let age = format!("{} days", entry.age_days());
+                    println!(
+                        "{:<12} {:<10} {:<12} {:<8} {}",
+                        format!("{:?}", entry.source),
+                        lang,
+                        entry.format_size(),
+                        age,
+                        entry.path.display(),
+                    );
+                }
+            } else {
+                // Compact table
+                println!(
+                    "{:<12} {:<10} {:<12} {}",
+                    style("Source").bold(),
+                    style("Language").bold(),
+                    style("Size").bold(),
+                    style("Downloaded").bold(),
+                );
+                println!("{}", "-".repeat(50));
+
+                for entry in &cache.entries {
+                    let lang = entry.language.as_deref().unwrap_or("-");
+                    let date = entry.downloaded_at.format("%Y-%m-%d").to_string();
+                    println!(
+                        "{:<12} {:<10} {:<12} {}",
+                        format!("{:?}", entry.source),
+                        lang,
+                        entry.format_size(),
+                        date,
+                    );
+                }
+            }
+
+            println!();
+            println!(
+                "Total: {} in {} {}",
+                style(format_bytes(cache.total_size())).cyan().bold(),
+                cache.count(),
+                if cache.count() == 1 { "corpus" } else { "corpora" }
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Clean cached corpus files.
+fn corpus_clean(args: CorpusCleanArgs, verbose: bool) -> CliResult<()> {
+    if verbose {
+        eprintln!("Loading corpus cache...");
+    }
+
+    let mut cache = CorpusCache::load()?;
+
+    if cache.entries.is_empty() {
+        println!("{}", style("No cached corpora to clean.").dim());
+        return Ok(());
+    }
+
+    // Build filter predicate
+    let filter = |entry: &CacheEntry| -> bool {
+        // Never clean streamed entries
+        if entry.was_streamed {
+            return false;
+        }
+
+        // Filter by source if specified
+        if let Some(ref source) = args.source {
+            if &entry.source != source {
+                return false;
+            }
+        }
+
+        // Filter by age if specified
+        if let Some(older_than) = args.older_than {
+            if entry.age_days() < older_than as i64 {
+                return false;
+            }
+        }
+
+        // If --all specified, clean everything (that passes other filters)
+        if args.all {
+            return true;
+        }
+
+        // If no specific filters, need --all
+        args.source.is_some() || args.older_than.is_some()
+    };
+
+    // Find entries to remove
+    let to_remove: Vec<_> = cache.entries.iter().filter(|e| filter(e)).cloned().collect();
+
+    if to_remove.is_empty() {
+        println!("{}", style("No corpora match the cleanup criteria.").dim());
+        if !args.all && args.source.is_none() && args.older_than.is_none() {
+            println!();
+            println!("Use one of:");
+            println!("  --all          Clean all cached corpora");
+            println!("  --source TYPE  Clean specific source type");
+            println!("  --older-than N Clean corpora older than N days");
+        }
+        return Ok(());
+    }
+
+    // Calculate total size to free
+    let total_to_free: u64 = to_remove.iter().map(|e| e.size_bytes).sum();
+
+    // Show what would be deleted
+    println!("{}", style("Corpora to clean:").bold());
+    for entry in &to_remove {
+        let lang = entry.language.as_deref().unwrap_or("-");
+        println!(
+            "  {:?} ({}) - {}",
+            entry.source,
+            lang,
+            entry.format_size()
+        );
+    }
+    println!();
+    println!(
+        "Total: {} to be freed",
+        style(format_bytes(total_to_free)).cyan().bold()
+    );
+
+    // Dry run stops here
+    if args.dry_run {
+        println!();
+        println!("{}", style("Dry run - no files deleted.").yellow());
+        return Ok(());
+    }
+
+    // Confirm unless --force
+    if !args.force {
+        println!();
+        print!("Delete these corpora? [y/N] ");
+        use std::io::{self, Write};
+        io::stdout().flush().map_err(|e| CliError::io(format!("stdout: {}", e)))?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).map_err(|e| CliError::io(format!("stdin: {}", e)))?;
+
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("{}", style("Cancelled.").dim());
+            return Ok(());
+        }
+    }
+
+    // Delete files
+    let mut deleted_count = 0;
+    let mut deleted_size = 0u64;
+    let mut failed = Vec::new();
+
+    for entry in &to_remove {
+        if entry.path.exists() {
+            match fs::remove_file(&entry.path) {
+                Ok(()) => {
+                    deleted_count += 1;
+                    deleted_size += entry.size_bytes;
+                    if verbose {
+                        eprintln!("Deleted: {}", entry.path.display());
+                    }
+                }
+                Err(e) => {
+                    failed.push((entry.path.clone(), e.to_string()));
+                }
+            }
+        } else {
+            // File already gone, just remove from cache
+            deleted_count += 1;
+        }
+    }
+
+    // Update cache
+    cache.remove_matching(|e| to_remove.iter().any(|r| r.path == e.path));
+    cache.save()?;
+
+    // Report results
+    println!();
+    println!(
+        "{} Deleted {} {}, freed {}",
+        style("✓").green().bold(),
+        deleted_count,
+        if deleted_count == 1 { "corpus" } else { "corpora" },
+        style(format_bytes(deleted_size)).cyan().bold()
+    );
+
+    if !failed.is_empty() {
+        println!();
+        println!("{}", style("Failed to delete:").red().bold());
+        for (path, err) in failed {
+            println!("  {}: {}", path.display(), err);
+        }
+    }
+
+    Ok(())
 }

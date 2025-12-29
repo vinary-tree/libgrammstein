@@ -363,7 +363,7 @@ fn train_ngram_inmemory(
         .batch_size(args.batch_size)
         .min_word_freq(args.min_count)
         .build()
-        .train(&*reader)
+        .train(reader)
         .map_err(|e| CliError::training(format!("Training failed: {}", e)))?;
 
     let ngram_count = model.ngram_count();
@@ -523,7 +523,7 @@ fn train_embedding(args: TrainEmbeddingArgs, verbose: bool, quiet: bool) -> CliR
         if let Some(ref manager) = checkpoint_manager {
             train_embedding_with_checkpoints(
                 trainer,
-                &*reader,
+                reader,
                 &args,
                 manager,
                 start_epoch,
@@ -535,7 +535,7 @@ fn train_embedding(args: TrainEmbeddingArgs, verbose: bool, quiet: bool) -> CliR
         } else {
             // Simple training without checkpoints
             trainer
-                .train(&*reader)
+                .train(reader)
                 .map_err(|e| CliError::training(format!("Training failed: {}", e)))?
         }
     };
@@ -564,7 +564,7 @@ fn train_embedding(args: TrainEmbeddingArgs, verbose: bool, quiet: bool) -> CliR
 /// Train embeddings with per-epoch checkpointing.
 fn train_embedding_with_checkpoints(
     trainer_builder: crate::embedding::EmbeddingTrainerBuilder,
-    reader: &dyn CorpusReader,
+    reader: Box<dyn CorpusReader>,
     args: &TrainEmbeddingArgs,
     manager: &crate::cli::checkpoint::CheckpointManager,
     start_epoch: u32,

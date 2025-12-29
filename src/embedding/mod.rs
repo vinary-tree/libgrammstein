@@ -19,7 +19,7 @@
 //!     .window_size(5)
 //!     .min_count(5)
 //!     .epochs(5)
-//!     .train(&reader)?;
+//!     .train(reader)?;
 //!
 //! // Get word vectors
 //! let vec = model.word_vector("hello");

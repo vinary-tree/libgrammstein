@@ -80,3 +80,24 @@ pub trait CorpusReader: Send + Sync {
         None
     }
 }
+
+/// Implement CorpusReader for boxed trait objects.
+///
+/// This enables dynamic dispatch with the ownership-based trainer APIs.
+impl CorpusReader for Box<dyn CorpusReader> {
+    fn documents(&self) -> Box<dyn Iterator<Item = Document> + Send + '_> {
+        (**self).documents()
+    }
+
+    fn sentences(&self) -> Box<dyn Iterator<Item = String> + Send + '_> {
+        (**self).sentences()
+    }
+
+    fn estimated_tokens(&self) -> Option<usize> {
+        (**self).estimated_tokens()
+    }
+
+    fn document_count(&self) -> Option<usize> {
+        (**self).document_count()
+    }
+}

@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
 
 /// grammstein - Language model training and experimentation CLI.
 ///
@@ -124,6 +125,11 @@ pub struct TrainNgramArgs {
     /// Resource management options.
     #[command(flatten)]
     pub resources: ResourceArgs,
+
+    /// Delete downloaded corpus after successful training.
+    /// Only applies to auto-downloaded corpora, not local files or streamed data.
+    #[arg(long)]
+    pub auto_clean: bool,
 }
 
 /// Arguments for training embedding models.
@@ -184,6 +190,11 @@ pub struct TrainEmbeddingArgs {
     /// Resource management options.
     #[command(flatten)]
     pub resources: ResourceArgs,
+
+    /// Delete downloaded corpus after successful training.
+    /// Only applies to auto-downloaded corpora, not local files or streamed data.
+    #[arg(long)]
+    pub auto_clean: bool,
 }
 
 /// Arguments for creating hybrid models.
@@ -413,6 +424,12 @@ pub enum CorpusCommands {
 
     /// Detect corpus language.
     Detect(CorpusDetectArgs),
+
+    /// List cached corpus files.
+    List(CorpusListArgs),
+
+    /// Remove cached corpus files.
+    Clean(CorpusCleanArgs),
 }
 
 /// Arguments for corpus statistics.
@@ -481,6 +498,42 @@ pub struct CorpusDetectArgs {
     /// Corpus format.
     #[arg(short, long, value_enum, default_value = "plaintext")]
     pub format: CorpusFormat,
+}
+
+/// Arguments for listing cached corpora.
+#[derive(Args, Debug)]
+pub struct CorpusListArgs {
+    /// Show detailed information including file sizes and usage.
+    #[arg(short, long)]
+    pub verbose: bool,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value = "table")]
+    pub format: OutputFormat,
+}
+
+/// Arguments for cleaning cached corpora.
+#[derive(Args, Debug)]
+pub struct CorpusCleanArgs {
+    /// Only show what would be deleted (dry run).
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Clean specific corpus by source type.
+    #[arg(short, long, value_enum)]
+    pub source: Option<CorpusSource>,
+
+    /// Clean corpora older than N days.
+    #[arg(long)]
+    pub older_than: Option<u32>,
+
+    /// Force cleanup without confirmation.
+    #[arg(long, short)]
+    pub force: bool,
+
+    /// Clean all cached corpora.
+    #[arg(long)]
+    pub all: bool,
 }
 
 // =============================================================================
@@ -614,7 +667,7 @@ pub enum OutputFormat {
 }
 
 /// Corpus download source.
-#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CorpusSource {
     /// Wikipedia dump.
     #[default]

@@ -531,7 +531,7 @@ mod tests {
         let dictionary = PathMapDictionary::<NgramEntry>::new();
         let ngram_model = TrainerBuilder::new(dictionary)
             .order(3)
-            .train(&reader)
+            .train(reader)
             .expect("N-gram training failed");
 
         // Train embedding model
@@ -541,7 +541,7 @@ mod tests {
             .window_size(2)
             .min_count(1)
             .epochs(2)
-            .train(&reader2)
+            .train(reader2)
             .expect("Embedding training failed");
 
         (ngram_model, embedding_model)
@@ -664,7 +664,7 @@ mod tests {
             let dictionary = DynamicDawgChar::<NgramEntry>::new();
             let ngram_model = TrainerBuilder::new(dictionary)
                 .order(3)
-                .train(&reader)
+                .train(reader)
                 .expect("N-gram training failed");
 
             // Train embedding model
@@ -674,7 +674,7 @@ mod tests {
                 .window_size(2)
                 .min_count(1)
                 .epochs(2)
-                .train(&reader2)
+                .train(reader2)
                 .expect("Embedding training failed");
 
             (ngram_model, embedding_model)
