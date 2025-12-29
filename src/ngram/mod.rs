@@ -48,7 +48,7 @@ pub use model::NgramModel;
 #[cfg(feature = "serde-extras")]
 pub use model::PortableNgramModel;
 pub use trainer::{NgramTrainer, TrainerBuilder, TrainingConfig, TrainingProgress, TrainingStats};
-pub use trie::{IterableDictionary, NgramTrie};
+pub use trie::{IterableDictionary, NgramTrie, NGRAM_SEPARATOR};
 
 #[cfg(feature = "serde-extras")]
 pub use accumulator::{AccumulatorError, AccumulatorResult, NgramAccumulator};

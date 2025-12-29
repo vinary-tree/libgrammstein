@@ -1,15 +1,32 @@
 //! Text generation via autoregressive sampling.
 //!
-//! This module will provide:
-//! - Greedy decoding
-//! - Nucleus (top-p) sampling
-//! - Temperature scaling
+//! This module provides text generation capabilities using trained language models.
+//! It supports multiple sampling strategies:
 //!
-//! # Status
+//! - **Greedy decoding**: Always select the highest probability token
+//! - **Nucleus (top-p) sampling**: Sample from the smallest set with cumulative probability >= p
+//! - **Top-k sampling**: Sample from the k highest probability tokens
+//! - **Temperature scaling**: Adjust the sharpness of the probability distribution
 //!
-//! This module is planned for Phase 7+ of implementation.
+//! # Example
+//!
+//! ```ignore
+//! use libgrammstein::generation::{TextGenerator, GenerationConfig};
+//! use libgrammstein::ngram::NgramModel;
+//!
+//! let model = NgramModel::load("model.bin")?;
+//! let generator = TextGenerator::new(model, GenerationConfig::default());
+//!
+//! // Generate text with default nucleus sampling
+//! let text = generator.generate(&["the", "quick"]);
+//! println!("Generated: {}", text.join(" "));
+//!
+//! // Or use greedy decoding for deterministic output
+//! let config = GenerationConfig::greedy().with_max_tokens(10);
+//! let generator = TextGenerator::new(model, config);
+//! let text = generator.generate(&["hello"]);
+//! ```
 
-// TODO: Implement in Phase 7+
-// mod sampler;
+mod sampler;
 
-// pub use sampler::TextGenerator;
+pub use sampler::{GenerationConfig, TextGenerator};

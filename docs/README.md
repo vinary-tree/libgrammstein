@@ -104,6 +104,8 @@ hybrid.save("model.bin")?;
 - [BPE Tokenizer](components/embedding/bpe-tokenizer.md) - Byte-Pair Encoding
 - [Skip-gram](components/embedding/skip-gram.md) - Training with negative sampling
 - [Similarity](components/embedding/similarity.md) - Cosine similarity and nearest neighbors
+- [Phonetic Embeddings](components/embedding/phonetic.md) - Combining orthographic and phonetic similarity
+- [Acoustic Word Embeddings](components/embedding/acoustic-word.md) - Fixed-dimensional audio representations
 
 #### Hybrid Model
 
@@ -111,11 +113,21 @@ hybrid.save("model.bin")?;
 - [Interpolation](components/hybrid/interpolation.md) - Score combination strategies
 - [OOV Handling](components/hybrid/oov-handling.md) - Out-of-vocabulary word handling
 
+#### Text Generation
+
+- [Text Generation](components/generation/text-generation.md) - Autoregressive text generation with sampling strategies
+
 #### Corpus Processing
 
 - [Overview](components/corpus/overview.md) - Streaming corpus architecture
 - [Streaming](components/corpus/streaming.md) - Memory-efficient processing
 - [Formats](components/corpus/formats.md) - Wikipedia, Gutenberg, plaintext
+
+#### Acoustic Processing
+
+- [Overview](components/acoustic/overview.md) - Audio feature extraction module
+- [Feature Extraction](components/acoustic/features.md) - MFCC, filterbank, streaming extraction
+- [Acoustic Models](components/acoustic/models.md) - Candle-based neural acoustic models
 
 ### Integration
 
@@ -169,6 +181,9 @@ libgrammstein = { version = "0.1", features = ["lling-llang-integration", "serde
 | `lling-llang-integration` | Implements lling-llang's `LanguageModel` trait |
 | `serde` | Model serialization/deserialization |
 | `async` | Async corpus streaming (Tokio) |
+| `acoustic` | Audio feature extraction (MFCC, filterbank) |
+| `candle-model` | Candle-based neural acoustic models |
+| `phonetic` | Phonetic-aware embeddings with Zompist rules |
 
 ## Related Projects
 

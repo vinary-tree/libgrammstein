@@ -13,7 +13,7 @@ categories = ["text-processing", "science"]
 # Core dependencies
 # Note: persistent-artrie has its own WAL-based persistence for crash-safe training.
 # Serialization uses portable format (IterableDictionary) that doesn't require D: Serialize.
-liblevenshtein = { path = "../liblevenshtein-rust", features = ["pathmap-backend", "persistent-artrie"] }
+liblevenshtein = { path = "../liblevenshtein-rust", features = ["pathmap-backend", "persistent-artrie", "phonetic-rules"] }
 ndarray = { version = "0.16", features = ["serde"] }
 ordered-float = "4.0"
 smallvec = "1.13"
@@ -60,6 +60,14 @@ wgpu = { version = "23", optional = true }
 bytemuck = { version = "1.14", features = ["derive"], optional = true }
 pollster = { version = "0.4", optional = true }
 
+# Audio feature extraction (optional)
+rustfft = { version = "6.2", optional = true }
+realfft = { version = "3.3", optional = true }
+
+# Candle (Rust ML framework) for acoustic models (optional)
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+
 # lling-llang integration (optional)
 lling-llang = { path = "../lling-llang", features = ["lm-rerank"], optional = true }
 
@@ -102,6 +110,9 @@ default = []
 # lling-llang integration for LanguageModel trait
 lling-llang-integration = ["dep:lling-llang"]
 
+# WFST export for n-gram models (includes lling-llang integration)
+wfst-export = ["lling-llang-integration"]
+
 # Async runtime (enable if I/O bottlenecks identified via profiling)
 async = ["dep:tokio", "dep:futures"]
 
@@ -120,6 +131,12 @@ ner = ["dep:ort", "dep:tokenizers"]
 
 # GPU acceleration for embedding training
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
+
+# Audio feature extraction (MFCC, mel filterbank)
+acoustic = ["dep:rustfft", "dep:realfft"]
+
+# Candle-based acoustic model (neural network inference)
+candle-model = ["dep:candle-core", "dep:candle-nn", "acoustic"]
 
 # CLI support (includes HTTP streaming, subword tokenization, and serialization extras)
 cli = [

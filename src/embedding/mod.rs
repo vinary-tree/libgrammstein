@@ -33,7 +33,9 @@
 
 mod bpe;
 mod model;
+mod phonetic;
 mod trainer;
+mod acoustic;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -50,6 +52,15 @@ pub use model::{
 
 pub use trainer::{
     EmbeddingConfig, EmbeddingProgress, EmbeddingTrainer, EmbeddingTrainerBuilder,
+};
+
+pub use phonetic::{
+    PhoneticEmbedding, DEFAULT_PHONETIC_FUEL, DEFAULT_PHONETIC_WEIGHT,
+};
+
+pub use acoustic::{
+    AcousticWordEmbedding, AcousticEmbeddingConfig, AcousticEmbeddingStats,
+    AcousticEncoder, LinearEncoder, PoolingStrategy,
 };
 
 #[cfg(feature = "gpu")]

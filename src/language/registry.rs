@@ -114,6 +114,33 @@ impl ModelMetadata {
         self.extra.insert(key.into(), value.into());
         self
     }
+
+    /// Save metadata to a sidecar JSON file.
+    ///
+    /// Creates a file at `{model_path}.meta.json` with the metadata.
+    pub fn save(&self, model_path: &Path) -> Result<()> {
+        let meta_path = model_path.with_extension("meta.json");
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| crate::Error::SerializationMessage(e.to_string()))?;
+        fs::write(&meta_path, content)?;
+        log::debug!("Saved metadata to {:?}", meta_path);
+        Ok(())
+    }
+
+    /// Load metadata from a sidecar JSON file.
+    ///
+    /// Tries to load from `{model_path}.meta.json`.
+    pub fn load(model_path: &Path) -> Result<Option<Self>> {
+        let meta_path = model_path.with_extension("meta.json");
+        if !meta_path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(&meta_path)?;
+        let meta = serde_json::from_str(&content)
+            .map_err(|e| crate::Error::SerializationMessage(e.to_string()))?;
+        Ok(Some(meta))
+    }
 }
 
 /// Entry in the model registry.
@@ -223,43 +250,98 @@ impl ModelRegistry {
         Ok(())
     }
 
+    /// Load metadata from a sidecar JSON file or embedded in the model.
+    ///
+    /// Tries loading from `{path}.meta.json` first, then from `{path_without_ext}.meta.json`.
+    fn load_metadata_from_model(path: &Path) -> Option<ModelMetadata> {
+        // Try sidecar file: model.bin.meta.json
+        let sidecar_path = path.with_extension("bin.meta.json");
+        if sidecar_path.exists() {
+            if let Ok(content) = fs::read_to_string(&sidecar_path) {
+                if let Ok(meta) = serde_json::from_str(&content) {
+                    log::debug!("Loaded metadata from {:?}", sidecar_path);
+                    return Some(meta);
+                }
+            }
+        }
+
+        // Try sidecar file: model.meta.json (without .bin extension)
+        let meta_path = path.with_extension("meta.json");
+        if meta_path.exists() {
+            if let Ok(content) = fs::read_to_string(&meta_path) {
+                if let Ok(meta) = serde_json::from_str(&content) {
+                    log::debug!("Loaded metadata from {:?}", meta_path);
+                    return Some(meta);
+                }
+            }
+        }
+
+        // Try adjacent metadata file with same stem
+        if let Some(stem) = path.file_stem() {
+            let parent = path.parent().unwrap_or(Path::new("."));
+            let stem_meta = parent.join(format!("{}.meta.json", stem.to_string_lossy()));
+            if stem_meta.exists() {
+                if let Ok(content) = fs::read_to_string(&stem_meta) {
+                    if let Ok(meta) = serde_json::from_str(&content) {
+                        log::debug!("Loaded metadata from {:?}", stem_meta);
+                        return Some(meta);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
     fn add_model_file(
         index: &mut HashMap<String, Vec<ModelEntry>>,
         path: &Path,
         lang: &str,
         dialect: Option<&str>,
     ) -> Result<()> {
-        let metadata = fs::metadata(path)?;
-        let size_bytes = metadata.len();
+        let file_metadata = fs::metadata(path)?;
+        let size_bytes = file_metadata.len();
 
-        // Infer model type from filename
-        let model_type = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| {
-                if s.contains("hybrid") {
-                    ModelType::Hybrid
-                } else if s.contains("embedding") || s.contains("embed") {
-                    ModelType::Embedding
+        // Try to load model metadata from sidecar file
+        let model_metadata = Self::load_metadata_from_model(path);
+
+        // Infer model type from metadata or filename
+        let model_type = model_metadata
+            .as_ref()
+            .map(|m| m.model_type.clone())
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| {
+                        if s.contains("hybrid") {
+                            ModelType::Hybrid
+                        } else if s.contains("embedding") || s.contains("embed") {
+                            ModelType::Embedding
+                        } else {
+                            ModelType::Ngram
+                        }
+                    })
+                    .unwrap_or(ModelType::Ngram)
+            });
+
+        // Build language tag from metadata or path
+        let language = model_metadata
+            .as_ref()
+            .map(|m| m.language.clone())
+            .unwrap_or_else(|| {
+                if let Some(d) = dialect {
+                    d.parse().unwrap_or_else(|_| LanguageTag::new(lang))
                 } else {
-                    ModelType::Ngram
+                    LanguageTag::new(lang)
                 }
-            })
-            .unwrap_or(ModelType::Ngram);
-
-        // Build language tag
-        let language = if let Some(d) = dialect {
-            d.parse().unwrap_or_else(|_| LanguageTag::new(lang))
-        } else {
-            LanguageTag::new(lang)
-        };
+            });
 
         let entry = ModelEntry {
             path: path.to_path_buf(),
             language: language.clone(),
             model_type,
             size_bytes,
-            metadata: None, // TODO: Load metadata from model file
+            metadata: model_metadata,
         };
 
         index

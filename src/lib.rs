@@ -77,6 +77,9 @@ pub mod cli;
 #[cfg(feature = "cli")]
 pub mod language;
 
+#[cfg(feature = "acoustic")]
+pub mod acoustic;
+
 /// Error types for libgrammstein operations.
 pub mod error {
     use thiserror::Error;
@@ -104,10 +107,14 @@ pub mod error {
         #[error("Model not trained: {0}")]
         NotTrained(String),
 
-        /// Serialization error.
+        /// Serialization error (bincode).
         #[cfg(feature = "serde-extras")]
         #[error("Serialization error: {0}")]
         Serialization(#[from] bincode::Error),
+
+        /// Serialization error (general, e.g., JSON).
+        #[error("Serialization error: {0}")]
+        SerializationMessage(String),
     }
 
     /// Result type alias for libgrammstein operations.
@@ -125,4 +132,15 @@ pub mod prelude {
 
     #[cfg(feature = "lling-llang-integration")]
     pub use crate::integration::GrammsteinLanguageModel;
+
+    #[cfg(feature = "acoustic")]
+    pub use crate::acoustic::{
+        FeatureConfig, FeatureExtractor, MelFilterbank, StreamingFeatureExtractor, WindowType,
+    };
+
+    #[cfg(feature = "candle-model")]
+    pub use crate::acoustic::{
+        AcousticModel, AcousticModelConfig, LinearAcousticModel, MockAcousticModel,
+        TransformerAcousticModel,
+    };
 }

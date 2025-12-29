@@ -26,6 +26,13 @@ impl IterableDictionary for liblevenshtein::dictionary::dynamic_dawg_char::Dynam
     }
 }
 
+// Implement IterableDictionary for PathMapDictionary
+impl IterableDictionary for liblevenshtein::dictionary::pathmap::PathMapDictionary<NgramEntry> {
+    fn iter_all(&self) -> Box<dyn Iterator<Item = (String, NgramEntry)> + '_> {
+        Box::new(self.iter())
+    }
+}
+
 /// Separator used between tokens in n-gram keys.
 ///
 /// Using pipe character as it's unlikely to appear in natural text tokens.

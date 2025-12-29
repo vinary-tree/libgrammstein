@@ -8,12 +8,14 @@
 
 use crate::corpus::{CorpusReader, Tokenizer};
 use crate::ngram::smoothing::KneserNeySmoothing;
+use crate::ngram::trie::{IterableDictionary, NGRAM_SEPARATOR};
 use crate::ngram::{NgramEntry, NgramModel, NgramTrie};
 use crate::Result;
 
 use crossbeam_channel::Sender;
 use liblevenshtein::dictionary::MutableMappedDictionary;
 use rayon::prelude::*;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Training progress information.
@@ -80,7 +82,7 @@ impl TrainingConfig {
 /// for lock-free n-gram counting.
 pub struct NgramTrainer<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary + Send + Sync,
 {
     /// The n-gram trie being built.
     trie: NgramTrie<D>,
@@ -137,7 +139,7 @@ impl TrainingStats {
 
 impl<D> NgramTrainer<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync + 'static,
+    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary + Send + Sync + 'static,
 {
     /// Create a new trainer with the given dictionary and configuration.
     pub fn new(dictionary: D, config: TrainingConfig) -> Self {
@@ -348,37 +350,136 @@ where
     /// For each n-gram w1...wn, we count:
     /// - Continuation count: Number of unique contexts (w0, w1...wn-1) for which c(w0, w1...wn) > 0
     /// - Unique continuations: Number of unique words wn+1 for which c(w1...wn, wn+1) > 0
+    ///
+    /// This performs a second pass over all n-grams to compute:
+    /// 1. For each word, how many unique histories precede it (continuation count)
+    /// 2. For each history, how many unique words follow it (unique continuations)
     fn collect_continuation_counts(&self) {
-        // For now, we'll compute continuation counts during probability queries
-        // using backoff. A full implementation would make a second pass here.
-        //
-        // TODO: Implement second-pass continuation counting for full MKN
-        log::debug!("Continuation counts will be computed on-demand during queries");
+        log::debug!("Collecting continuation counts for MKN smoothing");
+
+        // Track continuation counts: for each word, count unique preceding contexts
+        // continuation_count[word] = |{h : c(h, word) > 0}|
+        let mut word_contexts: std::collections::HashMap<String, HashSet<String>> =
+            std::collections::HashMap::new();
+
+        // Track unique continuations: for each history, count unique following words
+        // unique_continuations[history] = |{w : c(history, w) > 0}|
+        let mut history_words: std::collections::HashMap<String, HashSet<String>> =
+            std::collections::HashMap::new();
+
+        // Iterate over all n-grams
+        for (key, _entry) in self.trie.iter_entries() {
+            let parts: Vec<&str> = key.split(NGRAM_SEPARATOR).collect();
+
+            // Skip unigrams for continuation counting
+            if parts.len() < 2 {
+                continue;
+            }
+
+            // Extract history (all but last) and word (last)
+            let word = parts[parts.len() - 1].to_string();
+            let history = parts[..parts.len() - 1].join(&NGRAM_SEPARATOR.to_string());
+
+            // Record that this word has this history as a context
+            word_contexts
+                .entry(word.clone())
+                .or_default()
+                .insert(history.clone());
+
+            // Record that this history has this word as a continuation
+            history_words
+                .entry(history)
+                .or_default()
+                .insert(word);
+        }
+
+        // Update continuation counts in the trie
+        for (word, contexts) in word_contexts {
+            let continuation_count = contexts.len() as u32;
+            self.trie.update_continuation_count(&[&word], continuation_count);
+        }
+
+        // Update unique continuations in the trie
+        for (history, words) in history_words {
+            let unique_continuations = words.len() as u32;
+            let history_tokens: Vec<&str> = history.split(NGRAM_SEPARATOR).collect();
+            self.trie.update_unique_continuations(&history_tokens, unique_continuations);
+        }
+
+        log::debug!("Continuation count collection complete");
     }
 
-    /// Compute Modified Kneser-Ney smoothing parameters.
+    /// Count n-grams by frequency for MKN discount computation.
+    ///
+    /// Returns (n1, n2, n3, n4) where:
+    /// - n1 = count of n-grams occurring exactly once
+    /// - n2 = count of n-grams occurring exactly twice
+    /// - n3 = count of n-grams occurring exactly 3 times
+    /// - n4 = count of n-grams occurring exactly 4 times
+    fn count_ngram_frequencies(&self) -> (u64, u64, u64, u64) {
+        let mut n1 = 0u64;
+        let mut n2 = 0u64;
+        let mut n3 = 0u64;
+        let mut n4 = 0u64;
+
+        for (_key, entry) in self.trie.iter_entries() {
+            match entry.count() {
+                1 => n1 += 1,
+                2 => n2 += 1,
+                3 => n3 += 1,
+                4 => n4 += 1,
+                _ => {}
+            }
+        }
+
+        log::debug!(
+            "N-gram frequency counts: n1={}, n2={}, n3={}, n4={}",
+            n1, n2, n3, n4
+        );
+
+        (n1, n2, n3, n4)
+    }
+
+    /// Compute Modified Kneser-Ney smoothing parameters from actual corpus statistics.
+    ///
+    /// Uses the Chen & Goodman formula to compute optimal discounts:
+    /// - Y = n1 / (n1 + 2*n2)
+    /// - D1 = 1 - 2*Y * (n2/n1)
+    /// - D2 = 2 - 3*Y * (n3/n2)
+    /// - D3+ = 3 - 4*Y * (n4/n3)
     fn compute_smoothing_params(&self) -> KneserNeySmoothing {
-        // TODO: Count n-grams that occur exactly 1, 2, 3, 4 times
-        // for computing optimal discounts. For now, use defaults.
-        //
-        // We would need to iterate over all n-grams to count these.
-        // For now, use default values based on common corpus statistics.
-        KneserNeySmoothing::new(self.config.order)
+        let (n1, n2, n3, n4) = self.count_ngram_frequencies();
+
+        // Need all counts to be non-zero for meaningful discount computation
+        if n1 > 0 && n2 > 0 && n3 > 0 && n4 > 0 {
+            log::info!("Computing optimal MKN discounts from corpus statistics");
+            KneserNeySmoothing::from_counts(n1, n2, n3, n4)
+        } else {
+            log::debug!(
+                "Insufficient count diversity (n1={}, n2={}, n3={}, n4={}), using default MKN discounts",
+                n1, n2, n3, n4
+            );
+            KneserNeySmoothing::new(self.config.order)
+        }
     }
 
     /// Count unique unigrams (vocabulary size).
     fn count_unigrams(&self) -> usize {
         // Count entries that are unigrams (no separator in key)
-        // This is an approximation - ideally we'd track this during training
-        // For now, return the total n-gram count as an upper bound
-        self.trie.len()
+        let mut count = 0;
+        for (key, _entry) in self.trie.iter_entries() {
+            if !key.contains(NGRAM_SEPARATOR) {
+                count += 1;
+            }
+        }
+        count
     }
 }
 
 /// Builder for training with fluent API.
 pub struct TrainerBuilder<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary + Send + Sync,
 {
     dictionary: D,
     config: TrainingConfig,
@@ -387,7 +488,7 @@ where
 
 impl<D> TrainerBuilder<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync + 'static,
+    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary + Send + Sync + 'static,
 {
     /// Create a new trainer builder.
     pub fn new(dictionary: D) -> Self {
