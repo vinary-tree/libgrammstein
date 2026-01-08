@@ -13,7 +13,10 @@ categories = ["text-processing", "science"]
 # Core dependencies
 # Note: persistent-artrie has its own WAL-based persistence for crash-safe training.
 # Serialization uses portable format (IterableDictionary) that doesn't require D: Serialize.
-liblevenshtein = { path = "../liblevenshtein-rust", features = ["pathmap-backend", "persistent-artrie", "phonetic-rules"] }
+liblevenshtein = { path = "../liblevenshtein-rust", features = ["pathmap-backend", "persistent-artrie", "embedded-rules"] }
+
+# PathMap for efficient trie storage (production deployment after training)
+pathmap = { path = "../PathMap", default-features = true }
 ndarray = { version = "0.16", features = ["serde"] }
 ordered-float = "4.0"
 smallvec = "1.13"
@@ -52,6 +55,17 @@ ureq = { version = "2.9", optional = true }
 fs2 = { version = "0.4", optional = true }
 tempfile = { version = "3.14", optional = true }
 
+# Async HTTP streaming for Google Books (optional)
+reqwest = { version = "0.11", features = ["stream", "gzip"], optional = true }
+tokio-util = { version = "0.7", features = ["io"], optional = true }
+tokio-stream = { version = "0.1", features = ["io-util"], optional = true }
+
+# Async gzip decompression (optional)
+async-compression = { version = "0.4", features = ["tokio", "gzip"], optional = true }
+
+# Sync gzip for local files (optional)
+flate2 = { version = "1.0", optional = true }
+
 # BPE subword tokenization (optional)
 tokenizers = { version = "0.20", optional = true }
 
@@ -67,15 +81,26 @@ pollster = { version = "0.4", optional = true }
 rustfft = { version = "6.2", optional = true }
 realfft = { version = "3.3", optional = true }
 
-# Candle (Rust ML framework) for acoustic models (optional)
+# Candle (Rust ML framework) for acoustic models and neural rescoring (optional)
 candle-core = { version = "0.8", optional = true }
 candle-nn = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+hf-hub = { version = "0.3", optional = true }
+
+# HNSW for approximate nearest neighbor (optional for large RAG indices)
+# hnsw_rs supports per-query ef_search, parallel ops, SIMD, filtering, and mmap
+hnsw_rs = { version = "0.3", features = ["simdeez_f"], optional = true }
+
+# OCR support (optional)
+tesseract-rs = { version = "0.1", optional = true }
+image = { version = "0.25", optional = true }
+pdf = { version = "0.9", optional = true }
 
 # lling-llang integration (optional)
 lling-llang = { path = "../lling-llang", features = ["lm-rerank"], optional = true }
 
 # Async runtime (optional - if profiling shows I/O bottlenecks)
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal", "macros"], optional = true }
 futures = { version = "0.3", optional = true }
 
 # Serialization (required because liblevenshtein persistent-artrie feature requires it)
@@ -142,6 +167,27 @@ acoustic = ["dep:rustfft", "dep:realfft"]
 # Candle-based acoustic model (neural network inference)
 candle-model = ["dep:candle-core", "dep:candle-nn", "acoustic"]
 
+# Neural rescoring with ModernBERT
+neural-rescore = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:hf-hub",
+]
+
+# RAG with exact cosine similarity (ndarray-based)
+rag = ["neural-rescore", "dep:bytemuck", "dep:serde_json", "dep:bincode"]
+
+# RAG with HNSW for large indices (> 1M documents)
+rag-hnsw = ["rag", "dep:hnsw_rs"]
+
+# OCR support for PDF corpus processing
+ocr = ["dep:tesseract-rs", "dep:image", "dep:pdf"]
+
+# LaTeX OCR for mathematical formulas (requires neural-rescore for model)
+latex-ocr = ["ocr", "neural-rescore"]
+
 # CLI support (includes HTTP streaming, subword tokenization, and serialization extras)
 cli = [
     "http-corpus",
@@ -165,6 +211,20 @@ cli = [
 
 # Full language support including CJK tokenization
 language-full = ["dep:whatlang", "dep:unic-langid"]
+
+# Google Books N-gram import support
+google-books = [
+    "dep:reqwest",
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:tokio-stream",
+    "dep:async-compression",
+    "dep:flate2",
+    "dep:indicatif",
+    "dep:chrono",
+    "dep:serde_json",
+    "serde-extras",
+]
 
 [[bin]]
 name = "grammstein"

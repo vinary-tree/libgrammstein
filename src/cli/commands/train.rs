@@ -9,6 +9,8 @@ use console::style;
 use crate::cli::args::{
     CorpusFormat, TrainCommands, TrainEmbeddingArgs, TrainHybridArgs, TrainNgramArgs,
 };
+#[cfg(feature = "google-books")]
+use crate::cli::args::ImportGoogleBooksArgs;
 use crate::cli::checkpoint::{
     CheckpointManager, CorpusPosition, NgramCheckpoint, NgramCheckpointConfig,
     NgramTrainingState, TrainingTimer,
@@ -25,6 +27,8 @@ pub fn run(cmd: TrainCommands, verbose: bool, quiet: bool) -> CliResult<()> {
         TrainCommands::Ngram(args) => train_ngram(args, verbose, quiet),
         TrainCommands::Embedding(args) => train_embedding(args, verbose, quiet),
         TrainCommands::Hybrid(args) => train_hybrid(args, verbose, quiet),
+        #[cfg(feature = "google-books")]
+        TrainCommands::ImportGoogleBooks(args) => import_google_books(args, verbose, quiet),
     }
 }
 
@@ -813,4 +817,193 @@ fn create_corpus_reader(path: &str, format: CorpusFormat) -> CliResult<Box<dyn C
             }
         }
     }
+}
+
+/// Import N-gram model from Google Books N-grams.
+#[cfg(feature = "google-books")]
+fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) -> CliResult<()> {
+    use crate::sources::google_books::{GoogleBooksConfig, GoogleBooksImporter, LanguageInfo};
+
+    if verbose {
+        eprintln!("Importing Google Books N-grams");
+        eprintln!("  Language: {}", args.language);
+        eprintln!("  Orders: {}-{}", args.min_order, args.max_order);
+        eprintln!("  Output: {}", args.output.display());
+        eprintln!("  Min count: {}", args.min_count);
+        if let Some(min_year) = args.min_year {
+            eprintln!("  Min year: {}", min_year);
+        }
+        if let Some(max_year) = args.max_year {
+            eprintln!("  Max year: {}", max_year);
+        }
+    }
+
+    // Validate language
+    let lang_info = LanguageInfo::from_code(&args.language).ok_or_else(|| {
+        CliError::unsupported(format!(
+            "Unsupported language: {}. Available: en, de, fr, es, it, ru, he, zh",
+            args.language
+        ))
+    })?;
+
+    if !quiet {
+        eprintln!(
+            "Importing {} n-grams ({}-grams to {}-grams)",
+            lang_info.name, args.min_order, args.max_order
+        );
+    }
+
+    // Build configuration
+    let year_range = match (args.min_year, args.max_year) {
+        (Some(min), Some(max)) => Some((min, max)),
+        (Some(min), None) => Some((min, 2020)),
+        (None, Some(max)) => Some((1800, max)),
+        (None, None) => None,
+    };
+
+    let config = GoogleBooksConfig {
+        language: args.language.clone(),
+        orders: args.min_order..=args.max_order,
+        min_count: args.min_count,
+        year_range,
+        output_path: args.output.clone(),
+        buffer_pool_size: 256, // 64MB default
+        parallel_downloads: args.parallel,
+        progress_interval: 100_000,
+        skip_pos_tags: args.skip_pos_tags,
+    };
+
+    // Setup progress indicator
+    let progress = if quiet || args.resources.no_progress {
+        None
+    } else {
+        Some(indicatif::ProgressBar::new_spinner())
+    };
+
+    if let Some(ref pb) = progress {
+        pb.set_style(
+            indicatif::ProgressStyle::default_spinner()
+                .template("{spinner:.green} [{elapsed_precise}] {msg}")
+                .expect("Invalid progress template"),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    }
+
+    // Create importer
+    let mut importer = GoogleBooksImporter::new(config)
+        .map_err(|e| CliError::io(format!("Failed to create importer: {}", e)))?;
+
+    // Check for local files vs HTTP
+    if let Some(ref local_dir) = args.local_files {
+        // Import from local files
+        if !quiet {
+            if let Some(ref pb) = progress {
+                pb.set_message(format!("Importing from local files: {}", local_dir.display()));
+            }
+        }
+
+        // Verify the directory exists and has gzip files
+        let file_count = std::fs::read_dir(local_dir)
+            .map_err(|e| CliError::io(format!("Failed to read directory: {}", e)))?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "gz"))
+            .count();
+
+        if file_count == 0 {
+            return Err(CliError::corpus(format!(
+                "No .gz files found in {}",
+                local_dir.display()
+            )));
+        }
+
+        if verbose {
+            eprintln!("Found {} gzip files", file_count);
+        }
+
+        // Import files from directory
+        let stats = importer
+            .import_files(local_dir, |progress_info| {
+                if let Some(ref pb) = progress {
+                    pb.set_message(format!(
+                        "Order {}: {} n-grams ({}/{} files, prefix: {})",
+                        progress_info.current_order,
+                        progress_info.total_ngrams,
+                        progress_info.files_completed,
+                        progress_info.total_files,
+                        progress_info.current_prefix
+                    ));
+                }
+            })
+            .map_err(|e| CliError::io(format!("Import failed: {}", e)))?;
+
+        if let Some(ref pb) = progress {
+            pb.finish_and_clear();
+        }
+
+        if !quiet {
+            print_import_stats(&stats, &args.output);
+        }
+    } else {
+        // Import from HTTP (async)
+        if !quiet {
+            if let Some(ref pb) = progress {
+                pb.set_message("Streaming from Google Books servers...");
+            }
+        }
+
+        // Run async import
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(args.parallel)
+            .enable_all()
+            .build()
+            .map_err(|e| CliError::io(format!("Failed to create async runtime: {}", e)))?;
+
+        let stats = runtime
+            .block_on(async {
+                importer
+                    .import_http(|progress_info| {
+                        if let Some(ref pb) = progress {
+                            pb.set_message(format!(
+                                "Order {}: {} n-grams ({}/{} files, prefix: {})",
+                                progress_info.current_order,
+                                progress_info.total_ngrams,
+                                progress_info.files_completed,
+                                progress_info.total_files,
+                                progress_info.current_prefix
+                            ));
+                        }
+                    })
+                    .await
+            })
+            .map_err(|e| CliError::io(format!("HTTP import failed: {}", e)))?;
+
+        if let Some(ref pb) = progress {
+            pb.finish_and_clear();
+        }
+
+        if !quiet {
+            print_import_stats(&stats, &args.output);
+        }
+    }
+
+    Ok(())
+}
+
+/// Print import statistics.
+#[cfg(feature = "google-books")]
+fn print_import_stats(stats: &crate::sources::google_books::ImportStats, output: &std::path::Path) {
+    use console::style;
+
+    println!();
+    println!(
+        "{} Google Books import complete",
+        style("✓").green().bold()
+    );
+    println!();
+    println!("  Total n-grams:  {}", stats.total_ngrams);
+    println!("  Unique n-grams: {}", stats.unique_ngrams);
+    println!("  Files processed: {}", stats.files_processed);
+    println!("  Duration: {:.2}s", stats.elapsed_seconds);
+    println!();
+    println!("  Output: {}", output.display());
 }

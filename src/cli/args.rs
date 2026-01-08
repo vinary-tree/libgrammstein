@@ -77,6 +77,10 @@ pub enum TrainCommands {
 
     /// Combine N-gram and embedding models into hybrid.
     Hybrid(TrainHybridArgs),
+
+    /// Import N-gram model from Google Books N-grams.
+    #[cfg(feature = "google-books")]
+    ImportGoogleBooks(ImportGoogleBooksArgs),
 }
 
 /// Arguments for training N-gram models.
@@ -223,6 +227,59 @@ pub struct TrainHybridArgs {
     /// Score cache size.
     #[arg(long, default_value = "50000")]
     pub cache_size: usize,
+}
+
+/// Arguments for importing Google Books N-grams.
+#[cfg(feature = "google-books")]
+#[derive(Args, Debug)]
+pub struct ImportGoogleBooksArgs {
+    /// Output model path (PersistentARTrie format).
+    #[arg(value_name = "OUTPUT")]
+    pub output: PathBuf,
+
+    /// Language code (en, de, fr, es, it, ru, he, zh).
+    #[arg(short = 'L', long, default_value = "en")]
+    pub language: String,
+
+    /// Minimum n-gram order to import.
+    #[arg(long, default_value = "1")]
+    pub min_order: u8,
+
+    /// Maximum n-gram order to import (1-5).
+    #[arg(long, default_value = "5")]
+    pub max_order: u8,
+
+    /// Minimum frequency threshold.
+    #[arg(short, long, default_value = "40")]
+    pub min_count: u64,
+
+    /// Minimum year (filter older publications).
+    #[arg(long)]
+    pub min_year: Option<u16>,
+
+    /// Maximum year (filter newer publications).
+    #[arg(long)]
+    pub max_year: Option<u16>,
+
+    /// Import from local gzip files instead of HTTP.
+    #[arg(long, value_name = "DIR")]
+    pub local_files: Option<PathBuf>,
+
+    /// Number of parallel download streams.
+    #[arg(long, default_value = "4")]
+    pub parallel: usize,
+
+    /// Skip n-grams with POS tags (e.g., _NOUN_).
+    #[arg(long)]
+    pub skip_pos_tags: bool,
+
+    /// Force fresh import (ignore existing checkpoint).
+    #[arg(long)]
+    pub no_resume: bool,
+
+    /// Resource management options.
+    #[command(flatten)]
+    pub resources: ResourceArgs,
 }
 
 // =============================================================================
@@ -546,6 +603,14 @@ pub enum ConvertCommands {
     /// Convert to static DoubleArrayTrie (fast inference).
     ToStatic(ConvertToStaticArgs),
 
+    /// Translate trained model to PathMap for production deployment.
+    #[cfg(feature = "google-books")]
+    ToPathmap(ConvertToPathmapArgs),
+
+    /// Extract dictionary from n-gram model's 1-grams.
+    #[cfg(feature = "google-books")]
+    ExtractDict(ExtractDictArgs),
+
     /// Export model info.
     Info(ConvertInfoArgs),
 }
@@ -568,6 +633,44 @@ pub struct ConvertInfoArgs {
     /// Model path.
     #[arg(value_name = "MODEL")]
     pub model: PathBuf,
+}
+
+/// Arguments for PathMap translation.
+#[cfg(feature = "google-books")]
+#[derive(Args, Debug)]
+pub struct ConvertToPathmapArgs {
+    /// Input model path (PersistentARTrie format).
+    #[arg(value_name = "INPUT")]
+    pub input: PathBuf,
+
+    /// Output PathMap path.
+    #[arg(value_name = "OUTPUT")]
+    pub output: PathBuf,
+
+    /// Verify translation integrity after completion.
+    #[arg(long)]
+    pub verify: bool,
+}
+
+/// Arguments for dictionary extraction.
+#[cfg(feature = "google-books")]
+#[derive(Args, Debug)]
+pub struct ExtractDictArgs {
+    /// Input n-gram model path.
+    #[arg(value_name = "MODEL")]
+    pub model: PathBuf,
+
+    /// Output dictionary path (DoubleArrayTrieChar format).
+    #[arg(value_name = "OUTPUT")]
+    pub output: PathBuf,
+
+    /// Minimum frequency threshold for vocabulary.
+    #[arg(short, long, default_value = "100")]
+    pub min_count: u64,
+
+    /// Only extract unigrams (1-grams) for vocabulary.
+    #[arg(long)]
+    pub unigrams_only: bool,
 }
 
 // =============================================================================

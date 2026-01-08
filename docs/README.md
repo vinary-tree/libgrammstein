@@ -129,6 +129,31 @@ hybrid.save("model.bin")?;
 - [Feature Extraction](components/acoustic/features.md) - MFCC, filterbank, streaming extraction
 - [Acoustic Models](components/acoustic/models.md) - Candle-based neural acoustic models
 
+#### Neural Module
+
+- [Overview](components/neural/overview.md) - ModernBERT-based neural components
+- [Model](components/neural/model.md) - ModernBERT model wrapper and inference
+- [Embedder](components/neural/embedder.md) - Document and query embedding
+- [Rescorer](components/neural/rescorer.md) - Neural rescoring for beam search
+- [Summarizer](components/neural/summarizer.md) - Extractive summarization with MMR
+- [Cache](components/neural/cache.md) - KV cache for efficient inference
+
+#### RAG (Retrieval-Augmented Generation)
+
+- [Overview](components/rag/overview.md) - Document indexing and retrieval
+- [Document](components/rag/document.md) - Document structures and metadata
+- [Backend](components/rag/backend.md) - Retrieval backends (Exact, HNSW)
+- [Index](components/rag/index.md) - RagIndex with topic integration
+- [Retriever](components/rag/retriever.md) - Query and retrieval pipeline
+- [Builder](components/rag/builder.md) - Index construction workflow
+
+#### Topic Extraction
+
+- [Overview](components/topic/overview.md) - BERTopic-style topic modeling
+- [Clustering](components/topic/clustering.md) - Hierarchical agglomerative clustering
+- [c-TF-IDF](components/topic/ctfidf.md) - Keyword extraction algorithm
+- [Dendrogram](components/topic/dendrogram.md) - Topic hierarchy navigation
+
 ### Integration
 
 #### lling-llang
@@ -184,6 +209,8 @@ libgrammstein = { version = "0.1", features = ["lling-llang-integration", "serde
 | `acoustic` | Audio feature extraction (MFCC, filterbank) |
 | `candle-model` | Candle-based neural acoustic models |
 | `phonetic` | Phonetic-aware embeddings with Zompist rules |
+| `neural-rescore` | ModernBERT embeddings, rescoring, and summarization |
+| `rag` | RAG indexing with topic extraction |
 
 ## Related Projects
 

@@ -5,12 +5,18 @@ use std::path::Path;
 use console::style;
 
 use crate::cli::args::{ConvertCommands, ConvertInfoArgs, ConvertToStaticArgs};
+#[cfg(feature = "google-books")]
+use crate::cli::args::{ConvertToPathmapArgs, ExtractDictArgs};
 use crate::cli::error::{CliError, CliResult};
 
 /// Run the convert command.
 pub fn run(cmd: ConvertCommands, verbose: bool) -> CliResult<()> {
     match cmd {
         ConvertCommands::ToStatic(args) => convert_to_static(args, verbose),
+        #[cfg(feature = "google-books")]
+        ConvertCommands::ToPathmap(args) => convert_to_pathmap(args, verbose),
+        #[cfg(feature = "google-books")]
+        ConvertCommands::ExtractDict(args) => extract_dict(args, verbose),
         ConvertCommands::Info(args) => convert_info(args, verbose),
     }
 }
@@ -202,4 +208,160 @@ fn convert_info(args: ConvertInfoArgs, verbose: bool) -> CliResult<()> {
         }),
         verbose,
     )
+}
+
+/// Translate trained model to PathMap format for production deployment.
+#[cfg(feature = "google-books")]
+fn convert_to_pathmap(args: ConvertToPathmapArgs, verbose: bool) -> CliResult<()> {
+    use crate::sources::google_books::{PathMapTranslator, TranslationPhase};
+
+    if !args.input.exists() {
+        return Err(CliError::file_not_found(&args.input));
+    }
+
+    if verbose {
+        eprintln!("Translating to PathMap format");
+        eprintln!("  Input:  {}", args.input.display());
+        eprintln!("  Output: {}", args.output.display());
+    }
+
+    eprintln!("Translating model to PathMap format...");
+
+    // Create progress indicator
+    let pb = indicatif::ProgressBar::new_spinner();
+    pb.set_style(
+        indicatif::ProgressStyle::default_spinner()
+            .template("{spinner:.green} [{elapsed_precise}] {msg}")
+            .expect("Invalid progress template"),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    // Translate with progress
+    let stats = PathMapTranslator::translate_with_progress(&args.input, &args.output, |progress| {
+        let phase_str = match progress.phase {
+            TranslationPhase::Loading => "Loading source model",
+            TranslationPhase::Iterating => "Iterating entries",
+            TranslationPhase::Building => "Building PathMap",
+            TranslationPhase::Merkleizing => "Computing Merkle hashes",
+            TranslationPhase::Saving => "Saving to disk",
+            TranslationPhase::Complete => "Complete",
+        };
+        pb.set_message(format!(
+            "{}: {} entries processed",
+            phase_str, progress.entries_processed
+        ));
+    })
+    .map_err(|e| CliError::io(format!("Translation failed: {}", e)))?;
+
+    pb.finish_and_clear();
+
+    // Verify if requested
+    if args.verify {
+        eprintln!("Verifying translation integrity...");
+        let verification = PathMapTranslator::verify(&args.input, &args.output)
+            .map_err(|e| CliError::io(format!("Verification failed: {}", e)))?;
+
+        if !verification.verified {
+            return Err(CliError::io(format!(
+                "Verification failed: {} mismatches found",
+                verification.mismatches
+            )));
+        }
+        eprintln!("  Verified {} entries", verification.entries_verified);
+    }
+
+    // Print success
+    println!();
+    println!(
+        "{} PathMap translation complete",
+        style("✓").green().bold()
+    );
+    println!();
+    println!("  Entries translated: {}", stats.entries_translated);
+    println!(
+        "  Source size: {}",
+        humansize::format_size(stats.artrie_size_bytes, humansize::BINARY)
+    );
+    println!(
+        "  Output size: {}",
+        humansize::format_size(stats.pathmap_size_bytes, humansize::BINARY)
+    );
+    if stats.compression_ratio > 0.0 {
+        println!("  Compression ratio: {:.2}x", stats.compression_ratio);
+    }
+    println!("  Duration: {:.2}s", stats.elapsed_seconds);
+    println!();
+    println!("  Output: {}", args.output.display());
+
+    Ok(())
+}
+
+/// Extract dictionary from n-gram model's 1-grams.
+#[cfg(feature = "google-books")]
+fn extract_dict(args: ExtractDictArgs, verbose: bool) -> CliResult<()> {
+    use crate::sources::google_books::{DictionaryExtractor, ExtractionPhase};
+
+    if !args.model.exists() {
+        return Err(CliError::file_not_found(&args.model));
+    }
+
+    if verbose {
+        eprintln!("Extracting dictionary from n-gram model");
+        eprintln!("  Model: {}", args.model.display());
+        eprintln!("  Output: {}", args.output.display());
+        eprintln!("  Min count: {}", args.min_count);
+    }
+
+    eprintln!("Extracting vocabulary from 1-grams...");
+
+    // Create progress indicator
+    let pb = indicatif::ProgressBar::new_spinner();
+    pb.set_style(
+        indicatif::ProgressStyle::default_spinner()
+            .template("{spinner:.green} [{elapsed_precise}] {msg}")
+            .expect("Invalid progress template"),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    // Extract with progress
+    let stats = DictionaryExtractor::extract_to_file_with_progress(
+        &args.model,
+        &args.output,
+        args.min_count,
+        |progress| {
+            let phase_str = match progress.phase {
+                ExtractionPhase::Loading => "Loading model",
+                ExtractionPhase::Filtering => "Filtering vocabulary",
+                ExtractionPhase::Building => "Building dictionary",
+                ExtractionPhase::Saving => "Saving to disk",
+                ExtractionPhase::Complete => "Complete",
+            };
+            pb.set_message(format!(
+                "{}: {} words processed",
+                phase_str, progress.words_processed
+            ));
+        },
+    )
+    .map_err(|e| CliError::io(format!("Extraction failed: {}", e)))?;
+
+    pb.finish_and_clear();
+
+    // Print success
+    println!();
+    println!(
+        "{} Dictionary extraction complete",
+        style("✓").green().bold()
+    );
+    println!();
+    println!("  Words extracted: {}", stats.words_extracted);
+    println!("  Words filtered: {}", stats.words_filtered);
+    println!(
+        "  Dictionary size: {}",
+        humansize::format_size(stats.dict_size_bytes, humansize::BINARY)
+    );
+    println!("  Duration: {:.2}s", stats.elapsed_seconds);
+    println!();
+    println!("  Output: {}", args.output.display());
+
+    Ok(())
 }

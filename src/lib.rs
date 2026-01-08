@@ -80,6 +80,18 @@ pub mod language;
 #[cfg(feature = "acoustic")]
 pub mod acoustic;
 
+#[cfg(feature = "neural-rescore")]
+pub mod neural;
+
+#[cfg(feature = "rag")]
+pub mod rag;
+
+#[cfg(feature = "rag")]
+pub mod topic;
+
+#[cfg(feature = "google-books")]
+pub mod sources;
+
 /// Error types for libgrammstein operations.
 pub mod error {
     use thiserror::Error;
@@ -143,4 +155,21 @@ pub mod prelude {
         AcousticModel, AcousticModelConfig, LinearAcousticModel, MockAcousticModel,
         TransformerAcousticModel,
     };
+
+    #[cfg(feature = "neural-rescore")]
+    pub use crate::neural::{
+        Device, EmbeddingConfig, ModernBertConfig, ModernBertEmbedder, ModernBertModel,
+        ModernBertRescorer, RescoringConfig, ScoredPath, Summarizer, SummarizerConfig, Synopsis,
+        SynopsisSource,
+    };
+
+    #[cfg(feature = "rag")]
+    pub use crate::rag::{
+        Document, DocumentId, DocumentMetadata, ExactCosineBackend, IndexBuilder,
+        IndexBuilderConfig, LanguageTag, RagIndex, RagIndexConfig, Retriever, RetrievalConfig,
+        RetrievalResult,
+    };
+
+    #[cfg(feature = "rag")]
+    pub use crate::topic::{Topic, TopicConfig, TopicExtractor, TopicId, TopicModel};
 }

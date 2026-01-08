@@ -4,13 +4,19 @@
 //! - Combined scoring from n-gram and embedding models
 //! - OOV handling via embedding similarity
 //! - Configurable interpolation weights
+//!
+//! # Thread Safety
+//!
+//! This module uses lock-free caching via `DashMap` for concurrent scoring.
 
 use crate::embedding::SubwordEmbedding;
 use crate::ngram::{NgramEntry, NgramModel};
+use dashmap::DashMap;
 use liblevenshtein::dictionary::MutableMappedDictionary;
-use lru::LruCache;
-use std::num::NonZeroUsize;
-use std::sync::Mutex;
+use parking_lot::Mutex;
+use std::collections::VecDeque;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(feature = "serde-extras")]
 use std::path::Path;
@@ -78,19 +84,109 @@ impl Default for HybridConfig {
     }
 }
 
-/// Cache key for combined scores.
-#[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct CacheKey {
-    word: String,
-    context: Vec<String>,
+/// Lock-free score cache using DashMap with LRU eviction.
+///
+/// This cache provides thread-safe caching without blocking:
+/// - DashMap for lock-free concurrent access to entries
+/// - Mutex<VecDeque> only for LRU eviction tracking
+/// - AtomicUsize for fast entry counting
+struct ScoreCache {
+    /// Score entries keyed by hash of (word, context).
+    entries: DashMap<u64, f64>,
+    /// LRU tracking for eviction (only locked during eviction).
+    access_order: Mutex<VecDeque<u64>>,
+    /// Maximum number of entries.
+    max_entries: usize,
+    /// Current entry count.
+    num_entries: AtomicUsize,
+}
+
+impl ScoreCache {
+    /// Create a new cache with the given maximum size.
+    fn new(max_entries: usize) -> Self {
+        Self {
+            entries: DashMap::with_capacity(max_entries.min(10_000)),
+            access_order: Mutex::new(VecDeque::with_capacity(max_entries.min(10_000))),
+            max_entries,
+            num_entries: AtomicUsize::new(0),
+        }
+    }
+
+    /// Compute hash for a (word, context) pair.
+    fn compute_hash(word: &str, context: &[&str]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        word.hash(&mut hasher);
+        context.len().hash(&mut hasher);
+        for ctx in context {
+            ctx.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Get a cached score if present.
+    fn get(&self, word: &str, context: &[&str]) -> Option<f64> {
+        let hash = Self::compute_hash(word, context);
+        self.entries.get(&hash).map(|entry| *entry)
+    }
+
+    /// Insert a score into the cache.
+    fn insert(&self, word: &str, context: &[&str], score: f64) {
+        let hash = Self::compute_hash(word, context);
+
+        // Check if already present (no eviction needed)
+        if self.entries.contains_key(&hash) {
+            // Update existing entry
+            self.entries.insert(hash, score);
+            return;
+        }
+
+        // Insert new entry
+        self.entries.insert(hash, score);
+        let count = self.num_entries.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Track in LRU
+        {
+            let mut order = self.access_order.lock();
+            order.push_back(hash);
+        }
+
+        // Evict if over capacity
+        if count > self.max_entries {
+            self.evict_oldest();
+        }
+    }
+
+    /// Evict the oldest entry.
+    fn evict_oldest(&self) {
+        let hash_to_remove = {
+            let mut order = self.access_order.lock();
+            order.pop_front()
+        };
+
+        if let Some(hash) = hash_to_remove {
+            if self.entries.remove(&hash).is_some() {
+                self.num_entries.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Clear all entries.
+    fn clear(&self) {
+        self.entries.clear();
+        self.access_order.lock().clear();
+        self.num_entries.store(0, Ordering::Relaxed);
+    }
+}
+
+impl Default for ScoreCache {
+    fn default() -> Self {
+        Self::new(HybridConfig::default().cache_size)
+    }
 }
 
 /// Default cache constructor for serde deserialization.
-/// Uses the default cache size from HybridConfig.
-fn default_cache() -> Mutex<LruCache<CacheKey, f64>> {
-    let cache_size = NonZeroUsize::new(HybridConfig::default().cache_size)
-        .expect("Default cache size must be non-zero");
-    Mutex::new(LruCache::new(cache_size))
+fn default_cache() -> ScoreCache {
+    ScoreCache::default()
 }
 
 /// Hybrid language model combining n-gram and embedding models.
@@ -126,8 +222,9 @@ where
     config: HybridConfig,
 
     /// Score cache (not serialized - reconstructed on load).
+    /// Uses lock-free DashMap for concurrent access.
     #[serde(skip, default = "default_cache")]
-    cache: Mutex<LruCache<CacheKey, f64>>,
+    cache: ScoreCache,
 }
 
 impl<D> HybridLanguageModel<D>
@@ -136,12 +233,12 @@ where
 {
     /// Create a new hybrid model.
     pub fn new(ngram: NgramModel<D>, embedding: SubwordEmbedding, config: HybridConfig) -> Self {
-        let cache_size = NonZeroUsize::new(config.cache_size).unwrap_or(NonZeroUsize::new(1).unwrap());
+        let cache = ScoreCache::new(config.cache_size.max(1));
         Self {
             ngram,
             embedding,
             config,
-            cache: Mutex::new(LruCache::new(cache_size)),
+            cache,
         }
     }
 
@@ -168,17 +265,11 @@ where
     /// Score a word given context.
     ///
     /// Returns log probability of the word given the context.
+    /// Uses lock-free caching for thread-safe concurrent access.
     pub fn score(&self, word: &str, context: &[&str]) -> f64 {
-        // Check cache
-        let cache_key = CacheKey {
-            word: word.to_string(),
-            context: context.iter().map(|s| s.to_string()).collect(),
-        };
-
-        if let Ok(mut cache) = self.cache.lock() {
-            if let Some(&cached_score) = cache.get(&cache_key) {
-                return cached_score;
-            }
+        // Check cache (lock-free lookup)
+        if let Some(cached_score) = self.cache.get(word, context) {
+            return cached_score;
         }
 
         // Compute score based on strategy
@@ -198,10 +289,8 @@ where
             }
         };
 
-        // Update cache
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.put(cache_key, score);
-        }
+        // Update cache (lock-free insert with LRU eviction)
+        self.cache.insert(word, context, score);
 
         score
     }
@@ -352,9 +441,7 @@ where
 
     /// Clear the score cache.
     pub fn clear_cache(&self) {
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.clear();
-        }
+        self.cache.clear();
     }
 }
 
@@ -490,14 +577,13 @@ where
             dictionary_factory,
         )?;
 
-        let cache_size = std::num::NonZeroUsize::new(portable.config.cache_size)
-            .unwrap_or(std::num::NonZeroUsize::new(1).unwrap());
+        let cache = ScoreCache::new(portable.config.cache_size.max(1));
 
         Ok(Self {
             ngram,
             embedding: portable.embedding,
             config: portable.config,
-            cache: Mutex::new(LruCache::new(cache_size)),
+            cache,
         })
     }
 }

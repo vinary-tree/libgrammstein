@@ -72,6 +72,63 @@ libgrammstein is designed with four primary goals:
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Neural, RAG, and Topic Layers
+
+The following layers provide advanced neural capabilities, document retrieval, and topic modeling:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           Neural Layer                                       │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
+│  │ ModernBertModel │──│ ModernBert      │──│   ModernBertRescorer        │  │
+│  │ (149M params)   │  │ Embedder        │  │   (beam search rescoring)   │  │
+│  │ - 8K context    │  │ - 768-dim       │  │   - pseudo-perplexity       │  │
+│  │ - MLM head      │  │ - CLS/Mean pool │  │   - embedding coherence     │  │
+│  └────────┬────────┘  └────────┬────────┘  └─────────────────────────────┘  │
+│           │                    │                                             │
+│           │           ┌────────┴────────┐                                   │
+│           │           │   Summarizer    │                                   │
+│           │           │ - MMR selection │                                   │
+│           │           │ - Extractive    │                                   │
+│           │           └─────────────────┘                                   │
+└───────────┼─────────────────────┼───────────────────────────────────────────┘
+            │                     │
+            ▼                     ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              RAG Layer                                       │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
+│  │  IndexBuilder   │──│   RagIndex<B>   │──│       Retriever<B>          │  │
+│  │ - auto-embed    │  │ - storage+query │  │ - text→embedding→results   │  │
+│  │ - auto-synopsis │  │ - topic model   │  │ - batch retrieval          │  │
+│  └─────────────────┘  └────────┬────────┘  └─────────────────────────────┘  │
+│                                │                                             │
+│  ┌─────────────────────────────┼────────────────────────────────────────┐   │
+│  │            RetrievalBackend │                                         │   │
+│  │  ┌──────────────────────┐  └────┐  ┌─────────────────────────────┐   │   │
+│  │  │ ExactCosineBackend   │       │  │       HnswBackend           │   │   │
+│  │  │ - BLAS-accelerated   │       │  │ - approx NN, O(log n)       │   │   │
+│  │  │ - O(n) query, <1M    │       │  │ - scalable, >1M docs        │   │   │
+│  │  └──────────────────────┘       │  └─────────────────────────────┘   │   │
+│  └─────────────────────────────────┴────────────────────────────────────┘   │
+└─────────────────────────────────────┬───────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                             Topic Layer                                      │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
+│  │ TopicExtractor  │──│   TopicModel    │──│         Topic               │  │
+│  │ - HAC cluster   │  │ - topics map    │  │ - id, keywords, desc        │  │
+│  │ - c-TF-IDF      │  │ - assignments   │  │ - document_count            │  │
+│  └────────┬────────┘  └─────────────────┘  └─────────────────────────────┘  │
+│           │                                                                  │
+│  ┌────────┴────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
+│  │ Hierarchical    │  │     CtfIdf      │  │       Dendrogram            │  │
+│  │ Clustering      │  │ - keywords/topic│  │ - scipy-compatible          │  │
+│  │ - Ward/Complete │  │ - min_df/max_df │  │ - cut_tree/cut_by_distance  │  │
+│  └─────────────────┘  └─────────────────┘  └─────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
 ## Component Relationships
 
 ### Training Pipeline
@@ -287,4 +344,7 @@ HybridLanguageModel
 - [Data Flow](data-flow.md): Detailed data flow through the system
 - [Threading Model](threading-model.md): Concurrency patterns
 - [N-gram Overview](../components/ngram/overview.md): N-gram model details
+- [Neural Overview](../components/neural/overview.md): ModernBERT-based neural components
+- [RAG Overview](../components/rag/overview.md): Document indexing and retrieval
+- [Topic Overview](../components/topic/overview.md): BERTopic-style topic modeling
 - [lling-llang Integration](../integration/lling-llang/overview.md): Integration architecture
