@@ -154,6 +154,50 @@ hybrid.save("model.bin")?;
 - [c-TF-IDF](components/topic/ctfidf.md) - Keyword extraction algorithm
 - [Dendrogram](components/topic/dendrogram.md) - Topic hierarchy navigation
 
+#### Paradigm Detection
+
+- [Overview](components/paradigm/overview.md) - Programming paradigm analysis
+- [Detection](components/paradigm/detection.md) - ParadigmDetector usage and configuration
+- [Indicators](components/paradigm/indicators.md) - OOP, FP, reactive, procedural indicators
+- [API Patterns](components/paradigm/api-patterns.md) - PrefixSpan sequence mining
+- [Domain Patterns](components/paradigm/domain-patterns.md) - Rholang and MeTTa pattern catalogs
+
+#### Code Embeddings
+
+- [Overview](components/code-embeddings/overview.md) - Neural code embedding models
+- [CodeT5+](components/code-embeddings/codet5.md) - CodeT5+ model integration
+- [UniXcoder](components/code-embeddings/unixcoder.md) - UniXcoder model integration
+- [GraphCodeBERT](components/code-embeddings/graphcodebert.md) - GraphCodeBERT with data flow
+- [Ensemble](components/code-embeddings/ensemble.md) - Multi-model ensemble strategies
+- [Caching](components/code-embeddings/caching.md) - Embedding cache management
+
+#### Subtree Mining
+
+- [Overview](components/subtree/overview.md) - Frequent subtree pattern discovery
+- [TreeminerD](components/subtree/treeminer-d.md) - TreeminerD algorithm details
+
+#### Code Correction
+
+- [Overview](components/code/overview.md) - Multi-language code correction module
+- [Language Trait](components/code/language.md) - CodeLanguage trait and token types
+- [Languages](components/code/languages.md) - Python, Rust, JavaScript, Rholang, MeTTa support
+- [AST](components/code/ast.md) - Tree-sitter integration and parsing
+- [Tokenizer](components/code/tokenizer.md) - Code tokenization system
+- [CPG](components/code/cpg.md) - Code Property Graphs (AST + CFG + DFG)
+- [Correction Framework](components/code/correction.md) - Correction types and traits
+- [Correctors](components/code/correctors/overview.md) - Lexical, grammar, semantic correctors
+  - [Lexical](components/code/correctors/lexical.md) - Fuzzy matching with Levenshtein distance
+  - [Grammar](components/code/correctors/grammar.md) - PCFG + Earley parsing
+  - [Semantic](components/code/correctors/semantic.md) - GNN + CPG analysis
+  - [Ensemble](components/code/correctors/ensemble.md) - Multi-source aggregation
+- [Pipeline](components/code/pipeline.md) - End-to-end correction workflow
+- [PCFG](components/code/pcfg.md) - Probabilistic context-free grammars
+- [GNN](components/code/gnn.md) - Graph neural networks for code
+- [Embeddings](components/code/embeddings.md) - Code embeddings (UniXcoder, GraphCodeBERT)
+- [Constrained Decoding](components/code/constrained-decoding.md) - Grammar-constrained generation
+- [WFST Export](components/code/wfst-export.md) - PCFG to WFST approximation
+- [Subtree Mining](components/code/subtree-mining.md) - TreeminerD frequent pattern mining
+
 ### Integration
 
 #### lling-llang
@@ -211,6 +255,13 @@ libgrammstein = { version = "0.1", features = ["lling-llang-integration", "serde
 | `phonetic` | Phonetic-aware embeddings with Zompist rules |
 | `neural-rescore` | ModernBERT embeddings, rescoring, and summarization |
 | `rag` | RAG indexing with topic extraction |
+| `code` | Core code correction (lexical corrector only) |
+| `code-python` | Python language support |
+| `code-rust` | Rust language support |
+| `code-javascript` | JavaScript language support |
+| `code-rholang` | Rholang language support |
+| `code-metta` | MeTTa language support |
+| `code-neural` | Neural code embeddings (UniXcoder, GraphCodeBERT) |
 
 ## Related Projects
 

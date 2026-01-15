@@ -1,4 +1,4 @@
-//! Persistent N-gram accumulator using liblevenshtein's PersistentARTrie.
+//! Persistent N-gram accumulator using liblevenshtein's DiskBackedCharTrieInner.
 //!
 //! This module provides crash-safe N-gram counting for training with:
 //! - WAL-based durability (automatic crash recovery)
@@ -9,7 +9,7 @@
 //!
 //! The accumulator uses a three-tier persistence strategy:
 //!
-//! 1. **Hot State (PersistentARTrie)**: WAL-based crash recovery during training
+//! 1. **Hot State (DiskBackedCharTrieInner)**: WAL-based crash recovery during training
 //! 2. **Checkpoints (metadata)**: Periodic snapshots of training progress
 //! 3. **Final Model (PathMap)**: Convert to optimized inference structure
 //!
@@ -38,8 +38,7 @@
 //! }
 //! ```
 
-use liblevenshtein::dictionary::persistent_artrie::PersistentARTrie;
-use liblevenshtein::dictionary::{Dictionary, MappedDictionary};
+use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -65,16 +64,20 @@ pub type AccumulatorResult<T> = std::result::Result<T, AccumulatorError>;
 /// N-gram count accumulator using persistent ART with WAL.
 ///
 /// Provides atomic increment for frequency counting with crash recovery.
-/// The underlying PersistentARTrie uses Write-Ahead Logging (WAL) for durability
+/// The underlying DiskBackedCharTrieInner uses Write-Ahead Logging (WAL) for durability
 /// and automatic ARIES-style recovery on open.
+///
+/// This uses the character-based trie variant for proper Unicode support in
+/// multilingual n-grams.
 ///
 /// # Thread Safety
 ///
-/// The `increment()` method takes `&self` and is internally synchronized,
-/// allowing concurrent increments from multiple threads.
+/// The `increment()` method takes `&mut self`. For concurrent access, wrap in
+/// a synchronization primitive like `parking_lot::RwLock`.
 pub struct NgramAccumulator {
     /// Persistent ART-based trie with WAL (stores i64 for increment compatibility)
-    trie: PersistentARTrie<i64>,
+    /// Uses character-based trie for proper Unicode n-gram support.
+    trie: DiskBackedCharTrieInner<i64>,
 
     /// File path for the trie
     path: PathBuf,
@@ -86,7 +89,7 @@ pub struct NgramAccumulator {
 impl NgramAccumulator {
     /// Create a new persistent accumulator.
     ///
-    /// Creates a new PersistentARTrie at the specified path. If the path
+    /// Creates a new DiskBackedCharTrieInner at the specified path. If the path
     /// already exists, it will be overwritten.
     ///
     /// # Arguments
@@ -97,7 +100,7 @@ impl NgramAccumulator {
     ///
     /// Returns an error if the file cannot be created or initialized.
     pub fn create(path: &Path) -> AccumulatorResult<Self> {
-        let trie = PersistentARTrie::create(path).map_err(|e| {
+        let trie = DiskBackedCharTrieInner::create(path).map_err(|e| {
             AccumulatorError::Dictionary(format!("Failed to create persistent trie: {}", e))
         })?;
 
@@ -108,11 +111,18 @@ impl NgramAccumulator {
         })
     }
 
-    /// Open an existing accumulator (with automatic WAL recovery).
+    /// Open an existing accumulator with automatic crash recovery.
     ///
-    /// Opens an existing PersistentARTrie and automatically performs
-    /// ARIES-style redo recovery to restore any operations that were
-    /// logged but not yet persisted.
+    /// Opens an existing DiskBackedCharTrieInner with automatic corruption detection
+    /// and recovery from WAL archive segments. If corruption is detected,
+    /// the trie is rebuilt from archived WAL segments.
+    ///
+    /// # Recovery Process
+    ///
+    /// 1. **Check existence** - If file doesn't exist, returns an error
+    /// 2. **Detect corruption** - Validates file header and checksums
+    /// 3. **If corrupted** - Rebuilds from WAL archive segments
+    /// 4. **Open normally** - If no corruption detected
     ///
     /// # Arguments
     ///
@@ -120,14 +130,27 @@ impl NgramAccumulator {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be opened or recovery fails.
+    /// Returns an error if:
+    /// - The file cannot be opened
+    /// - Corruption is detected but no WAL archive segments exist
+    /// - Recovery fails
     pub fn open(path: &Path) -> AccumulatorResult<Self> {
-        let trie = PersistentARTrie::open(path).map_err(|e| {
-            AccumulatorError::Dictionary(format!("Failed to open persistent trie: {}", e))
+        let (trie, report) = DiskBackedCharTrieInner::open_with_recovery(path).map_err(|e| {
+            AccumulatorError::Dictionary(format!("Failed to open/recover persistent trie: {}", e))
         })?;
 
-        // Get current count
-        let count = trie.len().unwrap_or(0);
+        // Log recovery if it occurred
+        if report.mode.recovered() {
+            log::info!(
+                "Recovered accumulator from crash: mode={:?}, {} records replayed, {} terms recovered",
+                report.mode,
+                report.records_replayed,
+                report.terms_recovered
+            );
+        }
+
+        // Get current count (len is a direct field access)
+        let count = trie.len;
 
         Ok(Self {
             trie,
@@ -159,7 +182,7 @@ impl NgramAccumulator {
     /// # Errors
     ///
     /// Returns an error if the operation cannot be persisted.
-    pub fn increment(&self, ngram: &str) -> AccumulatorResult<i64> {
+    pub fn increment(&mut self, ngram: &str) -> AccumulatorResult<i64> {
         let result = self.trie.increment(ngram, 1).map_err(|e| {
             AccumulatorError::Dictionary(format!("Failed to increment n-gram: {}", e))
         })?;
@@ -176,7 +199,7 @@ impl NgramAccumulator {
     /// Increment by a specific delta.
     ///
     /// Useful for merging counts from batch processing.
-    pub fn increment_by(&self, ngram: &str, delta: i64) -> AccumulatorResult<i64> {
+    pub fn increment_by(&mut self, ngram: &str, delta: i64) -> AccumulatorResult<i64> {
         self.trie.increment(ngram, delta).map_err(|e| {
             AccumulatorError::Dictionary(format!("Failed to increment n-gram: {}", e))
         })
@@ -186,7 +209,7 @@ impl NgramAccumulator {
     ///
     /// Returns `None` if the n-gram has never been seen.
     pub fn get(&self, ngram: &str) -> Option<i64> {
-        self.trie.get_value(ngram)
+        self.trie.get(ngram).copied()
     }
 
     /// Check if an n-gram exists in the accumulator.
@@ -202,7 +225,7 @@ impl NgramAccumulator {
     /// # Errors
     ///
     /// Returns an error if the sync operation fails.
-    pub fn sync(&self) -> AccumulatorResult<()> {
+    pub fn sync(&mut self) -> AccumulatorResult<()> {
         self.trie.sync().map_err(|e| {
             AccumulatorError::Dictionary(format!("Failed to sync WAL: {}", e))
         })
@@ -229,21 +252,26 @@ impl NgramAccumulator {
     /// Iterate over all (ngram, count) pairs.
     ///
     /// Used for exporting to the final model format.
-    /// Entries without values are filtered out (should not occur in normal use).
-    pub fn iter_with_counts(&self) -> impl Iterator<Item = (String, i64)> + '_ {
+    /// Returns an empty iterator if the trie is empty or an error occurs.
+    pub fn iter_with_counts(&self) -> impl Iterator<Item = (String, i64)> {
         self.trie
-            .iter_with_values()
-            .filter_map(|(bytes, count_opt)| {
-                count_opt.map(|count| {
-                    let ngram = String::from_utf8_lossy(&bytes).into_owned();
-                    (ngram, count)
-                })
-            })
+            .iter_prefix_with_values("")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .into_iter()
     }
 
     /// Iterate over all n-gram keys.
-    pub fn iter(&self) -> impl Iterator<Item = String> + '_ {
-        self.trie.iter_strings()
+    ///
+    /// Returns an empty iterator if the trie is empty or an error occurs.
+    pub fn iter(&self) -> impl Iterator<Item = String> {
+        self.trie
+            .iter_prefix("")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .into_iter()
     }
 
     /// Number of unique n-grams.
@@ -262,9 +290,9 @@ impl NgramAccumulator {
 
     /// Get the exact count of unique n-grams.
     ///
-    /// This may be slower than `len()` as it queries the underlying trie.
+    /// This directly accesses the trie's length field.
     pub fn exact_len(&self) -> usize {
-        self.trie.len().unwrap_or(0)
+        self.trie.len
     }
 }
 
@@ -318,7 +346,7 @@ mod tests {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let path = dir.path().join("test.artrie");
 
-        let acc = NgramAccumulator::create(&path).expect("Failed to create accumulator");
+        let mut acc = NgramAccumulator::create(&path).expect("Failed to create accumulator");
 
         // First increment creates entry with count 1
         let count = acc.increment("the|quick").expect("Failed to increment");
@@ -342,7 +370,7 @@ mod tests {
 
         // Create and populate
         {
-            let acc = NgramAccumulator::create(&path).expect("Failed to create accumulator");
+            let mut acc = NgramAccumulator::create(&path).expect("Failed to create accumulator");
             acc.increment("the|quick").expect("Failed to increment");
             acc.increment("the|quick").expect("Failed to increment");
             acc.increment("quick|brown").expect("Failed to increment");
@@ -363,7 +391,7 @@ mod tests {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let path = dir.path().join("test.artrie");
 
-        let acc = NgramAccumulator::create(&path).expect("Failed to create accumulator");
+        let mut acc = NgramAccumulator::create(&path).expect("Failed to create accumulator");
         acc.increment("a|b").expect("Failed to increment");
         acc.increment("a|b").expect("Failed to increment");
         acc.increment("c|d").expect("Failed to increment");

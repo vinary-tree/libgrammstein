@@ -216,7 +216,206 @@ impl EmbeddingTrainer {
         Self { config }
     }
 
-    /// Train embeddings from corpus.
+    /// Train embeddings from corpus using multi-pass streaming (memory-efficient).
+    ///
+    /// This method uses streaming to avoid loading the entire corpus into memory:
+    /// - Pass 1: Build vocabulary (streaming word counts)
+    /// - Pass 2+: For each epoch, re-stream the corpus for training
+    ///
+    /// # Arguments
+    ///
+    /// * `reader_factory` - A closure that creates a new CorpusReader for each pass
+    ///
+    /// # Returns
+    ///
+    /// Trained `SubwordEmbedding` model.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let trainer = EmbeddingTrainer::new(config);
+    /// let path = Path::new("corpus.txt");
+    /// let model = trainer.train_streaming(|| PlaintextReader::from_file(&path))?;
+    /// ```
+    pub fn train_streaming<F, R>(&self, reader_factory: F) -> Result<SubwordEmbedding>
+    where
+        F: Fn() -> Result<R>,
+        R: CorpusReader + 'static,
+    {
+        // Phase 1: Build vocabulary with streaming (no sentence collection)
+        log::info!("Building vocabulary (streaming pass 1)...");
+        let (vocab, word_counts, total_words) = self.build_vocabulary_streaming(reader_factory()?)?;
+
+        log::info!(
+            "Vocabulary: {} words, {} total tokens",
+            vocab.len(),
+            total_words
+        );
+
+        // Phase 2: Initialize model
+        let mut model = SubwordEmbedding::new(vocab.clone(), self.config.dim, self.config.bucket_count)
+            .with_subword_range(self.config.min_subword_len, self.config.max_subword_len);
+
+        self.initialize_embeddings(&mut model);
+
+        // Phase 3: Create negative sampler
+        let sampler = Arc::new(NegativeSampler::new(&word_counts, 10_000_000));
+
+        // Phase 4: Train epochs with streaming (one pass per epoch)
+        log::info!("Training {} epochs (streaming)...", self.config.epochs);
+        for epoch in 0..self.config.epochs {
+            let lr = self.config.learning_rate * (1.0 - epoch as f32 / self.config.epochs as f32);
+            log::info!("Epoch {}/{}, lr={:.6}", epoch + 1, self.config.epochs, lr);
+
+            // Create fresh reader for this epoch
+            let reader = reader_factory()?;
+            self.train_epoch_streaming(reader, &mut model, &vocab, &word_counts, total_words, &sampler, lr)?;
+        }
+
+        Ok(model)
+    }
+
+    /// Build vocabulary using streaming (without collecting sentences).
+    fn build_vocabulary_streaming<R: CorpusReader + 'static>(
+        &self,
+        reader: R,
+    ) -> Result<(Vec<String>, Vec<u64>, u64)> {
+        let mut word_counts: HashMap<String, u64> = HashMap::new();
+        let mut total_words = 0u64;
+
+        let config = PrefetchConfig::new()
+            .with_batch_size(self.config.batch_size)
+            .with_ram_fraction(0.10);
+
+        let prefetch = PrefetchingReader::with_config(reader, config);
+
+        // Stream through corpus, counting words only (no sentence collection)
+        for batch in prefetch.batches() {
+            for sentence in batch {
+                for word in sentence.split_whitespace() {
+                    let word = word.to_lowercase();
+                    *word_counts.entry(word).or_insert(0) += 1;
+                    total_words += 1;
+                }
+            }
+        }
+
+        // Filter by minimum count and sort by frequency
+        let mut vocab_entries: Vec<(String, u64)> = word_counts
+            .into_iter()
+            .filter(|(_, count)| *count >= self.config.min_count)
+            .collect();
+
+        vocab_entries.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let vocab: Vec<String> = vocab_entries.iter().map(|(w, _)| w.clone()).collect();
+        let counts: Vec<u64> = vocab_entries.iter().map(|(_, c)| *c).collect();
+
+        if vocab.is_empty() {
+            return Err(crate::Error::EmptyCorpus);
+        }
+
+        Ok((vocab, counts, total_words))
+    }
+
+    /// Train a single epoch using streaming (memory-efficient).
+    fn train_epoch_streaming<R: CorpusReader + 'static>(
+        &self,
+        reader: R,
+        model: &mut SubwordEmbedding,
+        vocab: &[String],
+        word_counts: &[u64],
+        total_words: u64,
+        sampler: &Arc<NegativeSampler>,
+        lr: f32,
+    ) -> Result<()> {
+        let word_to_idx: HashMap<&str, usize> = vocab
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (w.as_str(), i))
+            .collect();
+
+        let config = PrefetchConfig::new()
+            .with_batch_size(self.config.batch_size)
+            .with_ram_fraction(0.10);
+
+        let prefetch = PrefetchingReader::with_config(reader, config);
+        let subsample_threshold = self.config.subsample_threshold;
+        let stats = TrainingStats::default();
+
+        for batch in prefetch.batches() {
+            for sentence in batch {
+                let words: Vec<&str> = sentence.split_whitespace().collect();
+                let word_indices: Vec<Option<usize>> = words
+                    .iter()
+                    .map(|w| word_to_idx.get(w.to_lowercase().as_str()).copied())
+                    .collect();
+
+                for (pos, &opt_center_idx) in word_indices.iter().enumerate() {
+                    let center_idx = match opt_center_idx {
+                        Some(idx) => idx,
+                        None => continue,
+                    };
+
+                    // Subsampling for frequent words
+                    let center_count = word_counts[center_idx];
+                    let freq = center_count as f32 / total_words as f32;
+                    let keep_prob = ((freq / subsample_threshold).sqrt() + 1.0)
+                        * (subsample_threshold / freq);
+
+                    let mut rng = thread_rng();
+                    if rng.gen::<f32>() > keep_prob {
+                        continue;
+                    }
+
+                    // Dynamic window size
+                    let window = rng.gen_range(1..=self.config.window_size);
+
+                    // Get context words
+                    let start = pos.saturating_sub(window);
+                    let end = (pos + window + 1).min(words.len());
+
+                    for ctx_pos in start..end {
+                        if ctx_pos == pos {
+                            continue;
+                        }
+
+                        let ctx_idx = match word_indices[ctx_pos] {
+                            Some(idx) => idx,
+                            None => continue,
+                        };
+
+                        // Skip-gram update
+                        self.skipgram_update(
+                            model,
+                            center_idx,
+                            ctx_idx,
+                            &words[pos].to_lowercase(),
+                            sampler,
+                            lr,
+                            &mut rng,
+                        );
+
+                        stats.examples_processed.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    stats.words_processed.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        log::info!(
+            "  Words processed: {}",
+            stats.words_processed.load(Ordering::Relaxed)
+        );
+
+        Ok(())
+    }
+
+    /// Train embeddings from corpus (legacy method - collects sentences into memory).
+    ///
+    /// **Warning**: This method buffers all sentences into memory. For large corpora
+    /// (>500MB), use [`train_streaming`](Self::train_streaming) instead to avoid OOM.
     ///
     /// # Arguments
     ///
@@ -225,17 +424,17 @@ impl EmbeddingTrainer {
     /// # Returns
     ///
     /// Trained `SubwordEmbedding` model.
-    ///
-    /// # Note
-    ///
-    /// Embedding training requires multiple passes over the corpus. The first
-    /// pass builds the vocabulary using prefetched streaming, but subsequent
-    /// training epochs collect sentences into memory for efficient gradient
-    /// updates. For very large corpora, consider using online learning approaches.
     pub fn train<R: CorpusReader + 'static>(&self, reader: R) -> Result<SubwordEmbedding> {
         // Phase 1: Build vocabulary with prefetched streaming
         log::info!("Building vocabulary...");
         let (vocab, word_counts, total_words, sentences) = self.build_vocabulary_and_collect(reader)?;
+
+        if sentences.len() > 1_000_000 {
+            log::warn!(
+                "Collected {} sentences into memory. For large corpora, use train_streaming() instead.",
+                sentences.len()
+            );
+        }
 
         log::info!(
             "Vocabulary: {} words, {} total tokens, {} sentences",
@@ -661,9 +860,36 @@ impl EmbeddingTrainerBuilder {
         EmbeddingTrainer::new(self.config)
     }
 
-    /// Build and train from corpus.
+    /// Build and train from corpus (legacy - buffers sentences).
+    ///
+    /// **Warning**: For large corpora (>500MB), use `train_streaming` instead.
     pub fn train<R: CorpusReader + 'static>(self, reader: R) -> Result<SubwordEmbedding> {
         self.build().train(reader)
+    }
+
+    /// Build and train from corpus using multi-pass streaming (memory-efficient).
+    ///
+    /// # Arguments
+    ///
+    /// * `reader_factory` - A closure that creates a new CorpusReader for each pass
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use libgrammstein::corpus::PlaintextReader;
+    ///
+    /// let path = std::path::Path::new("corpus.txt");
+    /// let model = EmbeddingTrainerBuilder::new()
+    ///     .dim(100)
+    ///     .epochs(5)
+    ///     .train_streaming(|| PlaintextReader::from_file(&path))?;
+    /// ```
+    pub fn train_streaming<F, R>(self, reader_factory: F) -> Result<SubwordEmbedding>
+    where
+        F: Fn() -> Result<R>,
+        R: CorpusReader + 'static,
+    {
+        self.build().train_streaming(reader_factory)
     }
 }
 

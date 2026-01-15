@@ -51,3 +51,6 @@
 
 #[cfg(feature = "google-books")]
 pub mod google_books;
+
+#[cfg(feature = "pdf-extraction")]
+pub mod pdf;

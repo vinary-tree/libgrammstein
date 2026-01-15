@@ -45,6 +45,72 @@ pub enum ReaderError {
     Decompression(String),
 }
 
+/// Saves a failed HTTP response (headers + body) to disk for post-mortem analysis.
+/// Returns the path where the response was saved.
+fn save_failed_response(
+    url: &str,
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: &[u8],
+) -> Option<std::path::PathBuf> {
+    use std::io::Write;
+
+    // Determine output directory
+    let dir = std::env::temp_dir().join("grammstein-failed-responses");
+
+    if std::fs::create_dir_all(&dir).is_err() {
+        tracing::warn!("Failed to create directory for failed responses: {}", dir.display());
+        return None;
+    }
+
+    // Generate unique filename from URL
+    let filename: String = url
+        .replace("://", "_")
+        .replace('/', "_")
+        .replace('?', "_")
+        .chars()
+        .take(100)
+        .collect();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("{}_{}.response", filename, timestamp));
+
+    // Write headers and body
+    let file = match std::fs::File::create(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!("Failed to create response dump file: {}", e);
+            return None;
+        }
+    };
+    let mut writer = std::io::BufWriter::new(file);
+
+    // Write URL and HTTP status line
+    writeln!(writer, "URL: {}", url).ok();
+    writeln!(writer, "HTTP/1.1 {}", status).ok();
+
+    // Write headers
+    for (name, value) in headers.iter() {
+        if let Ok(v) = value.to_str() {
+            writeln!(writer, "{}: {}", name, v).ok();
+        } else {
+            writeln!(writer, "{}: <binary>", name).ok();
+        }
+    }
+    writeln!(writer).ok();
+
+    // Write body
+    if let Err(e) = writer.write_all(body) {
+        tracing::warn!("Failed to write response body: {}", e);
+        return None;
+    }
+
+    tracing::info!("Saved failed response to: {}", path.display());
+    Some(path)
+}
+
 /// File-based n-gram reader for local gzip files.
 ///
 /// Uses `flate2` for gzip decompression with buffered I/O.
@@ -487,24 +553,60 @@ impl HttpNgramReader {
 
     /// Read all records into a vector (blocking, for simpler use cases).
     ///
-    /// This is a convenience method for when you don't need streaming.
+    /// **DEPRECATED**: This method buffers the entire file into memory.
+    /// For large 2-gram files (50-100M n-grams), this can consume 6-8 GB per file.
+    /// Use [`stream_records()`](Self::stream_records) or [`stream_aggregated()`](Self::stream_aggregated)
+    /// for memory-efficient processing.
+    ///
+    /// # Memory Safety
+    ///
+    /// This method enforces a maximum of 10 million records to prevent OOM.
+    /// For larger files, use streaming methods instead.
     #[cfg(feature = "google-books")]
+    #[deprecated(
+        since = "0.2.0",
+        note = "This method can cause OOM for large files. Use stream_records() or stream_aggregated() instead."
+    )]
     pub async fn read_all(&mut self) -> Result<Vec<NgramRecord>, ReaderError> {
         use tokio_stream::StreamExt;
 
+        const MAX_RECORDS: usize = 10_000_000;
+
+        // Clone URL before creating stream to avoid borrow conflict
+        let url = self.url.clone();
         let stream = self.stream_records().await?;
         tokio::pin!(stream);
 
         let mut records = Vec::new();
         while let Some(result) = stream.next().await {
             records.push(result?);
+            if records.len() >= MAX_RECORDS {
+                log::warn!(
+                    "read_all() hit {} record limit for {}. Use stream_records() for larger files.",
+                    MAX_RECORDS,
+                    url
+                );
+                break;
+            }
         }
 
         Ok(records)
     }
 
     /// Read and aggregate records by year.
+    ///
+    /// **DEPRECATED**: This method buffers the entire file into memory. For large
+    /// 2-gram files (50-100M n-grams), this can consume 6-8 GB per file.
+    /// Use [`stream_aggregated()`](Self::stream_aggregated) for memory-efficient processing.
+    ///
+    /// # Memory Safety
+    ///
+    /// This method enforces a maximum of 10 million aggregated records to prevent OOM.
     #[cfg(feature = "google-books")]
+    #[deprecated(
+        since = "0.2.0",
+        note = "This method can cause OOM for large files. Use stream_aggregated() instead."
+    )]
     pub async fn read_aggregated(
         &mut self,
         year_range: Option<(u16, u16)>,
@@ -512,6 +614,10 @@ impl HttpNgramReader {
         use super::aggregator::YearAggregator;
         use tokio_stream::StreamExt;
 
+        const MAX_AGGREGATED: usize = 10_000_000;
+
+        // Clone URL before creating stream to avoid borrow conflict
+        let url = self.url.clone();
         let stream = self.stream_records().await?;
         tokio::pin!(stream);
 
@@ -522,6 +628,14 @@ impl HttpNgramReader {
             let record = result?;
             if let Some(aggregated) = aggregator.push(record) {
                 results.push(aggregated);
+                if results.len() >= MAX_AGGREGATED {
+                    log::warn!(
+                        "read_aggregated() hit {} record limit for {}. Use stream_aggregated() for larger files.",
+                        MAX_AGGREGATED,
+                        url
+                    );
+                    return Ok(results);
+                }
             }
         }
 
@@ -531,6 +645,207 @@ impl HttpNgramReader {
         }
 
         Ok(results)
+    }
+
+    /// Stream aggregated records by year (memory-efficient for large files).
+    ///
+    /// Unlike `read_aggregated()`, this yields n-grams one at a time instead
+    /// of buffering the entire file. Essential for large 2-gram files that can
+    /// contain 50-100M aggregated n-grams (6-8GB in memory).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use tokio_stream::StreamExt;
+    ///
+    /// let mut reader = HttpNgramReader::new(&url);
+    /// let stream = reader.stream_aggregated(Some((2000, 2020)));
+    /// tokio::pin!(stream);
+    ///
+    /// while let Some(result) = stream.next().await {
+    ///     let aggregated = result?;
+    ///     println!("{}: {}", aggregated.ngram, aggregated.total_count);
+    /// }
+    /// ```
+    #[cfg(feature = "google-books")]
+    pub fn stream_aggregated(
+        &mut self,
+        year_range: Option<(u16, u16)>,
+    ) -> impl tokio_stream::Stream<Item = Result<AggregatedNgram, ReaderError>> + '_ {
+        use super::aggregator::YearAggregator;
+
+        let skip_pos = self.skip_pos_tags;
+        let min_count = self.min_count;
+        let url = self.url.clone();
+
+        async_stream::try_stream! {
+            use async_compression::tokio::bufread::GzipDecoder;
+            use std::time::Duration;
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            use tokio_stream::StreamExt;
+            use tokio_util::io::StreamReader;
+
+            // Create HTTP client with timeouts for long-running imports
+            // - timeout: Total request timeout (5 min for large files)
+            // - connect_timeout: Time to establish connection (30s)
+            // - read_timeout: Time allowed without receiving data (60s)
+            //   Prevents hanging on slow/stalled connections that trickle data
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(300))
+                .connect_timeout(Duration::from_secs(30))
+                .read_timeout(Duration::from_secs(60))
+                .user_agent("Mozilla/5.0 (compatible; libgrammstein/0.1; +https://github.com/vinary-tree/libgrammstein)")
+                .build()
+                .map_err(|e| ReaderError::Http(format!("Failed to build HTTP client: {}", e)))?;
+
+            // Make HTTP request
+            let response = client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| ReaderError::Http(e.to_string()))?;
+
+            let status = response.status();
+            if !status.is_success() {
+                // Check for rate limiting
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    // Log Retry-After header if present
+                    if let Some(retry_after) = response.headers().get("retry-after") {
+                        tracing::warn!(
+                            "Rate limited (429) for {}, Retry-After: {:?}",
+                            url,
+                            retry_after
+                        );
+                    }
+                    Err(ReaderError::Http(format!(
+                        "Rate limited (HTTP 429) for {}",
+                        url
+                    )))?;
+                }
+                if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                    Err(ReaderError::Http(format!(
+                        "Service unavailable (HTTP 503) for {} - Google may be throttling",
+                        url
+                    )))?;
+                }
+                Err(ReaderError::Http(format!("HTTP {} for {}", status, url)))?;
+            }
+
+            // Log Content-Length for debugging large file issues
+            if let Some(content_length) = response.content_length() {
+                tracing::debug!("Downloading {} ({} bytes compressed)", url, content_length);
+            }
+
+            // Extract response metadata before consuming body
+            let status = response.status();
+            let headers_clone = response.headers().clone();
+            let content_length = response.content_length();
+
+            let content_type = headers_clone
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_lowercase());
+            let content_encoding = headers_clone
+                .get("content-encoding")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_lowercase());
+
+            tracing::debug!(
+                "Response for {}: Content-Type={:?}, Content-Encoding={:?}, Length={:?}",
+                url, content_type, content_encoding, content_length
+            );
+
+            // Determine if this is an error response that should be saved
+            let is_html = content_type.as_ref().map(|t| t.contains("text/html")).unwrap_or(false);
+            let is_gzip = content_encoding.as_ref().map(|e| e.contains("gzip")).unwrap_or(false)
+                || url.ends_with(".gz");
+            let is_plain_text = !is_gzip && content_type.as_ref().map(|t| t.starts_with("text/")).unwrap_or(false);
+
+            // Handle error responses: consume body, save to disk, fail with clear message
+            if is_html || is_plain_text {
+                let bytes = response.bytes().await.map_err(|e| ReaderError::Http(e.to_string()))?;
+
+                // Save response for post-mortem analysis
+                let saved_path = save_failed_response(&url, status, &headers_clone, &bytes);
+
+                let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(500)]);
+                let preview_short = &preview[..preview.len().min(200)];
+
+                if is_html {
+                    tracing::error!(
+                        "HTML error page received for {}. Saved to: {:?}. Preview: {}",
+                        url, saved_path, preview_short
+                    );
+                    Err(ReaderError::Http(format!(
+                        "Server returned HTML error page for {} (saved to {:?})",
+                        url, saved_path
+                    )))?;
+                } else {
+                    tracing::error!(
+                        "Plain text received for {}. Saved to: {:?}. Preview: {}",
+                        url, saved_path, preview_short
+                    );
+                    Err(ReaderError::Decompression(format!(
+                        "Server returned plain text for {} (saved to {:?})",
+                        url, saved_path
+                    )))?;
+                }
+            } else {
+                // Normal case: stream the gzip-compressed body
+                let byte_stream = response.bytes_stream();
+
+                // Map stream items to io::Result for StreamReader compatibility
+                let mapped_stream = byte_stream.map(|result| {
+                    result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                });
+
+                // Create async reader from stream
+                let stream_reader = StreamReader::new(mapped_stream);
+
+                // Wrap in gzip decoder
+                let decoder = GzipDecoder::new(BufReader::new(stream_reader));
+                let buf_reader = BufReader::new(decoder);
+
+                // Create line stream
+                let lines = tokio_stream::wrappers::LinesStream::new(buf_reader.lines());
+                tokio::pin!(lines);
+
+                let mut aggregator = YearAggregator::new(year_range);
+                let mut line_num = 0u64;
+
+                while let Some(line_result) = lines.next().await {
+                    line_num += 1;
+                    let line = line_result?;
+
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    match super::parser::parse_ngram_line(&line) {
+                        Ok(record) => {
+                        // Apply filters
+                        if record.match_count < min_count {
+                            continue;
+                        }
+                        if skip_pos && super::parser::contains_pos_tag(&record.ngram) {
+                            continue;
+                        }
+                        if let Some(aggregated) = aggregator.push(record) {
+                            yield aggregated;
+                        }
+                    }
+                    Err(e) => {
+                        Err(ReaderError::Parse { line: line_num, error: e })?;
+                    }
+                }
+            }
+
+                // Flush final n-gram
+                if let Some(aggregated) = aggregator.flush() {
+                    yield aggregated;
+                }
+            }
+        }
     }
 }
 

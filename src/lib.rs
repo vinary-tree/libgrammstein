@@ -89,8 +89,14 @@ pub mod rag;
 #[cfg(feature = "rag")]
 pub mod topic;
 
-#[cfg(feature = "google-books")]
+#[cfg(any(feature = "google-books", feature = "pdf-extraction"))]
 pub mod sources;
+
+#[cfg(feature = "code")]
+pub mod code;
+
+#[cfg(feature = "latex")]
+pub mod latex;
 
 /// Error types for libgrammstein operations.
 pub mod error {
@@ -172,4 +178,64 @@ pub mod prelude {
 
     #[cfg(feature = "rag")]
     pub use crate::topic::{Topic, TopicConfig, TopicExtractor, TopicId, TopicModel};
+
+    // Code module exports
+    #[cfg(feature = "code")]
+    pub use crate::code::{
+        // Core traits and types
+        CodeLanguage, TokenType, TokenContext,
+        // Tokenization
+        CodeTokenizer, CodeToken,
+        // Parsing
+        ParsedCode, AstNode, AstError,
+        // Code Property Graph
+        CodePropertyGraph, CpgNode, CpgNodeKind, CpgEdge, CpgEdgeKind,
+        // PCFG
+        WeightedCFG, Production, PcfgTrainer,
+        // Corpus
+        CodeCorpusReader, CodeSnippet,
+        // Correction trait and types
+        CodeCorrector, Correction, CorrectionKind, CorrectionSource, CorrectionCandidates,
+        // Concrete corrector implementations
+        LexicalCorrector, GrammarCorrector, SemanticCorrector, EnsembleCorrector,
+        // End-to-end pipeline
+        CorrectionPipeline, PipelineConfig, PipelineError, AnalysisResult, Diagnostic, DiagnosticSeverity,
+        // GNN semantic scoring
+        GnnSemanticScorer, GnnConfig, GnnFeatures, SemanticIssue, IssueType,
+        // Grammar-constrained decoding
+        GrammarConstraint, ConstrainedDecodingConfig, TokenMask, DecodingVocabulary,
+    };
+
+    // Language-specific re-exports
+    #[cfg(feature = "code-python")]
+    pub use crate::code::Python;
+
+    #[cfg(feature = "code-rust")]
+    pub use crate::code::Rust;
+
+    #[cfg(feature = "code-javascript")]
+    pub use crate::code::JavaScript;
+
+    #[cfg(feature = "code-rholang")]
+    pub use crate::code::Rholang;
+
+    #[cfg(feature = "code-metta")]
+    pub use crate::code::MeTTa;
+
+    // LaTeX module exports
+    #[cfg(feature = "latex")]
+    pub use crate::latex::{
+        // Tokenization
+        LaTeXTokenizer, LaTeXToken, LaTeXTokenKind, TokenizerConfig, MathMode, BraceKind,
+        // N-gram models
+        LaTeXNgramModel, ModeDetector, LaTeXMode, NgramConfig,
+        // Embeddings
+        LaTeXEmbedder, CommandEmbedding, EquationEmbedding, LaTeXEmbeddingConfig,
+        // Neural rescoring
+        LaTeXRescorer, RescorerConfig, RescoreResult,
+        // Equation RAG
+        EquationRagIndex, EquationDocument, EquationRetriever, EquationRetrievalConfig,
+        // Combined scorer
+        LaTeXScorer, LaTeXScorerBuilder, ScorerConfig, ScoringResult, ComponentScore,
+    };
 }

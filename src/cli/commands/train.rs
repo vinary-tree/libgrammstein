@@ -106,7 +106,7 @@ fn train_ngram(args: TrainNgramArgs, verbose: bool, quiet: bool) -> CliResult<()
             if let Some(ref manager) = checkpoint_manager {
                 save_ngram_checkpoint(
                     manager,
-                    &accumulator,
+                    &mut accumulator,
                     &state,
                     &args,
                     &timer,
@@ -156,7 +156,7 @@ fn train_ngram(args: TrainNgramArgs, verbose: bool, quiet: bool) -> CliResult<()
             if let Some(ref manager) = checkpoint_manager {
                 save_ngram_checkpoint(
                     manager,
-                    &accumulator,
+                    &mut accumulator,
                     &state,
                     &args,
                     &timer,
@@ -172,7 +172,7 @@ fn train_ngram(args: TrainNgramArgs, verbose: bool, quiet: bool) -> CliResult<()
         .map_err(|e| CliError::io(format!("Failed to sync accumulator: {}", e)))?;
 
     if let Some(ref manager) = checkpoint_manager {
-        save_ngram_checkpoint(manager, &accumulator, &state, &args, &timer, quiet)?;
+        save_ngram_checkpoint(manager, &mut accumulator, &state, &args, &timer, quiet)?;
     }
 
     // Finalize: Convert accumulator to final model format
@@ -239,7 +239,7 @@ fn resume_ngram_training(
 /// Save an N-gram training checkpoint.
 fn save_ngram_checkpoint(
     manager: &CheckpointManager,
-    accumulator: &NgramAccumulator,
+    accumulator: &mut NgramAccumulator,
     state: &NgramTrainingState,
     args: &TrainNgramArgs,
     timer: &TrainingTimer,
@@ -873,34 +873,27 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
         skip_pos_tags: args.skip_pos_tags,
     };
 
-    // Setup progress indicator
-    let progress = if quiet || args.resources.no_progress {
-        None
-    } else {
-        Some(indicatif::ProgressBar::new_spinner())
-    };
-
-    if let Some(ref pb) = progress {
-        pb.set_style(
-            indicatif::ProgressStyle::default_spinner()
-                .template("{spinner:.green} [{elapsed_precise}] {msg}")
-                .expect("Invalid progress template"),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
-    }
-
-    // Create importer
-    let mut importer = GoogleBooksImporter::new(config)
+    // Create importer (resume from checkpoint if one exists)
+    let mut importer = GoogleBooksImporter::resume_or_start(config)
         .map_err(|e| CliError::io(format!("Failed to create importer: {}", e)))?;
 
     // Check for local files vs HTTP
     if let Some(ref local_dir) = args.local_files {
-        // Import from local files
-        if !quiet {
-            if let Some(ref pb) = progress {
-                pb.set_message(format!("Importing from local files: {}", local_dir.display()));
-            }
-        }
+        // Setup progress indicator for local file imports (simple spinner)
+        // NOTE: Only created here to avoid interfering with ratatui TUI in HTTP path
+        let local_progress = if quiet || args.resources.no_progress {
+            None
+        } else {
+            let pb = indicatif::ProgressBar::new_spinner();
+            pb.set_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .template("{spinner:.green} [{elapsed_precise}] {msg}")
+                    .expect("Invalid progress template"),
+            );
+            pb.enable_steady_tick(std::time::Duration::from_millis(100));
+            pb.set_message(format!("Importing from local files: {}", local_dir.display()));
+            Some(pb)
+        };
 
         // Verify the directory exists and has gzip files
         let file_count = std::fs::read_dir(local_dir)
@@ -923,7 +916,7 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
         // Import files from directory
         let stats = importer
             .import_files(local_dir, |progress_info| {
-                if let Some(ref pb) = progress {
+                if let Some(ref pb) = local_progress {
                     pb.set_message(format!(
                         "Order {}: {} n-grams ({}/{} files, prefix: {})",
                         progress_info.current_order,
@@ -936,7 +929,7 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
             })
             .map_err(|e| CliError::io(format!("Import failed: {}", e)))?;
 
-        if let Some(ref pb) = progress {
+        if let Some(ref pb) = local_progress {
             pb.finish_and_clear();
         }
 
@@ -944,12 +937,10 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
             print_import_stats(&stats, &args.output);
         }
     } else {
-        // Import from HTTP (async)
-        if !quiet {
-            if let Some(ref pb) = progress {
-                pb.set_message("Streaming from Google Books servers...");
-            }
-        }
+        // Import from HTTP using reactive TUI architecture
+        use crate::sources::google_books::{ImportCommand, ImportEvent};
+
+        let show_tui = !quiet && !args.resources.no_progress;
 
         // Run async import
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -958,28 +949,135 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
             .build()
             .map_err(|e| CliError::io(format!("Failed to create async runtime: {}", e)))?;
 
-        let stats = runtime
-            .block_on(async {
-                importer
-                    .import_http(|progress_info| {
-                        if let Some(ref pb) = progress {
-                            pb.set_message(format!(
-                                "Order {}: {} n-grams ({}/{} files, prefix: {})",
-                                progress_info.current_order,
-                                progress_info.total_ngrams,
-                                progress_info.files_completed,
-                                progress_info.total_files,
-                                progress_info.current_prefix
-                            ));
-                        }
-                    })
-                    .await
-            })
-            .map_err(|e| CliError::io(format!("HTTP import failed: {}", e)))?;
+        let stats = if show_tui {
+            // Use ratatui TUI for rich interactive display
+            use crate::cli::tui::ImportTui;
+            use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+            use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
-        if let Some(ref pb) = progress {
-            pb.finish_and_clear();
-        }
+            // Create event/command channels
+            let (event_tx, _) = tokio::sync::broadcast::channel::<ImportEvent>(1024);
+            let (command_tx, command_rx) = tokio::sync::mpsc::channel::<ImportCommand>(16);
+
+            // Subscribe to events for TUI
+            let tui_event_rx = event_tx.subscribe();
+
+            // Clone event_tx for the import task
+            let event_tx_clone = event_tx.clone();
+
+            // Run import in background
+            let import_handle = runtime.spawn(async move {
+                importer.import_http_reactive(event_tx_clone, command_rx).await
+            });
+
+            // Set up file-based tracing for debugging (works even when TUI is active)
+            let log_dir = args.output.parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::env::temp_dir().join("grammstein-logs"));
+            std::fs::create_dir_all(&log_dir).ok();
+
+            let file_appender = RollingFileAppender::new(
+                Rotation::NEVER,
+                &log_dir,
+                "import-debug.log",
+            );
+            let (non_blocking, tracing_guard) = tracing_appender::non_blocking(file_appender);
+
+            // Use try_init() to avoid panic if already initialized
+            let _ = tracing_subscriber::registry()
+                .with(tracing_subscriber::fmt::layer()
+                    .with_writer(non_blocking)
+                    .with_ansi(false)
+                    .with_target(true))
+                .with(tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "libgrammstein::sources::google_books=debug".parse().expect("valid filter")))
+                .try_init();
+
+            // Initialize log → tracing bridge so log:: calls go to file
+            let _ = tracing_log::LogTracer::init();
+
+            // Print log location to stderr before TUI takes over the terminal
+            let log_path = log_dir.join("import-debug.log");
+            eprintln!("Debug logs will be written to: {}", log_path.display());
+            log::info!("Debug logs being written to: {}", log_path.display());
+
+            // Note: We no longer suppress log level during TUI because:
+            // 1. tracing_subscriber writes to file, not stderr (no TUI corruption)
+            // 2. Suppressing log level prevents log:: calls from reaching the tracing bridge
+
+            // Create and run TUI (blocks until import completes or user quits)
+            let tui = ImportTui::new(
+                command_tx,
+                &args.language,
+                args.min_order,
+                args.max_order,
+                args.parallel,
+            );
+
+            let tui_result = tui.run(tui_event_rx);
+
+            // Flush and drop file-based tracing
+            drop(tracing_guard);
+
+            // Wait for import to finish
+            let import_result = runtime.block_on(async {
+                import_handle.await
+            });
+
+            // Handle TUI result
+            if let Err(e) = tui_result {
+                return Err(CliError::io(format!("TUI error: {}", e)));
+            }
+
+            // Handle import result
+            let import_result = import_result
+                .map_err(|e| CliError::io(format!("Import task failed: {}", e)))?;
+            import_result.map_err(|e| CliError::io(format!("HTTP import failed: {}", e)))?
+        } else {
+            // Quiet mode: use simple logging without TUI
+            let (event_tx, _) = tokio::sync::broadcast::channel::<ImportEvent>(1024);
+            let (_command_tx, command_rx) = tokio::sync::mpsc::channel::<ImportCommand>(16);
+
+            // Clone event_tx for the import task
+            let event_tx_clone = event_tx.clone();
+
+            // Simple logging subscriber
+            let mut log_rx = event_tx.subscribe();
+            let log_task = runtime.spawn(async move {
+                while let Ok(event) = log_rx.recv().await {
+                    match event {
+                        ImportEvent::OrderStarted { order, total_files } => {
+                            log::info!("Started order {} ({} files)", order, total_files);
+                        }
+                        ImportEvent::OrderCompleted { order, ngram_count, duration } => {
+                            log::info!(
+                                "Completed order {}: {} n-grams in {:.1}s",
+                                order, ngram_count, duration.as_secs_f64()
+                            );
+                        }
+                        ImportEvent::ImportCompleted { total_ngrams, duration } => {
+                            log::info!(
+                                "Import completed: {} n-grams in {:.1}s",
+                                total_ngrams, duration.as_secs_f64()
+                            );
+                        }
+                        ImportEvent::WorkerRetrying { prefix, attempt, error, .. } => {
+                            log::warn!("Retry {}: {} - {}", attempt, prefix, error);
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            let result = runtime
+                .block_on(async {
+                    importer.import_http_reactive(event_tx_clone, command_rx).await
+                })
+                .map_err(|e| CliError::io(format!("HTTP import failed: {}", e)))?;
+
+            log_task.abort();
+            result
+        };
 
         if !quiet {
             print_import_stats(&stats, &args.output);

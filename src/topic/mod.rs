@@ -66,6 +66,7 @@ mod ctfidf;
 mod dendrogram;
 mod extractor;
 mod model;
+pub mod paradigm;
 mod summarizer;
 mod topic;
 
@@ -76,6 +77,14 @@ pub use ctfidf::*;
 pub use dendrogram::*;
 pub use extractor::*;
 pub use model::*;
+pub use paradigm::{
+    Paradigm, ParadigmConfig, ParadigmDetector, ParadigmProfile, ParadigmIndicator,
+    IndicatorCategory, DetectionResult, IndicatorMatch, ParadigmWeights, LanguageHints,
+    ApiPatternMiner, ApiPatternConfig, ApiPattern, MiningStats,
+    RholangPatternCatalog, RholangPattern, RholangPatternCategory, RholangPatternMatch,
+    MettaPatternCatalog, MettaPattern, MettaPatternCategory, MettaPatternMatch,
+    DomainPatternDetector,
+};
 pub use summarizer::*;
 pub use topic::*;
 
@@ -114,6 +123,10 @@ pub enum TopicError {
     /// Checkpoint error.
     #[error("Checkpoint error: {0}")]
     CheckpointError(String),
+
+    /// Paradigm detection error.
+    #[error("Paradigm detection error: {0}")]
+    ParadigmError(String),
 
     /// IO error.
     #[error("IO error: {0}")]

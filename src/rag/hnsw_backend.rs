@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use hnsw_rs::api::AnnT;
 use hnsw_rs::hnsw::Hnsw;
+use hnsw_rs::hnswio::HnswIo;
 use hnsw_rs::prelude::DistDot;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -383,6 +384,31 @@ impl HnswBackend {
         self.build_index()
     }
 
+    /// Load the HNSW graph natively using hnsw_rs's HnswIo.
+    ///
+    /// This avoids expensive rebuilding by loading the persisted graph structure
+    /// directly from disk.
+    ///
+    /// # Safety
+    ///
+    /// The returned Hnsw has a 'static lifetime, which is safe because:
+    /// - The default ReloadOptions does not use memory mapping
+    /// - Data is fully deserialized and owned by the Hnsw struct
+    /// - The HnswIo can be dropped after loading
+    fn load_native_graph(path: &Path) -> Result<Hnsw<'static, f32, DistDot>> {
+        let mut reloader = HnswIo::new(path, "hnsw_index");
+
+        let hnsw: Hnsw<f32, DistDot> = reloader
+            .load_hnsw()
+            .map_err(|e| RagError::Serialization(format!("Failed to reload HNSW graph: {:?}", e)))?;
+
+        // Safety: With default ReloadOptions (no mmap), data is fully deserialized
+        // and owned by the Hnsw struct, so 'static lifetime is valid.
+        let hnsw_static: Hnsw<'static, f32, DistDot> = unsafe { std::mem::transmute(hnsw) };
+
+        Ok(hnsw_static)
+    }
+
     /// Get index statistics.
     pub fn stats(&self) -> HnswStats {
         let index_guard = self.index.read();
@@ -468,30 +494,51 @@ impl RetrievalBackend for HnswBackend {
         serde_json::to_writer_pretty(BufWriter::new(config_file), &self.config)
             .map_err(|e| RagError::Serialization(e.to_string()))?;
 
-        // Save document ID mapping
+        // Save document ID mapping with batched serialization
         let mapping_path = path.join("doc_mapping.bin");
         let mapping_file = File::create(&mapping_path)?;
         let mut writer = BufWriter::new(mapping_file);
 
         let points_guard = self.pending_points.read();
+        let num_docs = points_guard.len();
 
-        // Header
+        // Header with version for batched format
         let header = HnswHeader {
-            num_docs: points_guard.len(),
+            num_docs,
             embedding_dim: self.embedding_dim,
+            version: 2, // v2 = batched format
         };
         bincode::serialize_into(&mut writer, &header)
             .map_err(|e| RagError::Serialization(e.to_string()))?;
 
-        // Embeddings
-        let embeddings: Vec<&Vec<f32>> = points_guard.iter().map(|(p, _)| p).collect();
-        bincode::serialize_into(&mut writer, &embeddings)
+        // Serialize embeddings and IDs in batches to prevent OOM
+        // For 1M docs × 768 dims = ~3GB if collected at once; batching reduces peak to ~30MB
+        let num_batches = (num_docs + SERIALIZATION_BATCH_SIZE - 1) / SERIALIZATION_BATCH_SIZE;
+        bincode::serialize_into(&mut writer, &num_batches)
             .map_err(|e| RagError::Serialization(e.to_string()))?;
 
-        // Document IDs
-        let ids: Vec<DocumentId> = points_guard.iter().map(|(_, id)| *id).collect();
-        bincode::serialize_into(&mut writer, &ids)
-            .map_err(|e| RagError::Serialization(e.to_string()))?;
+        for batch_idx in 0..num_batches {
+            let start = batch_idx * SERIALIZATION_BATCH_SIZE;
+            let end = (start + SERIALIZATION_BATCH_SIZE).min(num_docs);
+
+            // Serialize batch of embeddings
+            let batch_embeddings: Vec<&Vec<f32>> = points_guard[start..end]
+                .iter()
+                .map(|(embedding, _)| embedding)
+                .collect();
+            bincode::serialize_into(&mut writer, &batch_embeddings)
+                .map_err(|e| RagError::Serialization(e.to_string()))?;
+
+            // Serialize batch of document IDs
+            let batch_ids: Vec<DocumentId> = points_guard[start..end]
+                .iter()
+                .map(|(_, id)| *id)
+                .collect();
+            bincode::serialize_into(&mut writer, &batch_ids)
+                .map_err(|e| RagError::Serialization(e.to_string()))?;
+        }
+
+        drop(points_guard); // Release read lock before accessing index
 
         // Use hnsw_rs native dump for the graph structure if index is built
         let index_guard = self.index.read();
@@ -512,7 +559,7 @@ impl RetrievalBackend for HnswBackend {
         let config: HnswConfig = serde_json::from_reader(BufReader::new(config_file))
             .map_err(|e| RagError::Serialization(e.to_string()))?;
 
-        // Load document mapping
+        // Load document mapping with streaming deserialization
         let mapping_path = path.join("doc_mapping.bin");
         let mapping_file = File::open(&mapping_path)?;
         let mut reader = BufReader::new(mapping_file);
@@ -527,33 +574,76 @@ impl RetrievalBackend for HnswBackend {
             )));
         }
 
-        let embeddings: Vec<Vec<f32>> = bincode::deserialize_from(&mut reader)
-            .map_err(|e| RagError::Serialization(e.to_string()))?;
+        // Preallocate with known capacity to avoid reallocation during loading
+        let mut pending_points: Vec<(Vec<f32>, DocumentId)> = Vec::with_capacity(header.num_docs);
 
-        let ids: Vec<DocumentId> = bincode::deserialize_from(&mut reader)
-            .map_err(|e| RagError::Serialization(e.to_string()))?;
+        // Handle both v1 (unbatched) and v2 (batched) formats
+        if header.version >= 2 {
+            // v2 batched format: read num_batches, then process each batch
+            let num_batches: usize = bincode::deserialize_from(&mut reader)
+                .map_err(|e| RagError::Serialization(e.to_string()))?;
 
-        let pending_points: Vec<(Vec<f32>, DocumentId)> =
-            embeddings.into_iter().zip(ids).collect();
+            for _ in 0..num_batches {
+                // Deserialize batch of embeddings
+                let batch_embeddings: Vec<Vec<f32>> = bincode::deserialize_from(&mut reader)
+                    .map_err(|e| RagError::Serialization(e.to_string()))?;
+
+                // Deserialize batch of document IDs
+                let batch_ids: Vec<DocumentId> = bincode::deserialize_from(&mut reader)
+                    .map_err(|e| RagError::Serialization(e.to_string()))?;
+
+                // Combine embeddings and IDs
+                pending_points.extend(batch_embeddings.into_iter().zip(batch_ids));
+            }
+        } else {
+            // v1 legacy format: all embeddings, then all IDs (for backwards compatibility)
+            let embeddings: Vec<Vec<f32>> = bincode::deserialize_from(&mut reader)
+                .map_err(|e| RagError::Serialization(e.to_string()))?;
+
+            let ids: Vec<DocumentId> = bincode::deserialize_from(&mut reader)
+                .map_err(|e| RagError::Serialization(e.to_string()))?;
+
+            pending_points.extend(embeddings.into_iter().zip(ids));
+        }
 
         let num_points = pending_points.len();
 
+        // Check for native graph files (created by hnsw_rs file_dump)
+        let graph_path = path.join("hnsw_index.hnsw.graph");
+        let data_path = path.join("hnsw_index.hnsw.data");
+
+        // Try native graph reload if files exist, fall back to rebuild
+        let (loaded_index, needs_rebuild) = if graph_path.exists() && data_path.exists() {
+            match Self::load_native_graph(path) {
+                Ok(hnsw) => {
+                    log::debug!("Successfully loaded native HNSW graph from {:?}", path);
+                    (Some(hnsw), false)
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to load native HNSW graph from {:?}, will rebuild: {}",
+                        path,
+                        e
+                    );
+                    (None, true)
+                }
+            }
+        } else {
+            log::debug!("No native HNSW graph files found at {:?}, will rebuild", path);
+            (None, true)
+        };
+
         let backend = Self {
-            index: RwLock::new(None),
+            index: RwLock::new(loaded_index),
             embedding_dim,
             config,
-            needs_rebuild: AtomicBool::new(true),
+            needs_rebuild: AtomicBool::new(needs_rebuild),
             pending_points: RwLock::new(pending_points),
             num_points: AtomicUsize::new(num_points),
         };
 
-        // Try to load the graph if it exists, otherwise rebuild
-        let graph_path = path.join("hnsw_graph.bin");
-        if graph_path.exists() {
-            // For now, just rebuild - native load requires matching types
-            // TODO: Implement native graph reload when hnsw_rs API stabilizes
-            backend.build_index()?;
-        } else {
+        // Build index if native load failed or files don't exist
+        if needs_rebuild {
             backend.build_index()?;
         }
 
@@ -580,7 +670,13 @@ impl RetrievalBackend for HnswBackend {
 struct HnswHeader {
     num_docs: usize,
     embedding_dim: usize,
+    /// Format version for backwards compatibility
+    version: u32,
 }
+
+/// Default batch size for serialization/deserialization (10K embeddings)
+/// This prevents OOM for 1M+ document indices (1M × 768 dims = ~3GB if loaded at once).
+const SERIALIZATION_BATCH_SIZE: usize = 10_000;
 
 impl std::fmt::Debug for HnswBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

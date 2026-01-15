@@ -9,6 +9,9 @@ pub mod error;
 pub mod output;
 pub mod progress;
 
+#[cfg(feature = "google-books")]
+pub mod tui;
+
 pub use args::{Cli, Commands};
 pub use checkpoint::CheckpointManager;
 pub use error::{CliError, CliResult};

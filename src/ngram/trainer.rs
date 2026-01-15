@@ -262,13 +262,15 @@ where
             received_any = true;
 
             batch.par_iter().for_each(|sentence| {
-                // Tokenize into owned strings first, then get refs
+                // Tokenize into owned strings, then work with references
                 let token_strings: Vec<String> = tokenizer.words(sentence).collect();
-                let tokens: Vec<&str> = token_strings.iter().map(|s| s.as_str()).collect();
 
-                if tokens.is_empty() {
+                if token_strings.is_empty() {
                     return;
                 }
+
+                // Create refs slice for trie insertion (avoids second Vec allocation)
+                let tokens: Vec<&str> = token_strings.iter().map(String::as_str).collect();
 
                 stats.inc_tokens(tokens.len() as u64);
                 stats.inc_sentences();
@@ -276,10 +278,10 @@ where
                 let mut ngram_count = 0u64;
 
                 // Extract and count n-grams of all orders up to max
+                // Pass slice directly to avoid Vec allocation per n-gram
                 for n in 1..=order.min(tokens.len()) {
                     for i in 0..=(tokens.len() - n) {
-                        let ngram: Vec<&str> = tokens[i..i + n].to_vec();
-                        trie.insert(&ngram);
+                        trie.insert(&tokens[i..i + n]);
                         ngram_count += 1;
                     }
                 }
@@ -326,23 +328,25 @@ where
             received_any = true;
 
             batch.par_iter().for_each(|sentence| {
-                // Tokenize into owned strings first, then get refs
+                // Tokenize into owned strings, then work with references
                 let token_strings: Vec<String> = tokenizer.words(sentence).collect();
-                let tokens: Vec<&str> = token_strings.iter().map(|s| s.as_str()).collect();
 
-                if tokens.is_empty() {
+                if token_strings.is_empty() {
                     return;
                 }
+
+                // Create refs slice for trie insertion (avoids second Vec allocation)
+                let tokens: Vec<&str> = token_strings.iter().map(String::as_str).collect();
 
                 stats.inc_tokens(tokens.len() as u64);
                 stats.inc_sentences();
 
                 let mut ngram_count = 0u64;
 
+                // Pass slice directly to avoid Vec allocation per n-gram
                 for n in 1..=order.min(tokens.len()) {
                     for i in 0..=(tokens.len() - n) {
-                        let ngram: Vec<&str> = tokens[i..i + n].to_vec();
-                        trie.insert(&ngram);
+                        trie.insert(&tokens[i..i + n]);
                         ngram_count += 1;
                     }
                 }
@@ -377,8 +381,29 @@ where
     /// This performs a second pass over all n-grams to compute:
     /// 1. For each word, how many unique histories precede it (continuation count)
     /// 2. For each history, how many unique words follow it (unique continuations)
+    ///
+    /// # Memory Warning
+    ///
+    /// This function uses `HashMap<String, HashSet<String>>` to track unique relationships.
+    /// For very large corpora (10M+ n-grams), memory usage can reach 2-5GB due to:
+    /// - String allocations for each word/history
+    /// - HashSet overhead for unique tracking
+    ///
+    /// For production use with massive corpora, consider:
+    /// - Pre-computing continuation counts during n-gram insertion
+    /// - Using approximate counting (HyperLogLog) for unique estimation
+    /// - Processing in sorted batches with external merge
     fn collect_continuation_counts(&self) {
         log::debug!("Collecting continuation counts for MKN smoothing");
+
+        let entry_count = self.stats.ngrams_counted();
+        if entry_count > 5_000_000 {
+            log::warn!(
+                "Collecting continuation counts for {} n-grams may use significant memory (2-5GB). \
+                 Consider using smaller corpus or pre-computed statistics.",
+                entry_count
+            );
+        }
 
         // Track continuation counts: for each word, count unique preceding contexts
         // continuation_count[word] = |{h : c(h, word) > 0}|

@@ -10,6 +10,7 @@
 //! - **Path Rescoring**: Rescore top-k paths from n-gram beam search
 //! - **Document Embedding**: Generate embeddings for RAG retrieval
 //! - **Extractive Summarization**: Select representative sentences
+//! - **Code Embeddings**: Neural code embeddings (CodeT5+, UniXcoder, GraphCodeBERT)
 //!
 //! # Example
 //!
@@ -19,12 +20,24 @@
 //! let rescorer = ModernBertRescorer::load("answerdotai/ModernBERT-base", Device::Cuda(0))?;
 //! let score = rescorer.score_sentence("The quick brown fox jumps over the lazy dog.")?;
 //! ```
+//!
+//! # Code Embeddings Example
+//!
+//! ```ignore
+//! use libgrammstein::neural::code::{CodeT5Embedder, CodeLanguage, CodeEmbedder};
+//!
+//! let embedder = CodeT5Embedder::from_directory("/path/to/codet5p-110m")?;
+//! let embedding = embedder.embed_code("fn main() {}", CodeLanguage::Rust)?;
+//! ```
 
 mod modernbert;
 mod rescorer;
 mod embedder;
 mod summarizer;
 mod cache;
+
+#[cfg(feature = "code-neural")]
+pub mod code;
 
 pub use modernbert::{ModernBertModel, ModernBertConfig, Device};
 pub use rescorer::{ModernBertRescorer, RescoringConfig, ScoredPath};

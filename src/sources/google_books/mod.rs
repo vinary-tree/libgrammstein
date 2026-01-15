@@ -59,6 +59,7 @@
 mod aggregator;
 mod checkpoint;
 mod config;
+mod events;
 mod extractor;
 mod importer;
 mod languages;
@@ -69,8 +70,9 @@ mod translator;
 pub use aggregator::YearAggregator;
 pub use checkpoint::{ImportCheckpoint, MknPhase};
 pub use config::GoogleBooksConfig;
+pub use events::{ImportCommand, ImportEvent, LogLevel};
 pub use extractor::{DictionaryExtractor, ExtractionPhase, ExtractionProgress, ExtractionStats};
-pub use importer::{GoogleBooksImporter, ImportProgress, ImportStats};
+pub use importer::{GoogleBooksImporter, ImportPhase, ImportProgress, ImportStats, WorkerUpdate};
 pub use languages::{LanguageInfo, LanguageMetadata, SUPPORTED_LANGUAGES};
 pub use parser::{NgramRecord, parse_ngram_line};
 pub use reader::{FileNgramReader, HttpNgramReader, NgramReader};
