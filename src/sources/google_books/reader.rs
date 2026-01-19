@@ -11,6 +11,8 @@ use flate2::read::GzDecoder;
 
 use super::aggregator::{AggregatedNgram, AggregatingIterator};
 use super::parser::{parse_ngram_line, NgramRecord, ParseError};
+#[cfg(feature = "google-books")]
+use super::task_manager::RetryAfter;
 
 /// Trait for n-gram readers.
 pub trait NgramReader: Iterator<Item = Result<NgramRecord, ReaderError>> {
@@ -43,6 +45,20 @@ pub enum ReaderError {
     /// Decompression error.
     #[error("Decompression error: {0}")]
     Decompression(String),
+
+    /// Rate limited (HTTP 429).
+    ///
+    /// This error variant captures the URL and optional Retry-After header value
+    /// from HTTP 429 responses. The TaskManager can use this to schedule retries
+    /// with proper backoff timing.
+    #[cfg(feature = "google-books")]
+    #[error("Rate limited (HTTP 429) for {url}")]
+    RateLimited {
+        /// URL that was rate limited.
+        url: String,
+        /// Parsed Retry-After header value (if present).
+        retry_after: Option<RetryAfter>,
+    },
 }
 
 /// Saves a failed HTTP response (headers + body) to disk for post-mortem analysis.
@@ -709,18 +725,22 @@ impl HttpNgramReader {
             if !status.is_success() {
                 // Check for rate limiting
                 if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    // Log Retry-After header if present
-                    if let Some(retry_after) = response.headers().get("retry-after") {
-                        tracing::warn!(
-                            "Rate limited (429) for {}, Retry-After: {:?}",
-                            url,
-                            retry_after
-                        );
-                    }
-                    Err(ReaderError::Http(format!(
-                        "Rate limited (HTTP 429) for {}",
-                        url
-                    )))?;
+                    // Parse Retry-After header if present
+                    let retry_after = response.headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(RetryAfter::parse);
+
+                    tracing::warn!(
+                        "Rate limited (429) for {}, Retry-After: {:?}",
+                        url,
+                        retry_after
+                    );
+
+                    Err(ReaderError::RateLimited {
+                        url: url.clone(),
+                        retry_after,
+                    })?;
                 }
                 if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
                     Err(ReaderError::Http(format!(

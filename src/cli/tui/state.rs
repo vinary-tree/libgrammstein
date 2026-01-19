@@ -383,6 +383,7 @@ impl TuiState {
             }
 
             ImportEvent::Error { message } => {
+                log::error!("Import error: {}", message);
                 self.error_message = Some(message.clone());
                 self.add_log(LogLevel::Error, format!("FATAL: {}", message));
             }

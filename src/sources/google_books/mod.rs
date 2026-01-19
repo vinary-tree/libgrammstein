@@ -65,15 +65,24 @@ mod importer;
 mod languages;
 mod parser;
 mod reader;
+pub mod sharding;
+mod storage;
+pub mod task_manager;
 mod translator;
 
 pub use aggregator::YearAggregator;
 pub use checkpoint::{ImportCheckpoint, MknPhase};
-pub use config::GoogleBooksConfig;
+pub use config::{GoogleBooksConfig, ShardingGranularity, ShardingMode, ShardingOptions};
 pub use events::{ImportCommand, ImportEvent, LogLevel};
 pub use extractor::{DictionaryExtractor, ExtractionPhase, ExtractionProgress, ExtractionStats};
 pub use importer::{GoogleBooksImporter, ImportPhase, ImportProgress, ImportStats, WorkerUpdate};
 pub use languages::{LanguageInfo, LanguageMetadata, SUPPORTED_LANGUAGES};
 pub use parser::{NgramRecord, parse_ngram_line};
-pub use reader::{FileNgramReader, HttpNgramReader, NgramReader};
+pub use reader::{FileNgramReader, HttpNgramReader, NgramReader, ReaderError};
+pub use storage::{NgramStorage, StorageError, StorageResult, StorageStats};
+#[cfg(feature = "google-books")]
+pub use task_manager::{
+    Job, MetricsSnapshot, RetryAfter, TaskManager, TaskManagerConfig, TaskManagerMetrics,
+    TaskSubmitter,
+};
 pub use translator::{PathMapTranslator, TranslationPhase, TranslationProgress, TranslationStats};

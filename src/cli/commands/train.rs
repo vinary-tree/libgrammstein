@@ -822,7 +822,7 @@ fn create_corpus_reader(path: &str, format: CorpusFormat) -> CliResult<Box<dyn C
 /// Import N-gram model from Google Books N-grams.
 #[cfg(feature = "google-books")]
 fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) -> CliResult<()> {
-    use crate::sources::google_books::{GoogleBooksConfig, GoogleBooksImporter, LanguageInfo};
+    use crate::sources::google_books::{GoogleBooksConfig, GoogleBooksImporter, LanguageInfo, ShardingMode};
 
     if verbose {
         eprintln!("Importing Google Books N-grams");
@@ -871,6 +871,7 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
         parallel_downloads: args.parallel,
         progress_interval: 100_000,
         skip_pos_tags: args.skip_pos_tags,
+        sharding: ShardingMode::default(),
     };
 
     // Create importer (resume from checkpoint if one exists)
@@ -993,8 +994,8 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
                     .unwrap_or_else(|_| "libgrammstein::sources::google_books=debug".parse().expect("valid filter")))
                 .try_init();
 
-            // Initialize log → tracing bridge so log:: calls go to file
-            let _ = tracing_log::LogTracer::init();
+            // Note: tracing-subscriber with 'fmt' feature automatically sets up
+            // a LogTracer to bridge log:: calls to tracing. No explicit init needed.
 
             // Print log location to stderr before TUI takes over the terminal
             let log_path = log_dir.join("import-debug.log");

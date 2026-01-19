@@ -53,6 +53,9 @@ impl ImportTui {
         // Initialize terminal
         let mut terminal = ratatui::init();
 
+        // Clear any pre-existing terminal content
+        terminal.clear()?;
+
         let result = self.run_loop(&mut terminal, &mut event_rx);
 
         // Restore terminal

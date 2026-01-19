@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
 use parking_lot::RwLock;
 
+use super::sharding::MknAggregator;
+use super::storage::{NgramStorage, StorageError};
+
 
 use super::aggregator::YearAggregator;
 use super::checkpoint::{
@@ -21,6 +24,58 @@ use super::events::{ImportCommand, ImportEvent, LogLevel};
 use super::languages::{get_file_url, get_metadata, get_prefixes, is_supported};
 use super::parser::NgramRecord;
 use super::reader::{FileNgramReader, ReaderError};
+#[cfg(feature = "google-books")]
+use super::task_manager::RetryAfter;
+
+// ============================================================================
+// N-gram Count Estimation
+// ============================================================================
+
+/// Estimate the number of n-grams for a given configuration.
+///
+/// This is used to decide whether sharding should be enabled in auto mode.
+/// The estimates are based on empirical data from Google Books n-gram corpus.
+fn estimate_ngram_count(config: &GoogleBooksConfig) -> u64 {
+    // Estimates for English (other languages have fewer)
+    // These are rough estimates based on Google Books v3 dataset
+    let per_order: &[u64] = match config.language.as_str() {
+        "en" | "eng" => &[
+            0,          // Order 0 (unused)
+            13_000_000, // 1-grams: ~13M
+            314_000_000, // 2-grams: ~314M
+            977_000_000, // 3-grams: ~977M
+            1_313_000_000, // 4-grams: ~1.3B
+            1_176_000_000, // 5-grams: ~1.2B
+        ],
+        _ => &[
+            0,          // Order 0 (unused)
+            5_000_000,  // 1-grams (estimate for non-English)
+            100_000_000, // 2-grams
+            300_000_000, // 3-grams
+            500_000_000, // 4-grams
+            400_000_000, // 5-grams
+        ],
+    };
+
+    let mut total = 0u64;
+    for order in config.orders.clone() {
+        if let Some(&count) = per_order.get(order as usize) {
+            // Apply min_count filter estimate (higher min_count = fewer n-grams)
+            // This is a rough estimate: each 10x increase in min_count
+            // reduces count by ~60-70%
+            let factor = match config.min_count {
+                0..=1 => 1.0,
+                2..=10 => 0.4,
+                11..=40 => 0.2,
+                41..=100 => 0.1,
+                _ => 0.05,
+            };
+            total += (count as f64 * factor) as u64;
+        }
+    }
+
+    total
+}
 
 // ============================================================================
 // Free functions for parallel processing
@@ -92,6 +147,27 @@ fn is_retryable_error(e: &ImportError) -> bool {
     }
 }
 
+/// Extract RetryAfter from an ImportError if it's a rate limiting error.
+///
+/// This inspects the underlying ReaderError to check for the RateLimited variant
+/// and extracts the Retry-After header value if present.
+#[cfg(feature = "google-books")]
+fn extract_retry_after(error: &ImportError) -> Option<RetryAfter> {
+    match error {
+        ImportError::Reader(ReaderError::RateLimited { retry_after, .. }) => retry_after.clone(),
+        _ => None,
+    }
+}
+
+/// Check if an error is specifically a rate limit error (HTTP 429).
+#[cfg(feature = "google-books")]
+fn is_rate_limit_error(error: &ImportError) -> bool {
+    matches!(
+        error,
+        ImportError::Reader(ReaderError::RateLimited { .. })
+    )
+}
+
 /// Result of storing an n-gram, with counter deltas for batched updates.
 ///
 /// This enables callers to batch atomic counter updates instead of
@@ -124,19 +200,28 @@ pub const COUNTER_BATCH_SIZE: u64 = 10_000;
 fn store_ngram_shared(
     ngram: &str,
     count: u64,
-    trie: &Arc<RwLock<DiskBackedCharTrieInner<u64>>>,
+    storage: &Arc<NgramStorage>,
 ) -> Result<NgramStorageResult, ImportError> {
-    // Store in the disk-backed trie
-    let mut trie_guard = trie.write();
-
-    // Check if this is a new ngram for statistics
-    let is_new = trie_guard.get(ngram).is_none();
-
-    // Increment the count
-    trie_guard.increment(ngram, count as i64).map_err(|e| {
+    // Store using the storage abstraction (handles both single-trie and sharded)
+    let is_new = storage.store(ngram, count).map_err(|e| {
         ImportError::Trie(format!("Failed to store ngram '{}': {}", ngram, e))
     })?;
 
+    Ok(NgramStorageResult { is_new })
+}
+
+/// Legacy version for direct trie access (used during migration).
+#[allow(dead_code)]
+fn store_ngram_shared_legacy(
+    ngram: &str,
+    count: u64,
+    trie: &Arc<RwLock<DiskBackedCharTrieInner<u64>>>,
+) -> Result<NgramStorageResult, ImportError> {
+    let mut trie_guard = trie.write();
+    let is_new = trie_guard.get(ngram).is_none();
+    trie_guard.increment(ngram, count as i64).map_err(|e| {
+        ImportError::Trie(format!("Failed to store ngram '{}': {}", ngram, e))
+    })?;
     Ok(NgramStorageResult { is_new })
 }
 
@@ -245,6 +330,35 @@ impl Job {
             attempt: self.attempt + 1,
             backoff_ms: new_backoff,
             ready_at: Some(std::time::Instant::now() + Duration::from_millis(new_backoff)),
+        }
+    }
+
+    /// Create a retry job using the Retry-After header value if available.
+    ///
+    /// If `retry_after` is `Some`, uses that duration for the retry delay.
+    /// Otherwise falls back to the exponential backoff (doubled from previous).
+    fn with_retry_after(&self, retry_after: Option<RetryAfter>) -> Self {
+        let new_backoff = self.backoff_ms.saturating_mul(2);
+        let ready_at = match retry_after {
+            Some(ra) => {
+                // Use Retry-After header value
+                let duration = ra.to_duration();
+                // Also update backoff_ms for future retries (if Retry-After is larger)
+                std::time::Instant::now() + duration
+            }
+            None => {
+                // Fall back to exponential backoff
+                std::time::Instant::now() + Duration::from_millis(new_backoff)
+            }
+        };
+
+        Self {
+            url: Arc::clone(&self.url),
+            prefix: Arc::clone(&self.prefix),
+            order: self.order,
+            attempt: self.attempt + 1,
+            backoff_ms: new_backoff,
+            ready_at: Some(ready_at),
         }
     }
 
@@ -399,7 +513,7 @@ enum PrefixOutcome {
 #[cfg(feature = "google-books")]
 struct WorkerSharedState {
     config: GoogleBooksConfig,
-    trie: Arc<RwLock<DiskBackedCharTrieInner<u64>>>,
+    storage: Arc<NgramStorage>,
     total_ngrams: Arc<AtomicU64>,
     unique_ngrams: Arc<AtomicU64>,
     progress_tx: tokio::sync::mpsc::Sender<WorkerUpdate>,
@@ -449,7 +563,7 @@ async fn process_single_attempt(
         let storage_result = store_ngram_shared(
             &agg.ngram,
             agg.total_count,
-            &shared.trie,
+            &shared.storage,
         )?;
         count += 1;
         local_total += 1;
@@ -645,12 +759,19 @@ async fn worker_task(
             }
             Err(e) if is_retryable_error(&e) && job.attempt < MAX_RETRIES => {
                 // Retryable error - requeue with ready_at set, pick up next job immediately
-                let retry_job = job.with_retry();
+                // Extract Retry-After header if this was a rate limit error
+                let retry_after = extract_retry_after(&e);
+                let retry_job = job.with_retry_after(retry_after.clone());
                 let debug_info = RequestDebugInfo::from_error(&job.url, &e, elapsed);
 
-                // Log detailed debug info
+                // Calculate actual delay for logging
+                let delay_ms = retry_job.ready_at
+                    .map(|ra| ra.saturating_duration_since(std::time::Instant::now()).as_millis() as u64)
+                    .unwrap_or(retry_job.backoff_ms);
+
+                // Log detailed debug info (including Retry-After if present)
                 log::debug!(
-                    "Worker {} deferring {} (order {}) - attempt {}/{}, retry at +{}ms\n\
+                    "Worker {} deferring {} (order {}) - attempt {}/{}, retry at +{}ms{}\n\
                      URL: {}\n\
                      Error: {}\n\
                      Status code: {:?}\n\
@@ -660,7 +781,8 @@ async fn worker_task(
                     retry_job.order,
                     retry_job.attempt,
                     MAX_RETRIES,
-                    retry_job.backoff_ms,
+                    delay_ms,
+                    if retry_after.is_some() { " (from Retry-After header)" } else { "" },
                     debug_info.url,
                     debug_info.error_message,
                     debug_info.status_code,
@@ -801,7 +923,7 @@ async fn worker_task(
 /// * `attempt` - Current retry attempt (0 = first attempt)
 /// * `backoff_ms` - Backoff delay in ms if this attempt fails (for next retry)
 /// * `config` - Import configuration
-/// * `trie` - Shared trie for storing n-grams
+/// * `storage` - Storage backend for n-grams (single-trie or sharded)
 /// * `total_ngrams` - Atomic counter for total n-grams
 /// * `unique_ngrams` - Atomic counter for unique n-grams
 /// * `progress_tx` - Optional channel for sending progress updates
@@ -815,7 +937,7 @@ async fn process_prefix_file(
     attempt: u8,
     backoff_ms: u64,
     config: GoogleBooksConfig,
-    trie: Arc<RwLock<DiskBackedCharTrieInner<u64>>>,
+    storage: Arc<NgramStorage>,
     total_ngrams: Arc<AtomicU64>,
     unique_ngrams: Arc<AtomicU64>,
     progress_tx: Option<tokio::sync::mpsc::Sender<WorkerUpdate>>,
@@ -885,7 +1007,7 @@ async fn process_prefix_file(
             let storage_result = store_ngram_shared(
                 &agg.ngram,
                 agg.total_count,
-                &trie,
+                &storage,
             )?;
             count += 1;
             local_total += 1;
@@ -1230,8 +1352,13 @@ pub struct GoogleBooksImporter {
     /// Start time.
     start_time: Instant,
 
-    /// Disk-backed n-gram storage using persistent AR-Trie.
-    /// Uses UTF-8 character encoding for international language support.
+    /// N-gram storage backend.
+    /// Can be single-trie (original behavior) or sharded storage.
+    storage: Arc<NgramStorage>,
+
+    /// Legacy trie field for checkpoint compatibility.
+    /// Only used when storage is single-trie mode.
+    /// TODO: Remove once checkpoint migration to storage is complete.
     trie: Arc<RwLock<DiskBackedCharTrieInner<u64>>>,
 }
 
@@ -1246,17 +1373,40 @@ impl GoogleBooksImporter {
         let checkpoint_path = config.output_path.with_extension("checkpoint.json");
         let output_path = &config.output_path;
 
-        // Create or open the disk-backed trie
-        let trie = if output_path.exists() {
-            log::info!("Opening existing trie at {:?}", output_path);
-            DiskBackedCharTrieInner::open(output_path).map_err(|e| {
-                ImportError::Trie(format!("Failed to open trie: {}", e))
-            })?
+        // Estimate n-gram count based on language and orders
+        // For English 1-3 grams, expect ~500M n-grams; 1-5 grams ~2B
+        let estimated_ngrams = estimate_ngram_count(&config);
+        log::info!("Estimated n-gram count: {}", estimated_ngrams);
+
+        // Create storage backend based on sharding configuration
+        let storage = NgramStorage::create(&config, estimated_ngrams).map_err(|e| {
+            ImportError::Trie(format!("Failed to create storage: {}", e))
+        })?;
+
+        // Log which storage mode is being used
+        if storage.is_sharded() {
+            log::info!("Using sharded storage for parallel writes");
         } else {
-            log::info!("Creating new trie at {:?}", output_path);
-            DiskBackedCharTrieInner::create(output_path).map_err(|e| {
-                ImportError::Trie(format!("Failed to create trie: {}", e))
-            })?
+            log::info!("Using single-trie storage");
+        }
+
+        // For checkpoint compatibility, we also need a trie reference
+        // In sharded mode, create a separate trie just for checkpoint metadata
+        let trie = if let Some(inner_trie) = storage.as_single_trie() {
+            Arc::clone(inner_trie)
+        } else {
+            // Sharded mode: create a checkpoint-only trie at output path
+            let checkpoint_trie_path = config.output_path.with_extension("checkpoint.artrie");
+            let trie = if checkpoint_trie_path.exists() {
+                DiskBackedCharTrieInner::open(&checkpoint_trie_path).map_err(|e| {
+                    ImportError::Trie(format!("Failed to open checkpoint trie: {}", e))
+                })?
+            } else {
+                DiskBackedCharTrieInner::create(&checkpoint_trie_path).map_err(|e| {
+                    ImportError::Trie(format!("Failed to create checkpoint trie: {}", e))
+                })?
+            };
+            Arc::new(RwLock::new(trie))
         };
 
         Ok(Self {
@@ -1267,7 +1417,8 @@ impl GoogleBooksImporter {
             unique_ngrams: AtomicU64::new(0),
             interrupted: AtomicBool::new(false),
             start_time: Instant::now(),
-            trie: Arc::new(RwLock::new(trie)),
+            storage: Arc::new(storage),
+            trie,
         })
     }
 
@@ -1496,7 +1647,8 @@ impl GoogleBooksImporter {
             self.save_checkpoint()?;
         }
 
-        self.build_stats()
+        // Finalize: compute MKN stats, sync storage, and return final stats
+        self.finalize()
     }
 
     /// Import from HTTP (streaming from Google's servers).
@@ -1604,7 +1756,7 @@ impl GoogleBooksImporter {
             );
 
             // Clone Arc references for parallel processing
-            let trie = Arc::clone(&self.trie);
+            let storage = Arc::clone(&self.storage);
 
             // Create new atomic counters for this batch (we'll sync back after)
             let total_ngrams = Arc::new(AtomicU64::new(self.total_ngrams.load(Ordering::Relaxed)));
@@ -1649,7 +1801,7 @@ impl GoogleBooksImporter {
                             0,                    // First attempt
                             INITIAL_BACKOFF_MS,   // Initial backoff
                             config.clone(),
-                            Arc::clone(&trie),
+                            Arc::clone(&storage),
                             Arc::clone(&total_ngrams),
                             Arc::clone(&unique_ngrams),
                             worker_updates.clone(),
@@ -1744,7 +1896,7 @@ impl GoogleBooksImporter {
                             attempt,
                             backoff_ms,
                             config.clone(),
-                            Arc::clone(&trie),
+                            Arc::clone(&storage),
                             Arc::clone(&total_ngrams),
                             Arc::clone(&unique_ngrams),
                             worker_updates.clone(),
@@ -1818,7 +1970,8 @@ impl GoogleBooksImporter {
             self.save_checkpoint()?;
         }
 
-        self.build_stats()
+        // Finalize: compute MKN stats, sync storage, and return final stats
+        self.finalize()
     }
 
     /// Import from HTTP with reactive event/command channels.
@@ -2005,7 +2158,7 @@ impl GoogleBooksImporter {
         );
 
         // Clone Arc references for parallel processing
-        let trie = Arc::clone(&self.trie);
+        let storage = Arc::clone(&self.storage);
 
         // Create atomic counters for shared state
         let total_ngrams = Arc::new(AtomicU64::new(self.total_ngrams.load(Ordering::Relaxed)));
@@ -2132,7 +2285,7 @@ impl GoogleBooksImporter {
         // Create shared state for workers
         let shared_state = Arc::new(WorkerSharedState {
             config: config.clone(),
-            trie: Arc::clone(&trie),
+            storage: Arc::clone(&storage),
             total_ngrams: Arc::clone(&total_ngrams),
             unique_ngrams: Arc::clone(&unique_ngrams),
             progress_tx: worker_tx.clone(),
@@ -2564,6 +2717,7 @@ impl GoogleBooksImporter {
                     // Save checkpoint periodically
                     if files_completed.load(Ordering::Relaxed) % 10 == 0 {
                         if let Err(e) = self.save_checkpoint() {
+                            log::error!("Checkpoint failed: {}", e);
                             let _ = event_tx.send(ImportEvent::Error {
                                 message: format!("Checkpoint failed: {}", e),
                             });
@@ -2601,6 +2755,7 @@ impl GoogleBooksImporter {
 
         // Final checkpoint save
         if let Err(e) = self.save_checkpoint() {
+            log::error!("Final checkpoint failed: {}", e);
             let _ = event_tx.send(ImportEvent::Error {
                 message: format!("Final checkpoint failed: {}", e),
             });
@@ -2619,7 +2774,8 @@ impl GoogleBooksImporter {
         command_handler.abort();
         let _ = command_handler.await;
 
-        self.build_stats()
+        // Finalize: compute MKN stats, sync storage, and return final stats
+        self.finalize()
     }
 
     /// Process a single local file.
@@ -2654,16 +2810,10 @@ impl GoogleBooksImporter {
 
     /// Store an n-gram with its count.
     ///
-    /// Writes to the disk-backed PersistentARTrie.
+    /// Uses the storage backend (single-trie or sharded).
     /// MKN statistics are computed as a post-processing step after import completes.
     fn store_ngram(&self, ngram: &str, count: u64) -> Result<(), ImportError> {
-        let mut trie = self.trie.write();
-
-        // Check if this is a new ngram for statistics
-        let is_new = trie.get(ngram).is_none();
-
-        // Increment the count
-        trie.increment(ngram, count as i64).map_err(|e| {
+        let is_new = self.storage.store(ngram, count).map_err(|e| {
             ImportError::Trie(format!("Failed to store ngram '{}': {}", ngram, e))
         })?;
 
@@ -2697,27 +2847,23 @@ impl GoogleBooksImporter {
         Some(remaining as u64)
     }
 
-    /// Finalize import: compute MKN statistics, sync trie, and return stats.
+    /// Finalize import: compute MKN statistics, sync storage, and return stats.
     pub fn finalize(&mut self) -> Result<ImportStats, ImportError> {
         log::info!("Finalizing import...");
 
         // Compute MKN continuation counts
         self.compute_mkn_stats()?;
 
-        // Sync and checkpoint the trie to ensure all data is persisted
-        {
-            let mut trie = self.trie.write();
+        // Sync and checkpoint the storage to ensure all data is persisted
+        log::info!("Syncing storage to disk...");
+        self.storage.sync().map_err(|e| {
+            ImportError::Trie(format!("Failed to sync storage: {}", e))
+        })?;
 
-            log::info!("Syncing trie to disk...");
-            trie.sync().map_err(|e| {
-                ImportError::Trie(format!("Failed to sync trie: {}", e))
-            })?;
-
-            log::info!("Creating trie checkpoint...");
-            trie.checkpoint().map_err(|e| {
-                ImportError::Trie(format!("Failed to checkpoint trie: {}", e))
-            })?;
-        }
+        log::info!("Creating storage checkpoint...");
+        self.storage.checkpoint().map_err(|e| {
+            ImportError::Trie(format!("Failed to checkpoint storage: {}", e))
+        })?;
 
         // Build final stats
         let stats = self.build_stats()?;
@@ -2736,7 +2882,11 @@ impl GoogleBooksImporter {
 
     /// Compute Modified Kneser-Ney smoothing statistics as a post-processing step.
     ///
-    /// This function iterates over all n-grams in the trie and computes:
+    /// This function computes MKN statistics differently based on storage mode:
+    /// - **Single-trie**: Iterates over the trie and stores stats inline with special keys
+    /// - **Sharded**: Uses MknAggregator to compute stats across all shards
+    ///
+    /// The statistics include:
     /// - N1+(suffix): Count of unique preceding words for each suffix
     /// - N1+prefix(context): Count of unique following words for each context
     ///
@@ -2750,6 +2900,102 @@ impl GoogleBooksImporter {
 
         log::info!("Computing MKN statistics (post-processing)...");
 
+        if self.storage.is_sharded() {
+            // Sharded mode: use MknAggregator which iterates over all shards
+            self.compute_mkn_stats_sharded()?;
+        } else {
+            // Single-trie mode: iterate over trie and store stats inline
+            self.compute_mkn_stats_single_trie()?;
+        }
+
+        self.checkpoint.mkn_phase = MknPhase::Complete;
+        self.save_checkpoint()?;
+
+        log::info!("MKN statistics computed successfully");
+        Ok(())
+    }
+
+    /// Compute MKN stats for sharded storage using MknAggregator.
+    fn compute_mkn_stats_sharded(&self) -> Result<(), ImportError> {
+        let coordinator = self.storage.as_sharded().ok_or_else(|| {
+            ImportError::Trie("Expected sharded storage".to_string())
+        })?;
+
+        let aggregator = MknAggregator::new(coordinator);
+        let mkn_stats = aggregator.compute_all().map_err(|e| {
+            ImportError::Trie(format!("Failed to compute MKN statistics: {}", e))
+        })?;
+
+        // Save MKN stats to a separate file alongside the shards
+        let mkn_path = self.config.output_path.with_extension("mkn.artrie");
+        log::info!("Saving MKN statistics to {:?}...", mkn_path);
+
+        let mkn_trie = DiskBackedCharTrieInner::create(&mkn_path).map_err(|e| {
+            ImportError::Trie(format!("Failed to create MKN trie: {}", e))
+        })?;
+        let mkn_trie = Arc::new(RwLock::new(mkn_trie));
+
+        {
+            let mut trie = mkn_trie.write();
+
+            // Store frequency counts for each order
+            for (order, counts) in mkn_stats.frequency_counts.iter().enumerate() {
+                let prefix = format!("\x00order{}\x00", order);
+                trie.upsert(&format!("{}n1", prefix), counts.n1).map_err(|e| {
+                    ImportError::Trie(format!("Failed to write n1: {}", e))
+                })?;
+                trie.upsert(&format!("{}n2", prefix), counts.n2).map_err(|e| {
+                    ImportError::Trie(format!("Failed to write n2: {}", e))
+                })?;
+                trie.upsert(&format!("{}n3", prefix), counts.n3).map_err(|e| {
+                    ImportError::Trie(format!("Failed to write n3: {}", e))
+                })?;
+                trie.upsert(&format!("{}n4", prefix), counts.n4).map_err(|e| {
+                    ImportError::Trie(format!("Failed to write n4: {}", e))
+                })?;
+                trie.upsert(&format!("{}total_unique", prefix), counts.total_unique).map_err(|e| {
+                    ImportError::Trie(format!("Failed to write total_unique: {}", e))
+                })?;
+                trie.upsert(&format!("{}total_count", prefix), counts.total_count).map_err(|e| {
+                    ImportError::Trie(format!("Failed to write total_count: {}", e))
+                })?;
+            }
+
+            // Store continuation counts for each order
+            for (order, conts) in mkn_stats.continuation_counts.iter().enumerate() {
+                // Store predecessor counts (N1+(•w) - unique predecessors for each context)
+                for (context, count) in &conts.predecessor_counts {
+                    let key = format!("\x00N1+predecessor\x00{}\x00{}", order, context);
+                    trie.upsert(&key, *count).map_err(|e| {
+                        ImportError::Trie(format!("Failed to write predecessor count: {}", e))
+                    })?;
+                }
+
+                // Store successor counts (N1+(w•) - unique successors for each context)
+                for (context, count) in &conts.successor_counts {
+                    let key = format!("\x00N1+successor\x00{}\x00{}", order, context);
+                    trie.upsert(&key, *count).map_err(|e| {
+                        ImportError::Trie(format!("Failed to write successor count: {}", e))
+                    })?;
+                }
+            }
+
+            // Checkpoint to persist
+            trie.checkpoint().map_err(|e| {
+                ImportError::Trie(format!("Failed to checkpoint MKN trie: {}", e))
+            })?;
+        }
+
+        log::info!(
+            "MKN statistics saved: {} orders with frequency and continuation counts",
+            mkn_stats.max_order
+        );
+
+        Ok(())
+    }
+
+    /// Compute MKN stats for single-trie storage (original behavior).
+    fn compute_mkn_stats_single_trie(&self) -> Result<(), ImportError> {
         // Collect unique (suffix, prefix) and (context, following) pairs
         // using HashSets for deduplication
         use std::collections::HashSet;
@@ -2834,10 +3080,6 @@ impl GoogleBooksImporter {
             }
         }
 
-        self.checkpoint.mkn_phase = MknPhase::Complete;
-        self.save_checkpoint()?;
-
-        log::info!("MKN statistics computed successfully");
         Ok(())
     }
 

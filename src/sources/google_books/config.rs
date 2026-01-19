@@ -1,5 +1,6 @@
 //! Configuration for Google Books N-gram import.
 
+use super::sharding::{ShardConfig, ShardGranularity};
 use serde::{Deserialize, Serialize};
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
@@ -71,6 +72,107 @@ pub struct GoogleBooksConfig {
     ///
     /// Default: true.
     pub skip_pos_tags: bool,
+
+    /// Sharding mode configuration.
+    ///
+    /// When enabled, n-grams are distributed across multiple trie instances
+    /// based on prefix routing, eliminating lock contention for parallel imports.
+    ///
+    /// Default: `ShardingMode::Auto` - automatically enables sharding for large
+    /// datasets (estimated >10M n-grams).
+    #[serde(default)]
+    pub sharding: ShardingMode,
+}
+
+/// Sharding mode for Google Books import.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum ShardingMode {
+    /// Disable sharding - use single trie (original behavior).
+    Disabled,
+
+    /// Automatically enable sharding based on dataset size.
+    /// Sharding is enabled when estimated n-grams exceed the threshold.
+    Auto {
+        /// Threshold for automatic sharding (default: 10M n-grams).
+        #[serde(default = "default_auto_threshold")]
+        threshold: u64,
+    },
+
+    /// Always use sharding with specified configuration.
+    Enabled(ShardingOptions),
+}
+
+impl Default for ShardingMode {
+    fn default() -> Self {
+        Self::Auto {
+            threshold: default_auto_threshold(),
+        }
+    }
+}
+
+fn default_auto_threshold() -> u64 {
+    10_000_000 // 10M n-grams
+}
+
+/// Configuration options for sharded import.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ShardingOptions {
+    /// Sharding granularity.
+    ///
+    /// Default: `Adaptive` - 26 shards for 1-grams, 676 for 2-5 grams.
+    #[serde(default)]
+    pub granularity: ShardingGranularity,
+
+    /// Maximum open shards in memory.
+    ///
+    /// Default: 100. Lower values reduce memory usage via LRU eviction.
+    #[serde(default = "default_max_open_shards")]
+    pub max_open_shards: usize,
+
+    /// Directory for shard files (relative to output_path's parent).
+    ///
+    /// Default: `{output_path_stem}_shards/`
+    #[serde(default)]
+    pub shard_dir: Option<PathBuf>,
+}
+
+impl Default for ShardingOptions {
+    fn default() -> Self {
+        Self {
+            granularity: ShardingGranularity::default(),
+            max_open_shards: default_max_open_shards(),
+            shard_dir: None,
+        }
+    }
+}
+
+fn default_max_open_shards() -> usize {
+    100
+}
+
+/// Sharding granularity for configuration.
+/// This wraps the internal ShardGranularity enum for serde compatibility.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub enum ShardingGranularity {
+    /// 26 shards (a-z).
+    FirstChar,
+
+    /// 676 shards (aa-zz).
+    TwoChar,
+
+    /// Adaptive: 26 for 1-grams, 676 for 2-5 grams (matches Google Books).
+    #[default]
+    Adaptive,
+}
+
+impl From<ShardingGranularity> for ShardGranularity {
+    fn from(g: ShardingGranularity) -> Self {
+        match g {
+            ShardingGranularity::FirstChar => ShardGranularity::FirstChar,
+            ShardingGranularity::TwoChar => ShardGranularity::TwoChar,
+            ShardingGranularity::Adaptive => ShardGranularity::Adaptive,
+        }
+    }
 }
 
 impl Default for GoogleBooksConfig {
@@ -85,6 +187,7 @@ impl Default for GoogleBooksConfig {
             parallel_downloads: 4,
             progress_interval: 100_000,
             skip_pos_tags: true,
+            sharding: ShardingMode::default(),
         }
     }
 }
@@ -123,6 +226,60 @@ impl GoogleBooksConfig {
     /// Get the checkpoint file path.
     pub fn checkpoint_path(&self) -> PathBuf {
         self.output_path.with_extension("checkpoint.json")
+    }
+
+    /// Check if sharding should be used for the given estimated n-gram count.
+    pub fn should_use_sharding(&self, estimated_ngrams: u64) -> bool {
+        match &self.sharding {
+            ShardingMode::Disabled => false,
+            ShardingMode::Auto { threshold } => estimated_ngrams >= *threshold,
+            ShardingMode::Enabled(_) => true,
+        }
+    }
+
+    /// Get the shard directory path.
+    ///
+    /// Returns the configured shard directory, or a default based on the output path.
+    pub fn shard_dir(&self) -> PathBuf {
+        if let ShardingMode::Enabled(opts) = &self.sharding {
+            if let Some(dir) = &opts.shard_dir {
+                return dir.clone();
+            }
+        }
+
+        // Default: {output_stem}_shards/ in same directory as output
+        let parent = self.output_path.parent().unwrap_or(std::path::Path::new("."));
+        let stem = self
+            .output_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("ngrams");
+        parent.join(format!("{}_shards", stem))
+    }
+
+    /// Create a ShardConfig from this configuration.
+    pub fn to_shard_config(&self) -> ShardConfig {
+        let shard_dir = self.shard_dir();
+
+        let (granularity, max_open_shards) = match &self.sharding {
+            ShardingMode::Enabled(opts) => (
+                opts.granularity.clone().into(),
+                opts.max_open_shards,
+            ),
+            _ => (
+                // Use CPU-proportional sharding: creates num_cpus * 2 shards
+                // Much fewer files than Adaptive (676) while maintaining parallelism
+                ShardGranularity::default(),
+                // Scale max_open_shards with worker count to prevent OOM
+                // Workers hold shard references, so we need workers + buffer
+                self.parallel_downloads + 8,
+            ),
+        };
+
+        ShardConfig::new(shard_dir)
+            .with_granularity(granularity)
+            .with_max_writers(self.parallel_downloads)
+            .with_max_open_shards(max_open_shards)
     }
 }
 
@@ -184,6 +341,44 @@ impl GoogleBooksConfigBuilder {
     /// Set whether to skip POS-tagged n-grams.
     pub fn skip_pos_tags(mut self, skip: bool) -> Self {
         self.config.skip_pos_tags = skip;
+        self
+    }
+
+    /// Set the sharding mode.
+    pub fn sharding(mut self, mode: ShardingMode) -> Self {
+        self.config.sharding = mode;
+        self
+    }
+
+    /// Disable sharding (use single trie).
+    pub fn sharding_disabled(mut self) -> Self {
+        self.config.sharding = ShardingMode::Disabled;
+        self
+    }
+
+    /// Enable automatic sharding with default threshold.
+    pub fn sharding_auto(mut self) -> Self {
+        self.config.sharding = ShardingMode::Auto {
+            threshold: default_auto_threshold(),
+        };
+        self
+    }
+
+    /// Enable automatic sharding with custom threshold.
+    pub fn sharding_auto_threshold(mut self, threshold: u64) -> Self {
+        self.config.sharding = ShardingMode::Auto { threshold };
+        self
+    }
+
+    /// Force enable sharding with default options.
+    pub fn sharding_enabled(mut self) -> Self {
+        self.config.sharding = ShardingMode::Enabled(ShardingOptions::default());
+        self
+    }
+
+    /// Force enable sharding with custom options.
+    pub fn sharding_enabled_with(mut self, options: ShardingOptions) -> Self {
+        self.config.sharding = ShardingMode::Enabled(options);
         self
     }
 
