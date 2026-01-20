@@ -96,6 +96,9 @@ pub struct FrequencyCounts {
 
 impl FrequencyCounts {
     /// Add another FrequencyCounts to this one.
+    ///
+    /// This operation is proven associative and commutative in
+    /// `formal/rocq/FrequencyCountsMerge.v`, enabling parallel tree reduction.
     pub fn merge(&mut self, other: &FrequencyCounts) {
         self.n1 += other.n1;
         self.n2 += other.n2;
@@ -321,6 +324,14 @@ impl<'a> MknAggregator<'a> {
     /// Compute frequency counts for all orders.
     ///
     /// This is a single-pass operation that iterates through all shards.
+    ///
+    /// # Note on Parallel Reduction
+    ///
+    /// `formal/rocq/FrequencyCountsMerge.v` proves that merge is associative
+    /// and commutative, enabling parallel tree reduction. However, benchmarking
+    /// showed that for typical dataset sizes, the atomic approach is faster
+    /// due to lower overhead. Tree reduction would benefit with millions of
+    /// n-grams across hundreds of shards causing significant cache contention.
     pub fn compute_frequency_counts(&self) -> MknResult<Vec<FrequencyCounts>> {
         let max_order = 5u8;
         let counts: Vec<AtomicFrequencyCounts> = (0..=max_order)

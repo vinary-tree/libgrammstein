@@ -317,3 +317,8 @@ harness = false
 [[bench]]
 name = "training"
 harness = false
+
+[[bench]]
+name = "mkn_frequency_counts"
+harness = false
+required-features = ["google-books"]

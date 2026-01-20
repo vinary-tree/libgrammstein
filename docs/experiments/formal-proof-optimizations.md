@@ -1,0 +1,196 @@
+# Scientific Ledger: Formal Proof-Based Optimizations
+
+## Overview
+
+This document records experiments evaluating optimizations enabled by formal verification proofs.
+
+**Date Started**: 2026-01-20
+**Hypothesis**: Formal proofs enable optimizations with measurable performance benefits.
+**Success Criterion**: p < 0.05 for performance improvement (Welch's t-test)
+
+---
+
+## Hardware Configuration
+
+See `/home/dylon/.claude/hardware-specifications.md` for full specs.
+
+**Benchmark Settings**:
+- CPU governor: performance (max frequency)
+- 10 iterations per measurement (excluding warmup)
+- Release build with `--features google-books`
+
+---
+
+## Experiment 1: Parallel Tree Reduction for FrequencyCounts
+
+### Formal Basis
+- **Proof**: `FrequencyCountsMerge.v` proves `merge_associative` and `merge_commutative`
+- **Implication**: Any reduction order produces identical results (commutative monoid)
+
+### Hypothesis
+Replacing shared atomic counters with thread-local accumulation + parallel tree reduction will reduce cache-line contention and improve throughput by 2-5x.
+
+### Methodology
+1. Baseline: Current `AtomicFrequencyCounts` with shared atomic fetch_add
+2. Treatment: Thread-local `FrequencyCounts` + `par_iter().reduce()`
+3. Metric: Time to compute frequency counts across all shards
+
+### Baseline Results
+```
+Benchmark: mkn_frequency_counts/compute (criterion, 100 samples)
+Date: 2026-01-20
+
+1000 n-grams:  474.05 - 477.26 µs (mean: 475.61 µs)
+5000 n-grams:  524.15 - 526.76 µs (mean: 525.47 µs)
+10000 n-grams: 525.41 - 528.28 µs (mean: 526.80 µs)
+
+Note: Times are relatively flat because setup (shard iteration) dominates.
+The atomic contention is visible in the close grouping at higher n-gram counts.
+```
+
+### Treatment Results
+```
+Benchmark: mkn_frequency_counts/compute (criterion, 100 samples)
+Date: 2026-01-20
+Implementation: Thread-local accumulation + parallel tree reduction
+
+1000 n-grams:  489.75 - 491.72 µs (mean: 490.72 µs)
+5000 n-grams:  537.89 - 542.07 µs (mean: 539.91 µs)
+10000 n-grams: 536.31 - 539.50 µs (mean: 537.92 µs)
+```
+
+### Statistical Analysis
+```
+Comparison (baseline → treatment):
+
+1000 n-grams:  475.61 µs → 490.72 µs  (+3.17% regression)
+5000 n-grams:  525.47 µs → 539.91 µs  (+2.75% regression)
+10000 n-grams: 526.80 µs → 537.92 µs  (+2.11% regression)
+
+All changes show p < 0.05 (statistically significant)
+Direction: REGRESSION (not improvement)
+```
+
+### Analysis
+
+The parallel tree reduction is slower for this benchmark because:
+
+1. **Small dataset**: The test uses 1000-10000 n-grams across few shards
+2. **Low contention**: With few shards, atomic contention is minimal
+3. **Overhead dominates**: Vec allocation per shard + reduce tree overhead > atomic cost
+4. **Break-even point**: Tree reduction benefits when many threads compete on atomics
+
+The formal proof (FrequencyCountsMerge.v) guarantees **correctness**, not performance.
+Tree reduction would likely win with:
+- Millions of n-grams
+- Many more shards (hundreds)
+- Higher thread counts causing significant cache-line bouncing
+
+### Decision
+- [ ] ACCEPTED (p < 0.05, performance improved)
+- [x] REJECTED (p < 0.05 but performance REGRESSED)
+
+### Action
+Revert to atomic implementation. The formal proof remains valid for future use
+when dataset scale justifies the overhead.
+
+### Commit
+```
+[Commit hash to be recorded after revert]
+```
+
+---
+
+## Experiment 2: Bitmap-Based Checkpoint State
+
+### Formal Basis
+- **Proof**: `CheckpointStateMachine.tla` proves `DisjointSets` invariant
+- **Implication**: Each prefix has exactly one state; 2-bit encoding sufficient
+
+### Hypothesis
+Replacing three `Vec<String>` with a 2-bit-per-prefix bitmap will reduce state transition time from O(n) to O(1).
+
+### Methodology
+1. Baseline: Current `Vec<String>` with `retain()` for state transitions
+2. Treatment: `OrderProgressOptimized` with bitmap storage
+3. Metric: Time for 1000 state transitions (start_prefix, complete_prefix, needs_prefix)
+
+### Baseline Results
+```
+[To be filled after baseline measurement]
+```
+
+### Treatment Results
+```
+[To be filled after implementation]
+```
+
+### Statistical Analysis
+```
+[To be filled with t-test results]
+```
+
+### Decision
+- [ ] ACCEPTED (p < 0.05, performance improved)
+- [ ] REJECTED (p >= 0.05 or performance regressed)
+
+### Commit
+```
+[Commit hash to be recorded]
+```
+
+---
+
+## Experiment 3: Conditional Clamping Elision
+
+### Formal Basis
+- **Proof**: `MknStatistics.v` proves `d2_unclamped_upper_bound` and `d3_plus_unclamped_upper_bound`
+- **Implication**: Under Zipf distribution (n1 >= n2 >= n3 >= n4), clamping is unnecessary
+
+### Hypothesis
+Adding a fast path that skips `.max().min()` chains when preconditions hold will marginally improve MKN computation time.
+
+### Methodology
+1. Baseline: Current always-clamp implementation
+2. Treatment: Conditional skip when n1 >= n2 >= n3 >= n4
+3. Metric: Time for 10,000 `DiscountParams::from_counts()` calls
+
+### Baseline Results
+```
+[To be filled after baseline measurement]
+```
+
+### Treatment Results
+```
+[To be filled after implementation]
+```
+
+### Statistical Analysis
+```
+[To be filled with t-test results]
+```
+
+### Decision
+- [ ] ACCEPTED (p < 0.05, performance improved)
+- [ ] REJECTED (p >= 0.05 or performance regressed)
+
+### Commit
+```
+[Commit hash to be recorded]
+```
+
+---
+
+## Summary Table
+
+| Experiment | Baseline (ms) | Treatment (ms) | Change | p-value | Decision |
+|------------|---------------|----------------|--------|---------|----------|
+| 1. Tree Reduction | - | - | - | - | - |
+| 2. Bitmap Checkpoint | - | - | - | - | - |
+| 3. Clamping Elision | - | - | - | - | - |
+
+---
+
+## Lessons Learned
+
+[To be filled after all experiments complete]
