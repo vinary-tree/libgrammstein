@@ -209,13 +209,9 @@ impl DiscountParams {
         // Y = n1 / (n1 + 2*n2)
         let y = n1 / (n1 + 2.0 * n2);
 
-        // D1 = 1 - 2*Y*(n2/n1)
+        // Discount parameters with clamping to valid ranges
         let d1 = (1.0 - 2.0 * y * (n2 / n1)).max(0.0).min(1.0);
-
-        // D2 = 2 - 3*Y*(n3/n2)
         let d2 = (2.0 - 3.0 * y * (n3 / n2)).max(0.0).min(2.0);
-
-        // D3+ = 3 - 4*Y*(n4/n3)
         let d3_plus = (3.0 - 4.0 * y * (n4 / n3)).max(0.0).min(3.0);
 
         Self { d1, d2, d3_plus, y }
