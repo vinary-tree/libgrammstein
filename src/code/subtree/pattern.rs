@@ -292,10 +292,7 @@ pub mod encoding {
 
     /// Compute a hash for a pattern.
     pub fn pattern_hash(nodes: &[PatternNode]) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = gxhash::GxHasher::default();
-        nodes.hash(&mut hasher);
-        hasher.finish()
+        crate::util::hash::safe_hash(Self::encode_pattern(nodes).as_bytes())
     }
 }
 

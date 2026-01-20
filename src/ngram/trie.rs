@@ -4,9 +4,7 @@
 //! using liblevenshtein-rust's dictionary implementations.
 
 use crate::ngram::NgramEntry;
-use gxhash::GxHasher;
 use liblevenshtein::dictionary::MutableMappedDictionary;
-use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -232,21 +230,20 @@ where
 
 /// Fast position-aware hash for n-gram keys.
 ///
-/// Uses GxHash with position encoding to distinguish n-grams with the same
+/// Uses position-aware hashing to distinguish n-grams with the same
 /// tokens in different orders (e.g., ["a", "b"] vs ["b", "a"]).
 ///
 /// Based on MeTTaTron's collision-resistant hashing pattern.
 #[inline]
 pub fn hash_ngram_key(tokens: &[&str]) -> u64 {
+    use crate::util::hash::safe_hash_with_seed;
+
     const GOLDEN_RATIO: u64 = 0x9e3779b97f4a7c15;
     const NGRAM_SEED: u64 = 0x6e6772616d5f7365; // "ngram_se"
 
     let mut hash = NGRAM_SEED;
     for (i, token) in tokens.iter().enumerate() {
-        // Position-aware hashing
-        let mut hasher = GxHasher::with_seed(i as i64);
-        hasher.write(token.as_bytes());
-        let token_hash = hasher.finish();
+        let token_hash = safe_hash_with_seed(token.as_bytes(), i as u64);
         hash = hash.wrapping_add(token_hash).wrapping_mul(GOLDEN_RATIO);
     }
     hash ^ (hash >> 32)

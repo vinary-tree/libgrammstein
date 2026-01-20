@@ -364,10 +364,7 @@ impl EmbeddingCache {
 
     /// Hash text for cache key.
     fn hash_text(text: &str) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = gxhash::GxHasher::default();
-        text.hash(&mut hasher);
-        hasher.finish()
+        crate::util::hash::safe_hash(text.as_bytes())
     }
 }
 

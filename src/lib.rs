@@ -67,6 +67,7 @@ pub mod generation;
 pub mod hybrid;
 pub mod ngram;
 pub mod scoring;
+pub mod util;
 
 #[cfg(feature = "lling-llang-integration")]
 pub mod integration;

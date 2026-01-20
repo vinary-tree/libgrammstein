@@ -38,7 +38,7 @@ parking_lot = "0.12"
 crossbeam-channel = "0.5"
 
 # Hashing (collision reduction from MeTTaTron)
-gxhash = "3.4"
+gxhash = "3.5"
 
 # Caching
 lru = "0.12"

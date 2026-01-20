@@ -25,9 +25,8 @@
 //! ```
 
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
 
-use gxhash::{GxBuildHasher, GxHasher};
+use gxhash::GxBuildHasher;
 
 /// Deduplication mode.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -93,9 +92,14 @@ impl MinHashSignature {
     }
 
     /// Hash a value with a seed to create different hash functions.
+    ///
+    /// Uses standard library hasher to avoid gxhash's SIMD buffer overflows
+    /// when hashing small inputs (u64 is only 8 bytes).
     fn hash_with_seed(value: u64, seed: u64) -> u64 {
-        let mut hasher = GxHasher::with_seed(seed as i64);
-        value.hash(&mut hasher);
+        use std::hash::{DefaultHasher, Hasher};
+        let mut hasher = DefaultHasher::new();
+        hasher.write_u64(seed);
+        hasher.write_u64(value);
         hasher.finish()
     }
 
@@ -262,11 +266,9 @@ impl Deduplicator {
         true
     }
 
-    /// Hash a string using GxHash.
+    /// Hash a string using safe_hash (gxhash for long strings, FNV-1a for short).
     fn hash_string(s: &str) -> u64 {
-        let mut hasher = GxHasher::with_seed(0);
-        s.hash(&mut hasher);
-        hasher.finish()
+        crate::util::hash::safe_hash(s.as_bytes())
     }
 
     /// Normalize a sentence for comparison.

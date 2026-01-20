@@ -318,12 +318,22 @@ impl CodeEmbeddingCache {
         self.cache.is_empty()
     }
 
+    /// Compute a cache key for code and language.
     fn compute_key(&self, code: &str, language: CodeLanguage) -> u64 {
+        use crate::util::hash::{fnv1a, GXHASH_MIN_SIZE};
         use std::hash::{Hash, Hasher};
-        let mut hasher = gxhash::GxHasher::default();
-        code.hash(&mut hasher);
-        language.hash(&mut hasher);
-        hasher.finish()
+
+        if code.len() >= GXHASH_MIN_SIZE {
+            let mut hasher = gxhash::GxHasher::default();
+            code.hash(&mut hasher);
+            language.hash(&mut hasher);
+            hasher.finish()
+        } else {
+            // FNV-1a for short code, mix in language discriminant
+            let mut hash = fnv1a(code.as_bytes());
+            hash ^= language as u64;
+            hash.wrapping_mul(0x100000001b3) // FNV_PRIME
+        }
     }
 }
 

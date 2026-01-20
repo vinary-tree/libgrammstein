@@ -6,10 +6,10 @@
 use std::collections::HashMap;
 
 use dashmap::DashMap;
-use gxhash::GxBuildHasher;
 use rayon::prelude::*;
 
 use super::types::{DictionaryStats, WordEntry};
+use crate::util::hash::SafeGxBuildHasher;
 
 /// Configuration for word extraction.
 #[derive(Debug, Clone)]
@@ -44,7 +44,7 @@ impl Default for ExtractionConfig {
 /// parallel corpus processing.
 pub struct WordExtractor {
     /// Word counts.
-    counts: DashMap<String, u64, GxBuildHasher>,
+    counts: DashMap<String, u64, SafeGxBuildHasher>,
     /// Configuration.
     config: ExtractionConfig,
     /// Total tokens seen.
@@ -62,7 +62,7 @@ impl WordExtractor {
     /// Create a new word extractor with custom configuration.
     pub fn with_config(config: ExtractionConfig) -> Self {
         Self {
-            counts: DashMap::with_hasher(GxBuildHasher::default()),
+            counts: DashMap::with_hasher(SafeGxBuildHasher::default()),
             config,
             total_tokens: std::sync::atomic::AtomicU64::new(0),
             sentences_processed: std::sync::atomic::AtomicUsize::new(0),
