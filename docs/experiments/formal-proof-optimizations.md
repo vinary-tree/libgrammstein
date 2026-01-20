@@ -112,31 +112,99 @@ Replacing three `Vec<String>` with a 2-bit-per-prefix bitmap will reduce state t
 
 ### Methodology
 1. Baseline: Current `Vec<String>` with `retain()` for state transitions
-2. Treatment: `OrderProgressOptimized` with bitmap storage
-3. Metric: Time for 1000 state transitions (start_prefix, complete_prefix, needs_prefix)
+2. Treatment: HashMap<String, PrefixState> for O(1) state lookup/transition
+3. Metric: Time for state transitions and needs_prefix lookups across all prefixes
 
 ### Baseline Results
 ```
-[To be filled after baseline measurement]
+Benchmark: checkpoint_ops (criterion, 100 samples)
+Date: 2026-01-20
+
+State Transitions (start -> complete for all prefixes):
+- Order 1 (26 prefixes):  6.57 µs
+- Order 2 (676 prefixes): 3.22 ms
+- Order 3 (676 prefixes): 3.12 ms
+
+Needs Prefix Lookup (all prefixes, half completed):
+- Order 1 (26 prefixes):  1.71 µs
+- Order 2 (676 prefixes): 729.19 µs
+- Order 3 (676 prefixes): 688.79 µs
+
+Mixed Operations (676 prefixes simulation):
+- Import simulation: 2.88 ms
+
+Sparse Remaining (95% completed, find remaining):
+- 676 prefixes, 33 remaining: 978.93 µs
+
+Note: Order 2/3 with 676 prefixes shows O(n²) behavior due to
+repeated Vec::contains() and Vec::retain() operations.
 ```
 
 ### Treatment Results
 ```
-[To be filled after implementation]
+Benchmark: checkpoint_ops (criterion, 100 samples)
+Date: 2026-01-20
+Implementation: HashMap<String, PrefixState> replacing three Vec<String>
+
+State Transitions (start -> complete for all prefixes):
+- Order 1 (26 prefixes):  6.32 µs
+- Order 2 (676 prefixes): 148.06 µs (was 3.22 ms)
+- Order 3 (676 prefixes): 147.80 µs (was 3.12 ms)
+
+Needs Prefix Lookup (all prefixes, half completed):
+- Order 1 (26 prefixes):  1.19 µs
+- Order 2 (676 prefixes): 33.38 µs (was 729 µs)
+- Order 3 (676 prefixes): 32.65 µs (was 689 µs)
+
+Mixed Operations (676 prefixes simulation):
+- Import simulation: 194.28 µs (was 2.88 ms)
+
+Sparse Remaining (95% completed, find remaining):
+- 676 prefixes, 33 remaining: 35.93 µs (was 979 µs)
 ```
 
 ### Statistical Analysis
 ```
-[To be filled with t-test results]
+All comparisons (criterion, Welch's t-test):
+
+State Transitions:
+- Order 2: 3.22 ms → 148 µs (-95.3%, p = 0.00)
+- Order 3: 3.12 ms → 148 µs (-95.3%, p = 0.00)
+
+Needs Prefix Lookups:
+- Order 1:  1.71 µs → 1.19 µs  (-31%, p = 0.00)
+- Order 2:  729 µs  → 33.4 µs  (-95.4%, p = 0.00)
+- Order 3:  689 µs  → 32.7 µs  (-95.2%, p = 0.00)
+
+Mixed Operations: 2.88 ms → 194 µs (-93.3%, p = 0.00)
+Sparse Remaining: 979 µs  → 35.9 µs (-96.3%, p = 0.00)
+
+All changes statistically significant (p < 0.05)
 ```
 
+### Analysis
+
+The HashMap optimization delivers massive performance improvements:
+
+1. **O(1) vs O(n) complexity**: Replaced Vec::contains() and Vec::retain()
+   with HashMap::get() and HashMap::insert()
+2. **No allocation overhead**: State changes are in-place HashMap updates
+   instead of creating/resizing Vecs
+3. **Cache efficiency**: HashMap provides better locality for lookups
+4. **TLA+ DisjointSets invariant**: Guarantees each prefix has exactly one
+   state, making HashMap semantically correct
+
+The 95%+ improvement for 676-prefix operations validates that the O(n²)
+behavior of repeated Vec::contains() was the bottleneck. Order 1 with
+only 26 prefixes shows smaller (31%) improvement as expected.
+
 ### Decision
-- [ ] ACCEPTED (p < 0.05, performance improved)
+- [x] ACCEPTED (p < 0.05, performance improved)
 - [ ] REJECTED (p >= 0.05 or performance regressed)
 
 ### Commit
 ```
-[Commit hash to be recorded]
+[To be recorded after commit]
 ```
 
 ---
@@ -183,11 +251,11 @@ Adding a fast path that skips `.max().min()` chains when preconditions hold will
 
 ## Summary Table
 
-| Experiment | Baseline (ms) | Treatment (ms) | Change | p-value | Decision |
-|------------|---------------|----------------|--------|---------|----------|
-| 1. Tree Reduction | - | - | - | - | - |
-| 2. Bitmap Checkpoint | - | - | - | - | - |
-| 3. Clamping Elision | - | - | - | - | - |
+| Experiment | Baseline | Treatment | Change | p-value | Decision |
+|------------|----------|-----------|--------|---------|----------|
+| 1. Tree Reduction | 526.80 µs | 537.92 µs | +2.1% | <0.05 | REJECTED |
+| 2. HashMap Checkpoint | 2.88 ms | 194 µs | -93.3% | <0.05 | **ACCEPTED** |
+| 3. Clamping Elision | - | - | - | - | PENDING |
 
 ---
 

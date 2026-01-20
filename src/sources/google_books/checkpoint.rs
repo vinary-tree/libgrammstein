@@ -7,13 +7,35 @@
 //!
 //! - **Version 1**: Single-order tracking with `current_order` and `completed_prefixes`
 //! - **Version 2**: Per-order tracking with `order_progress` HashMap for overlapping order processing
+//!
+//! ## Performance Optimization
+//!
+//! The `CheckpointStateMachine.tla` proof establishes the `DisjointSets` invariant:
+//! each prefix has exactly one state at any time. This enables O(1) state lookups
+//! using a HashMap instead of O(n) Vec searches. The optimization maintains
+//! backward-compatible JSON serialization.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
+
+/// State of a prefix in the checkpoint.
+///
+/// The TLA+ `DisjointSets` invariant proves each prefix is in exactly one state.
+/// This enables O(1) lookups via HashMap<String, PrefixState> instead of
+/// O(n) Vec::contains() on three separate vectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrefixState {
+    /// Prefix is currently being processed.
+    InProgress,
+    /// Prefix has been successfully processed.
+    Completed,
+    /// Prefix failed after exhausting retries.
+    Failed,
+}
 
 /// Progress tracking for a single n-gram order.
 ///
@@ -24,44 +46,137 @@ use std::path::Path;
 /// ## Prefix States
 ///
 /// A prefix can be in one of four states:
-/// - **Not started**: Not in any list (needs processing)
-/// - **In progress**: In `in_progress_prefixes` (started but not finished)
-/// - **Completed**: In `completed_prefixes` (successfully processed)
-/// - **Failed**: In `failed_prefixes` (failed after exhausting retries)
+/// - **Not started**: Not in the state map (needs processing)
+/// - **In progress**: `PrefixState::InProgress` (started but not finished)
+/// - **Completed**: `PrefixState::Completed` (successfully processed)
+/// - **Failed**: `PrefixState::Failed` (failed after exhausting retries)
 ///
 /// On resume:
 /// - Completed prefixes are skipped
 /// - In-progress prefixes are cleared and retried (data may be partial)
 /// - Failed prefixes are retried on subsequent runs
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+///
+/// ## Implementation Note
+///
+/// Uses HashMap<String, PrefixState> internally for O(1) state lookups.
+/// The TLA+ `DisjointSets` invariant guarantees each prefix has exactly
+/// one state, making this representation sound.
+/// JSON serialization uses Vec format for backward compatibility.
+#[derive(Clone, Debug, Default)]
 pub struct OrderProgress {
-    /// Completed prefix files for this order.
+    /// Map from prefix to its current state.
     ///
-    /// For 1-grams: ["a", "b", "c", ...]
-    /// For 2-5 grams: ["aa", "ab", "ac", ...]
-    pub completed_prefixes: Vec<String>,
-
-    /// Prefixes that started processing but didn't complete.
-    ///
-    /// On crash recovery, these prefixes have potentially partial data
-    /// in the trie. They should be cleared and retried to ensure
-    /// data integrity and prevent double-counting.
-    #[serde(default)]
-    pub in_progress_prefixes: Vec<String>,
-
-    /// Prefixes that failed after exhausting all retries.
-    ///
-    /// These are skipped with warnings on the current run but will be
-    /// retried on subsequent runs. Permanently failed prefixes should
-    /// be manually removed if they can never succeed.
-    #[serde(default)]
-    pub failed_prefixes: Vec<String>,
+    /// Prefixes not in the map are in "NotStarted" state.
+    /// This provides O(1) state lookup instead of O(n) Vec::contains().
+    prefix_states: HashMap<String, PrefixState>,
 
     /// Whether this order is fully complete (all prefixes processed).
     pub is_complete: bool,
 
     /// N-grams processed for this order.
     pub ngrams_processed: u64,
+}
+
+impl OrderProgress {
+    /// Get all completed prefixes.
+    pub fn completed_prefixes(&self) -> impl Iterator<Item = &String> {
+        self.prefix_states.iter()
+            .filter(|(_, s)| **s == PrefixState::Completed)
+            .map(|(p, _)| p)
+    }
+
+    /// Get all in-progress prefixes.
+    pub fn in_progress_prefixes(&self) -> impl Iterator<Item = &String> {
+        self.prefix_states.iter()
+            .filter(|(_, s)| **s == PrefixState::InProgress)
+            .map(|(p, _)| p)
+    }
+
+    /// Get all failed prefixes.
+    pub fn failed_prefixes(&self) -> impl Iterator<Item = &String> {
+        self.prefix_states.iter()
+            .filter(|(_, s)| **s == PrefixState::Failed)
+            .map(|(p, _)| p)
+    }
+
+    /// Get the state of a prefix.
+    pub fn get_state(&self, prefix: &str) -> Option<PrefixState> {
+        self.prefix_states.get(prefix).copied()
+    }
+
+    /// Set the state of a prefix.
+    pub fn set_state(&mut self, prefix: String, state: PrefixState) {
+        self.prefix_states.insert(prefix, state);
+    }
+
+    /// Remove a prefix from tracking (return to NotStarted).
+    pub fn clear_state(&mut self, prefix: &str) {
+        self.prefix_states.remove(prefix);
+    }
+
+    /// Count prefixes in a given state.
+    pub fn count_state(&self, state: PrefixState) -> usize {
+        self.prefix_states.values().filter(|s| **s == state).count()
+    }
+}
+
+/// Serialization helper for backward-compatible JSON format.
+#[derive(Serialize, Deserialize)]
+struct OrderProgressSerde {
+    completed_prefixes: Vec<String>,
+    #[serde(default)]
+    in_progress_prefixes: Vec<String>,
+    #[serde(default)]
+    failed_prefixes: Vec<String>,
+    is_complete: bool,
+    ngrams_processed: u64,
+}
+
+impl Serialize for OrderProgress {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let serde_repr = OrderProgressSerde {
+            completed_prefixes: self.completed_prefixes().cloned().collect(),
+            in_progress_prefixes: self.in_progress_prefixes().cloned().collect(),
+            failed_prefixes: self.failed_prefixes().cloned().collect(),
+            is_complete: self.is_complete,
+            ngrams_processed: self.ngrams_processed,
+        };
+        serde_repr.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OrderProgress {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let serde_repr = OrderProgressSerde::deserialize(deserializer)?;
+
+        let mut prefix_states = HashMap::with_capacity(
+            serde_repr.completed_prefixes.len()
+                + serde_repr.in_progress_prefixes.len()
+                + serde_repr.failed_prefixes.len(),
+        );
+
+        for prefix in serde_repr.completed_prefixes {
+            prefix_states.insert(prefix, PrefixState::Completed);
+        }
+        for prefix in serde_repr.in_progress_prefixes {
+            prefix_states.insert(prefix, PrefixState::InProgress);
+        }
+        for prefix in serde_repr.failed_prefixes {
+            prefix_states.insert(prefix, PrefixState::Failed);
+        }
+
+        Ok(OrderProgress {
+            prefix_states,
+            is_complete: serde_repr.is_complete,
+            ngrams_processed: serde_repr.ngrams_processed,
+        })
+    }
 }
 
 /// Import checkpoint for resume support.
@@ -238,30 +353,26 @@ impl ImportCheckpoint {
         // Mark completed orders as complete with empty prefixes
         // (we don't have the prefix list, but they're done)
         for order in v1.completed_orders {
-            order_progress.insert(
-                order,
-                OrderProgress {
-                    completed_prefixes: Vec::new(),
-                    in_progress_prefixes: Vec::new(),
-                    failed_prefixes: Vec::new(),
-                    is_complete: true,
-                    ngrams_processed: 0, // We don't have per-order stats in v1
-                },
-            );
+            let progress = OrderProgress {
+                prefix_states: HashMap::new(),
+                is_complete: true,
+                ngrams_processed: 0, // We don't have per-order stats in v1
+            };
+            order_progress.insert(order, progress);
         }
 
         // Add current order's progress (if it has any completed prefixes)
         if !v1.completed_prefixes.is_empty() || v1.current_prefix.is_some() {
-            order_progress.insert(
-                v1.current_order,
-                OrderProgress {
-                    completed_prefixes: v1.completed_prefixes,
-                    in_progress_prefixes: Vec::new(),
-                    failed_prefixes: Vec::new(),
-                    is_complete: false,
-                    ngrams_processed: 0,
-                },
-            );
+            let mut prefix_states = HashMap::with_capacity(v1.completed_prefixes.len());
+            for prefix in v1.completed_prefixes {
+                prefix_states.insert(prefix, PrefixState::Completed);
+            }
+            let progress = OrderProgress {
+                prefix_states,
+                is_complete: false,
+                ngrams_processed: 0,
+            };
+            order_progress.insert(v1.current_order, progress);
         }
 
         Self {
@@ -311,33 +422,25 @@ impl ImportCheckpoint {
     /// This should be called BEFORE any n-grams are written to the trie,
     /// and the checkpoint should be saved immediately. This allows crash
     /// recovery to detect partial data.
+    ///
+    /// O(1) operation due to HashMap-based state storage (TLA+ DisjointSets invariant).
     pub fn start_prefix(&mut self, order: u8, prefix: &str) {
         let progress = self.order_progress.entry(order).or_default();
-        let prefix_str = prefix.to_string();
-
-        // Ensure not already in any list
-        progress.completed_prefixes.retain(|p| p != &prefix_str);
-        progress.failed_prefixes.retain(|p| p != &prefix_str);
-
-        if !progress.in_progress_prefixes.contains(&prefix_str) {
-            progress.in_progress_prefixes.push(prefix_str);
-        }
+        // DisjointSets invariant: prefix can only be in one state
+        // HashMap insert replaces any existing state
+        progress.set_state(prefix.to_string(), PrefixState::InProgress);
     }
 
     /// Mark a prefix as completed for a specific order.
     ///
     /// Moves the prefix from in_progress to completed.
     /// This is the v2 version that supports overlapping order processing.
+    ///
+    /// O(1) operation due to HashMap-based state storage (TLA+ DisjointSets invariant).
     pub fn complete_prefix(&mut self, order: u8, prefix: &str) {
         let progress = self.order_progress.entry(order).or_default();
-        let prefix_str = prefix.to_string();
-
-        // Move from in_progress to completed
-        progress.in_progress_prefixes.retain(|p| p != &prefix_str);
-
-        if !progress.completed_prefixes.contains(&prefix_str) {
-            progress.completed_prefixes.push(prefix_str);
-        }
+        // DisjointSets invariant: HashMap insert replaces any existing state
+        progress.set_state(prefix.to_string(), PrefixState::Completed);
         self.stats.files_processed += 1;
     }
 
@@ -346,38 +449,45 @@ impl ImportCheckpoint {
     /// Moves the prefix from in_progress to failed.
     /// Failed prefixes are skipped on the current run but will be
     /// retried on subsequent runs.
+    ///
+    /// O(1) operation due to HashMap-based state storage (TLA+ DisjointSets invariant).
     pub fn fail_prefix(&mut self, order: u8, prefix: &str) {
         let progress = self.order_progress.entry(order).or_default();
-        let prefix_str = prefix.to_string();
-
-        // Move from in_progress to failed
-        progress.in_progress_prefixes.retain(|p| p != &prefix_str);
-
-        if !progress.failed_prefixes.contains(&prefix_str) {
-            progress.failed_prefixes.push(prefix_str);
-        }
+        // DisjointSets invariant: HashMap insert replaces any existing state
+        progress.set_state(prefix.to_string(), PrefixState::Failed);
     }
 
     /// Clear a prefix from the failed list (for retry on subsequent run).
+    ///
+    /// O(1) operation due to HashMap-based state storage.
     pub fn clear_failed(&mut self, order: u8, prefix: &str) {
         if let Some(progress) = self.order_progress.get_mut(&order) {
-            progress.failed_prefixes.retain(|p| p != prefix);
+            // Only clear if currently Failed (don't disturb other states)
+            if progress.get_state(prefix) == Some(PrefixState::Failed) {
+                progress.clear_state(prefix);
+            }
         }
     }
 
     /// Check if a prefix is currently marked as in-progress.
+    ///
+    /// O(1) operation due to HashMap-based state storage.
     pub fn is_in_progress(&self, order: u8, prefix: &str) -> bool {
         self.order_progress
             .get(&order)
-            .map(|p| p.in_progress_prefixes.contains(&prefix.to_string()))
+            .and_then(|p| p.get_state(prefix))
+            .map(|s| s == PrefixState::InProgress)
             .unwrap_or(false)
     }
 
     /// Check if a prefix has failed (exhausted retries).
+    ///
+    /// O(1) operation due to HashMap-based state storage.
     pub fn is_failed_prefix(&self, order: u8, prefix: &str) -> bool {
         self.order_progress
             .get(&order)
-            .map(|p| p.failed_prefixes.contains(&prefix.to_string()))
+            .and_then(|p| p.get_state(prefix))
+            .map(|s| s == PrefixState::Failed)
             .unwrap_or(false)
     }
 
@@ -387,7 +497,7 @@ impl ImportCheckpoint {
     pub fn in_progress_prefixes(&self, order: u8) -> Vec<String> {
         self.order_progress
             .get(&order)
-            .map(|p| p.in_progress_prefixes.clone())
+            .map(|p| p.in_progress_prefixes().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -397,7 +507,7 @@ impl ImportCheckpoint {
     pub fn failed_prefixes(&self, order: u8) -> Vec<String> {
         self.order_progress
             .get(&order)
-            .map(|p| p.failed_prefixes.clone())
+            .map(|p| p.failed_prefixes().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -407,19 +517,21 @@ impl ImportCheckpoint {
     /// The caller should clear partial data from the trie before retrying.
     pub fn recover_in_progress_as_failed(&mut self, order: u8) {
         if let Some(progress) = self.order_progress.get_mut(&order) {
-            for prefix in progress.in_progress_prefixes.drain(..) {
-                if !progress.failed_prefixes.contains(&prefix) {
-                    progress.failed_prefixes.push(prefix);
-                }
+            // Collect in-progress prefixes first to avoid borrow conflicts
+            let in_progress: Vec<String> = progress.in_progress_prefixes().cloned().collect();
+            for prefix in in_progress {
+                progress.set_state(prefix, PrefixState::Failed);
             }
         }
     }
 
     /// Get count of failed prefixes for an order.
+    ///
+    /// O(n) where n is number of tracked prefixes for this order.
     pub fn failed_prefix_count(&self, order: u8) -> usize {
         self.order_progress
             .get(&order)
-            .map(|p| p.failed_prefixes.len())
+            .map(|p| p.count_state(PrefixState::Failed))
             .unwrap_or(0)
     }
 
@@ -427,7 +539,7 @@ impl ImportCheckpoint {
     pub fn total_failed_prefix_count(&self) -> usize {
         self.order_progress
             .values()
-            .map(|p| p.failed_prefixes.len())
+            .map(|p| p.count_state(PrefixState::Failed))
             .sum()
     }
 
@@ -457,10 +569,11 @@ impl ImportCheckpoint {
         // TLA+ invariant: CompletedOrderNoInProgress
         // order_complete[o] => in_progress_prefixes[o] = {}
         if let Some(progress) = self.order_progress.get(&order) {
-            if !progress.in_progress_prefixes.is_empty() {
+            let in_progress_count = progress.count_state(PrefixState::InProgress);
+            if in_progress_count > 0 {
                 return Err(CheckpointError::OrderHasInProgressPrefixes {
                     order,
-                    count: progress.in_progress_prefixes.len(),
+                    count: in_progress_count,
                 });
             }
         }
@@ -479,14 +592,21 @@ impl ImportCheckpoint {
     /// Note: In-progress prefixes are excluded because they need special
     /// handling (clear partial data before retry). Use `in_progress_prefixes()`
     /// to get the list of prefixes that need recovery.
+    ///
+    /// O(1) operation due to HashMap-based state storage (TLA+ DisjointSets invariant).
     pub fn needs_prefix(&self, order: u8, prefix: &str) -> bool {
         self.order_progress
             .get(&order)
             .map(|p| {
-                let prefix_str = prefix.to_string();
-                !p.is_complete
-                    && !p.completed_prefixes.contains(&prefix_str)
-                    && !p.in_progress_prefixes.contains(&prefix_str)
+                if p.is_complete {
+                    return false;
+                }
+                match p.get_state(prefix) {
+                    None => true,           // Not started - needs processing
+                    Some(PrefixState::Failed) => true,  // Failed - retry
+                    Some(PrefixState::Completed) => false,
+                    Some(PrefixState::InProgress) => false,
+                }
             })
             .unwrap_or(true) // If no progress recorded, needs processing
     }
@@ -503,7 +623,7 @@ impl ImportCheckpoint {
     pub fn completed_prefix_count(&self, order: u8) -> usize {
         self.order_progress
             .get(&order)
-            .map(|p| p.completed_prefixes.len())
+            .map(|p| p.count_state(PrefixState::Completed))
             .unwrap_or(0)
     }
 
@@ -511,7 +631,7 @@ impl ImportCheckpoint {
     pub fn total_completed_prefix_count(&self) -> usize {
         self.order_progress
             .values()
-            .map(|p| p.completed_prefixes.len())
+            .map(|p| p.count_state(PrefixState::Completed))
             .sum()
     }
 
@@ -548,7 +668,7 @@ impl ImportCheckpoint {
             .order_progress
             .iter()
             .filter(|(_, p)| !p.is_complete)
-            .map(|(order, p)| format!("{}:{}", order, p.completed_prefixes.len()))
+            .map(|(order, p)| format!("{}:{}", order, p.count_state(PrefixState::Completed)))
             .collect();
 
         let failed_count = self.total_failed_prefix_count();
@@ -804,24 +924,15 @@ impl ImportCheckpoint {
                 keys_written += 1;
             }
 
-            // Store prefix statuses
-            for prefix in &progress.completed_prefixes {
+            // Store prefix statuses (using HashMap directly)
+            for (prefix, state) in progress.prefix_states.iter() {
                 let key = format!("{}{}:{}", CHECKPOINT_PREFIX_KEY_PREFIX, order, prefix);
-                trie.store_checkpoint_u64(&key, PrefixStatusCode::Completed as u64)
-                    .map_err(|e| CheckpointError::Trie(e.to_string()))?;
-                keys_written += 1;
-            }
-
-            for prefix in &progress.in_progress_prefixes {
-                let key = format!("{}{}:{}", CHECKPOINT_PREFIX_KEY_PREFIX, order, prefix);
-                trie.store_checkpoint_u64(&key, PrefixStatusCode::InProgress as u64)
-                    .map_err(|e| CheckpointError::Trie(e.to_string()))?;
-                keys_written += 1;
-            }
-
-            for prefix in &progress.failed_prefixes {
-                let key = format!("{}{}:{}", CHECKPOINT_PREFIX_KEY_PREFIX, order, prefix);
-                trie.store_checkpoint_u64(&key, PrefixStatusCode::Failed as u64)
+                let status_code = match state {
+                    PrefixState::Completed => PrefixStatusCode::Completed as u64,
+                    PrefixState::InProgress => PrefixStatusCode::InProgress as u64,
+                    PrefixState::Failed => PrefixStatusCode::Failed as u64,
+                };
+                trie.store_checkpoint_u64(&key, status_code)
                     .map_err(|e| CheckpointError::Trie(e.to_string()))?;
                 keys_written += 1;
             }
@@ -939,30 +1050,32 @@ impl ImportCheckpoint {
                 .iter_checkpoint_prefix(&prefix_key_prefix)
                 .map_err(|e| CheckpointError::Trie(e.to_string()))?;
 
-            let mut completed = Vec::new();
-            let mut in_progress = Vec::new();
-            let mut failed = Vec::new();
+            let mut prefix_states = HashMap::new();
 
             for (key, status_code) in prefix_entries {
                 // Extract prefix from key (after "...:order:prefix")
                 if let Some(prefix) = key.strip_prefix(&prefix_key_prefix) {
                     match PrefixStatusCode::from_u64(status_code) {
-                        Some(PrefixStatusCode::Completed) => completed.push(prefix.to_string()),
-                        Some(PrefixStatusCode::InProgress) => in_progress.push(prefix.to_string()),
-                        Some(PrefixStatusCode::Failed) => failed.push(prefix.to_string()),
+                        Some(PrefixStatusCode::Completed) => {
+                            prefix_states.insert(prefix.to_string(), PrefixState::Completed);
+                        }
+                        Some(PrefixStatusCode::InProgress) => {
+                            prefix_states.insert(prefix.to_string(), PrefixState::InProgress);
+                        }
+                        Some(PrefixStatusCode::Failed) => {
+                            prefix_states.insert(prefix.to_string(), PrefixState::Failed);
+                        }
                         None => {}
                     }
                 }
             }
 
             // Only add order if it has any data
-            if is_complete || !completed.is_empty() || !in_progress.is_empty() || !failed.is_empty() {
+            if is_complete || !prefix_states.is_empty() {
                 order_progress.insert(
                     order,
                     OrderProgress {
-                        completed_prefixes: completed,
-                        in_progress_prefixes: in_progress,
-                        failed_prefixes: failed,
+                        prefix_states,
                         is_complete,
                         ngrams_processed: ngrams_by_order[order as usize - 1],
                     },
@@ -1313,7 +1426,10 @@ mod tests {
         // Starting it again should move it back to in_progress
         cp.start_prefix(2, "aa");
         assert!(cp.is_in_progress(2, "aa"));
-        assert!(!cp.order_progress.get(&2).unwrap().completed_prefixes.contains(&"aa".to_string()));
+        // Verify it's no longer in Completed state
+        let progress = cp.order_progress.get(&2).unwrap();
+        assert_eq!(progress.get_state("aa"), Some(PrefixState::InProgress));
+        assert_eq!(progress.count_state(PrefixState::Completed), 0);
     }
 
     #[test]

@@ -322,3 +322,8 @@ harness = false
 name = "mkn_frequency_counts"
 harness = false
 required-features = ["google-books"]
+
+[[bench]]
+name = "checkpoint_ops"
+harness = false
+required-features = ["google-books"]
