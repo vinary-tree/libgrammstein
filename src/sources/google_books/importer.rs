@@ -1643,7 +1643,7 @@ impl GoogleBooksImporter {
                 }
             }
 
-            self.checkpoint.complete_order(order);
+            self.checkpoint.complete_order(order)?;
             self.save_checkpoint()?;
         }
 
@@ -1744,7 +1744,7 @@ impl GoogleBooksImporter {
 
             if pending_prefixes.is_empty() {
                 log::info!("Order {} already complete", order);
-                self.checkpoint.complete_order(order);
+                self.checkpoint.complete_order(order)?;
                 continue;
             }
 
@@ -1966,7 +1966,7 @@ impl GoogleBooksImporter {
             self.unique_ngrams
                 .store(unique_ngrams.load(Ordering::Relaxed), Ordering::Relaxed);
 
-            self.checkpoint.complete_order(order);
+            self.checkpoint.complete_order(order)?;
             self.save_checkpoint()?;
         }
 
@@ -2118,7 +2118,7 @@ impl GoogleBooksImporter {
 
             if pending_count == 0 {
                 log::info!("Order {} already complete", order);
-                self.checkpoint.complete_order(order);
+                self.checkpoint.complete_order(order)?;
                 continue;
             }
 
@@ -2683,7 +2683,7 @@ impl GoogleBooksImporter {
 
                     // Check if order is now complete
                     if is_order_complete && !self.checkpoint.is_order_complete(result_order) {
-                        self.checkpoint.complete_order(result_order);
+                        self.checkpoint.complete_order(result_order)?;
                         let order_duration = order_start_times
                             .get(&result_order)
                             .map(|t| t.elapsed())

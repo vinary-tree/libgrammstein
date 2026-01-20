@@ -442,10 +442,32 @@ impl ImportCheckpoint {
     ///
     /// Unlike v1, this does NOT clear the completed_prefixes - they're kept
     /// for resume verification and debugging.
-    pub fn complete_order(&mut self, order: u8) {
+    ///
+    /// # Errors
+    ///
+    /// Returns `CheckpointError::OrderHasInProgressPrefixes` if any prefixes
+    /// for this order are still in progress. This enforces the TLA+ invariant:
+    /// `order_complete[o] => in_progress_prefixes[o] = {}`
+    ///
+    /// # Precondition
+    ///
+    /// All prefixes for this order must be either completed or failed (not in progress).
+    /// Call `complete_prefix()` or `fail_prefix()` for all in-progress prefixes first.
+    pub fn complete_order(&mut self, order: u8) -> Result<(), CheckpointError> {
+        // TLA+ invariant: CompletedOrderNoInProgress
+        // order_complete[o] => in_progress_prefixes[o] = {}
+        if let Some(progress) = self.order_progress.get(&order) {
+            if !progress.in_progress_prefixes.is_empty() {
+                return Err(CheckpointError::OrderHasInProgressPrefixes {
+                    order,
+                    count: progress.in_progress_prefixes.len(),
+                });
+            }
+        }
         let progress = self.order_progress.entry(order).or_default();
         progress.is_complete = true;
         // Don't clear completed_prefixes - keep for resume verification
+        Ok(())
     }
 
     /// Check if a specific prefix needs processing.
@@ -572,6 +594,13 @@ pub enum CheckpointError {
     /// Trie operation failed.
     #[error("Trie error: {0}")]
     Trie(String),
+
+    /// Cannot complete order with in-progress prefixes.
+    ///
+    /// TLA+ invariant: `order_complete[o] => in_progress_prefixes[o] = {}`
+    /// An order cannot be marked complete while any prefixes are still in progress.
+    #[error("Cannot complete order {order}: {count} prefixes still in progress")]
+    OrderHasInProgressPrefixes { order: u8, count: usize },
 }
 
 // =============================================================================
@@ -1052,7 +1081,7 @@ mod tests {
         let path = dir.path().join("test.checkpoint.json");
 
         let mut cp = ImportCheckpoint::new();
-        cp.complete_order(1); // Mark order 1 as complete
+        cp.complete_order(1).expect("no in-progress prefixes for order 1"); // Mark order 1 as complete
         cp.complete_prefix(2, "aa"); // Order 2 has prefix "aa" done
         cp.add_ngrams(2, 12345);
 
@@ -1085,7 +1114,7 @@ mod tests {
         assert!(cp.needs_prefix(2, "ac"));
 
         // Mark order 2 as complete - now all prefixes are "done"
-        cp.complete_order(2);
+        cp.complete_order(2).expect("no in-progress prefixes for order 2");
         assert!(!cp.needs_prefix(2, "ac"));
         assert!(!cp.needs_prefix(2, "zz"));
     }
@@ -1107,11 +1136,33 @@ mod tests {
         cp.complete_prefix(1, "a");
         cp.complete_prefix(1, "b");
 
-        cp.complete_order(1);
+        cp.complete_order(1).expect("no in-progress prefixes for order 1");
 
         assert!(cp.is_order_complete(1));
         // v2: Prefixes are NOT cleared, kept for verification
         assert_eq!(cp.completed_prefix_count(1), 2);
+    }
+
+    #[test]
+    fn test_complete_order_with_in_progress_fails() {
+        let mut cp = ImportCheckpoint::new();
+        cp.start_prefix(1, "a");  // Mark prefix as in-progress
+
+        // Attempting to complete order should fail (TLA+ invariant violation)
+        let result = cp.complete_order(1);
+        assert!(result.is_err());
+        match result {
+            Err(CheckpointError::OrderHasInProgressPrefixes { order, count }) => {
+                assert_eq!(order, 1);
+                assert_eq!(count, 1);
+            }
+            _ => panic!("Expected OrderHasInProgressPrefixes error"),
+        }
+
+        // After completing the prefix, order completion should succeed
+        cp.complete_prefix(1, "a");
+        cp.complete_order(1).expect("all prefixes completed");
+        assert!(cp.is_order_complete(1));
     }
 
     #[test]
@@ -1131,7 +1182,7 @@ mod tests {
         assert!(cp.needs_prefix(2, "ab"));
 
         // Finish order 1
-        cp.complete_order(1);
+        cp.complete_order(1).expect("no in-progress prefixes for order 1");
         assert!(cp.is_order_complete(1));
         assert!(!cp.is_order_complete(2));
 

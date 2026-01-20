@@ -1,0 +1,17 @@
+# Coq/Rocq project file for libgrammstein formal verification
+#
+# Build with: coq_makefile -f _CoqProject -o Makefile && make
+#
+# Prerequisites:
+#   - Coq/Rocq 8.18+ (for Lqa tactic)
+#   - Standard library (included with Coq)
+#
+# For memory-intensive proofs, use resource limits:
+#   systemd-run --user --scope -p MemoryMax=16G -p CPUQuota=400% make
+
+# Compiler flags
+-Q . LibgrammsteinFormal
+
+# Source files
+MknStatistics.v
+FrequencyCountsMerge.v

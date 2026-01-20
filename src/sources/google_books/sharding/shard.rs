@@ -6,6 +6,7 @@
 use super::routing::ShardKey;
 use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
 use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -42,6 +43,17 @@ pub type ShardResult<T> = Result<T, ShardError>;
 ///
 /// Ensures single-writer constraint per shard. A worker must hold
 /// a WriteToken to perform write operations on a shard.
+///
+/// # Thread Safety
+///
+/// `WriteToken` is intentionally `!Send` (via `PhantomData<*const ()>`).
+/// This compile-time constraint ensures tokens cannot be passed between
+/// threads, which allows the use of `Relaxed` ordering when reading
+/// `write_generation` in `release_write()`. Since the token can only be
+/// used on the thread that acquired it, program order guarantees visibility
+/// of the generation counter without explicit synchronization.
+///
+/// This design is formally verified in `formal/tla/ShardWriteToken.tla`.
 #[derive(Debug)]
 pub struct WriteToken {
     /// The shard this token grants access to.
@@ -55,6 +67,13 @@ pub struct WriteToken {
 
     /// Generation counter to detect stale tokens.
     generation: u64,
+
+    /// Marker to make WriteToken `!Send`.
+    ///
+    /// This ensures `Relaxed` ordering on `write_generation` reads is correct
+    /// because tokens cannot be passed between threads. Within a single thread,
+    /// program order ensures visibility of the generation counter.
+    _not_send: PhantomData<*const ()>,
 }
 
 impl WriteToken {
@@ -65,6 +84,7 @@ impl WriteToken {
             acquired_at: Instant::now(),
             worker_id,
             generation,
+            _not_send: PhantomData,
         }
     }
 
@@ -282,7 +302,23 @@ impl ShardHandle {
     /// Release exclusive write access.
     ///
     /// Returns `true` if the token was valid and the lock was released.
+    ///
+    /// # Memory Ordering
+    ///
+    /// Uses `Relaxed` ordering for loading the generation counter. This is safe
+    /// because `WriteToken` is `!Send`:
+    ///
+    /// 1. The token can only be used on the thread that acquired it
+    /// 2. Within a single thread, program order ensures the generation read
+    ///    sees the value written during `try_acquire_write()`
+    /// 3. The subsequent `Release` store on `write_locked` publishes all writes
+    ///    to the next acquirer via the Acquire-Release pair on the CAS
+    ///
+    /// This optimization is formally verified in `formal/tla/ShardWriteToken.tla`.
     pub fn release_write(&self, token: WriteToken) -> bool {
+        // Relaxed is safe because WriteToken is !Send (PhantomData<*const ()>).
+        // The token cannot be passed between threads, so program order guarantees
+        // we see the generation value from our own try_acquire_write() call.
         let current_gen = self.write_generation.load(Ordering::Relaxed);
         if token.is_valid(&self.key, current_gen) {
             self.write_holder.store(usize::MAX, Ordering::Relaxed);
