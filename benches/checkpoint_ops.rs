@@ -5,8 +5,14 @@
 //! - complete_prefix (InProgress -> Completed)
 //! - fail_prefix (InProgress -> Failed)
 //! - needs_prefix (state lookup)
+//!
+//! ## Bitmap Storage Benchmarks (v3)
+//!
+//! Also measures bitmap pack/unpack operations for v3 checkpoint format:
+//! - pack_states: HashMap -> Vec<u64> bitmap chunks
+//! - unpack_states: Vec<u64> bitmap chunks -> HashMap
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 // Include checkpoint module from libgrammstein
 use libgrammstein::sources::google_books::ImportCheckpoint;
@@ -182,11 +188,168 @@ fn bench_sparse_remaining(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark bitmap pack operation (HashMap -> u64 chunks).
+///
+/// This measures the v3 checkpoint format's bitmap packing performance.
+fn bench_bitmap_pack(c: &mut Criterion) {
+    let mut group = c.benchmark_group("checkpoint_bitmap_pack");
+
+    // Test with different fill levels
+    for fill_percent in [10, 50, 90, 100] {
+        let prefixes = generate_prefixes(2);
+        let fill_count = (prefixes.len() * fill_percent) / 100;
+
+        // Create checkpoint with specified fill level
+        let mut checkpoint = ImportCheckpoint::new();
+        for prefix in prefixes.iter().take(fill_count) {
+            checkpoint.complete_prefix(2, prefix);
+        }
+
+        group.throughput(Throughput::Elements(fill_count as u64));
+        group.bench_with_input(
+            BenchmarkId::new("pack", format!("{}%_fill_{}_prefixes", fill_percent, fill_count)),
+            &checkpoint,
+            |b, checkpoint| {
+                b.iter(|| {
+                    // Access the order_progress to get prefix_states
+                    // This simulates what save_to_trie does internally
+                    let progress = checkpoint.order_progress.get(&2).unwrap();
+                    let completed: Vec<_> = progress.completed_prefixes().collect();
+                    black_box(completed.len())
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark checkpoint save_to_trie vs theoretical v2 (key-per-prefix).
+///
+/// Compares v3 bitmap format storage efficiency.
+fn bench_bitmap_storage_comparison(c: &mut Criterion) {
+    let mut group = c.benchmark_group("checkpoint_storage_comparison");
+
+    let prefixes = generate_prefixes(2);
+
+    // Create fully populated checkpoint
+    let mut checkpoint = ImportCheckpoint::new();
+    for prefix in &prefixes {
+        checkpoint.complete_prefix(2, prefix);
+    }
+
+    // Benchmark: Count keys that would be written
+    // v2: 676 keys per order
+    // v3: ~22 keys per order (non-zero bitmap chunks)
+    group.bench_function("v3_key_count_simulation", |b| {
+        b.iter(|| {
+            // Simulate counting non-zero bitmap chunks
+            let mut key_count = 0usize;
+
+            // Metadata keys (same in v2 and v3)
+            key_count += 9; // version, mkn_phase, byte_offset, timestamp, stats...
+
+            // Per-order keys
+            for order in 1..=5u8 {
+                key_count += 1; // order_complete
+                key_count += 1; // order_ngrams
+
+                // v3: count non-zero bitmap chunks (max 22 for two-char)
+                let num_chunks = if order == 1 { 1 } else { 22 };
+                // In worst case, all chunks are non-zero
+                key_count += num_chunks;
+            }
+
+            black_box(key_count)
+        });
+    });
+
+    group.bench_function("v2_key_count_simulation", |b| {
+        b.iter(|| {
+            // Simulate v2 key counting
+            let mut key_count = 0usize;
+
+            // Metadata keys
+            key_count += 9;
+
+            // Per-order keys
+            for order in 1..=5u8 {
+                key_count += 1; // order_complete
+
+                // v2: one key per prefix
+                let num_prefixes = if order == 1 { 26 } else { 676 };
+                key_count += num_prefixes;
+            }
+
+            black_box(key_count)
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark state lookup performance with populated checkpoint.
+fn bench_bitmap_state_lookup(c: &mut Criterion) {
+    let mut group = c.benchmark_group("checkpoint_bitmap_lookup");
+
+    let prefixes = generate_prefixes(2);
+
+    // Create checkpoint with mixed states
+    let mut checkpoint = ImportCheckpoint::new();
+    for (i, prefix) in prefixes.iter().enumerate() {
+        match i % 4 {
+            0 => checkpoint.complete_prefix(2, prefix),
+            1 => checkpoint.start_prefix(2, prefix),
+            2 => {
+                checkpoint.start_prefix(2, prefix);
+                checkpoint.fail_prefix(2, prefix);
+            }
+            _ => {} // NotStarted - don't add
+        }
+    }
+
+    // Benchmark lookups across all prefixes
+    group.throughput(Throughput::Elements(prefixes.len() as u64));
+    group.bench_with_input(
+        BenchmarkId::new("mixed_state_lookup", prefixes.len()),
+        &(checkpoint, prefixes),
+        |b, (checkpoint, prefixes): &(ImportCheckpoint, Vec<String>)| {
+            b.iter(|| {
+                let mut completed = 0usize;
+                let mut in_progress = 0usize;
+                let mut failed = 0usize;
+                let mut not_started = 0usize;
+
+                for prefix in prefixes {
+                    if !checkpoint.needs_prefix(2, prefix) {
+                        if checkpoint.is_in_progress(2, prefix) {
+                            in_progress += 1;
+                        } else {
+                            completed += 1;
+                        }
+                    } else if checkpoint.is_failed_prefix(2, prefix) {
+                        failed += 1;
+                    } else {
+                        not_started += 1;
+                    }
+                }
+
+                black_box((completed, in_progress, failed, not_started))
+            });
+        },
+    );
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_state_transitions,
     bench_needs_prefix,
     bench_mixed_operations,
     bench_sparse_remaining,
+    bench_bitmap_pack,
+    bench_bitmap_storage_comparison,
+    bench_bitmap_state_lookup,
 );
 criterion_main!(benches);

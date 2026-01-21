@@ -292,7 +292,11 @@ pub struct CheckpointStats {
 
 impl ImportCheckpoint {
     /// Current checkpoint format version.
-    pub const CURRENT_VERSION: u32 = 2;
+    ///
+    /// - Version 1: Single-order tracking (legacy)
+    /// - Version 2: Per-order tracking with key-per-prefix trie storage
+    /// - Version 3: Bitmap-based trie storage (22 u64s per order vs 676 keys)
+    pub const CURRENT_VERSION: u32 = 3;
 
     /// Create a new empty checkpoint.
     pub fn new() -> Self {
@@ -794,6 +798,12 @@ pub const CHECKPOINT_PREFIX_KEY_PREFIX: &str = "\x00__ckpt__:prefix:";
 /// Key prefix for order completion. Format: "\x00__ckpt__:order_complete:{order}"
 pub const CHECKPOINT_ORDER_COMPLETE_PREFIX: &str = "\x00__ckpt__:order_complete:";
 
+/// Key prefix for bitmap chunks. Format: "\x00__ckpt__:bitmap:{order}:{chunk}"
+pub const CHECKPOINT_BITMAP_PREFIX: &str = "\x00__ckpt__:bitmap:";
+
+/// Key for per-order n-gram count in bitmap format. Format: "\x00__ckpt__:order_ngrams:{order}"
+pub const CHECKPOINT_ORDER_NGRAMS_PREFIX: &str = "\x00__ckpt__:order_ngrams:";
+
 /// Prefix status codes for trie storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u64)]
@@ -816,6 +826,158 @@ impl PrefixStatusCode {
             _ => None,
         }
     }
+}
+
+// =============================================================================
+// Bitmap Encoding/Decoding for Compact Trie Storage
+// =============================================================================
+//
+// Version 3 uses a bitmap format where each prefix state occupies 2 bits:
+//   0b00 = NotStarted (not in map)
+//   0b01 = InProgress
+//   0b10 = Completed
+//   0b11 = Failed
+//
+// Each u64 holds 32 prefix states (64 bits / 2 bits = 32 prefixes).
+// For 676 prefixes (order 2+), we need ceil(676/32) = 22 u64 chunks.
+//
+// This reduces storage from ~22KB (676 keys) to ~180 bytes (22 u64s).
+// =============================================================================
+
+/// Bitmap state encoding (2 bits per prefix).
+const BITMAP_STATE_NOT_STARTED: u8 = 0b00;
+const BITMAP_STATE_IN_PROGRESS: u8 = 0b01;
+const BITMAP_STATE_COMPLETED: u8 = 0b10;
+const BITMAP_STATE_FAILED: u8 = 0b11;
+
+/// Number of prefix states that fit in one u64 (64 bits / 2 bits = 32).
+const PREFIXES_PER_CHUNK: usize = 32;
+
+/// Convert prefix string to index (0-based).
+///
+/// - Single char: "a" -> 0, "z" -> 25
+/// - Two char: "aa" -> 0, "ab" -> 1, "zz" -> 675
+///
+/// Returns `None` for invalid prefixes.
+fn prefix_to_index(prefix: &str) -> Option<u16> {
+    let bytes = prefix.as_bytes();
+    match bytes.len() {
+        1 => {
+            let c = bytes[0];
+            if c >= b'a' && c <= b'z' {
+                Some((c - b'a') as u16)
+            } else {
+                None
+            }
+        }
+        2 => {
+            let c1 = bytes[0];
+            let c2 = bytes[1];
+            if c1 >= b'a' && c1 <= b'z' && c2 >= b'a' && c2 <= b'z' {
+                Some(((c1 - b'a') as u16) * 26 + ((c2 - b'a') as u16))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Convert index back to prefix string.
+///
+/// - `prefix_len=1`: 0 -> "a", 25 -> "z"
+/// - `prefix_len=2`: 0 -> "aa", 1 -> "ab", 675 -> "zz"
+fn index_to_prefix(index: u16, prefix_len: u8) -> String {
+    match prefix_len {
+        1 => {
+            debug_assert!(index < 26, "Index {} out of range for single-char prefix", index);
+            let c = (b'a' + index as u8) as char;
+            c.to_string()
+        }
+        2 => {
+            debug_assert!(index < 676, "Index {} out of range for two-char prefix", index);
+            let c1 = (b'a' + (index / 26) as u8) as char;
+            let c2 = (b'a' + (index % 26) as u8) as char;
+            format!("{}{}", c1, c2)
+        }
+        _ => panic!("Unsupported prefix length: {}", prefix_len),
+    }
+}
+
+/// Get the prefix length for a given n-gram order.
+///
+/// - Order 1: single-char prefixes (26 total)
+/// - Order 2+: two-char prefixes (676 total)
+fn prefix_len_for_order(order: u8) -> u8 {
+    if order == 1 { 1 } else { 2 }
+}
+
+/// Get the maximum index for a given prefix length.
+fn max_index_for_prefix_len(prefix_len: u8) -> u16 {
+    if prefix_len == 1 { 26 } else { 676 }
+}
+
+/// Get the number of u64 chunks needed for a given prefix length.
+fn num_chunks_for_prefix_len(prefix_len: u8) -> usize {
+    let max_index = max_index_for_prefix_len(prefix_len) as usize;
+    (max_index + PREFIXES_PER_CHUNK - 1) / PREFIXES_PER_CHUNK
+}
+
+/// Pack prefix states into u64 bitmap chunks.
+///
+/// Each prefix state occupies 2 bits within a u64. States are packed
+/// in index order, with lower indices in lower bits.
+fn pack_states(states: &HashMap<String, PrefixState>, prefix_len: u8) -> Vec<u64> {
+    let num_chunks = num_chunks_for_prefix_len(prefix_len);
+    let mut chunks = vec![0u64; num_chunks];
+
+    for (prefix, state) in states {
+        if let Some(index) = prefix_to_index(prefix) {
+            let chunk_idx = (index as usize) / PREFIXES_PER_CHUNK;
+            let bit_pos = ((index as usize) % PREFIXES_PER_CHUNK) * 2;
+            let state_bits = match state {
+                PrefixState::InProgress => BITMAP_STATE_IN_PROGRESS as u64,
+                PrefixState::Completed => BITMAP_STATE_COMPLETED as u64,
+                PrefixState::Failed => BITMAP_STATE_FAILED as u64,
+            };
+            chunks[chunk_idx] |= state_bits << bit_pos;
+        } else {
+            // Non-standard prefix - log warning and skip
+            log::warn!(
+                "Skipping non-standard prefix '{}' during bitmap packing",
+                prefix
+            );
+        }
+    }
+    chunks
+}
+
+/// Unpack u64 bitmap chunks into prefix states.
+///
+/// Returns a HashMap containing only prefixes with non-zero states
+/// (NotStarted prefixes are not included in the map).
+fn unpack_states(chunks: &[u64], prefix_len: u8) -> HashMap<String, PrefixState> {
+    let max_index = max_index_for_prefix_len(prefix_len);
+    let mut states = HashMap::new();
+
+    for index in 0..max_index {
+        let chunk_idx = (index as usize) / PREFIXES_PER_CHUNK;
+        let bit_pos = ((index as usize) % PREFIXES_PER_CHUNK) * 2;
+
+        if chunk_idx < chunks.len() {
+            let state_bits = ((chunks[chunk_idx] >> bit_pos) & 0b11) as u8;
+            let state = match state_bits {
+                BITMAP_STATE_NOT_STARTED => continue, // Don't add to map
+                BITMAP_STATE_IN_PROGRESS => PrefixState::InProgress,
+                BITMAP_STATE_COMPLETED => PrefixState::Completed,
+                BITMAP_STATE_FAILED => PrefixState::Failed,
+                _ => unreachable!("Invalid state bits: {}", state_bits),
+            };
+            let prefix = index_to_prefix(index, prefix_len);
+            states.insert(prefix, state);
+        }
+    }
+    states
 }
 
 impl MknPhase {
@@ -853,6 +1015,12 @@ impl ImportCheckpoint {
     /// This stores the checkpoint data atomically with the n-gram data,
     /// ensuring consistency between data and progress tracking.
     ///
+    /// ## Version 3 Bitmap Format
+    ///
+    /// Version 3 uses a compact bitmap format where each prefix state occupies
+    /// 2 bits within u64 chunks. This reduces storage from ~22KB (676 keys per
+    /// order) to ~180 bytes (22 u64 chunks per order).
+    ///
     /// # Arguments
     ///
     /// * `trie` - The trie to store the checkpoint in
@@ -866,8 +1034,8 @@ impl ImportCheckpoint {
     {
         let mut keys_written = 0;
 
-        // Store metadata as individual keys with u64 values
-        trie.store_checkpoint_u64(CHECKPOINT_VERSION_KEY, self.version as u64)
+        // Always save as current version (v3 bitmap format)
+        trie.store_checkpoint_u64(CHECKPOINT_VERSION_KEY, Self::CURRENT_VERSION as u64)
             .map_err(|e| CheckpointError::Trie(e.to_string()))?;
         keys_written += 1;
 
@@ -906,7 +1074,7 @@ impl ImportCheckpoint {
             .map_err(|e| CheckpointError::Trie(e.to_string()))?;
         keys_written += 1;
 
-        // Store ngrams by order
+        // Store ngrams by order (global stats)
         for (idx, &count) in self.stats.ngrams_by_order.iter().enumerate() {
             let key = format!("{}{}", CHECKPOINT_NGRAMS_BY_ORDER_PREFIX, idx + 1);
             trie.store_checkpoint_u64(&key, count)
@@ -914,7 +1082,7 @@ impl ImportCheckpoint {
             keys_written += 1;
         }
 
-        // Store per-order progress
+        // Store per-order progress using bitmap format (v3)
         for (order, progress) in &self.order_progress {
             // Store order completion status
             if progress.is_complete {
@@ -924,17 +1092,25 @@ impl ImportCheckpoint {
                 keys_written += 1;
             }
 
-            // Store prefix statuses (using HashMap directly)
-            for (prefix, state) in progress.prefix_states.iter() {
-                let key = format!("{}{}:{}", CHECKPOINT_PREFIX_KEY_PREFIX, order, prefix);
-                let status_code = match state {
-                    PrefixState::Completed => PrefixStatusCode::Completed as u64,
-                    PrefixState::InProgress => PrefixStatusCode::InProgress as u64,
-                    PrefixState::Failed => PrefixStatusCode::Failed as u64,
-                };
-                trie.store_checkpoint_u64(&key, status_code)
-                    .map_err(|e| CheckpointError::Trie(e.to_string()))?;
-                keys_written += 1;
+            // Store per-order n-gram count
+            let ngrams_key = format!("{}{}", CHECKPOINT_ORDER_NGRAMS_PREFIX, order);
+            trie.store_checkpoint_u64(&ngrams_key, progress.ngrams_processed)
+                .map_err(|e| CheckpointError::Trie(e.to_string()))?;
+            keys_written += 1;
+
+            // Pack prefix states into bitmap chunks
+            let prefix_len = prefix_len_for_order(*order);
+            let chunks = pack_states(&progress.prefix_states, prefix_len);
+
+            // Store each chunk
+            for (chunk_idx, &chunk_value) in chunks.iter().enumerate() {
+                // Only store non-zero chunks (optimization for sparse states)
+                if chunk_value != 0 {
+                    let key = format!("{}{}:{}", CHECKPOINT_BITMAP_PREFIX, order, chunk_idx);
+                    trie.store_checkpoint_u64(&key, chunk_value)
+                        .map_err(|e| CheckpointError::Trie(e.to_string()))?;
+                    keys_written += 1;
+                }
             }
         }
 
@@ -942,6 +1118,9 @@ impl ImportCheckpoint {
     }
 
     /// Load checkpoint from a trie.
+    ///
+    /// Supports both v2 (key-per-prefix) and v3 (bitmap) formats.
+    /// v2 checkpoints are automatically migrated to v3 on next save.
     ///
     /// # Arguments
     ///
@@ -969,7 +1148,7 @@ impl ImportCheckpoint {
             });
         }
 
-        // Load metadata
+        // Load metadata (common to all versions)
         let mkn_phase_ordinal = trie
             .load_checkpoint_u64(CHECKPOINT_MKN_PHASE_KEY)
             .map_err(|e| CheckpointError::Trie(e.to_string()))?
@@ -1014,7 +1193,7 @@ impl ImportCheckpoint {
             .map_err(|e| CheckpointError::Trie(e.to_string()))?
             .unwrap_or(0);
 
-        // Load ngrams by order
+        // Load ngrams by order (global stats)
         let mut ngrams_by_order = [0u64; 5];
         for order in 1..=5u8 {
             let key = format!("{}{}", CHECKPOINT_NGRAMS_BY_ORDER_PREFIX, order);
@@ -1032,7 +1211,34 @@ impl ImportCheckpoint {
             elapsed_seconds,
         };
 
-        // Load per-order progress using prefix iteration
+        // Load per-order progress based on version
+        let order_progress = if version >= 3 {
+            Self::load_order_progress_v3(trie, &ngrams_by_order)?
+        } else {
+            // v2: key-per-prefix format (backward compatibility)
+            log::info!("Loading v2 checkpoint (key-per-prefix format), will migrate to v3 on save");
+            Self::load_order_progress_v2(trie, &ngrams_by_order)?
+        };
+
+        Ok(Some(Self {
+            version: Self::CURRENT_VERSION, // Always report as current version
+            order_progress,
+            current_prefix: None, // Current prefix not stored in trie-based checkpoint
+            byte_offset,
+            mkn_phase,
+            stats,
+            timestamp,
+        }))
+    }
+
+    /// Load per-order progress using v3 bitmap format.
+    fn load_order_progress_v3<T>(
+        trie: &T,
+        ngrams_by_order: &[u64; 5],
+    ) -> Result<HashMap<u8, OrderProgress>, CheckpointError>
+    where
+        T: TrieCheckpointStorage,
+    {
         let mut order_progress = HashMap::new();
 
         for order in 1..=5u8 {
@@ -1044,7 +1250,72 @@ impl ImportCheckpoint {
                 .map(|v| v == 1)
                 .unwrap_or(false);
 
-            // Get all prefix statuses for this order
+            // Load per-order n-gram count (v3 stores this separately)
+            let ngrams_key = format!("{}{}", CHECKPOINT_ORDER_NGRAMS_PREFIX, order);
+            let order_ngrams = trie
+                .load_checkpoint_u64(&ngrams_key)
+                .map_err(|e| CheckpointError::Trie(e.to_string()))?
+                .unwrap_or(ngrams_by_order[order as usize - 1]);
+
+            // Load bitmap chunks for this order
+            let prefix_len = prefix_len_for_order(order);
+            let num_chunks = num_chunks_for_prefix_len(prefix_len);
+            let mut chunks = vec![0u64; num_chunks];
+            let mut has_any_chunks = false;
+
+            for chunk_idx in 0..num_chunks {
+                let key = format!("{}{}:{}", CHECKPOINT_BITMAP_PREFIX, order, chunk_idx);
+                if let Ok(Some(chunk_value)) = trie.load_checkpoint_u64(&key) {
+                    chunks[chunk_idx] = chunk_value;
+                    if chunk_value != 0 {
+                        has_any_chunks = true;
+                    }
+                }
+            }
+
+            // Unpack bitmap chunks into prefix states
+            let prefix_states = if has_any_chunks {
+                unpack_states(&chunks, prefix_len)
+            } else {
+                HashMap::new()
+            };
+
+            // Only add order if it has any data
+            if is_complete || !prefix_states.is_empty() {
+                order_progress.insert(
+                    order,
+                    OrderProgress {
+                        prefix_states,
+                        is_complete,
+                        ngrams_processed: order_ngrams,
+                    },
+                );
+            }
+        }
+
+        Ok(order_progress)
+    }
+
+    /// Load per-order progress using v2 key-per-prefix format (backward compatibility).
+    fn load_order_progress_v2<T>(
+        trie: &T,
+        ngrams_by_order: &[u64; 5],
+    ) -> Result<HashMap<u8, OrderProgress>, CheckpointError>
+    where
+        T: TrieCheckpointStorage,
+    {
+        let mut order_progress = HashMap::new();
+
+        for order in 1..=5u8 {
+            // Check if order is complete
+            let complete_key = format!("{}{}", CHECKPOINT_ORDER_COMPLETE_PREFIX, order);
+            let is_complete = trie
+                .load_checkpoint_u64(&complete_key)
+                .map_err(|e| CheckpointError::Trie(e.to_string()))?
+                .map(|v| v == 1)
+                .unwrap_or(false);
+
+            // Get all prefix statuses for this order using key iteration
             let prefix_key_prefix = format!("{}{}:", CHECKPOINT_PREFIX_KEY_PREFIX, order);
             let prefix_entries = trie
                 .iter_checkpoint_prefix(&prefix_key_prefix)
@@ -1083,15 +1354,7 @@ impl ImportCheckpoint {
             }
         }
 
-        Ok(Some(Self {
-            version,
-            order_progress,
-            current_prefix: None, // Current prefix not stored in trie-based checkpoint
-            byte_offset,
-            mkn_phase,
-            stats,
-            timestamp,
-        }))
+        Ok(order_progress)
     }
 
     /// Check if a trie contains checkpoint data.
@@ -1458,5 +1721,301 @@ mod tests {
 
         let summary = cp.progress_summary();
         assert!(summary.contains("Failed: 1"));
+    }
+
+    // =========================================================================
+    // Bitmap Encoding/Decoding Tests (v3 format)
+    // =========================================================================
+
+    #[test]
+    fn test_prefix_to_index_single_char() {
+        // Test all 26 single-char prefixes
+        assert_eq!(prefix_to_index("a"), Some(0));
+        assert_eq!(prefix_to_index("b"), Some(1));
+        assert_eq!(prefix_to_index("m"), Some(12));
+        assert_eq!(prefix_to_index("z"), Some(25));
+
+        // Invalid
+        assert_eq!(prefix_to_index("A"), None); // uppercase
+        assert_eq!(prefix_to_index("1"), None); // digit
+        assert_eq!(prefix_to_index(""), None);  // empty
+    }
+
+    #[test]
+    fn test_prefix_to_index_two_char() {
+        // First row: aa-az (0-25)
+        assert_eq!(prefix_to_index("aa"), Some(0));
+        assert_eq!(prefix_to_index("ab"), Some(1));
+        assert_eq!(prefix_to_index("az"), Some(25));
+
+        // Second row: ba-bz (26-51)
+        assert_eq!(prefix_to_index("ba"), Some(26));
+        assert_eq!(prefix_to_index("bb"), Some(27));
+
+        // Last: zz (675)
+        assert_eq!(prefix_to_index("zz"), Some(675));
+
+        // Formula verification: (c1 - 'a') * 26 + (c2 - 'a')
+        // "th" = (19 * 26) + 7 = 494 + 7 = 501
+        assert_eq!(prefix_to_index("th"), Some(501));
+
+        // Invalid
+        assert_eq!(prefix_to_index("AA"), None);
+        assert_eq!(prefix_to_index("a1"), None);
+        assert_eq!(prefix_to_index("abc"), None); // too long
+    }
+
+    #[test]
+    fn test_prefix_to_index_exhaustive_single_char() {
+        // Verify all 26 single-char prefixes map to unique indices 0-25
+        for (i, c) in ('a'..='z').enumerate() {
+            let prefix = c.to_string();
+            assert_eq!(prefix_to_index(&prefix), Some(i as u16));
+        }
+    }
+
+    #[test]
+    fn test_prefix_to_index_exhaustive_two_char() {
+        // Verify all 676 two-char prefixes map to unique indices 0-675
+        let mut expected_index = 0u16;
+        for c1 in 'a'..='z' {
+            for c2 in 'a'..='z' {
+                let prefix = format!("{}{}", c1, c2);
+                assert_eq!(
+                    prefix_to_index(&prefix),
+                    Some(expected_index),
+                    "prefix '{}' should map to index {}",
+                    prefix,
+                    expected_index
+                );
+                expected_index += 1;
+            }
+        }
+        assert_eq!(expected_index, 676);
+    }
+
+    #[test]
+    fn test_index_to_prefix_single_char() {
+        assert_eq!(index_to_prefix(0, 1), "a");
+        assert_eq!(index_to_prefix(1, 1), "b");
+        assert_eq!(index_to_prefix(12, 1), "m");
+        assert_eq!(index_to_prefix(25, 1), "z");
+    }
+
+    #[test]
+    fn test_index_to_prefix_two_char() {
+        assert_eq!(index_to_prefix(0, 2), "aa");
+        assert_eq!(index_to_prefix(1, 2), "ab");
+        assert_eq!(index_to_prefix(25, 2), "az");
+        assert_eq!(index_to_prefix(26, 2), "ba");
+        assert_eq!(index_to_prefix(501, 2), "th");
+        assert_eq!(index_to_prefix(675, 2), "zz");
+    }
+
+    #[test]
+    fn test_index_prefix_roundtrip_single_char() {
+        for i in 0..26u16 {
+            let prefix = index_to_prefix(i, 1);
+            assert_eq!(prefix_to_index(&prefix), Some(i));
+        }
+    }
+
+    #[test]
+    fn test_index_prefix_roundtrip_two_char() {
+        for i in 0..676u16 {
+            let prefix = index_to_prefix(i, 2);
+            assert_eq!(prefix_to_index(&prefix), Some(i));
+        }
+    }
+
+    #[test]
+    fn test_pack_states_empty() {
+        let states: HashMap<String, PrefixState> = HashMap::new();
+
+        // Single-char: 1 chunk (26 prefixes / 32 per chunk = 1)
+        let chunks = pack_states(&states, 1);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], 0);
+
+        // Two-char: 22 chunks (676 prefixes / 32 per chunk = 22)
+        let chunks = pack_states(&states, 2);
+        assert_eq!(chunks.len(), 22);
+        assert!(chunks.iter().all(|&c| c == 0));
+    }
+
+    #[test]
+    fn test_pack_states_single_prefix() {
+        let mut states = HashMap::new();
+        states.insert("aa".to_string(), PrefixState::Completed);
+
+        let chunks = pack_states(&states, 2);
+
+        // "aa" = index 0, chunk 0, bit position 0
+        // Completed = 0b10
+        assert_eq!(chunks[0], 0b10);
+    }
+
+    #[test]
+    fn test_pack_states_all_state_types() {
+        let mut states = HashMap::new();
+        states.insert("aa".to_string(), PrefixState::InProgress); // index 0
+        states.insert("ab".to_string(), PrefixState::Completed);  // index 1
+        states.insert("ac".to_string(), PrefixState::Failed);     // index 2
+
+        let chunks = pack_states(&states, 2);
+
+        // Bit layout: [ac][ab][aa] = [11][10][01] = 0b110100 + 01 = 0b110101
+        // Actually: bit positions are index * 2
+        // index 0 (aa): bits 0-1 = InProgress (0b01)
+        // index 1 (ab): bits 2-3 = Completed (0b10)
+        // index 2 (ac): bits 4-5 = Failed (0b11)
+        let expected = 0b01 | (0b10 << 2) | (0b11 << 4);
+        assert_eq!(chunks[0], expected);
+    }
+
+    #[test]
+    fn test_pack_unpack_roundtrip_sparse() {
+        let mut states = HashMap::new();
+        states.insert("aa".to_string(), PrefixState::Completed);
+        states.insert("th".to_string(), PrefixState::InProgress);
+        states.insert("zz".to_string(), PrefixState::Failed);
+
+        let chunks = pack_states(&states, 2);
+        let unpacked = unpack_states(&chunks, 2);
+
+        assert_eq!(unpacked.len(), 3);
+        assert_eq!(unpacked.get("aa"), Some(&PrefixState::Completed));
+        assert_eq!(unpacked.get("th"), Some(&PrefixState::InProgress));
+        assert_eq!(unpacked.get("zz"), Some(&PrefixState::Failed));
+    }
+
+    #[test]
+    fn test_pack_unpack_roundtrip_full() {
+        // Pack all 676 prefixes as Completed
+        let mut states = HashMap::new();
+        for c1 in 'a'..='z' {
+            for c2 in 'a'..='z' {
+                states.insert(format!("{}{}", c1, c2), PrefixState::Completed);
+            }
+        }
+
+        let chunks = pack_states(&states, 2);
+        let unpacked = unpack_states(&chunks, 2);
+
+        assert_eq!(unpacked.len(), 676);
+        for (prefix, state) in &unpacked {
+            assert_eq!(
+                *state,
+                PrefixState::Completed,
+                "prefix '{}' should be Completed",
+                prefix
+            );
+        }
+    }
+
+    #[test]
+    fn test_pack_unpack_roundtrip_mixed_states() {
+        let mut states = HashMap::new();
+
+        // Assign different states based on index
+        for i in 0..676u16 {
+            let prefix = index_to_prefix(i, 2);
+            let state = match i % 3 {
+                0 => PrefixState::Completed,
+                1 => PrefixState::InProgress,
+                2 => PrefixState::Failed,
+                _ => unreachable!(),
+            };
+            states.insert(prefix, state);
+        }
+
+        let chunks = pack_states(&states, 2);
+        let unpacked = unpack_states(&chunks, 2);
+
+        assert_eq!(unpacked.len(), 676);
+        for i in 0..676u16 {
+            let prefix = index_to_prefix(i, 2);
+            let expected = match i % 3 {
+                0 => PrefixState::Completed,
+                1 => PrefixState::InProgress,
+                2 => PrefixState::Failed,
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                unpacked.get(&prefix),
+                Some(&expected),
+                "prefix '{}' (index {}) state mismatch",
+                prefix,
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_unpack_states_not_started_excluded() {
+        // Empty chunks = all NotStarted = empty HashMap
+        let chunks = vec![0u64; 22];
+        let unpacked = unpack_states(&chunks, 2);
+        assert!(unpacked.is_empty());
+    }
+
+    #[test]
+    fn test_bitmap_chunk_boundaries() {
+        // Test prefixes at chunk boundaries (indices 31, 32, 63, 64, etc.)
+        let mut states = HashMap::new();
+
+        // Indices at chunk boundaries
+        let boundary_indices = [0u16, 31, 32, 63, 64, 95, 96, 671, 672, 675];
+
+        for &idx in &boundary_indices {
+            let prefix = index_to_prefix(idx, 2);
+            states.insert(prefix, PrefixState::Completed);
+        }
+
+        let chunks = pack_states(&states, 2);
+        let unpacked = unpack_states(&chunks, 2);
+
+        assert_eq!(unpacked.len(), boundary_indices.len());
+        for &idx in &boundary_indices {
+            let prefix = index_to_prefix(idx, 2);
+            assert_eq!(
+                unpacked.get(&prefix),
+                Some(&PrefixState::Completed),
+                "boundary prefix '{}' (index {}) should be present",
+                prefix,
+                idx
+            );
+        }
+    }
+
+    #[test]
+    fn test_prefix_len_for_order() {
+        assert_eq!(prefix_len_for_order(1), 1);
+        assert_eq!(prefix_len_for_order(2), 2);
+        assert_eq!(prefix_len_for_order(3), 2);
+        assert_eq!(prefix_len_for_order(4), 2);
+        assert_eq!(prefix_len_for_order(5), 2);
+    }
+
+    #[test]
+    fn test_num_chunks_for_prefix_len() {
+        // Single char: 26 prefixes / 32 = 1 chunk
+        assert_eq!(num_chunks_for_prefix_len(1), 1);
+
+        // Two char: 676 prefixes / 32 = 21.125 = 22 chunks
+        assert_eq!(num_chunks_for_prefix_len(2), 22);
+    }
+
+    #[test]
+    fn test_bitmap_storage_size() {
+        // Verify the claimed storage reduction
+        // v2: 676 keys * ~33 bytes = ~22KB per order
+        // v3: 22 chunks * 8 bytes = 176 bytes per order
+
+        let num_chunks = num_chunks_for_prefix_len(2);
+        let v3_bytes = num_chunks * 8;
+
+        assert_eq!(num_chunks, 22);
+        assert_eq!(v3_bytes, 176);
     }
 }

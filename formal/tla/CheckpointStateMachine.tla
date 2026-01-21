@@ -332,6 +332,22 @@ InProgressEventuallyResolves ==
  * --------------------------------------------------------------------------- *)
 
 (*
+ * Storage Format History:
+ *   v2: One trie key per prefix - \x00__ckpt__:prefix:{order}:{prefix}
+ *   v3: Bitmap chunks - \x00__ckpt__:bitmap:{order}:{chunk}
+ *       Each u64 holds 32 prefix states (2 bits each)
+ *
+ * The storage format is transparent to this specification, which models
+ * the logical state machine semantics. The bijective encoding between
+ * HashMap<String, PrefixState> and Vec<u64> bitmaps is verified by
+ * exhaustive property-based tests in checkpoint.rs:
+ *   - test_prefix_to_index_exhaustive_two_char
+ *   - test_index_prefix_roundtrip_two_char
+ *   - test_pack_unpack_roundtrip_full
+ *   - test_pack_unpack_roundtrip_mixed_states
+ *)
+
+(*
  * Mapping from TLA+ to Rust implementation:
  *
  * TLA+ Variable            | Rust Field/Method                    | Location

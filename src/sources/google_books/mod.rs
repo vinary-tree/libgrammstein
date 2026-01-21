@@ -58,6 +58,7 @@
 
 mod aggregator;
 mod checkpoint;
+mod checkpoint_decoder;
 mod config;
 mod events;
 mod extractor;
@@ -71,7 +72,8 @@ pub mod task_manager;
 mod translator;
 
 pub use aggregator::YearAggregator;
-pub use checkpoint::{ImportCheckpoint, MknPhase};
+pub use checkpoint::{ImportCheckpoint, MknPhase, PrefixState};
+pub use checkpoint_decoder::{decode_checkpoint, decode_checkpoint_summary};
 pub use config::{GoogleBooksConfig, ShardingGranularity, ShardingMode, ShardingOptions};
 pub use events::{ImportCommand, ImportEvent, LogLevel};
 pub use extractor::{DictionaryExtractor, ExtractionPhase, ExtractionProgress, ExtractionStats};
