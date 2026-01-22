@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::sources::google_books::{ImportCommand, ImportEvent};

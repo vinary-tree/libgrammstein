@@ -48,6 +48,16 @@ pub struct GoogleBooksConfig {
     /// to PathMap using `PathMapTranslator`.
     pub output_path: PathBuf,
 
+    /// Path for the shared vocabulary file.
+    ///
+    /// The vocabulary maps unique words to PUA (Private Use Area) characters,
+    /// enabling compact n-gram key encoding without delimiter bugs.
+    ///
+    /// If not specified, defaults to `{output_path_stem}.vocab.artrie` in the
+    /// same directory as `output_path`.
+    #[serde(default)]
+    pub vocabulary_path: Option<PathBuf>,
+
     /// Buffer pool size for PersistentARTrie.
     ///
     /// Default: 256 pages = 64MB.
@@ -183,6 +193,7 @@ impl Default for GoogleBooksConfig {
             min_count: 40,
             year_range: None,
             output_path: PathBuf::from("ngrams.artrie"),
+            vocabulary_path: None,
             buffer_pool_size: 256,
             parallel_downloads: 4,
             progress_interval: 100_000,
@@ -226,6 +237,25 @@ impl GoogleBooksConfig {
     /// Get the checkpoint file path.
     pub fn checkpoint_path(&self) -> PathBuf {
         self.output_path.with_extension("checkpoint.json")
+    }
+
+    /// Get the vocabulary file path.
+    ///
+    /// Returns the configured vocabulary path, or a default based on the output path.
+    /// The default is `{output_path_stem}.vocab.artrie` in the same directory.
+    pub fn vocabulary_path(&self) -> PathBuf {
+        if let Some(path) = &self.vocabulary_path {
+            return path.clone();
+        }
+
+        // Default: {output_stem}.vocab.artrie in same directory as output
+        let parent = self.output_path.parent().unwrap_or(std::path::Path::new("."));
+        let stem = self
+            .output_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("ngrams");
+        parent.join(format!("{}.vocab.artrie", stem))
     }
 
     /// Check if sharding should be used for the given estimated n-gram count.
@@ -317,6 +347,14 @@ impl GoogleBooksConfigBuilder {
     /// Set the output path.
     pub fn output_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.config.output_path = path.into();
+        self
+    }
+
+    /// Set the vocabulary file path.
+    ///
+    /// If not set, defaults to `{output_path_stem}.vocab.artrie`.
+    pub fn vocabulary_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.vocabulary_path = Some(path.into());
         self
     }
 

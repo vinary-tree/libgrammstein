@@ -292,7 +292,7 @@ pub mod encoding {
 
     /// Compute a hash for a pattern.
     pub fn pattern_hash(nodes: &[PatternNode]) -> u64 {
-        crate::util::hash::safe_hash(Self::encode_pattern(nodes).as_bytes())
+        crate::util::hash::safe_hash(encode_pattern(nodes).as_bytes())
     }
 }
 

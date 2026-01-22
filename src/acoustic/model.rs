@@ -498,7 +498,7 @@ impl TransformerAcousticModel {
 
     /// Add sinusoidal positional encoding.
     fn add_positional_encoding(&self, x: &Tensor) -> Result<Tensor> {
-        let (batch, seq_len, hidden_dim) = x.dims3()?;
+        let (_batch_size, seq_len, hidden_dim) = x.dims3()?;
 
         // Generate positional encodings
         let mut pe = vec![0.0f32; seq_len * hidden_dim];

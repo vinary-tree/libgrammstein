@@ -54,7 +54,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2};
 use ordered_float::OrderedFloat;
 
 /// Pooling strategy for aggregating frame-level features.

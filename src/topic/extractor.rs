@@ -122,7 +122,7 @@ impl TopicExtractor {
 
         // Check embedding dimension consistency
         let embedding_dim = embeddings[0].len();
-        for (i, emb) in embeddings.iter().enumerate() {
+        for (_idx, emb) in embeddings.iter().enumerate() {
             if emb.len() != embedding_dim {
                 return Err(TopicError::DimensionMismatch {
                     expected: embedding_dim,

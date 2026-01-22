@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use super::cache::EmbeddingCache;
-use super::modernbert::{Device, ModernBertConfig, ModernBertModel};
-use super::{NeuralError, Result};
+use super::modernbert::{ModernBertConfig, ModernBertModel};
+use super::Result;
 
 /// Configuration for embedder.
 #[derive(Clone, Debug)]

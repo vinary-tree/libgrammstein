@@ -95,7 +95,7 @@ impl LoadedModel {
                 }))
             }
             LoadedModel::Ngram(m) => {
-                use crate::ngram::IterableDictionary;
+                
                 // Extract unigrams (no separator)
                 Box::new(m.trie().iter_entries().filter_map(|(key, _)| {
                     if !key.contains('|') {

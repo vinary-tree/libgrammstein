@@ -1,11 +1,11 @@
 //! Configuration for paradigm detection.
 
-#[cfg(feature = "serde")]
+#[cfg(feature = "serde-extras")]
 use serde::{Deserialize, Serialize};
 
 /// Configuration for paradigm detection.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub struct ParadigmConfig {
     /// Weights for different paradigm indicators.
     pub weights: ParadigmWeights,
@@ -135,7 +135,7 @@ impl ParadigmConfig {
 
 /// Weight multipliers for paradigm scores.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub struct ParadigmWeights {
     /// Multiplier for OOP indicators.
     pub oop_multiplier: f64,
@@ -192,7 +192,7 @@ impl ParadigmWeights {
 
 /// Language-specific hints for paradigm detection.
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub struct LanguageHints {
     /// The programming language (optional).
     pub language: Option<String>,

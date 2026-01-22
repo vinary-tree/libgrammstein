@@ -4,7 +4,6 @@
 //! reducing redundant computation when processing sequences incrementally.
 
 use candle_core::{DType, Device, Tensor};
-use std::collections::HashMap;
 
 use super::{NeuralError, Result};
 

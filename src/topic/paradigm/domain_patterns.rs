@@ -29,14 +29,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[cfg(feature = "serde")]
+#[cfg(feature = "serde-extras")]
 use serde::{Deserialize, Serialize};
 
-use super::indicators::{Paradigm, ParadigmIndicator, IndicatorCategory};
 
 /// Rholang-specific pattern categories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub enum RholangPatternCategory {
     /// Process composition patterns (|, ;).
     ProcessComposition,
@@ -86,7 +85,7 @@ impl RholangPatternCategory {
 
 /// A Rholang pattern definition.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub struct RholangPattern {
     /// Pattern name.
     pub name: String,
@@ -149,7 +148,7 @@ impl RholangPattern {
 
 /// MeTTa-specific pattern categories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub enum MettaPatternCategory {
     /// Atom definitions (Symbol, Expression, Variable).
     AtomDefinition,
@@ -199,7 +198,7 @@ impl MettaPatternCategory {
 
 /// A MeTTa pattern definition.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub struct MettaPattern {
     /// Pattern name.
     pub name: String,
@@ -883,7 +882,7 @@ impl DomainPatternDetector {
 
 /// A matched Rholang pattern.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub struct RholangPatternMatch {
     /// Name of the matched pattern.
     pub pattern_name: String,
@@ -899,7 +898,7 @@ pub struct RholangPatternMatch {
 
 /// A matched MeTTa pattern.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub struct MettaPatternMatch {
     /// Name of the matched pattern.
     pub pattern_name: String,

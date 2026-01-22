@@ -107,7 +107,7 @@ pub struct ErrorRange {
 
 impl ParsedCode {
     /// Returns the root node of the AST.
-    pub fn root(&self) -> Node {
+    pub fn root(&self) -> Node<'_> {
         self.tree.root_node()
     }
 

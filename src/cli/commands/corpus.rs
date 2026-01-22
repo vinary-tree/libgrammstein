@@ -313,7 +313,7 @@ fn wikipedia_dump_url(lang: &str) -> String {
 
 /// Detect corpus language.
 fn corpus_detect(args: CorpusDetectArgs, verbose: bool) -> CliResult<()> {
-    use whatlang::{detect, Lang};
+    use whatlang::detect;
 
     if verbose {
         eprintln!("Detecting language of corpus: {}", args.corpus);
@@ -380,6 +380,7 @@ fn corpus_detect(args: CorpusDetectArgs, verbose: bool) -> CliResult<()> {
 }
 
 /// Convert whatlang Lang to ISO 639-1 code.
+#[allow(unreachable_patterns)]
 fn lang_to_code(lang: whatlang::Lang) -> &'static str {
     use whatlang::Lang::*;
     match lang {
@@ -426,6 +427,7 @@ fn lang_to_code(lang: whatlang::Lang) -> &'static str {
 }
 
 /// Get human-readable language name.
+#[allow(unreachable_patterns)]
 fn lang_name(lang: whatlang::Lang) -> &'static str {
     use whatlang::Lang::*;
     match lang {

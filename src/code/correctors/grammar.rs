@@ -186,7 +186,7 @@ impl<L: CodeLanguage> GrammarCorrector<L> {
         &self,
         position: usize,
         context: &[&str],
-        source: &str,
+        _source: &str,
         byte_position: usize,
     ) -> Vec<Correction> {
         if !self.config.suggest_insertions {

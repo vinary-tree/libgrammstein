@@ -1,6 +1,5 @@
 //! CLI-specific error types and formatting.
 
-use std::fmt;
 use std::path::PathBuf;
 
 use console::style;

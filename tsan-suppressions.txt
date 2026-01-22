@@ -1,3 +1,0 @@
-# Arc-related false positives (TSan doesn't understand atomic fences)
-race:std::sync::arc::Arc
-race:std::sync::atomic

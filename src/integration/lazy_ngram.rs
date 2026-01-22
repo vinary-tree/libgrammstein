@@ -36,6 +36,7 @@ use lling_llang::semiring::Semiring;
 use lling_llang::wfst::{LazyState, StateId, StateSource, WeightedTransition};
 use smallvec::SmallVec;
 
+#[allow(deprecated)]
 use crate::ngram::{IterableDictionary, NgramEntry, NgramModel, NGRAM_SEPARATOR};
 use liblevenshtein::dictionary::MutableMappedDictionary;
 
@@ -210,6 +211,7 @@ where
     }
 
     /// Build vocabulary from the n-gram model.
+    #[allow(deprecated)]
     fn build_vocabulary(model: &NgramModel<D>) -> WordVocabulary {
         let mut vocab = WordVocabulary::with_capacity(model.vocab_size());
 

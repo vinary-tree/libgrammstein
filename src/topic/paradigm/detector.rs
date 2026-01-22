@@ -4,7 +4,6 @@
 //! detecting programming paradigms from code tokens.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use super::config::ParadigmConfig;
 use super::indicators::{

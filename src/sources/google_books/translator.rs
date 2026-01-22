@@ -15,7 +15,6 @@ use liblevenshtein::dictionary::persistent_artrie_char::dict_impl_char::{
 };
 use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
 use pathmap::paths_serialization::{serialize_paths_with_auxdata, for_each_deserialized_path};
-use pathmap::zipper::ZipperMoving;
 use pathmap::PathMap;
 
 /// Recursively traverse the trie and collect all entries.

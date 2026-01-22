@@ -10,7 +10,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rayon::prelude::*;
 
-use super::pattern::{FlatNode, FlatTree, PatternNode, SubtreePattern, encoding};
+use super::pattern::{encoding, FlatNode, FlatTree, PatternNode, SubtreePattern};
 
 /// Configuration for the TreeminerD algorithm.
 #[derive(Debug, Clone)]
@@ -383,7 +383,6 @@ impl TreeminerD {
         for match_positions in matches {
             // For each match, try to extend with adjacent nodes
             let last_match_pos = *match_positions.last().unwrap_or(&0);
-            let pattern_max_depth = pattern.max_depth();
 
             // Try to extend as a sibling (same depth as last node in pattern)
             // or as a child (depth + 1)

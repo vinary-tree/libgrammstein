@@ -5,12 +5,12 @@
 
 use std::fmt;
 
-#[cfg(feature = "serde")]
+#[cfg(feature = "serde-extras")]
 use serde::{Deserialize, Serialize};
 
 /// Programming paradigms that can be detected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub enum Paradigm {
     /// Object-Oriented Programming: classes, inheritance, encapsulation, polymorphism.
     ObjectOriented,
@@ -66,7 +66,7 @@ impl fmt::Display for Paradigm {
 
 /// A profile of paradigm scores for a code sample.
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub struct ParadigmProfile {
     /// Score for Object-Oriented patterns (0.0 to 1.0).
     pub oop_score: f64,
@@ -191,7 +191,7 @@ impl ParadigmProfile {
 
 /// A single paradigm indicator with metadata.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub struct ParadigmIndicator {
     /// The paradigm this indicator belongs to.
     pub paradigm: Paradigm,
@@ -249,7 +249,7 @@ impl ParadigmIndicator {
 
 /// Category of indicator within a paradigm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub enum IndicatorCategory {
     /// OOP: Class/type definitions.
     OopClass,
@@ -348,7 +348,7 @@ impl IndicatorCategory {
 
 /// OOP-specific indicators.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub enum OopIndicator {
     /// Class definition keyword.
     ClassKeyword,
@@ -384,7 +384,7 @@ pub enum OopIndicator {
 
 /// FP-specific indicators.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub enum FpIndicator {
     /// Lambda/arrow function.
     Lambda,
@@ -422,7 +422,7 @@ pub enum FpIndicator {
 
 /// Reactive-specific indicators.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub enum ReactiveIndicator {
     /// Observable/Subject creation.
     ObservableCreate,
@@ -456,7 +456,7 @@ pub enum ReactiveIndicator {
 
 /// Procedural-specific indicators.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub enum ProceduralIndicator {
     /// For loop.
     ForLoop,

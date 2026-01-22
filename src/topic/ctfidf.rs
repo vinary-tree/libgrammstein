@@ -16,7 +16,6 @@
 //! - `avg_docs` = average number of words per topic
 //! - `df(t)` = number of topics containing term t
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dashmap::DashMap;

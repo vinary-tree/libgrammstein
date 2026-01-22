@@ -31,6 +31,7 @@ use lling_llang::asr::{NgramBuilder, NgramConfig, NgramTransducer};
 use lling_llang::semiring::{LogWeight, ProbabilityWeight, Semiring, TropicalWeight};
 use lling_llang::wfst::{MutableWfst, StateId, VectorWfst};
 
+#[allow(deprecated)]
 use crate::ngram::{IterableDictionary, NgramEntry, NgramModel, NGRAM_SEPARATOR};
 use liblevenshtein::dictionary::MutableMappedDictionary;
 
@@ -167,6 +168,7 @@ where
     }
 
     /// Build vocabulary from the n-gram model.
+    #[allow(deprecated)]
     fn build_vocabulary(model: &NgramModel<D>) -> WordVocabulary {
         let mut vocab = WordVocabulary::with_capacity(model.vocab_size());
 
@@ -261,6 +263,7 @@ where
     }
 
     /// Add higher-order n-gram transitions.
+    #[allow(deprecated)]
     fn add_higher_order_ngrams(&mut self) {
         let order = self.model.order();
 
@@ -523,6 +526,7 @@ where
     }
 
     /// Add higher-order n-grams and backoff weights.
+    #[allow(deprecated)]
     fn add_higher_order_ngrams(&mut self) {
         let order = self.model.order();
 
@@ -583,12 +587,6 @@ where
         // Add backoff weights for all seen histories
         // The backoff weight accounts for probability mass reserved for unseen n-grams
         for history_ids in histories_seen {
-            // Convert history IDs back to words for the model query
-            let history_words: Vec<String> = history_ids
-                .iter()
-                .filter_map(|&id| self.vocabulary.get_word(id).map(|s| s.to_string()))
-                .collect();
-
             // Compute backoff weight
             // In Modified Kneser-Ney, β(h) = D(h) * N1+(h•) / C(h)
             // For simplicity, we use unit weight since log_prob already includes smoothing

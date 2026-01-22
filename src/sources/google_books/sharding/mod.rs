@@ -87,5 +87,8 @@ pub use mkn::{
     MknStats, MknSummary, OrderSummary,
 };
 pub use query::{ShardedTrieView, ViewStats};
-pub use routing::{all_shard_keys, compute_shard_key, ngram_order, shard_key_for_file_prefix, ShardKey};
+pub use routing::{
+    all_shard_keys, compute_shard_key, compute_shard_key_from_token, ngram_order,
+    shard_key_for_file_prefix, ShardKey,
+};
 pub use shard::{ShardError, ShardHandle, ShardResult, ShardStats, WriteToken};

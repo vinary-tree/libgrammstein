@@ -1,8 +1,6 @@
 //! Custom widgets and helper functions for the TUI.
 
 use std::collections::VecDeque;
-use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Sparkline};
 
 /// Create a sparkline widget showing throughput history.
 ///

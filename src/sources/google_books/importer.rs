@@ -12,17 +12,16 @@ use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
 use parking_lot::RwLock;
 
 use super::sharding::MknAggregator;
-use super::storage::{NgramStorage, StorageError};
+use super::storage::NgramStorage;
 
 
 use super::aggregator::YearAggregator;
 use super::checkpoint::{
-    CheckpointError, CheckpointStats, ImportCheckpoint, MknPhase, TrieCheckpointStorage,
+    CheckpointError, ImportCheckpoint, MknPhase, TrieCheckpointStorage,
 };
 use super::config::GoogleBooksConfig;
 use super::events::{ImportCommand, ImportEvent, LogLevel};
 use super::languages::{get_file_url, get_metadata, get_prefixes, is_supported};
-use super::parser::NgramRecord;
 use super::reader::{FileNgramReader, ReaderError};
 #[cfg(feature = "google-books")]
 use super::task_manager::RetryAfter;
@@ -2025,7 +2024,7 @@ impl GoogleBooksImporter {
         event_tx: tokio::sync::broadcast::Sender<ImportEvent>,
         mut command_rx: tokio::sync::mpsc::Receiver<ImportCommand>,
     ) -> Result<ImportStats, ImportError> {
-        use futures::stream::{self, StreamExt};
+        use futures::stream::StreamExt;
         use std::time::{Duration, Instant};
 
         let parallel_downloads = self.config.parallel_downloads;
@@ -3147,7 +3146,7 @@ pub async fn shutdown_signal() {
 /// Run import with graceful shutdown handling.
 #[cfg(feature = "google-books")]
 pub async fn run_import_with_shutdown<F>(
-    mut importer: GoogleBooksImporter,
+    importer: GoogleBooksImporter,
     progress: F,
 ) -> Result<ImportStats, ImportError>
 where
@@ -3160,7 +3159,7 @@ where
     let shutdown_handle = tokio::spawn(async move {
         shutdown_signal().await;
         log::warn!("Received shutdown signal, saving checkpoint...");
-        if let Some(mut importer) = importer_clone.try_lock() {
+        if let Some(importer) = importer_clone.try_lock() {
             importer.interrupt();
         }
     });

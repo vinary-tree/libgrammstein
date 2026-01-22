@@ -10,9 +10,18 @@
 //!
 //! - **Sharded**: Distributes n-grams across multiple tries based on prefix routing.
 //!   Eliminates write contention for parallel imports.
+//!
+//! # Vocabulary-Indexed Encoding
+//!
+//! When a `SharedVocabulary` is provided, n-gram keys are encoded using PUA
+//! (Private Use Area) characters instead of pipe-separated tokens. This:
+//! - Fixes the delimiter bug when tokens contain `|`
+//! - Provides more compact storage (1 char per word)
+//! - Enables DAWG suffix sharing at the word level
 
-use super::config::{GoogleBooksConfig, ShardingMode};
+use super::config::GoogleBooksConfig;
 use super::sharding::{ShardCoordinator, ShardKey};
+use crate::ngram::vocabulary::{encode_ngram_key, SharedVocabulary};
 use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
 use parking_lot::RwLock;
 use std::path::Path;
@@ -65,11 +74,16 @@ impl StorageStats {
 ///
 /// This enum allows the importer to use either single-trie or sharded storage
 /// without changing the import logic.
+///
+/// When a `SharedVocabulary` is attached, n-gram keys are encoded using
+/// vocabulary-indexed (PUA character) encoding instead of pipe-separated tokens.
 pub enum NgramStorage {
     /// Single trie storage (original behavior).
     SingleTrie {
         /// The trie instance.
         trie: Arc<RwLock<DiskBackedCharTrieInner<u64>>>,
+        /// Optional shared vocabulary for PUA encoding.
+        vocabulary: Option<Arc<SharedVocabulary>>,
         /// Storage statistics.
         stats: Arc<StorageStats>,
     },
@@ -78,6 +92,8 @@ pub enum NgramStorage {
     Sharded {
         /// The shard coordinator.
         coordinator: ShardCoordinator,
+        /// Optional shared vocabulary for PUA encoding.
+        vocabulary: Option<Arc<SharedVocabulary>>,
         /// Storage statistics.
         stats: Arc<StorageStats>,
     },
@@ -100,6 +116,14 @@ impl NgramStorage {
 
     /// Create single-trie storage.
     pub fn create_single_trie(output_path: &Path) -> StorageResult<Self> {
+        Self::create_single_trie_with_vocabulary(output_path, None)
+    }
+
+    /// Create single-trie storage with optional vocabulary.
+    pub fn create_single_trie_with_vocabulary(
+        output_path: &Path,
+        vocabulary: Option<Arc<SharedVocabulary>>,
+    ) -> StorageResult<Self> {
         let trie = if output_path.exists() {
             log::info!("Opening existing trie at {:?}", output_path);
             DiskBackedCharTrieInner::open(output_path)
@@ -112,12 +136,21 @@ impl NgramStorage {
 
         Ok(Self::SingleTrie {
             trie: Arc::new(RwLock::new(trie)),
+            vocabulary,
             stats: Arc::new(StorageStats::default()),
         })
     }
 
     /// Create sharded storage.
     pub fn create_sharded(config: &GoogleBooksConfig) -> StorageResult<Self> {
+        Self::create_sharded_with_vocabulary(config, None)
+    }
+
+    /// Create sharded storage with optional vocabulary.
+    pub fn create_sharded_with_vocabulary(
+        config: &GoogleBooksConfig,
+        vocabulary: Option<Arc<SharedVocabulary>>,
+    ) -> StorageResult<Self> {
         let shard_config = config.to_shard_config();
 
         log::info!(
@@ -130,6 +163,7 @@ impl NgramStorage {
 
         Ok(Self::Sharded {
             coordinator,
+            vocabulary,
             stats: Arc::new(StorageStats::default()),
         })
     }
@@ -138,6 +172,17 @@ impl NgramStorage {
     ///
     /// For sharded storage, this loads existing checkpoint state.
     pub fn resume_or_start(config: &GoogleBooksConfig, estimated_ngrams: u64) -> StorageResult<Self> {
+        Self::resume_or_start_with_vocabulary(config, estimated_ngrams, None)
+    }
+
+    /// Resume or start storage with optional vocabulary.
+    ///
+    /// For sharded storage, this loads existing checkpoint state.
+    pub fn resume_or_start_with_vocabulary(
+        config: &GoogleBooksConfig,
+        estimated_ngrams: u64,
+        vocabulary: Option<Arc<SharedVocabulary>>,
+    ) -> StorageResult<Self> {
         let use_sharding = config.should_use_sharding(estimated_ngrams);
 
         if use_sharding {
@@ -152,16 +197,91 @@ impl NgramStorage {
 
             Ok(Self::Sharded {
                 coordinator,
+                vocabulary,
                 stats: Arc::new(StorageStats::default()),
             })
         } else {
-            Self::create_single_trie(&config.output_path)
+            Self::create_single_trie_with_vocabulary(&config.output_path, vocabulary)
         }
     }
 
     /// Check if this is sharded storage.
     pub fn is_sharded(&self) -> bool {
         matches!(self, Self::Sharded { .. })
+    }
+
+    /// Check if vocabulary-indexed encoding is enabled.
+    pub fn has_vocabulary(&self) -> bool {
+        match self {
+            Self::SingleTrie { vocabulary, .. } => vocabulary.is_some(),
+            Self::Sharded { vocabulary, .. } => vocabulary.is_some(),
+        }
+    }
+
+    /// Get the vocabulary reference, if any.
+    pub fn vocabulary(&self) -> Option<&Arc<SharedVocabulary>> {
+        match self {
+            Self::SingleTrie { vocabulary, .. } => vocabulary.as_ref(),
+            Self::Sharded { vocabulary, .. } => vocabulary.as_ref(),
+        }
+    }
+
+    /// Encode tokens to an n-gram key using vocabulary.
+    ///
+    /// If vocabulary is not set, returns the tokens joined with spaces.
+    pub fn encode_tokens(&self, tokens: &[&str]) -> String {
+        match self.vocabulary() {
+            Some(vocab) => encode_ngram_key(tokens, vocab),
+            None => tokens.join(" "),
+        }
+    }
+
+    /// Store tokens as an n-gram with count, using vocabulary encoding if available.
+    ///
+    /// This is the recommended method for storing n-grams when you have tokens.
+    /// If vocabulary is enabled, the tokens are encoded to a PUA key and routed
+    /// based on the original tokens (not the encoded key).
+    ///
+    /// # Arguments
+    ///
+    /// * `tokens` - The n-gram tokens (e.g., ["the", "quick", "brown"])
+    /// * `count` - The n-gram count
+    ///
+    /// # Returns
+    ///
+    /// `true` if this was a new n-gram.
+    pub fn store_tokens(&self, tokens: &[&str], count: u64) -> StorageResult<bool> {
+        let encoded_key = self.encode_tokens(tokens);
+
+        match self {
+            Self::SingleTrie { trie, stats, .. } => {
+                let mut guard = trie.write();
+                let is_new = guard.get(&encoded_key).is_none();
+                guard.increment(&encoded_key, count as i64).map_err(|e| {
+                    StorageError::Trie(format!("Failed to store n-gram: {}", e))
+                })?;
+
+                stats.record(count, if is_new { 1 } else { 0 });
+                Ok(is_new)
+            }
+            Self::Sharded { coordinator, stats, .. } => {
+                // Route based on original tokens, store encoded key
+                let shard_key = coordinator.route_tokens(tokens);
+                let is_new = coordinator.store_in_shard(&shard_key, &encoded_key, count)?;
+                stats.record(count, if is_new { 1 } else { 0 });
+                Ok(is_new)
+            }
+        }
+    }
+
+    /// Route tokens to their shard key (for sharded mode with vocabulary encoding).
+    ///
+    /// Returns `None` for single-trie mode.
+    pub fn route_tokens(&self, tokens: &[&str]) -> Option<ShardKey> {
+        match self {
+            Self::SingleTrie { .. } => None,
+            Self::Sharded { coordinator, .. } => Some(coordinator.route_tokens(tokens)),
+        }
     }
 
     /// Get storage statistics.
@@ -177,7 +297,7 @@ impl NgramStorage {
     /// Returns `true` if this was a new n-gram.
     pub fn store(&self, ngram: &str, count: u64) -> StorageResult<bool> {
         match self {
-            Self::SingleTrie { trie, stats } => {
+            Self::SingleTrie { trie, stats, .. } => {
                 let mut guard = trie.write();
                 let is_new = guard.get(ngram).is_none();
                 guard.increment(ngram, count as i64).map_err(|e| {
@@ -187,7 +307,7 @@ impl NgramStorage {
                 stats.record(count, if is_new { 1 } else { 0 });
                 Ok(is_new)
             }
-            Self::Sharded { coordinator, stats } => {
+            Self::Sharded { coordinator, stats, .. } => {
                 let is_new = coordinator.store_ngram(ngram, count)?;
                 stats.record(count, if is_new { 1 } else { 0 });
                 Ok(is_new)
@@ -213,7 +333,7 @@ impl NgramStorage {
         I: Iterator<Item = (&'a str, u64)>,
     {
         match self {
-            Self::SingleTrie { trie, stats } => {
+            Self::SingleTrie { trie, stats, .. } => {
                 let mut guard = trie.write();
                 let mut new_count = 0u64;
                 let mut total_count = 0u64;
@@ -233,7 +353,7 @@ impl NgramStorage {
                 stats.record(total_count, new_count);
                 Ok(new_count)
             }
-            Self::Sharded { coordinator, stats } => {
+            Self::Sharded { coordinator, stats, .. } => {
                 let key = shard_key.ok_or_else(|| {
                     StorageError::Config("Shard key required for sharded storage batch".to_string())
                 })?;
@@ -250,6 +370,9 @@ impl NgramStorage {
     }
 
     /// Get the count for an n-gram.
+    ///
+    /// For vocabulary-indexed encoding with sharded storage, use `get_tokens` instead
+    /// to ensure correct routing based on original tokens.
     pub fn get(&self, ngram: &str) -> Option<u64> {
         match self {
             Self::SingleTrie { trie, .. } => {
@@ -260,9 +383,37 @@ impl NgramStorage {
         }
     }
 
+    /// Get the count for an n-gram by tokens (for vocabulary-indexed encoding).
+    ///
+    /// This encodes the tokens to a PUA key and routes based on the original tokens,
+    /// ensuring correct shard routing for vocabulary-indexed storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `tokens` - The n-gram tokens (e.g., ["the", "quick", "brown"])
+    pub fn get_tokens(&self, tokens: &[&str]) -> Option<u64> {
+        let encoded_key = self.encode_tokens(tokens);
+
+        match self {
+            Self::SingleTrie { trie, .. } => {
+                let guard = trie.read();
+                guard.get(&encoded_key).map(|v| *v as u64)
+            }
+            Self::Sharded { coordinator, .. } => {
+                let shard_key = coordinator.route_tokens(tokens);
+                coordinator.get_in_shard(&shard_key, &encoded_key)
+            }
+        }
+    }
+
     /// Check if an n-gram exists.
     pub fn contains(&self, ngram: &str) -> bool {
         self.get(ngram).is_some()
+    }
+
+    /// Check if an n-gram exists by tokens (for vocabulary-indexed encoding).
+    pub fn contains_tokens(&self, tokens: &[&str]) -> bool {
+        self.get_tokens(tokens).is_some()
     }
 
     /// Checkpoint the storage.
@@ -384,6 +535,8 @@ impl NgramStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ngram::vocabulary::is_pua_char;
+    use crate::sources::google_books::config::ShardingMode;
     use tempfile::TempDir;
 
     #[test]
@@ -452,5 +605,146 @@ mod tests {
         assert_eq!(storage.get("the|quick"), Some(10));
         assert_eq!(storage.get("the|slow"), Some(5));
         assert_eq!(storage.get("this|is"), Some(3));
+    }
+
+    #[test]
+    fn test_vocabulary_encoding_single_trie() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let trie_path = dir.path().join("test.artrie");
+        let vocab_path = dir.path().join("vocab.artrie");
+
+        // Create vocabulary
+        let vocabulary = Arc::new(
+            SharedVocabulary::open_or_create(&vocab_path).expect("Failed to create vocabulary"),
+        );
+
+        // Create storage with vocabulary
+        let storage = NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(vocabulary))
+            .expect("Failed to create storage");
+
+        assert!(storage.has_vocabulary());
+
+        // Store tokens - should encode to PUA characters
+        let tokens1 = ["the", "quick"];
+        let tokens2 = ["the", "slow"];
+        let tokens3 = ["apple", "pie"];
+
+        assert!(storage.store_tokens(&tokens1, 10).expect("Failed to store"));
+        assert!(!storage.store_tokens(&tokens1, 5).expect("Failed to store")); // Duplicate
+        assert!(storage.store_tokens(&tokens2, 3).expect("Failed to store"));
+        assert!(storage.store_tokens(&tokens3, 7).expect("Failed to store"));
+
+        // Verify encoded keys are PUA strings
+        let encoded1 = storage.encode_tokens(&tokens1);
+        let encoded3 = storage.encode_tokens(&tokens3);
+
+        assert_eq!(encoded1.chars().count(), 2); // 2 PUA chars
+        assert!(encoded1.chars().all(is_pua_char));
+        assert_eq!(encoded3.chars().count(), 2); // 2 PUA chars
+        assert!(encoded3.chars().all(is_pua_char));
+
+        // Query using encoded keys
+        assert_eq!(storage.get(&encoded1), Some(15)); // 10 + 5
+        assert_eq!(storage.get(&storage.encode_tokens(&tokens2)), Some(3));
+        assert_eq!(storage.get(&encoded3), Some(7));
+
+        // Stats
+        assert_eq!(storage.stats().total_ngrams.load(Ordering::Relaxed), 25);
+        assert_eq!(storage.stats().unique_ngrams.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn test_vocabulary_encoding_sharded() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let vocab_path = dir.path().join("vocab.artrie");
+
+        // Create vocabulary
+        let vocabulary = Arc::new(
+            SharedVocabulary::open_or_create(&vocab_path).expect("Failed to create vocabulary"),
+        );
+
+        // Create sharded storage with vocabulary
+        let config = GoogleBooksConfig {
+            output_path: dir.path().join("output.artrie"),
+            sharding: ShardingMode::Enabled(super::super::config::ShardingOptions::default()),
+            ..Default::default()
+        };
+
+        let storage = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocabulary))
+            .expect("Failed to create storage");
+
+        assert!(storage.is_sharded());
+        assert!(storage.has_vocabulary());
+
+        // Store tokens - should route based on original tokens, not encoded key
+        let tokens_th = ["the", "quick", "brown"];
+        let tokens_ap = ["apple", "pie"];
+        let tokens_ze = ["zebra", "crossing"];
+
+        assert!(storage.store_tokens(&tokens_th, 10).expect("Failed to store"));
+        assert!(storage.store_tokens(&tokens_ap, 5).expect("Failed to store"));
+        assert!(storage.store_tokens(&tokens_ze, 3).expect("Failed to store"));
+
+        // Verify routing is based on original tokens
+        let shard_th = storage.route_tokens(&tokens_th).unwrap();
+        let shard_ap = storage.route_tokens(&tokens_ap).unwrap();
+        let shard_ze = storage.route_tokens(&tokens_ze).unwrap();
+
+        // With Adaptive granularity (default), trigrams use 2-char prefixes
+        assert_eq!(shard_th.prefix, "th");
+        assert_eq!(shard_ap.prefix, "ap");
+        assert_eq!(shard_ze.prefix, "ze");
+
+        // Query using get_tokens (which routes based on original tokens)
+        assert_eq!(storage.get_tokens(&tokens_th), Some(10));
+        assert_eq!(storage.get_tokens(&tokens_ap), Some(5));
+        assert_eq!(storage.get_tokens(&tokens_ze), Some(3));
+
+        // Verify contains_tokens works
+        assert!(storage.contains_tokens(&tokens_th));
+        assert!(storage.contains_tokens(&tokens_ap));
+        assert!(storage.contains_tokens(&tokens_ze));
+        assert!(!storage.contains_tokens(&["nonexistent", "ngram"]));
+
+        // Verify encoded keys are PUA strings
+        let encoded_th = storage.encode_tokens(&tokens_th);
+        assert_eq!(encoded_th.chars().count(), 3); // 3 PUA chars for trigram
+        assert!(encoded_th.chars().all(is_pua_char));
+    }
+
+    #[test]
+    fn test_vocabulary_encoding_with_pipe_in_token() {
+        // This tests the bug fix: tokens containing | should not corrupt data
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let trie_path = dir.path().join("test.artrie");
+        let vocab_path = dir.path().join("vocab.artrie");
+
+        let vocabulary = Arc::new(
+            SharedVocabulary::open_or_create(&vocab_path).expect("Failed to create vocabulary"),
+        );
+
+        let storage = NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(vocabulary))
+            .expect("Failed to create storage");
+
+        // Token with pipe - this would corrupt with pipe-separated encoding
+        let tokens = ["foo|bar", "baz"];
+
+        assert!(storage.store_tokens(&tokens, 10).expect("Failed to store"));
+
+        // Verify we can retrieve it
+        let encoded = storage.encode_tokens(&tokens);
+        assert_eq!(storage.get(&encoded), Some(10));
+
+        // The encoded key should be 2 PUA chars, not affected by the | in the token
+        assert_eq!(encoded.chars().count(), 2);
+        assert!(encoded.chars().all(is_pua_char));
+
+        // Store different tokens - should NOT conflict
+        let tokens2 = ["foo", "bar", "baz"]; // 3 separate tokens
+        assert!(storage.store_tokens(&tokens2, 5).expect("Failed to store"));
+
+        let encoded2 = storage.encode_tokens(&tokens2);
+        assert_eq!(encoded2.chars().count(), 3); // 3 PUA chars
+        assert_ne!(encoded, encoded2); // Different keys
     }
 }

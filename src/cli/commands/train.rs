@@ -1,6 +1,6 @@
 //! Training command implementations.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -12,7 +12,7 @@ use crate::cli::args::{
 #[cfg(feature = "google-books")]
 use crate::cli::args::ImportGoogleBooksArgs;
 use crate::cli::checkpoint::{
-    CheckpointManager, CorpusPosition, NgramCheckpoint, NgramCheckpointConfig,
+    CheckpointManager, NgramCheckpoint, NgramCheckpointConfig,
     NgramTrainingState, TrainingTimer,
 };
 use crate::cli::error::{print_success, CliError, CliResult};
@@ -397,8 +397,7 @@ fn train_ngram_inmemory(
 /// Train subword embeddings.
 fn train_embedding(args: TrainEmbeddingArgs, verbose: bool, quiet: bool) -> CliResult<()> {
     use crate::cli::checkpoint::{
-        CheckpointManager, EmbeddingCheckpoint, EmbeddingCheckpointConfig,
-        EmbeddingTrainingState, TrainingTimer,
+        CheckpointManager, TrainingTimer,
     };
     use crate::embedding::{EmbeddingTrainerBuilder, SubwordEmbedding};
 
@@ -421,7 +420,7 @@ fn train_embedding(args: TrainEmbeddingArgs, verbose: bool, quiet: bool) -> CliR
     setup_interrupt_handler(stats.clone());
 
     // Check for resume
-    let (start_epoch, mut model, timer, checkpoint_manager): (
+    let (start_epoch, model, timer, checkpoint_manager): (
         u32,
         Option<SubwordEmbedding>,
         TrainingTimer,
@@ -867,6 +866,7 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
         min_count: args.min_count,
         year_range,
         output_path: args.output.clone(),
+        vocabulary_path: None, // Use default derived from output_path
         buffer_pool_size: 256, // 64MB default
         parallel_downloads: args.parallel,
         progress_interval: 100_000,

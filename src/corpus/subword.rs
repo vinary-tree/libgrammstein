@@ -132,7 +132,7 @@ impl SubwordTokenizer {
         S: AsRef<str>,
     {
         use tokenizers::models::TrainerWrapper;
-        use tokenizers::TokenizerImpl;
+        
 
         // Create BPE trainer
         let trainer = BpeTrainer::builder()

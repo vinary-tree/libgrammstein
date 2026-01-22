@@ -2,6 +2,19 @@
 //!
 //! This module provides a high-level interface for storing and querying n-grams
 //! using liblevenshtein-rust's dictionary implementations.
+//!
+//! # Key Encoding
+//!
+//! N-gram keys can be encoded in two ways:
+//!
+//! 1. **Legacy (pipe-separated)**: `"the|quick|brown"` - Simple but vulnerable to
+//!    corruption if tokens contain the pipe character.
+//!
+//! 2. **Vocabulary-indexed (PUA)**: Each word maps to a Unicode Private Use Area
+//!    character, and n-gram keys are sequences of these characters. This eliminates
+//!    the delimiter bug entirely.
+//!
+//! New code should use vocabulary-indexed encoding via [`crate::ngram::vocabulary`].
 
 use crate::ngram::NgramEntry;
 use liblevenshtein::dictionary::MutableMappedDictionary;
@@ -31,10 +44,28 @@ impl IterableDictionary for liblevenshtein::dictionary::pathmap::PathMapDictiona
     }
 }
 
-/// Separator used between tokens in n-gram keys.
+/// Separator used between tokens in legacy n-gram keys.
 ///
-/// Using pipe character as it's unlikely to appear in natural text tokens.
+/// # Deprecation Notice
+///
+/// This encoding scheme is deprecated because it can cause silent data corruption
+/// if a token contains the pipe character. For example:
+///
+/// ```text
+/// ["foo|bar", "baz"] → "foo|bar|baz" → ["foo", "bar", "baz"]  // WRONG!
+/// ```
+///
+/// Use [`crate::ngram::vocabulary`] for the new vocabulary-indexed encoding
+/// that avoids this issue.
+#[deprecated(
+    since = "0.3.0",
+    note = "Use vocabulary-indexed encoding via crate::ngram::vocabulary instead. \
+            Pipe-separated keys can corrupt data if tokens contain '|'."
+)]
 pub const NGRAM_SEPARATOR: char = '|';
+
+// Re-export the non-deprecated version for internal use during migration
+pub(crate) const LEGACY_NGRAM_SEPARATOR: char = '|';
 
 /// N-gram trie wrapper providing high-level n-gram operations.
 ///
@@ -114,9 +145,15 @@ where
         Arc::clone(&self.dictionary)
     }
 
-    /// Encode an n-gram as a dictionary key.
+    /// Encode an n-gram as a dictionary key using legacy pipe-separated format.
     ///
-    /// Tokens are joined with the separator character.
+    /// # Deprecation Notice
+    ///
+    /// This function is deprecated because pipe-separated encoding can cause
+    /// silent data corruption if tokens contain the pipe character.
+    ///
+    /// Use [`crate::ngram::vocabulary::encode_ngram_key`] for the new
+    /// vocabulary-indexed encoding.
     ///
     /// # Example
     ///
@@ -125,19 +162,39 @@ where
     /// assert_eq!(key, "the|quick|brown");
     /// ```
     #[inline]
+    #[deprecated(
+        since = "0.3.0",
+        note = "Use vocabulary::encode_ngram_key() instead. \
+                Pipe-separated keys can corrupt data if tokens contain '|'."
+    )]
     pub fn encode_key(tokens: &[&str]) -> String {
-        tokens.join(&NGRAM_SEPARATOR.to_string())
+        Self::encode_key_legacy(tokens)
+    }
+
+    /// Encode an n-gram as a dictionary key using legacy pipe-separated format.
+    ///
+    /// This is the internal implementation used during migration. New code should
+    /// use [`crate::ngram::vocabulary::encode_ngram_key`] instead.
+    #[inline]
+    pub(crate) fn encode_key_legacy(tokens: &[&str]) -> String {
+        tokens.join(&LEGACY_NGRAM_SEPARATOR.to_string())
     }
 
     /// Insert or increment an n-gram count.
     ///
     /// If the n-gram exists, increments its count. Otherwise, inserts it with count 1.
     ///
+    /// # Note
+    ///
+    /// This method uses legacy pipe-separated encoding. For vocabulary-indexed
+    /// encoding, use [`Self::insert_with_key`] with a key from
+    /// [`crate::ngram::vocabulary::encode_ngram_key`].
+    ///
     /// # Returns
     ///
     /// `true` if this was a new n-gram (inserted), `false` if it already existed (incremented).
     pub fn insert(&self, tokens: &[&str]) -> bool {
-        let key = Self::encode_key(tokens);
+        let key = Self::encode_key_legacy(tokens);
         self.dictionary.update_or_insert(
             &key,
             NgramEntry::new(1),
@@ -145,22 +202,67 @@ where
         )
     }
 
+    /// Insert or increment an n-gram using a pre-encoded key.
+    ///
+    /// Use this with vocabulary-indexed keys from [`crate::ngram::vocabulary::encode_ngram_key`].
+    ///
+    /// # Returns
+    ///
+    /// `true` if this was a new n-gram (inserted), `false` if it already existed (incremented).
+    pub fn insert_with_key(&self, key: &str) -> bool {
+        self.dictionary.update_or_insert(
+            key,
+            NgramEntry::new(1),
+            |entry| entry.increment(),
+        )
+    }
+
     /// Insert an n-gram with a specific count.
+    ///
+    /// # Note
+    ///
+    /// This method uses legacy pipe-separated encoding. For vocabulary-indexed
+    /// encoding, use [`Self::insert_with_key_and_count`].
     pub fn insert_with_count(&self, tokens: &[&str], count: u64) -> bool {
-        let key = Self::encode_key(tokens);
+        let key = Self::encode_key_legacy(tokens);
         self.dictionary.insert_with_value(&key, NgramEntry::new(count))
     }
 
+    /// Insert an n-gram with a specific count using a pre-encoded key.
+    pub fn insert_with_key_and_count(&self, key: &str, count: u64) -> bool {
+        self.dictionary.insert_with_value(key, NgramEntry::new(count))
+    }
+
     /// Get the entry for an n-gram, if it exists.
+    ///
+    /// # Note
+    ///
+    /// This method uses legacy pipe-separated encoding. For vocabulary-indexed
+    /// encoding, use [`Self::get_by_key`].
     pub fn get(&self, tokens: &[&str]) -> Option<NgramEntry> {
-        let key = Self::encode_key(tokens);
+        let key = Self::encode_key_legacy(tokens);
         self.dictionary.get_value(&key)
     }
 
+    /// Get the entry for an n-gram using a pre-encoded key.
+    pub fn get_by_key(&self, key: &str) -> Option<NgramEntry> {
+        self.dictionary.get_value(key)
+    }
+
     /// Check if an n-gram exists in the trie.
+    ///
+    /// # Note
+    ///
+    /// This method uses legacy pipe-separated encoding. For vocabulary-indexed
+    /// encoding, use [`Self::contains_key`].
     pub fn contains(&self, tokens: &[&str]) -> bool {
-        let key = Self::encode_key(tokens);
+        let key = Self::encode_key_legacy(tokens);
         self.dictionary.contains(&key)
+    }
+
+    /// Check if an n-gram exists in the trie using a pre-encoded key.
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.dictionary.contains(key)
     }
 
     /// Get the count for an n-gram, or 0 if it doesn't exist.
@@ -169,12 +271,23 @@ where
         self.get(tokens).map(|e| e.count()).unwrap_or(0)
     }
 
+    /// Get the count for an n-gram using a pre-encoded key, or 0 if it doesn't exist.
+    #[inline]
+    pub fn count_by_key(&self, key: &str) -> u64 {
+        self.get_by_key(key).map(|e| e.count()).unwrap_or(0)
+    }
+
     /// Update continuation count for an n-gram.
     ///
     /// This is called during the second pass of training to set
     /// the number of unique preceding contexts.
+    ///
+    /// # Note
+    ///
+    /// This method uses legacy pipe-separated encoding. For vocabulary-indexed
+    /// encoding, use [`Self::update_continuation_count_by_key`].
     pub fn update_continuation_count(&self, tokens: &[&str], continuation_count: u32) {
-        let key = Self::encode_key(tokens);
+        let key = Self::encode_key_legacy(tokens);
         self.dictionary.update_or_insert(
             &key,
             NgramEntry::with_stats(0, continuation_count, 0),
@@ -182,11 +295,34 @@ where
         );
     }
 
+    /// Update continuation count for an n-gram using a pre-encoded key.
+    pub fn update_continuation_count_by_key(&self, key: &str, continuation_count: u32) {
+        self.dictionary.update_or_insert(
+            key,
+            NgramEntry::with_stats(0, continuation_count, 0),
+            |entry| entry.set_continuation_count(continuation_count),
+        );
+    }
+
     /// Update unique continuations count for an n-gram.
+    ///
+    /// # Note
+    ///
+    /// This method uses legacy pipe-separated encoding. For vocabulary-indexed
+    /// encoding, use [`Self::update_unique_continuations_by_key`].
     pub fn update_unique_continuations(&self, tokens: &[&str], unique_continuations: u32) {
-        let key = Self::encode_key(tokens);
+        let key = Self::encode_key_legacy(tokens);
         self.dictionary.update_or_insert(
             &key,
+            NgramEntry::with_stats(0, 0, unique_continuations),
+            |entry| entry.set_unique_continuations(unique_continuations),
+        );
+    }
+
+    /// Update unique continuations count for an n-gram using a pre-encoded key.
+    pub fn update_unique_continuations_by_key(&self, key: &str, unique_continuations: u32) {
+        self.dictionary.update_or_insert(
+            key,
             NgramEntry::with_stats(0, 0, unique_continuations),
             |entry| entry.set_unique_continuations(unique_continuations),
         );
@@ -235,6 +371,7 @@ where
 ///
 /// Based on MeTTaTron's collision-resistant hashing pattern.
 #[inline]
+#[allow(dead_code)]
 pub fn hash_ngram_key(tokens: &[&str]) -> u64 {
     use crate::util::hash::safe_hash_with_seed;
 
@@ -254,19 +391,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_encode_key() {
+    fn test_encode_key_legacy() {
+        type Trie = NgramTrie<liblevenshtein::dictionary::pathmap::PathMapDictionary<NgramEntry>>;
+
+        assert_eq!(Trie::encode_key_legacy(&["the"]), "the");
+        assert_eq!(Trie::encode_key_legacy(&["the", "quick"]), "the|quick");
         assert_eq!(
-            NgramTrie::<liblevenshtein::dictionary::pathmap::PathMapDictionary<NgramEntry>>::encode_key(&["the"]),
-            "the"
-        );
-        assert_eq!(
-            NgramTrie::<liblevenshtein::dictionary::pathmap::PathMapDictionary<NgramEntry>>::encode_key(&["the", "quick"]),
-            "the|quick"
-        );
-        assert_eq!(
-            NgramTrie::<liblevenshtein::dictionary::pathmap::PathMapDictionary<NgramEntry>>::encode_key(&["the", "quick", "brown"]),
+            Trie::encode_key_legacy(&["the", "quick", "brown"]),
             "the|quick|brown"
         );
+    }
+
+    #[test]
+    fn test_legacy_encoding_pipe_bug() {
+        // This test demonstrates the bug that vocabulary-indexed encoding fixes
+        type Trie = NgramTrie<liblevenshtein::dictionary::pathmap::PathMapDictionary<NgramEntry>>;
+
+        // A token containing a pipe character
+        let tokens = ["foo|bar", "baz"];
+        let encoded = Trie::encode_key_legacy(&tokens);
+
+        // When decoded by splitting on pipe, we get the wrong number of tokens!
+        let decoded: Vec<_> = encoded.split(LEGACY_NGRAM_SEPARATOR).collect();
+        assert_eq!(decoded.len(), 3, "Bug: pipe in token causes wrong split");
+        assert_eq!(decoded, ["foo", "bar", "baz"], "Bug: original tokens corrupted");
     }
 
     #[test]

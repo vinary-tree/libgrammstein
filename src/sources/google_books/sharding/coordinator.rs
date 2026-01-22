@@ -7,9 +7,9 @@
 //! - Checkpoint coordination across all shards
 //! - Query fanout for read operations
 
-use super::checkpoint::{CheckpointManager, CheckpointResult, GlobalCheckpoint, ImportPhase, ImportState};
+use super::checkpoint::{CheckpointManager, ImportPhase, ImportState};
 use super::config::{ShardConfig, ShardGranularity};
-use super::routing::{compute_shard_key, ngram_order, ShardKey};
+use super::routing::{compute_shard_key, compute_shard_key_from_token, ngram_order, ShardKey};
 use super::shard::{ShardError, ShardHandle};
 
 use dashmap::DashMap;
@@ -17,7 +17,6 @@ use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -209,7 +208,7 @@ impl ShardCoordinator {
             )));
         }
 
-        let mut coordinator = Self::new_internal(config, true)?;
+        let coordinator = Self::new_internal(config, true)?;
 
         // Detect if recovery is needed
         if let Some(ref manager) = coordinator.checkpoint_manager {
@@ -319,7 +318,7 @@ impl ShardCoordinator {
     /// Evict least recently used shard if at capacity.
     fn maybe_evict_shard(&self) {
         if let Some(ref lru) = self.lru_tracker {
-            let mut lru = lru.lock();
+            let lru = lru.lock();
             if lru.len() >= lru.cap().get() {
                 // Get LRU key
                 if let Some((key, _)) = lru.peek_lru() {
@@ -350,6 +349,25 @@ impl ShardCoordinator {
         compute_shard_key(ngram, order, &self.config.granularity)
     }
 
+    /// Compute the shard key from tokens (for vocabulary-indexed encoding).
+    ///
+    /// This routes based on the first token before encoding to PUA characters.
+    /// Use this when storing vocabulary-indexed n-grams where the key is a
+    /// sequence of PUA characters rather than pipe-separated tokens.
+    ///
+    /// # Arguments
+    ///
+    /// * `tokens` - The n-gram tokens (e.g., ["the", "quick", "brown"])
+    ///
+    /// # Returns
+    ///
+    /// A `ShardKey` identifying which shard should store this n-gram.
+    pub fn route_tokens(&self, tokens: &[&str]) -> ShardKey {
+        let first_token = tokens.first().map(|s| *s).unwrap_or("");
+        let order = tokens.len() as u8;
+        compute_shard_key_from_token(first_token, order, &self.config.granularity)
+    }
+
     /// Store an n-gram count.
     ///
     /// Routes the n-gram to the appropriate shard and increments its count.
@@ -366,7 +384,30 @@ impl ShardCoordinator {
     /// `true` if this was a new n-gram, `false` if it already existed.
     pub fn store_ngram(&self, ngram: &str, count: u64) -> CoordinatorResult<bool> {
         let key = self.route_ngram(ngram);
-        let shard = self.get_or_create_shard(&key)?;
+        self.store_in_shard(&key, ngram, count)
+    }
+
+    /// Store an encoded n-gram key in a specific shard.
+    ///
+    /// Use this when you have already computed the shard key and the encoded
+    /// n-gram key (e.g., for vocabulary-indexed encoding).
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_key` - The shard key (from `route_tokens` or `route_ngram`)
+    /// * `encoded_key` - The encoded n-gram key to store
+    /// * `count` - The count to add
+    ///
+    /// # Returns
+    ///
+    /// `true` if this was a new n-gram, `false` if it already existed.
+    pub fn store_in_shard(
+        &self,
+        shard_key: &ShardKey,
+        encoded_key: &str,
+        count: u64,
+    ) -> CoordinatorResult<bool> {
+        let shard = self.get_or_create_shard(shard_key)?;
 
         // Acquire write lock (blocking)
         let mut guard = shard.write();
@@ -383,7 +424,7 @@ impl ShardCoordinator {
             // Timeout after 1 second (something is wrong)
             if start.elapsed().as_secs() > 1 {
                 return Err(CoordinatorError::WriterTimeout {
-                    shard_key: key.to_string(),
+                    shard_key: shard_key.to_string(),
                 });
             }
         };
@@ -391,7 +432,7 @@ impl ShardCoordinator {
         let wait_us = start.elapsed().as_micros() as u64;
         self.stats.record_writer_acquisition(wait_us);
 
-        let was_new = guard.increment(ngram, count, &token)?;
+        let was_new = guard.increment(encoded_key, count, &token)?;
         guard.release_write(token);
 
         if was_new {
@@ -481,6 +522,34 @@ impl ShardCoordinator {
     /// Check if an n-gram exists.
     pub fn contains(&self, ngram: &str) -> bool {
         self.get(ngram).is_some()
+    }
+
+    /// Get the count for an encoded key in a specific shard.
+    ///
+    /// Use this when you have already computed the shard key and the encoded
+    /// n-gram key (e.g., for vocabulary-indexed encoding).
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_key` - The shard key (from `route_tokens` or `route_ngram`)
+    /// * `encoded_key` - The encoded n-gram key to look up
+    pub fn get_in_shard(&self, shard_key: &ShardKey, encoded_key: &str) -> Option<u64> {
+        if let Some(shard) = self.shards.get(shard_key) {
+            let guard = shard.read();
+            return guard.get(encoded_key);
+        }
+
+        // Shard not loaded - check if file exists
+        let path = self.config.shard_path(&shard_key.as_file_stem());
+        if path.exists() {
+            // Load shard and query
+            if let Ok(shard) = self.get_or_create_shard(shard_key) {
+                let guard = shard.read();
+                return guard.get(encoded_key);
+            }
+        }
+
+        None
     }
 
     /// Checkpoint all open shards.

@@ -68,7 +68,7 @@ impl CodeLanguage for Python {
             "integer" | "float" | "imaginary" => TokenType::NumericLiteral,
 
             // Operators
-            "+" | "-" | "*" | "/" | "//" | "%" | "**" | "@"
+            "+" | "-" | "*" | "/" | "//" | "%" | "**"
             | "==" | "!=" | "<" | ">" | "<=" | ">=" | "is" | "in"
             | "and" | "or" | "not"
             | "&" | "|" | "^" | "~" | "<<" | ">>"
@@ -76,7 +76,7 @@ impl CodeLanguage for Python {
             | "&=" | "|=" | "^=" | "<<=" | ">>="
             | "->" => TokenType::Operator,
 
-            // Punctuation
+            // Punctuation (includes @ for decorators)
             "(" | ")" | "[" | "]" | "{" | "}" | ":" | "," | "." | ";" | "@" => {
                 TokenType::Punctuation
             }

@@ -8,7 +8,7 @@ use super::lexical::LexicalCorrector;
 use super::semantic::SemanticCorrector;
 use crate::code::ast::ParsedCode;
 use crate::code::correction::{
-    CodeCorrector, Correction, CorrectionCandidates, CorrectionKind, CorrectionSource,
+    CodeCorrector, Correction, CorrectionSource,
 };
 use crate::code::cpg::CodePropertyGraph;
 use crate::code::language::{CodeLanguage, TokenContext};
@@ -195,7 +195,7 @@ impl<L: CodeLanguage + Clone> EnsembleCorrector<L> {
 
         let mut merged = Vec::new();
 
-        for ((replacement, start, end), group) in groups {
+        for ((_replacement, _start_byte, _end_byte), group) in groups {
             if group.len() == 1 {
                 // Single source
                 let (c, weight) = group.into_iter().next().unwrap();

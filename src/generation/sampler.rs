@@ -21,6 +21,7 @@
 //! println!("Generated: {}", text.join(" "));
 //! ```
 
+#[allow(deprecated)]
 use crate::ngram::{IterableDictionary, NgramEntry, NgramModel, NGRAM_SEPARATOR};
 use liblevenshtein::dictionary::MutableMappedDictionary;
 use rand::distributions::WeightedIndex;
@@ -158,6 +159,7 @@ where
     }
 
     /// Extract vocabulary (unigrams) from the model.
+    #[allow(deprecated)]
     fn extract_vocabulary(model: &NgramModel<D>) -> Vec<String> {
         let mut vocab: HashSet<String> = HashSet::new();
 

@@ -16,7 +16,27 @@
 //!   lookups during WFST rescoring. This representation is compact and optimized
 //!   for prefix matching operations.
 //!
-//! # Example
+//! # Vocabulary-Based Dictionary (Recommended)
+//!
+//! For n-gram language models using vocabulary-indexed encoding, the vocabulary
+//! already contains all words and the n-gram storage contains unigram frequencies.
+//! Use [`VocabularyDictionary`] for dictionary lookups in this case:
+//!
+//! ```ignore
+//! use libgrammstein::dictionary::VocabularyDictionary;
+//!
+//! let dict = VocabularyDictionary::new(&vocabulary, &storage);
+//!
+//! // Check if word exists
+//! if dict.contains("hello") {
+//!     // Get unigram frequency
+//!     let freq = dict.frequency("hello");
+//! }
+//! ```
+//!
+//! # Legacy Example
+//!
+//! For standalone dictionary extraction (without n-gram models):
 //!
 //! ```ignore
 //! use libgrammstein::dictionary::{WordExtractor, DictionaryBuilder};
@@ -38,10 +58,16 @@
 //! dictionary.save("words.dict")?;
 //! ```
 
-mod types;
-mod extractor;
 mod builder;
+mod extractor;
+mod types;
 
-pub use types::{DictionaryMetadata, WordEntry, DictionaryStats};
-pub use extractor::{WordExtractor, ExtractionConfig};
+#[cfg(feature = "google-books")]
+mod vocabulary_backed;
+
 pub use builder::{DictionaryBuilder, SpellingDictionary};
+pub use extractor::{ExtractionConfig, WordExtractor};
+pub use types::{DictionaryMetadata, DictionaryStats, WordEntry};
+
+#[cfg(feature = "google-books")]
+pub use vocabulary_backed::VocabularyDictionary;

@@ -11,6 +11,17 @@
 //! - Streaming corpus training with Rayon parallelism
 //! - Efficient probability queries via trie navigation
 //!
+//! # Key Encoding
+//!
+//! N-gram keys can be encoded in two ways:
+//!
+//! 1. **Legacy (pipe-separated)**: Simple `"the|quick|brown"` encoding. Deprecated
+//!    because it can corrupt data if tokens contain `|`.
+//!
+//! 2. **Vocabulary-indexed (PUA)**: Each word maps to a Unicode Private Use Area
+//!    character, producing compact keys like `"\u{F0000}\u{F0001}\u{F0002}"`.
+//!    This is the recommended encoding - see [`vocabulary`] module.
+//!
 //! # Dictionary Backend Type Aliases
 //!
 //! Two type aliases are provided for common use cases:
@@ -39,6 +50,7 @@ mod model;
 pub mod smoothing;
 mod trainer;
 mod trie;
+pub mod vocabulary;
 
 #[cfg(feature = "serde-extras")]
 pub mod accumulator;
@@ -46,9 +58,17 @@ pub mod accumulator;
 pub use entry::{NgramEntry, NgramEntrySnapshot};
 pub use model::NgramModel;
 #[cfg(feature = "serde-extras")]
-pub use model::PortableNgramModel;
-pub use trainer::{NgramTrainer, TrainerBuilder, TrainingConfig, TrainingProgress, TrainingStats};
+pub use model::{PortableNgramModel, PortableVocabulary};
+pub use trainer::{
+    NgramTrainer, TrainerBuilder, TrainingConfig, TrainingProgress, TrainingStats, VocabularyMode,
+};
+#[allow(deprecated)]
 pub use trie::{IterableDictionary, NgramTrie, NGRAM_SEPARATOR};
+pub use vocabulary::{
+    decode_ngram_key, encode_ngram_key, encode_ngram_key_existing, is_pua_char, ngram_order,
+    pua_char_to_index, try_encode_ngram_key, SharedVocabulary, VocabularyError, VocabularyResult,
+    MAX_VOCABULARY_SIZE,
+};
 
 #[cfg(feature = "serde-extras")]
 pub use accumulator::{AccumulatorError, AccumulatorResult, NgramAccumulator};

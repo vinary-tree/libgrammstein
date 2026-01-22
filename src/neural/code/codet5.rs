@@ -25,7 +25,6 @@ use std::sync::Arc;
 
 use ndarray::Array2;
 use ort::session::{builder::GraphOptimizationLevel, Session};
-use ort::value::Tensor;
 use parking_lot::Mutex;
 use tokenizers::Tokenizer;
 

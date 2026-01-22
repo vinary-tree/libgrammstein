@@ -12,7 +12,6 @@
 
 use super::coordinator::ShardCoordinator;
 use super::routing::{compute_shard_key, ngram_order, ShardKey};
-use super::config::ShardGranularity;
 use std::collections::BTreeMap;
 
 /// Read-only view over sharded n-gram storage.
@@ -234,7 +233,7 @@ pub struct ViewStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::config::ShardConfig;
+    use super::super::config::{ShardConfig, ShardGranularity};
     use tempfile::TempDir;
 
     fn create_test_coordinator() -> (TempDir, ShardCoordinator) {

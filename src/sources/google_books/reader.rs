@@ -4,12 +4,12 @@
 //! Both readers decompress gzip on-the-fly and yield parsed `NgramRecord`s.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use flate2::read::GzDecoder;
 
-use super::aggregator::{AggregatedNgram, AggregatingIterator};
+use super::aggregator::AggregatedNgram;
 use super::parser::{parse_ngram_line, NgramRecord, ParseError};
 #[cfg(feature = "google-books")]
 use super::task_manager::RetryAfter;

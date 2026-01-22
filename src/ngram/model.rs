@@ -246,6 +246,19 @@ where
 // Portable serialization that doesn't require D: Serialize
 // This exports the model as a list of (key, entry) pairs
 
+/// Portable vocabulary format for serialization.
+///
+/// This allows vocabulary-indexed models to be self-contained, including
+/// the mapping from PUA characters to words.
+#[cfg(feature = "serde-extras")]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct PortableVocabulary {
+    /// Words indexed by their PUA character offset from PUA_START.
+    ///
+    /// Index 0 corresponds to PUA_START (U+F0000), index 1 to U+F0001, etc.
+    pub words: Vec<String>,
+}
+
 /// Portable N-gram model format for serialization.
 ///
 /// This format doesn't require the dictionary to implement serde traits,
@@ -263,6 +276,12 @@ pub struct PortableNgramModel {
     pub total_count: u64,
     /// Smoothing parameters.
     pub smoothing: KneserNeySmoothing,
+    /// Optional vocabulary for vocabulary-indexed models.
+    ///
+    /// When present, the model uses PUA character encoding. When absent,
+    /// the model uses legacy pipe-separated encoding.
+    #[serde(default)]
+    pub vocabulary: Option<PortableVocabulary>,
 }
 
 #[cfg(feature = "serde-extras")]
@@ -270,12 +289,43 @@ impl<D> NgramModel<D>
 where
     D: MutableMappedDictionary<Value = NgramEntry>,
 {
-    /// Export to portable format for serialization.
+    /// Export to portable format for serialization (without vocabulary).
     ///
     /// This method iterates over all dictionary entries and exports them
     /// as (key, snapshot) pairs, allowing serialization without requiring
     /// the dictionary type to implement serde traits.
+    ///
+    /// For vocabulary-indexed models, use `to_portable_with_vocabulary` instead
+    /// to include the vocabulary mapping.
     pub fn to_portable(&self) -> PortableNgramModel
+    where
+        D: crate::ngram::trie::IterableDictionary,
+    {
+        self.to_portable_with_vocabulary(None)
+    }
+
+    /// Export to portable format with optional vocabulary.
+    ///
+    /// When a vocabulary is provided, the resulting portable model is self-contained
+    /// and can be decoded back to human-readable words.
+    ///
+    /// # Arguments
+    ///
+    /// * `vocabulary` - Optional shared vocabulary for vocabulary-indexed models
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // For vocabulary-indexed models
+    /// let portable = model.to_portable_with_vocabulary(Some(&vocab));
+    ///
+    /// // For legacy models or when vocabulary is not needed
+    /// let portable = model.to_portable_with_vocabulary(None);
+    /// ```
+    pub fn to_portable_with_vocabulary(
+        &self,
+        vocabulary: Option<&crate::ngram::SharedVocabulary>,
+    ) -> PortableNgramModel
     where
         D: crate::ngram::trie::IterableDictionary,
     {
@@ -285,23 +335,63 @@ where
             .map(|(key, entry)| (key, crate::ngram::NgramEntrySnapshot::from(&entry)))
             .collect();
 
+        // Convert vocabulary to portable format if provided
+        let portable_vocab = vocabulary.map(|vocab| {
+            let reverse_cache = vocab.build_reverse_cache();
+            let mut indexed_words: Vec<(u32, String)> = reverse_cache
+                .into_iter()
+                .filter_map(|(c, word)| {
+                    crate::ngram::pua_char_to_index(c).map(|idx| (idx, word))
+                })
+                .collect();
+
+            // Sort by index to ensure consistent ordering
+            indexed_words.sort_by_key(|(idx, _)| *idx);
+
+            PortableVocabulary {
+                words: indexed_words.into_iter().map(|(_, word)| word).collect(),
+            }
+        });
+
         PortableNgramModel {
             entries,
             max_order: self.trie.max_order(),
             vocab_size: self.vocab_size,
             total_count: self.total_count,
             smoothing: self.smoothing.clone(),
+            vocabulary: portable_vocab,
         }
     }
 
     /// Save model to a portable binary file.
     ///
     /// This format can be loaded into any dictionary backend.
+    /// For vocabulary-indexed models, use `save_portable_with_vocabulary` to
+    /// include the vocabulary mapping in the output.
     pub fn save_portable<P: AsRef<Path>>(&self, path: P) -> crate::Result<()>
     where
         D: crate::ngram::trie::IterableDictionary,
     {
         let portable = self.to_portable();
+        let file = std::fs::File::create(path)?;
+        let writer = std::io::BufWriter::new(file);
+        bincode::serialize_into(writer, &portable)?;
+        Ok(())
+    }
+
+    /// Save model to a portable binary file with vocabulary included.
+    ///
+    /// The vocabulary mapping is included in the output, making the model
+    /// file self-contained and allowing decoding of PUA keys to words.
+    pub fn save_portable_with_vocabulary<P: AsRef<Path>>(
+        &self,
+        path: P,
+        vocabulary: &crate::ngram::SharedVocabulary,
+    ) -> crate::Result<()>
+    where
+        D: crate::ngram::trie::IterableDictionary,
+    {
+        let portable = self.to_portable_with_vocabulary(Some(vocabulary));
         let file = std::fs::File::create(path)?;
         let writer = std::io::BufWriter::new(file);
         bincode::serialize_into(writer, &portable)?;

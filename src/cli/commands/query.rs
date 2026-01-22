@@ -229,7 +229,7 @@ struct NgramCompletionModel {
 
 impl CompletionModel for NgramCompletionModel {
     fn top_completions(&self, context: &[&str], k: usize) -> Vec<(String, f64)> {
-        use crate::ngram::IterableDictionary;
+        
 
         // Get unique unigrams from the trie
         let mut unigrams: std::collections::HashSet<String> = std::collections::HashSet::new();

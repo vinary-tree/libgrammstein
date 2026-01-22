@@ -331,6 +331,68 @@ pub fn ngram_order(ngram: &str) -> u8 {
     ngram.split('|').count() as u8
 }
 
+/// Compute the shard key from the first token of an n-gram.
+///
+/// This is used for vocabulary-indexed encoding where the n-gram key is a
+/// sequence of PUA characters (not pipe-separated). Routing is based on
+/// the original first token before encoding.
+///
+/// # Arguments
+///
+/// * `first_token` - The first word of the n-gram (e.g., "the")
+/// * `order` - The n-gram order (1-5)
+/// * `granularity` - The sharding granularity configuration
+///
+/// # Returns
+///
+/// A `ShardKey` identifying which shard should store this n-gram.
+///
+/// # Examples
+///
+/// ```ignore
+/// use libgrammstein::sources::google_books::sharding::routing::compute_shard_key_from_token;
+/// use libgrammstein::sources::google_books::sharding::config::ShardGranularity;
+///
+/// let key = compute_shard_key_from_token("the", 3, &ShardGranularity::TwoChar);
+/// assert_eq!(key.prefix, "th");
+/// ```
+pub fn compute_shard_key_from_token(
+    first_token: &str,
+    order: u8,
+    granularity: &ShardGranularity,
+) -> ShardKey {
+    // Handle hash-based routing: hash the first token
+    if let ShardGranularity::CpuProportional { .. } = granularity {
+        let num_shards = granularity.num_shards();
+        let index = hash_to_shard(first_token, num_shards);
+        return ShardKey::from_index(index);
+    }
+
+    // Prefix-based routing
+    let prefix_len = granularity.prefix_len_for_order(order);
+
+    // Get prefix characters, lowercase
+    let prefix: String = first_token
+        .chars()
+        .filter(|c| c.is_alphabetic())
+        .take(prefix_len)
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+
+    // Handle edge cases: non-alphabetic or short words
+    let prefix = if prefix.is_empty() {
+        // Non-alphabetic first word (numbers, symbols) → use special shard
+        "_".repeat(prefix_len)
+    } else if prefix.len() < prefix_len {
+        // Short word → pad with 'a' (keeps lexicographic ordering)
+        format!("{:a<width$}", prefix, width = prefix_len)
+    } else {
+        prefix
+    };
+
+    ShardKey::new(prefix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +616,89 @@ mod tests {
         assert_eq!(ngram_order("apple"), 1);
         assert_eq!(ngram_order("apple|pie"), 2);
         assert_eq!(ngram_order("the|quick|brown|fox|jumps"), 5);
+    }
+
+    #[test]
+    fn test_compute_shard_key_from_token_two_char() {
+        let g = ShardGranularity::TwoChar;
+
+        // Standard cases
+        let key = compute_shard_key_from_token("the", 3, &g);
+        assert_eq!(key.prefix, "th");
+
+        let key = compute_shard_key_from_token("apple", 2, &g);
+        assert_eq!(key.prefix, "ap");
+
+        // Uppercase (should lowercase)
+        let key = compute_shard_key_from_token("ZEBRA", 1, &g);
+        assert_eq!(key.prefix, "ze");
+
+        // Short word (should pad)
+        let key = compute_shard_key_from_token("a", 2, &g);
+        assert_eq!(key.prefix, "aa");
+
+        // Non-alphabetic (should use underscore shard)
+        let key = compute_shard_key_from_token("123", 1, &g);
+        assert_eq!(key.prefix, "__");
+    }
+
+    #[test]
+    fn test_compute_shard_key_from_token_adaptive() {
+        let g = ShardGranularity::Adaptive;
+
+        // 1-gram: single char
+        let key = compute_shard_key_from_token("apple", 1, &g);
+        assert_eq!(key.prefix, "a");
+
+        // 2-gram: two chars
+        let key = compute_shard_key_from_token("the", 2, &g);
+        assert_eq!(key.prefix, "th");
+
+        // 3-gram: two chars
+        let key = compute_shard_key_from_token("quick", 3, &g);
+        assert_eq!(key.prefix, "qu");
+    }
+
+    #[test]
+    fn test_compute_shard_key_from_token_cpu_proportional() {
+        let g = ShardGranularity::CpuProportional {
+            multiplier: 2,
+            minimum: 8,
+        };
+
+        // Hash-based routing should produce index-based keys
+        let key = compute_shard_key_from_token("the", 3, &g);
+        assert!(key.is_index_based());
+
+        // Same token should always route to same shard (deterministic)
+        let key2 = compute_shard_key_from_token("the", 3, &g);
+        assert_eq!(key.prefix, key2.prefix);
+
+        // Different tokens may route to different shards
+        let key3 = compute_shard_key_from_token("apple", 2, &g);
+        assert!(key3.is_index_based());
+    }
+
+    #[test]
+    fn test_compute_shard_key_from_token_matches_compute_shard_key() {
+        // Verify that compute_shard_key_from_token gives the same result as
+        // compute_shard_key when given the first token of an n-gram
+        let granularities = [
+            ShardGranularity::FirstChar,
+            ShardGranularity::TwoChar,
+            ShardGranularity::Adaptive,
+        ];
+
+        for g in &granularities {
+            // "the|quick|brown" -> first token is "the"
+            let key_from_ngram = compute_shard_key("the|quick|brown", 3, g);
+            let key_from_token = compute_shard_key_from_token("the", 3, g);
+            assert_eq!(key_from_ngram, key_from_token, "Mismatch for {:?}", g);
+
+            // "apple|pie" -> first token is "apple"
+            let key_from_ngram = compute_shard_key("apple|pie", 2, g);
+            let key_from_token = compute_shard_key_from_token("apple", 2, g);
+            assert_eq!(key_from_ngram, key_from_token, "Mismatch for {:?}", g);
+        }
     }
 }

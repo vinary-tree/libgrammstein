@@ -138,9 +138,8 @@ impl CodeLanguage for Rholang {
             // Comments
             "line_comment" | "block_comment" => TokenType::Comment,
 
-            // Process constructs
-            "par" | "choice" | "branch" | "case" => TokenType::Special,
-            "contract" | "new" | "ifElse" | "let" | "match" | "bundle" => TokenType::Special,
+            // Process constructs (note: contract, new, let, match, bundle are keywords above)
+            "par" | "choice" | "branch" | "case" | "ifElse" => TokenType::Special,
 
             // Collections
             "list" | "set" | "map" | "tuple" | "pathmap" | "collection" => TokenType::TypeName,

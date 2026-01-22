@@ -11,7 +11,7 @@
 //! module which uses a pushdown automaton.
 
 #[cfg(feature = "lling-llang-integration")]
-use lling_llang::semiring::{LogWeight, Semiring, TropicalWeight};
+use lling_llang::semiring::Semiring;
 #[cfg(feature = "lling-llang-integration")]
 use lling_llang::wfst::{MutableWfst, StateId, VectorWfst, Wfst};
 

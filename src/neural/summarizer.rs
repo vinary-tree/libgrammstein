@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::embedder::{EmbeddingConfig, ModernBertEmbedder};
 use super::modernbert::ModernBertModel;
-use super::{NeuralError, Result};
+use super::Result;
 
 /// Configuration for summarization.
 #[derive(Clone, Debug)]

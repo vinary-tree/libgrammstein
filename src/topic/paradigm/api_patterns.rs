@@ -34,12 +34,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[cfg(feature = "serde")]
+#[cfg(feature = "serde-extras")]
 use serde::{Deserialize, Serialize};
 
 /// Configuration for API pattern mining.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub struct ApiPatternConfig {
     /// Minimum support threshold (fraction of sequences containing the pattern).
     pub min_support: f64,
@@ -139,7 +139,7 @@ impl ApiPatternConfig {
 
 /// A mined API call pattern.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub struct ApiPattern {
     /// The sequence of API calls in the pattern.
     pub sequence: Vec<Arc<str>>,
@@ -478,7 +478,7 @@ impl std::fmt::Debug for ApiPatternMiner {
 
 /// Mining statistics.
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
 pub struct MiningStats {
     /// Total sequences processed.
     pub sequences_processed: usize,
