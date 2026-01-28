@@ -86,7 +86,7 @@ impl<'a> VocabularyDictionary<'a> {
     }
 
     /// Get the vocabulary size (number of unique words).
-    pub fn len(&self) -> u32 {
+    pub fn len(&self) -> u64 {
         self.vocabulary.len()
     }
 

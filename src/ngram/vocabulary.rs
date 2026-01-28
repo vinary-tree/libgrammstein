@@ -1,67 +1,68 @@
-//! Shared vocabulary for mapping words to PUA (Private Use Area) characters.
+//! Shared vocabulary for mapping words to varint-encoded u64 indices.
 //!
-//! This module provides a vocabulary that maps each unique word/token directly to a
-//! Unicode Private Use Area character, which enables compact n-gram key encoding
-//! without delimiters.
+//! This module provides a vocabulary that maps each unique word/token to a u64 index,
+//! enabling compact n-gram key encoding using LEB128 varint encoding with Latin-1 strings.
 //!
 //! # Architecture
 //!
-//! The vocabulary maps each unique word to a PUA character in the range U+F0000-U+FFFFD
-//! (Supplementary Private Use Area-A). This range provides 65,534 code points, which
-//! is sufficient for most vocabularies. For larger vocabularies, the range can be
-//! extended to include Supplementary Private Use Area-B (U+100000-U+10FFFD).
+//! The vocabulary maps each unique word to a sequential u64 index (0, 1, 2, ...).
+//! N-gram keys are encoded as concatenated LEB128 varints, with each byte stored
+//! as a Latin-1 character (0x00-0xFF → U+0000-U+00FF) for trie compatibility.
 //!
 //! # Key Benefits
 //!
-//! - **No delimiter bugs**: Each word maps to a single character, so no delimiter
-//!   character can appear within a token
-//! - **Compact encoding**: N-gram keys are sequences of 4-byte UTF-8 characters
-//! - **DAWG suffix sharing**: Common n-gram endings share trie nodes
+//! - **No delimiter bugs**: Each word maps to a varint, no delimiters needed
+//! - **Compact encoding**: Common words (index 0-127) use just 1 byte
+//! - **Unlimited vocabulary**: u64 indices support up to 2^64 words
+//! - **Standard encoding**: LEB128 is widely used (protobuf, DWARF, WebAssembly)
 //! - **Thread-safe**: Uses double-checked locking for concurrent access
+//!
+//! # Encoding Format
+//!
+//! Each word index is encoded as LEB128 varint, then converted to a Latin-1 string:
+//! - Bytes 0x00-0xFF are stored as chars U+0000-U+00FF
+//! - This produces valid UTF-8 that tries can store directly
 //!
 //! # Example
 //!
 //! ```ignore
-//! use libgrammstein::ngram::vocabulary::SharedVocabulary;
+//! use libgrammstein::ngram::vocabulary::{SharedVocabulary, encode_ngram_key};
 //!
 //! let vocab = SharedVocabulary::create(path)?;
 //!
-//! // Each word maps to a unique PUA character
-//! let the_char = vocab.get_or_insert("the");
-//! let quick_char = vocab.get_or_insert("quick");
+//! // Each word maps to a unique u64 index
+//! let the_idx = vocab.get_or_insert("the");   // Returns 0
+//! let quick_idx = vocab.get_or_insert("quick"); // Returns 1
 //!
-//! // N-gram keys are sequences of PUA characters
-//! let bigram_key: String = vec![the_char, quick_char].into_iter().collect();
+//! // N-gram keys are varint-encoded Latin-1 strings
+//! let bigram_key = encode_ngram_key(&["the", "quick"], &vocab);
 //! ```
 
 use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
-/// Start of the Private Use Area-A range (U+F0000).
-const PUA_START: u32 = 0xF0000;
-
-/// End of the Private Use Area-A range (U+FFFFD).
-const PUA_END_A: u32 = 0xFFFFD;
-
-/// End of the Private Use Area-B range (U+10FFFD).
-const PUA_END_B: u32 = 0x10FFFD;
-
-/// Maximum vocabulary size (PUA-A + PUA-B = 131,068 code points).
-pub const MAX_VOCABULARY_SIZE: u32 = (PUA_END_A - PUA_START + 1) + (PUA_END_B - 0x100000 + 1);
-
-/// Metadata key for the next character code point.
-const META_NEXT_CHAR: &str = "\x00__meta__:next_char";
+/// Metadata key for the next index.
+const META_NEXT_INDEX: &str = "\x00__meta__:next_index";
 
 /// Metadata key for the vocabulary version.
 const META_VERSION: &str = "\x00__meta__:version";
 
 /// Current vocabulary format version.
-const VOCABULARY_VERSION: u64 = 1;
+/// Version 2: Switched from PUA character encoding to varint-encoded u64 indices.
+/// Version 3: Start indices at 1 (not 0) to avoid collision with \x00 metadata prefix.
+const VOCABULARY_VERSION: u64 = 3;
+
+/// First valid vocabulary index.
+///
+/// Index 0 is reserved to avoid collision with the \x00 metadata key prefix.
+/// Varint encoding of 0 produces \x00, which would cause n-gram keys to be
+/// mistakenly filtered as metadata entries.
+const FIRST_VALID_INDEX: u64 = 1;
 
 /// Error type for vocabulary operations.
 #[derive(Error, Debug)]
@@ -73,19 +74,6 @@ pub enum VocabularyError {
     /// Trie operation failed.
     #[error("Trie error: {0}")]
     Trie(String),
-
-    /// Vocabulary capacity exceeded.
-    #[error("Vocabulary capacity exceeded: {current} >= {max}")]
-    CapacityExceeded {
-        /// Current vocabulary size.
-        current: u32,
-        /// Maximum allowed vocabulary size.
-        max: u32,
-    },
-
-    /// Invalid PUA character stored in trie.
-    #[error("Invalid PUA character stored: {0}")]
-    InvalidPuaChar(u64),
 
     /// Version mismatch.
     #[error("Vocabulary version mismatch: expected {expected}, found {found}")]
@@ -100,30 +88,75 @@ pub enum VocabularyError {
 /// Result type for vocabulary operations.
 pub type VocabularyResult<T> = Result<T, VocabularyError>;
 
-/// Shared vocabulary mapping words to PUA characters.
+// ============================================================================
+// Varint Encoding Utilities
+// ============================================================================
+
+/// Encode a u64 as LEB128 varint bytes.
 ///
-/// This struct provides thread-safe word-to-character mapping backed by a
-/// disk-persistent trie. Each unique word is assigned a unique character
-/// from the Unicode Private Use Area.
+/// LEB128 (Little Endian Base 128) encodes integers in 7-bit groups with
+/// continuation bits. Values 0-127 use 1 byte, 128-16383 use 2 bytes, etc.
+#[inline]
+pub fn encode_varint(mut value: u64, buf: &mut Vec<u8>) {
+    loop {
+        let byte = (value & 0x7F) as u8;
+        value >>= 7;
+        if value == 0 {
+            buf.push(byte);
+            break;
+        } else {
+            buf.push(byte | 0x80);
+        }
+    }
+}
+
+/// Decode a LEB128 varint from bytes, returning (value, bytes_consumed).
+///
+/// Returns `None` if the bytes are incomplete or would overflow u64.
+#[inline]
+pub fn decode_varint(bytes: &[u8]) -> Option<(u64, usize)> {
+    let mut result: u64 = 0;
+    let mut shift = 0;
+    for (i, &byte) in bytes.iter().enumerate() {
+        if shift >= 64 {
+            return None; // Would overflow
+        }
+        result |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some((result, i + 1));
+        }
+        shift += 7;
+    }
+    None // Incomplete varint
+}
+
+// ============================================================================
+// SharedVocabulary
+// ============================================================================
+
+/// Shared vocabulary mapping words to u64 indices.
+///
+/// This struct provides thread-safe word-to-index mapping backed by a
+/// disk-persistent trie. Each unique word is assigned a sequential u64 index.
 ///
 /// # Thread Safety
 ///
-/// Uses double-checked locking to ensure only one thread assigns a character
-/// for each word. The `fetch_add` on `next_char` is only called while holding
+/// Uses double-checked locking to ensure only one thread assigns an index
+/// for each word. The `fetch_add` on `next_index` is only called while holding
 /// the write lock, preventing TOCTOU race conditions.
 ///
 /// # Persistence
 ///
 /// The vocabulary is stored in a `DiskBackedCharTrieInner<u64>` with WAL-based
-/// crash recovery. The next character code point is stored in the trie as
-/// metadata to survive restarts.
+/// crash recovery. The next index is stored in the trie as metadata to survive
+/// restarts.
 #[derive(Debug)]
 pub struct SharedVocabulary {
-    /// The underlying trie mapping words to PUA characters (stored as u64).
+    /// The underlying trie mapping words to u64 indices.
     trie: Arc<RwLock<DiskBackedCharTrieInner<u64>>>,
 
-    /// Next PUA code point to assign (relative to PUA_START).
-    next_char: AtomicU32,
+    /// Next index to assign (sequential: 0, 1, 2, ...).
+    next_index: AtomicU64,
 }
 
 impl SharedVocabulary {
@@ -147,19 +180,20 @@ impl SharedVocabulary {
         let trie = Arc::new(RwLock::new(trie));
 
         // Initialize metadata
+        // Start at FIRST_VALID_INDEX to avoid \x00 collision with metadata prefix
         {
             let mut guard = trie.write();
             guard.upsert(META_VERSION, VOCABULARY_VERSION).map_err(|e| {
                 VocabularyError::Trie(format!("Failed to initialize version: {}", e))
             })?;
-            guard.upsert(META_NEXT_CHAR, 0u64).map_err(|e| {
-                VocabularyError::Trie(format!("Failed to initialize next_char: {}", e))
+            guard.upsert(META_NEXT_INDEX, FIRST_VALID_INDEX).map_err(|e| {
+                VocabularyError::Trie(format!("Failed to initialize next_index: {}", e))
             })?;
         }
 
         Ok(Self {
             trie,
-            next_char: AtomicU32::new(0),
+            next_index: AtomicU64::new(FIRST_VALID_INDEX),
         })
     }
 
@@ -178,42 +212,42 @@ impl SharedVocabulary {
             }
         }
 
-        // Load next_char from metadata
-        let next_char = trie
-            .get(META_NEXT_CHAR)
-            .map(|&v| v as u32)
+        // Load next_index from metadata
+        let next_index = trie
+            .get(META_NEXT_INDEX)
+            .copied()
             .unwrap_or(0);
 
         Ok(Self {
             trie: Arc::new(RwLock::new(trie)),
-            next_char: AtomicU32::new(next_char),
+            next_index: AtomicU64::new(next_index),
         })
     }
 
-    /// Get or assign a PUA character for a word (thread-safe).
+    /// Get or assign an index for a word (thread-safe).
     ///
     /// Uses double-checked locking to avoid TOCTOU race conditions.
-    /// If the word already exists, returns its existing PUA character.
-    /// Otherwise, assigns the next available PUA character.
+    /// If the word already exists, returns its existing index.
+    /// Otherwise, assigns the next available index.
     ///
     /// # Panics
     ///
-    /// Panics if the vocabulary capacity is exceeded. Use `try_get_or_insert`
+    /// Panics if the trie operation fails. Use `try_get_or_insert`
     /// for fallible insertion.
-    pub fn get_or_insert(&self, word: &str) -> char {
+    pub fn get_or_insert(&self, word: &str) -> u64 {
         self.try_get_or_insert(word)
-            .expect("Vocabulary capacity exceeded")
+            .expect("Failed to insert word into vocabulary")
     }
 
-    /// Try to get or assign a PUA character for a word (thread-safe, fallible).
+    /// Try to get or assign an index for a word (thread-safe, fallible).
     ///
-    /// Returns `Err` if the vocabulary capacity is exceeded.
-    pub fn try_get_or_insert(&self, word: &str) -> VocabularyResult<char> {
+    /// Returns the u64 index for this word in the vocabulary.
+    pub fn try_get_or_insert(&self, word: &str) -> VocabularyResult<u64> {
         // Fast path: read lock to check if word exists
         {
             let guard = self.trie.read();
-            if let Some(&code) = guard.get(word) {
-                return Self::u64_to_pua_char(code);
+            if let Some(&index) = guard.get(word) {
+                return Ok(index);
             }
         }
 
@@ -221,33 +255,29 @@ impl SharedVocabulary {
         let mut guard = self.trie.write();
 
         // Re-check after acquiring write lock (another thread may have inserted)
-        if let Some(&code) = guard.get(word) {
-            return Self::u64_to_pua_char(code);
+        if let Some(&index) = guard.get(word) {
+            return Ok(index);
         }
 
-        // This thread wins - assign the next PUA character
-        let relative_code = self.next_char.fetch_add(1, Ordering::SeqCst);
-        let pua_char = Self::relative_to_pua_char(relative_code)?;
+        // This thread wins - assign the next index atomically
+        // Use Relaxed ordering since the write lock already provides synchronization
+        // between the fetch_add and the trie upsert
+        let index = self.next_index.fetch_add(1, Ordering::Relaxed);
 
-        // Store the word -> PUA char mapping
-        guard.upsert(word, pua_char as u64).map_err(|e| {
+        // Store the word -> index mapping
+        // Note: Metadata (META_NEXT_INDEX) is persisted only in checkpoint(), not per-insert.
+        // This reduces lock contention significantly since we don't need an extra upsert
+        // on every word insert. The atomic next_index tracks the current value in memory.
+        guard.upsert(word, index).map_err(|e| {
             VocabularyError::Trie(format!("Failed to insert word '{}': {}", word, e))
         })?;
 
-        // Update the metadata for next_char
-        guard.upsert(META_NEXT_CHAR, (relative_code + 1) as u64).map_err(|e| {
-            VocabularyError::Trie(format!("Failed to update next_char metadata: {}", e))
-        })?;
-
-        Ok(pua_char)
+        Ok(index)
     }
 
-    /// Look up PUA character for word (None if not in vocabulary).
-    pub fn get(&self, word: &str) -> Option<char> {
-        self.trie
-            .read()
-            .get(word)
-            .and_then(|&code| Self::u64_to_pua_char(code).ok())
+    /// Look up index for word (None if not in vocabulary).
+    pub fn get(&self, word: &str) -> Option<u64> {
+        self.trie.read().get(word).copied()
     }
 
     /// Check if a word exists in the vocabulary.
@@ -256,20 +286,21 @@ impl SharedVocabulary {
     }
 
     /// Get the number of words in the vocabulary.
-    pub fn len(&self) -> u32 {
-        self.next_char.load(Ordering::Relaxed)
+    pub fn len(&self) -> u64 {
+        // Subtract FIRST_VALID_INDEX since we start at 1, not 0
+        self.next_index.load(Ordering::Relaxed) - FIRST_VALID_INDEX
     }
 
     /// Check if the vocabulary is empty.
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.next_index.load(Ordering::Relaxed) == FIRST_VALID_INDEX
     }
 
-    /// Build a reverse lookup cache (PUA char -> word).
+    /// Build a reverse lookup cache (index -> word).
     ///
     /// This is useful for decoding n-gram keys back to words.
     /// Note: This iterates over all entries and allocates a HashMap.
-    pub fn build_reverse_cache(&self) -> HashMap<char, String> {
+    pub fn build_reverse_cache(&self) -> HashMap<u64, String> {
         let guard = self.trie.read();
         let mut cache = HashMap::new();
 
@@ -282,9 +313,7 @@ impl SharedVocabulary {
                     continue;
                 }
 
-                if let Ok(pua_char) = Self::u64_to_pua_char(value) {
-                    cache.insert(pua_char, key);
-                }
+                cache.insert(value, key);
             }
         }
 
@@ -295,10 +324,10 @@ impl SharedVocabulary {
     pub fn checkpoint(&self) -> VocabularyResult<()> {
         let mut guard = self.trie.write();
 
-        // Ensure next_char metadata is up to date
-        let current = self.next_char.load(Ordering::Relaxed);
-        guard.upsert(META_NEXT_CHAR, current as u64).map_err(|e| {
-            VocabularyError::Trie(format!("Failed to update next_char metadata: {}", e))
+        // Ensure next_index metadata is up to date
+        let current = self.next_index.load(Ordering::Relaxed);
+        guard.upsert(META_NEXT_INDEX, current).map_err(|e| {
+            VocabularyError::Trie(format!("Failed to update next_index metadata: {}", e))
         })?;
 
         guard.checkpoint().map_err(|e| {
@@ -313,43 +342,16 @@ impl SharedVocabulary {
         })
     }
 
-    /// Convert a relative code point (0-based) to a PUA character.
-    fn relative_to_pua_char(relative: u32) -> VocabularyResult<char> {
-        let absolute = if relative <= (PUA_END_A - PUA_START) {
-            // Within PUA-A range
-            PUA_START + relative
-        } else {
-            // Overflow to PUA-B range
-            let pua_b_offset = relative - (PUA_END_A - PUA_START + 1);
-            let pua_b_start = 0x100000u32;
-            if pua_b_start + pua_b_offset > PUA_END_B {
-                return Err(VocabularyError::CapacityExceeded {
-                    current: relative,
-                    max: MAX_VOCABULARY_SIZE,
-                });
-            }
-            pua_b_start + pua_b_offset
-        };
-
-        char::from_u32(absolute).ok_or_else(|| VocabularyError::InvalidPuaChar(absolute as u64))
-    }
-
-    /// Convert a u64 stored in the trie to a PUA character.
-    fn u64_to_pua_char(code: u64) -> VocabularyResult<char> {
-        let code_u32 = code as u32;
-        char::from_u32(code_u32).ok_or_else(|| VocabularyError::InvalidPuaChar(code))
-    }
-
     /// Get a clone of the Arc-wrapped trie (for sharing across threads).
     pub fn trie_arc(&self) -> Arc<RwLock<DiskBackedCharTrieInner<u64>>> {
         Arc::clone(&self.trie)
     }
 }
 
-/// Encode an n-gram as a trie key (sequence of PUA chars).
+/// Encode an n-gram as a varint-encoded Latin-1 string.
 ///
-/// Each word in the n-gram is mapped to its PUA character, and the
-/// resulting characters are collected into a String.
+/// Each word is mapped to its vocabulary index, then LEB128 encoded.
+/// Bytes are converted to Latin-1 chars (0x00-0xFF → U+0000-U+00FF).
 ///
 /// # Arguments
 ///
@@ -358,27 +360,35 @@ impl SharedVocabulary {
 ///
 /// # Returns
 ///
-/// A String where each character is a PUA character representing one word.
+/// A Latin-1 encoded string where each word's index is varint-encoded.
 ///
 /// # Example
 ///
 /// ```ignore
 /// let key = encode_ngram_key(&["the", "quick", "brown"], &vocab);
-/// assert_eq!(key.chars().count(), 3);  // 3 PUA chars
+/// // Each word's index is varint-encoded and converted to Latin-1 chars
 /// ```
 pub fn encode_ngram_key(words: &[&str], vocab: &SharedVocabulary) -> String {
-    words.iter().map(|w| vocab.get_or_insert(w)).collect()
+    let mut buf = Vec::with_capacity(words.len() * 2); // Estimate 2 bytes/word average
+    for word in words {
+        let index = vocab.get_or_insert(word);
+        encode_varint(index, &mut buf);
+    }
+    // Convert bytes to Latin-1 string (each byte → char U+00XX)
+    buf.into_iter().map(|b| char::from(b)).collect()
 }
 
-/// Try to encode an n-gram as a trie key (fallible version).
+/// Try to encode an n-gram as a varint-encoded Latin-1 string (fallible version).
 pub fn try_encode_ngram_key(
     words: &[&str],
     vocab: &SharedVocabulary,
 ) -> VocabularyResult<String> {
-    words
-        .iter()
-        .map(|w| vocab.try_get_or_insert(w))
-        .collect()
+    let mut buf = Vec::with_capacity(words.len() * 2);
+    for word in words {
+        let index = vocab.try_get_or_insert(word)?;
+        encode_varint(index, &mut buf);
+    }
+    Ok(buf.into_iter().map(|b| char::from(b)).collect())
 }
 
 /// Encode an n-gram using existing vocabulary entries only.
@@ -386,47 +396,70 @@ pub fn try_encode_ngram_key(
 /// Returns `None` if any word is not in the vocabulary.
 /// This is useful for queries where we don't want to add new words.
 pub fn encode_ngram_key_existing(words: &[&str], vocab: &SharedVocabulary) -> Option<String> {
-    words
-        .iter()
-        .map(|w| vocab.get(w))
-        .collect::<Option<String>>()
+    let mut buf = Vec::with_capacity(words.len() * 2);
+    for word in words {
+        let index = vocab.get(word)?;
+        encode_varint(index, &mut buf);
+    }
+    Some(buf.into_iter().map(|b| char::from(b)).collect())
 }
 
-/// Decode an n-gram key to its PUA character sequence.
+/// Decode a Latin-1 encoded n-gram key to word indices.
 ///
-/// This is a simple wrapper that returns an iterator over the characters.
-/// To get the original words, use a reverse lookup cache from `SharedVocabulary::build_reverse_cache`.
-pub fn decode_ngram_key(key: &str) -> impl Iterator<Item = char> + '_ {
-    key.chars()
+/// Converts Latin-1 chars back to bytes and decodes LEB128 varints.
+pub fn decode_ngram_key(key: &str) -> Vec<u64> {
+    // Convert Latin-1 chars back to bytes
+    let bytes: Vec<u8> = key.chars().map(|c| c as u8).collect();
+    let mut indices = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if let Some((index, consumed)) = decode_varint(&bytes[offset..]) {
+            indices.push(index);
+            offset += consumed;
+        } else {
+            break;
+        }
+    }
+    indices
 }
 
 /// Get the n-gram order from an encoded key.
 ///
-/// The order is simply the number of characters in the key.
+/// The order is the number of varints in the encoded key.
 #[inline]
 pub fn ngram_order(key: &str) -> u8 {
-    key.chars().count() as u8
+    decode_ngram_key(key).len() as u8
 }
 
-/// Check if a character is a PUA character.
-#[inline]
-pub fn is_pua_char(c: char) -> bool {
-    let code = c as u32;
-    (PUA_START..=PUA_END_A).contains(&code) || (0x100000..=PUA_END_B).contains(&code)
-}
-
-/// Convert a PUA character to its relative index (0-based).
+/// Encode a slice of word indices to a varint-encoded Latin-1 key.
 ///
-/// Returns `None` if the character is not a PUA character.
-pub fn pua_char_to_index(c: char) -> Option<u32> {
-    let code = c as u32;
-    if (PUA_START..=PUA_END_A).contains(&code) {
-        Some(code - PUA_START)
-    } else if (0x100000..=PUA_END_B).contains(&code) {
-        Some((PUA_END_A - PUA_START + 1) + (code - 0x100000))
-    } else {
-        None
+/// This is useful for encoding sub-sequences (contexts) of n-grams
+/// without going through the vocabulary lookup. For example, when
+/// computing MKN continuation counts, we need to encode context keys
+/// from word indices that have already been decoded.
+///
+/// # Arguments
+///
+/// * `indices` - Slice of word indices (u64 values)
+///
+/// # Returns
+///
+/// A Latin-1 encoded string where each index is varint-encoded.
+///
+/// # Example
+///
+/// ```ignore
+/// // Given indices [100, 32, 200], encode as context key
+/// let context = encode_indices_to_key(&[100, 32, 200]);
+/// // This produces a Latin-1 string with LEB128-encoded values
+/// ```
+pub fn encode_indices_to_key(indices: &[u64]) -> String {
+    let mut buf = Vec::with_capacity(indices.len() * 2);
+    for &index in indices {
+        encode_varint(index, &mut buf);
     }
+    // Convert bytes to Latin-1 string (each byte → char U+00XX)
+    buf.into_iter().map(|b| char::from(b)).collect()
 }
 
 #[cfg(test)]
@@ -445,30 +478,30 @@ mod tests {
     fn test_get_or_insert_new_word() {
         let (_dir, vocab) = create_temp_vocab();
 
-        let char1 = vocab.get_or_insert("the");
-        let char2 = vocab.get_or_insert("quick");
-        let char3 = vocab.get_or_insert("brown");
+        let idx1 = vocab.get_or_insert("the");
+        let idx2 = vocab.get_or_insert("quick");
+        let idx3 = vocab.get_or_insert("brown");
 
-        // Each word should get a unique character
-        assert_ne!(char1, char2);
-        assert_ne!(char2, char3);
-        assert_ne!(char1, char3);
+        // Each word should get a unique index
+        assert_ne!(idx1, idx2);
+        assert_ne!(idx2, idx3);
+        assert_ne!(idx1, idx3);
 
-        // All should be PUA characters
-        assert!(is_pua_char(char1));
-        assert!(is_pua_char(char2));
-        assert!(is_pua_char(char3));
+        // Indices should be sequential, starting at 1 (not 0, to avoid \x00 collision)
+        assert_eq!(idx1, 1);
+        assert_eq!(idx2, 2);
+        assert_eq!(idx3, 3);
     }
 
     #[test]
     fn test_get_or_insert_existing_word() {
         let (_dir, vocab) = create_temp_vocab();
 
-        let char1 = vocab.get_or_insert("hello");
-        let char2 = vocab.get_or_insert("hello");
+        let idx1 = vocab.get_or_insert("hello");
+        let idx2 = vocab.get_or_insert("hello");
 
-        // Same word should return same character
-        assert_eq!(char1, char2);
+        // Same word should return same index
+        assert_eq!(idx1, idx2);
         assert_eq!(vocab.len(), 1);
     }
 
@@ -478,10 +511,10 @@ mod tests {
 
         assert!(vocab.get("nonexistent").is_none());
 
-        let char1 = vocab.get_or_insert("test");
-        let char2 = vocab.get("test");
+        let idx1 = vocab.get_or_insert("test");
+        let idx2 = vocab.get("test");
 
-        assert_eq!(char2, Some(char1));
+        assert_eq!(idx2, Some(idx1));
     }
 
     #[test]
@@ -494,18 +527,81 @@ mod tests {
     }
 
     #[test]
+    fn test_varint_encoding() {
+        // Test encode/decode roundtrip for various values
+        let test_values: [u64; 10] = [0, 1, 127, 128, 255, 256, 16383, 16384, 2097151, u64::MAX];
+
+        for &value in &test_values {
+            let mut buf = Vec::new();
+            encode_varint(value, &mut buf);
+            let (decoded, len) = decode_varint(&buf).expect("Should decode");
+            assert_eq!(decoded, value, "Value {} should roundtrip", value);
+            assert_eq!(len, buf.len(), "Should consume all bytes for {}", value);
+        }
+    }
+
+    #[test]
+    fn test_varint_encoding_sizes() {
+        // Verify varint sizes are as expected
+        let mut buf = Vec::new();
+
+        // 0-127: 1 byte
+        buf.clear();
+        encode_varint(0, &mut buf);
+        assert_eq!(buf.len(), 1);
+        buf.clear();
+        encode_varint(127, &mut buf);
+        assert_eq!(buf.len(), 1);
+
+        // 128-16383: 2 bytes
+        buf.clear();
+        encode_varint(128, &mut buf);
+        assert_eq!(buf.len(), 2);
+        buf.clear();
+        encode_varint(16383, &mut buf);
+        assert_eq!(buf.len(), 2);
+
+        // 16384-2097151: 3 bytes
+        buf.clear();
+        encode_varint(16384, &mut buf);
+        assert_eq!(buf.len(), 3);
+    }
+
+    #[test]
     fn test_encode_ngram_key() {
         let (_dir, vocab) = create_temp_vocab();
 
         let key = encode_ngram_key(&["the", "quick", "brown"], &vocab);
 
-        // Should have 3 characters
-        assert_eq!(key.chars().count(), 3);
+        // Decode and verify we get 3 indices
+        let indices = decode_ngram_key(&key);
+        assert_eq!(indices.len(), 3);
+        assert_eq!(indices, vec![1, 2, 3]); // Sequential indices starting at 1
+    }
 
-        // All characters should be PUA
-        for c in key.chars() {
-            assert!(is_pua_char(c));
+    #[test]
+    fn test_encode_ngram_key_with_large_indices() {
+        let (_dir, vocab) = create_temp_vocab();
+
+        // Insert enough words to test multi-byte varint
+        // Indices start at 1, so word0 gets index 1, word199 gets index 200
+        for i in 0..200 {
+            vocab.get_or_insert(&format!("word{}", i));
         }
+
+        // Encode an n-gram with indices that span single and multi-byte varints
+        let key = encode_ngram_key(&["word0", "word126", "word127", "word199"], &vocab);
+
+        let indices = decode_ngram_key(&key);
+        // word0 -> index 1, word126 -> index 127, word127 -> index 128, word199 -> index 200
+        assert_eq!(indices, vec![1, 127, 128, 200]);
+
+        // word0 (index 1) = 1 byte
+        // word126 (index 127) = 1 byte
+        // word127 (index 128) = 2 bytes (continuation bit set)
+        // word199 (index 200) = 2 bytes
+        // Total: 6 bytes = 6 Latin-1 chars
+        assert_eq!(key.chars().count(), 6);
     }
 
     #[test]
@@ -518,9 +614,14 @@ mod tests {
         // Build reverse cache
         let reverse = vocab.build_reverse_cache();
 
-        // Decode should recover original words
-        let decoded: Vec<_> = decode_ngram_key(&key)
-            .map(|c| reverse.get(&c).unwrap().as_str())
+        // Decode should recover original indices
+        let indices = decode_ngram_key(&key);
+        assert_eq!(indices.len(), words.len());
+
+        // Use reverse cache to get words back
+        let decoded: Vec<_> = indices
+            .iter()
+            .map(|idx| reverse.get(idx).unwrap().as_str())
             .collect();
 
         assert_eq!(decoded, words);
@@ -534,13 +635,15 @@ mod tests {
         let tokens = ["foo|bar", "baz"];
         let key = encode_ngram_key(&tokens, &vocab);
 
-        // Key should have exactly 2 characters (one per word)
-        assert_eq!(key.chars().count(), 2);
+        // Decode and verify
+        let indices = decode_ngram_key(&key);
+        assert_eq!(indices.len(), 2);
 
         // Build reverse cache and verify roundtrip
         let reverse = vocab.build_reverse_cache();
-        let decoded: Vec<_> = decode_ngram_key(&key)
-            .map(|c| reverse.get(&c).unwrap().as_str())
+        let decoded: Vec<_> = indices
+            .iter()
+            .map(|idx| reverse.get(idx).unwrap().as_str())
             .collect();
 
         assert_eq!(decoded, tokens);
@@ -587,10 +690,10 @@ mod tests {
         assert_ne!(comma, period);
         assert_ne!(period, quote);
 
-        // They should all be valid PUA chars
-        assert!(is_pua_char(comma));
-        assert!(is_pua_char(period));
-        assert!(is_pua_char(quote));
+        // They should all be valid indices (starting at 1)
+        assert_eq!(comma, 1);
+        assert_eq!(period, 2);
+        assert_eq!(quote, 3);
     }
 
     #[test]
@@ -599,12 +702,12 @@ mod tests {
         let path = dir.path().join("vocab.artrie");
 
         // Create and populate vocabulary
-        let char1;
-        let char2;
+        let idx1;
+        let idx2;
         {
             let vocab = SharedVocabulary::create(&path).expect("Failed to create vocab");
-            char1 = vocab.get_or_insert("hello");
-            char2 = vocab.get_or_insert("world");
+            idx1 = vocab.get_or_insert("hello");
+            idx2 = vocab.get_or_insert("world");
             vocab.checkpoint().expect("Checkpoint failed");
         }
 
@@ -613,42 +716,13 @@ mod tests {
             let vocab = SharedVocabulary::open(&path).expect("Failed to open vocab");
 
             assert_eq!(vocab.len(), 2);
-            assert_eq!(vocab.get("hello"), Some(char1));
-            assert_eq!(vocab.get("world"), Some(char2));
+            assert_eq!(vocab.get("hello"), Some(idx1));
+            assert_eq!(vocab.get("world"), Some(idx2));
 
             // New word should get next index
-            let char3 = vocab.get_or_insert("new");
-            assert_ne!(char3, char1);
-            assert_ne!(char3, char2);
+            let idx3 = vocab.get_or_insert("new");
+            assert_eq!(idx3, 3); // Sequential after idx1=1, idx2=2
         }
-    }
-
-    #[test]
-    fn test_pua_char_to_index_roundtrip() {
-        for i in [0, 1, 100, 1000, 10000, 65533] {
-            let pua_char =
-                SharedVocabulary::relative_to_pua_char(i).expect("Should be valid");
-            let index = pua_char_to_index(pua_char).expect("Should have index");
-            assert_eq!(index, i, "Index {} should roundtrip", i);
-        }
-    }
-
-    #[test]
-    fn test_is_pua_char() {
-        // Valid PUA-A chars
-        assert!(is_pua_char('\u{F0000}'));
-        assert!(is_pua_char('\u{F0001}'));
-        assert!(is_pua_char('\u{FFFFD}'));
-
-        // Valid PUA-B chars
-        assert!(is_pua_char('\u{100000}'));
-        assert!(is_pua_char('\u{10FFFD}'));
-
-        // Invalid (regular chars)
-        assert!(!is_pua_char('a'));
-        assert!(!is_pua_char('Z'));
-        assert!(!is_pua_char('|'));
-        assert!(!is_pua_char('\u{1F600}')); // Emoji
     }
 
     #[test]
@@ -665,7 +739,10 @@ mod tests {
         // Now they should work
         let key = encode_ngram_key_existing(&["the", "quick"], &vocab);
         assert!(key.is_some());
-        assert_eq!(key.unwrap().chars().count(), 2);
+
+        // Verify decoding works (indices start at 1)
+        let indices = decode_ngram_key(&key.unwrap());
+        assert_eq!(indices, vec![1, 2]);
 
         // But mixed should fail
         assert!(encode_ngram_key_existing(&["the", "unknown"], &vocab).is_none());
@@ -684,21 +761,44 @@ mod tests {
         let mut handles = vec![];
         for _ in 0..10 {
             let vocab = Arc::clone(&vocab);
-            handles.push(thread::spawn(move || {
-                vocab.get_or_insert("shared_word")
-            }));
+            handles.push(thread::spawn(move || vocab.get_or_insert("shared_word")));
         }
 
         // Collect results
-        let chars: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let indices: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-        // All threads should get the same character
-        let first = chars[0];
-        for c in &chars {
-            assert_eq!(*c, first);
+        // All threads should get the same index
+        let first = indices[0];
+        for idx in &indices {
+            assert_eq!(*idx, first);
         }
 
         // Should only have one entry
         assert_eq!(vocab.len(), 1);
+    }
+
+    #[test]
+    fn test_latin1_encoding_preserves_bytes() {
+        // Verify that Latin-1 encoding correctly round-trips all byte values
+        for byte in 0u8..=255 {
+            let c = char::from(byte);
+            assert_eq!(c as u8, byte, "Byte {} should round-trip through char", byte);
+        }
+    }
+
+    #[test]
+    fn test_large_vocabulary() {
+        // Test that vocabulary can grow beyond the old PUA limit
+        let (_dir, vocab) = create_temp_vocab();
+
+        // Insert more than 131,068 words (old PUA limit)
+        // We'll test with a smaller number for speed, but verify indices are correct
+        for i in 0..1000 {
+            let idx = vocab.get_or_insert(&format!("word{}", i));
+            // Indices start at 1, not 0
+            assert_eq!(idx, (i + 1) as u64);
+        }
+
+        assert_eq!(vocab.len(), 1000);
     }
 }

@@ -75,7 +75,7 @@ pub enum ImportEvent {
     OrderProgress {
         /// N-gram order (1-5).
         order: u8,
-        /// Files completed for this order.
+        /// Files completed for this order (success + skipped).
         files_completed: u64,
         /// Total files for this order.
         total_files: u64,
@@ -83,6 +83,10 @@ pub enum ImportEvent {
         ngrams_processed: u64,
         /// Whether this order is fully complete.
         is_complete: bool,
+        /// Files successfully completed (for green progress bar segment).
+        files_succeeded: u64,
+        /// Files skipped/failed (for yellow progress bar segment, will retry next session).
+        files_skipped: u64,
     },
 
     /// Worker is retrying after transient error.
@@ -190,6 +194,163 @@ pub enum ImportEvent {
         /// List of prefix strings with partial data.
         prefixes: Vec<String>,
     },
+
+    /// Job requeued with exponential backoff (current session retry).
+    ///
+    /// Emitted when a job encounters a retryable error and is requeued
+    /// with a delay (exponential backoff). These jobs will be retried
+    /// within the current session after the backoff delay expires.
+    DeferredRetry {
+        /// The prefix being retried.
+        prefix: String,
+        /// Current attempt number (1-indexed).
+        attempt: u32,
+        /// N-gram order (1-5).
+        order: u8,
+    },
+
+    /// Deferred retry job started processing (decrement backoff queue).
+    ///
+    /// Emitted when a job that was previously deferred (requeued with backoff)
+    /// starts processing again. This allows the TUI to decrement the backoff
+    /// queue counter.
+    DeferredRetryStarted {
+        /// The prefix starting its retry.
+        prefix: String,
+        /// N-gram order (1-5).
+        order: u8,
+    },
+
+    /// Merge phase started (sharded storage only).
+    ///
+    /// Emitted when the shard merge phase begins after n-gram collection completes.
+    MergeStarted {
+        /// Number of shards to merge.
+        shard_count: usize,
+        /// Estimated total n-grams across all shards.
+        estimated_ngrams: u64,
+    },
+
+    /// Merge progress update.
+    ///
+    /// Emitted periodically during the merge phase to update progress display.
+    MergeProgress {
+        /// Number of shards processed so far.
+        shards_processed: usize,
+        /// Total number of shards.
+        total_shards: usize,
+        /// N-grams merged so far.
+        ngrams_merged: u64,
+        /// Completion percentage (0.0 to 100.0).
+        percent_complete: f32,
+    },
+
+    /// Merge completed successfully.
+    ///
+    /// Emitted when all shards have been merged into the final output.
+    MergeCompleted {
+        /// Total n-grams in merged output.
+        total_ngrams: u64,
+        /// Bytes written to output file.
+        bytes_written: u64,
+        /// Duration of merge phase.
+        duration: Duration,
+    },
+
+    /// Merge failed with error.
+    ///
+    /// Emitted when merge encounters an unrecoverable error.
+    MergeFailed {
+        /// Human-readable error message.
+        error: String,
+    },
+
+    /// Shard cleanup started.
+    ///
+    /// Emitted when temporary shard files are being deleted after merge.
+    ShardCleanupStarted {
+        /// Number of shard files to delete.
+        shard_count: usize,
+    },
+
+    /// Shard cleanup completed.
+    ///
+    /// Emitted when all temporary shard files have been deleted.
+    ShardCleanupCompleted {
+        /// Number of shard files deleted.
+        shards_deleted: usize,
+        /// Total bytes freed by deletion.
+        bytes_freed: u64,
+    },
+
+    /// All work completed - triggers completion dialog.
+    ///
+    /// Emitted after import, merge (if applicable), and cleanup are all done.
+    /// The TUI should display a completion dialog requiring user acknowledgment.
+    AllWorkCompleted {
+        /// Total n-grams in final output.
+        total_ngrams: u64,
+        /// Total duration of entire import process.
+        total_duration: Duration,
+        /// Whether shard files were kept (--keep-shards flag).
+        shards_kept: bool,
+    },
+
+    /// MKN statistics computation started.
+    ///
+    /// Emitted when Modified Kneser-Ney statistics computation begins.
+    MknStarted {
+        /// Source of n-gram data for MKN computation.
+        /// Either "shards" (parallel computation) or "single_trie" (sequential).
+        source: String,
+        /// Estimated total n-grams to process.
+        estimated_ngrams: u64,
+    },
+
+    /// MKN computation progress update.
+    ///
+    /// Emitted periodically during MKN statistics computation.
+    MknProgress {
+        /// Current phase (1 = collecting pairs, 2 = writing stats).
+        phase: u8,
+        /// Total phases.
+        total_phases: u8,
+        /// Items processed in current phase.
+        items_processed: u64,
+        /// Estimated total items in current phase.
+        total_items: u64,
+        /// Completion percentage (0.0 to 100.0).
+        percent_complete: f32,
+    },
+
+    /// MKN computation completed successfully.
+    ///
+    /// Emitted when MKN statistics have been computed and written.
+    MknCompleted {
+        /// Number of continuation count entries written.
+        continuation_entries: u64,
+        /// Number of frequency count entries written.
+        frequency_entries: u64,
+        /// Duration of MKN computation.
+        duration: Duration,
+    },
+
+    /// MKN computation failed.
+    ///
+    /// Emitted when MKN computation encounters an unrecoverable error.
+    MknFailed {
+        /// Human-readable error message.
+        error: String,
+    },
+
+    /// Import phase changed.
+    ///
+    /// Emitted when the import pipeline transitions to a new phase.
+    /// Enables TUI to display current phase and track progress.
+    PhaseChanged {
+        /// Name of the new phase (e.g., "Downloading", "Computing MKN Statistics").
+        phase: String,
+    },
 }
 
 /// Log level for log events.
@@ -251,6 +412,8 @@ mod tests {
             total_files: 676,
             ngrams_processed: 1_000_000,
             is_complete: false,
+            files_succeeded: 48,
+            files_skipped: 2,
         };
         let _cloned = event.clone();
     }

@@ -18,9 +18,9 @@
 //! 1. **Legacy (pipe-separated)**: Simple `"the|quick|brown"` encoding. Deprecated
 //!    because it can corrupt data if tokens contain `|`.
 //!
-//! 2. **Vocabulary-indexed (PUA)**: Each word maps to a Unicode Private Use Area
-//!    character, producing compact keys like `"\u{F0000}\u{F0001}\u{F0002}"`.
-//!    This is the recommended encoding - see [`vocabulary`] module.
+//! 2. **Vocabulary-indexed (varint)**: Each word maps to a u64 index, encoded as
+//!    LEB128 varint bytes stored as Latin-1 characters. This produces compact keys
+//!    and supports unlimited vocabulary size. See [`vocabulary`] module.
 //!
 //! # Dictionary Backend Type Aliases
 //!
@@ -65,9 +65,8 @@ pub use trainer::{
 #[allow(deprecated)]
 pub use trie::{IterableDictionary, NgramTrie, NGRAM_SEPARATOR};
 pub use vocabulary::{
-    decode_ngram_key, encode_ngram_key, encode_ngram_key_existing, is_pua_char, ngram_order,
-    pua_char_to_index, try_encode_ngram_key, SharedVocabulary, VocabularyError, VocabularyResult,
-    MAX_VOCABULARY_SIZE,
+    decode_ngram_key, decode_varint, encode_ngram_key, encode_ngram_key_existing, encode_varint,
+    ngram_order, try_encode_ngram_key, SharedVocabulary, VocabularyError, VocabularyResult,
 };
 
 #[cfg(feature = "serde-extras")]

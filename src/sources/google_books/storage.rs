@@ -13,15 +13,15 @@
 //!
 //! # Vocabulary-Indexed Encoding
 //!
-//! When a `SharedVocabulary` is provided, n-gram keys are encoded using PUA
-//! (Private Use Area) characters instead of pipe-separated tokens. This:
+//! When a `SharedVocabulary` is provided, n-gram keys are encoded using varint-encoded
+//! u64 indices stored as Latin-1 strings instead of pipe-separated tokens. This:
 //! - Fixes the delimiter bug when tokens contain `|`
-//! - Provides more compact storage (1 char per word)
-//! - Enables DAWG suffix sharing at the word level
+//! - Provides compact storage (1-2 bytes per word for common words)
+//! - Supports unlimited vocabulary size
 
 use super::config::GoogleBooksConfig;
 use super::sharding::{ShardCoordinator, ShardKey};
-use crate::ngram::vocabulary::{encode_ngram_key, SharedVocabulary};
+use crate::ngram::vocabulary::{try_encode_ngram_key, SharedVocabulary, VocabularyError};
 use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
 use parking_lot::RwLock;
 use std::path::Path;
@@ -47,6 +47,10 @@ pub enum StorageError {
     /// Configuration error.
     #[error("Configuration error: {0}")]
     Config(String),
+
+    /// Vocabulary error.
+    #[error("Vocabulary error: {0}")]
+    Vocabulary(#[from] VocabularyError),
 }
 
 /// Result type for storage operations.
@@ -228,18 +232,19 @@ impl NgramStorage {
 
     /// Encode tokens to an n-gram key using vocabulary.
     ///
+    /// Returns a Latin-1 encoded string of varint bytes if vocabulary is set.
     /// If vocabulary is not set, returns the tokens joined with spaces.
-    pub fn encode_tokens(&self, tokens: &[&str]) -> String {
+    pub fn encode_tokens(&self, tokens: &[&str]) -> StorageResult<String> {
         match self.vocabulary() {
-            Some(vocab) => encode_ngram_key(tokens, vocab),
-            None => tokens.join(" "),
+            Some(vocab) => try_encode_ngram_key(tokens, vocab).map_err(StorageError::from),
+            None => Ok(tokens.join(" ")),
         }
     }
 
     /// Store tokens as an n-gram with count, using vocabulary encoding if available.
     ///
     /// This is the recommended method for storing n-grams when you have tokens.
-    /// If vocabulary is enabled, the tokens are encoded to a PUA key and routed
+    /// If vocabulary is enabled, the tokens are encoded to a varint key and routed
     /// based on the original tokens (not the encoded key).
     ///
     /// # Arguments
@@ -251,7 +256,7 @@ impl NgramStorage {
     ///
     /// `true` if this was a new n-gram.
     pub fn store_tokens(&self, tokens: &[&str], count: u64) -> StorageResult<bool> {
-        let encoded_key = self.encode_tokens(tokens);
+        let encoded_key = self.encode_tokens(tokens)?;
 
         match self {
             Self::SingleTrie { trie, stats, .. } => {
@@ -385,14 +390,14 @@ impl NgramStorage {
 
     /// Get the count for an n-gram by tokens (for vocabulary-indexed encoding).
     ///
-    /// This encodes the tokens to a PUA key and routes based on the original tokens,
+    /// This encodes the tokens to a varint key and routes based on the original tokens,
     /// ensuring correct shard routing for vocabulary-indexed storage.
     ///
     /// # Arguments
     ///
     /// * `tokens` - The n-gram tokens (e.g., ["the", "quick", "brown"])
     pub fn get_tokens(&self, tokens: &[&str]) -> Option<u64> {
-        let encoded_key = self.encode_tokens(tokens);
+        let encoded_key = self.encode_tokens(tokens).ok()?;
 
         match self {
             Self::SingleTrie { trie, .. } => {
@@ -535,7 +540,7 @@ impl NgramStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ngram::vocabulary::is_pua_char;
+    use crate::ngram::vocabulary::decode_ngram_key;
     use crate::sources::google_books::config::ShardingMode;
     use tempfile::TempDir;
 
@@ -624,7 +629,7 @@ mod tests {
 
         assert!(storage.has_vocabulary());
 
-        // Store tokens - should encode to PUA characters
+        // Store tokens - should encode to varint Latin-1 strings
         let tokens1 = ["the", "quick"];
         let tokens2 = ["the", "slow"];
         let tokens3 = ["apple", "pie"];
@@ -634,18 +639,19 @@ mod tests {
         assert!(storage.store_tokens(&tokens2, 3).expect("Failed to store"));
         assert!(storage.store_tokens(&tokens3, 7).expect("Failed to store"));
 
-        // Verify encoded keys are PUA strings
-        let encoded1 = storage.encode_tokens(&tokens1);
-        let encoded3 = storage.encode_tokens(&tokens3);
+        // Verify encoded keys decode to correct number of indices
+        let encoded1 = storage.encode_tokens(&tokens1).unwrap();
+        let encoded3 = storage.encode_tokens(&tokens3).unwrap();
 
-        assert_eq!(encoded1.chars().count(), 2); // 2 PUA chars
-        assert!(encoded1.chars().all(is_pua_char));
-        assert_eq!(encoded3.chars().count(), 2); // 2 PUA chars
-        assert!(encoded3.chars().all(is_pua_char));
+        assert_eq!(decode_ngram_key(&encoded1).len(), 2); // 2 word indices
+        assert_eq!(decode_ngram_key(&encoded3).len(), 2); // 2 word indices
 
         // Query using encoded keys
         assert_eq!(storage.get(&encoded1), Some(15)); // 10 + 5
-        assert_eq!(storage.get(&storage.encode_tokens(&tokens2)), Some(3));
+        assert_eq!(
+            storage.get(&storage.encode_tokens(&tokens2).unwrap()),
+            Some(3)
+        );
         assert_eq!(storage.get(&encoded3), Some(7));
 
         // Stats
@@ -706,10 +712,9 @@ mod tests {
         assert!(storage.contains_tokens(&tokens_ze));
         assert!(!storage.contains_tokens(&["nonexistent", "ngram"]));
 
-        // Verify encoded keys are PUA strings
-        let encoded_th = storage.encode_tokens(&tokens_th);
-        assert_eq!(encoded_th.chars().count(), 3); // 3 PUA chars for trigram
-        assert!(encoded_th.chars().all(is_pua_char));
+        // Verify encoded keys decode to correct number of indices
+        let encoded_th = storage.encode_tokens(&tokens_th).unwrap();
+        assert_eq!(decode_ngram_key(&encoded_th).len(), 3); // 3 word indices for trigram
     }
 
     #[test]
@@ -732,19 +737,18 @@ mod tests {
         assert!(storage.store_tokens(&tokens, 10).expect("Failed to store"));
 
         // Verify we can retrieve it
-        let encoded = storage.encode_tokens(&tokens);
+        let encoded = storage.encode_tokens(&tokens).unwrap();
         assert_eq!(storage.get(&encoded), Some(10));
 
-        // The encoded key should be 2 PUA chars, not affected by the | in the token
-        assert_eq!(encoded.chars().count(), 2);
-        assert!(encoded.chars().all(is_pua_char));
+        // The encoded key should decode to 2 indices, not affected by the | in the token
+        assert_eq!(decode_ngram_key(&encoded).len(), 2);
 
         // Store different tokens - should NOT conflict
         let tokens2 = ["foo", "bar", "baz"]; // 3 separate tokens
         assert!(storage.store_tokens(&tokens2, 5).expect("Failed to store"));
 
-        let encoded2 = storage.encode_tokens(&tokens2);
-        assert_eq!(encoded2.chars().count(), 3); // 3 PUA chars
+        let encoded2 = storage.encode_tokens(&tokens2).unwrap();
+        assert_eq!(decode_ngram_key(&encoded2).len(), 3); // 3 word indices
         assert_ne!(encoded, encoded2); // Different keys
     }
 }

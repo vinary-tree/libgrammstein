@@ -277,6 +277,15 @@ pub struct ImportGoogleBooksArgs {
     #[arg(long)]
     pub no_resume: bool,
 
+    /// Keep shard files after merge (default: delete to save disk space).
+    ///
+    /// When using sharded storage mode, temporary shard files are created during
+    /// import and merged at the end. By default, these are deleted after merge
+    /// to save disk space. Use this flag to preserve them for debugging or to
+    /// allow incremental updates in the future.
+    #[arg(long)]
+    pub keep_shards: bool,
+
     /// Resource management options.
     #[command(flatten)]
     pub resources: ResourceArgs,

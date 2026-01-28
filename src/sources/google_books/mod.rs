@@ -67,6 +67,7 @@ mod languages;
 mod parser;
 mod reader;
 pub mod sharding;
+pub mod state_machine;
 mod storage;
 pub mod task_manager;
 mod translator;

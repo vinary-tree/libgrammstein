@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::sources::google_books::{ImportCommand, ImportEvent};
@@ -75,27 +75,59 @@ impl ImportTui {
             loop {
                 match event_rx.try_recv() {
                     Ok(import_event) => {
+                        // Log phase-critical events
+                        match &import_event {
+                            ImportEvent::PhaseChanged { phase } => {
+                                log::debug!("[TUI-APP] Received PhaseChanged: '{}'", phase);
+                            }
+                            ImportEvent::MknStarted { .. } => {
+                                log::debug!("[TUI-APP] Received MknStarted");
+                            }
+                            ImportEvent::MknCompleted { .. } => {
+                                log::debug!("[TUI-APP] Received MknCompleted");
+                            }
+                            ImportEvent::MergeStarted { shard_count, .. } => {
+                                log::debug!("[TUI-APP] Received MergeStarted: {} shards", shard_count);
+                            }
+                            ImportEvent::MergeCompleted { .. } => {
+                                log::debug!("[TUI-APP] Received MergeCompleted");
+                            }
+                            ImportEvent::AllWorkCompleted { .. } => {
+                                log::debug!("[TUI-APP] Received AllWorkCompleted");
+                            }
+                            ImportEvent::WorkerExited { worker_id } => {
+                                log::debug!("[TUI-APP] Received WorkerExited: {}", worker_id);
+                            }
+                            _ => {}
+                        }
                         self.state.apply_event(&import_event);
 
-                        // Check for completion
-                        if self.state.is_finished() {
-                            // Render one more time to show final state
-                            terminal.draw(|frame| self.render(frame))?;
-
-                            // Brief pause to let user see final state
-                            std::thread::sleep(Duration::from_millis(500));
-
-                            return Ok(self.state.completed);
-                        }
+                        // Note: We no longer auto-exit on is_finished().
+                        // Instead, we wait for AllWorkCompleted which sets
+                        // show_completion_dialog, requiring user acknowledgment.
                     }
                     Err(broadcast::error::TryRecvError::Empty) => break,
                     Err(broadcast::error::TryRecvError::Lagged(n)) => {
                         // We missed some events due to slow rendering, log it
-                        log::warn!("TUI lagged, missed {} events", n);
+                        log::warn!("[TUI-APP] LAGGED: missed {} events!", n);
                     }
                     Err(broadcast::error::TryRecvError::Closed) => {
-                        // Channel closed, import must have finished
-                        return Ok(self.state.completed);
+                        log::debug!(
+                            "[TUI-APP] Channel closed, show_completion_dialog={}, is_finished={}",
+                            self.state.show_completion_dialog,
+                            self.state.is_finished()
+                        );
+                        // Channel closed - if we have a completion dialog, show it
+                        // Otherwise, the import must have finished abruptly
+                        if !self.state.show_completion_dialog && self.state.is_finished() {
+                            // Import completed without AllWorkCompleted event
+                            // (e.g., non-sharded mode or error)
+                            // Brief pause to show final state, then exit
+                            terminal.draw(|frame| self.render(frame))?;
+                            std::thread::sleep(Duration::from_millis(500));
+                            return Ok(self.state.completed);
+                        }
+                        // If dialog is showing, continue loop to handle user input
                     }
                 }
             }
@@ -109,7 +141,7 @@ impl ImportTui {
                     // Only handle key press events, not release
                     if key.kind == KeyEventKind::Press {
                         if self.handle_key(key.code)? {
-                            return Ok(false); // User requested quit
+                            return Ok(self.state.completed);
                         }
                     }
                 }
@@ -121,6 +153,16 @@ impl ImportTui {
     ///
     /// Returns `true` if the TUI should exit.
     fn handle_key(&mut self, key: KeyCode) -> io::Result<bool> {
+        // If completion dialog is showing, only accept exit keys
+        if self.state.show_completion_dialog {
+            match key {
+                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    return Ok(true); // Exit TUI
+                }
+                _ => return Ok(false), // Ignore other keys
+            }
+        }
+
         match key {
             KeyCode::Char('p') | KeyCode::Char('P') => {
                 let cmd = if self.state.paused {
@@ -226,6 +268,11 @@ impl ImportTui {
 
         // Log panel
         self.render_log(frame, chunks[3]);
+
+        // Render completion dialog on top if needed
+        if self.state.show_completion_dialog {
+            self.render_completion_dialog(frame, area);
+        }
     }
 
     /// Render the header.
@@ -263,10 +310,11 @@ impl ImportTui {
         };
 
         let title = format!(
-            " Google Books Import - {} {}-{}grams  [P]ause  [Q]uit  [+/-] Workers{}{}",
+            " Google Books Import - {} {}-{}grams | {}  [P]ause  [Q]uit  [+/-] Workers{}{}",
             self.state.language.to_uppercase(),
             self.state.min_order,
             self.state.max_order,
+            self.state.display_phase(),
             status,
             warning
         );
@@ -298,12 +346,18 @@ impl ImportTui {
         let mut lines: Vec<Line> = Vec::new();
 
         for order in self.state.min_order..=self.state.max_order {
-            let (files_completed, total_files, is_complete) =
+            let (files_completed, total_files, is_complete, files_succeeded, files_skipped) =
                 if let Some(progress) = self.state.order_progress.get(&order) {
-                    (progress.files_completed, progress.total_files, progress.is_complete)
+                    (
+                        progress.files_completed,
+                        progress.total_files,
+                        progress.is_complete,
+                        progress.files_succeeded,
+                        progress.files_skipped,
+                    )
                 } else {
                     // Order hasn't started yet
-                    (0, 0, false)
+                    (0, 0, false, 0, 0)
                 };
 
             let percent = if total_files > 0 {
@@ -312,9 +366,14 @@ impl ImportTui {
                 0.0
             };
 
-            // Create mini progress bar
+            // Create segmented progress bar with colors for success/skipped
             let bar_width = 20;
-            let progress_bar = widgets::mini_progress_bar(percent as f32 / 100.0, bar_width);
+            let bar_spans = widgets::segmented_progress_bar(
+                files_succeeded,
+                files_skipped,
+                total_files,
+                bar_width,
+            );
 
             // Determine status text and color
             let (status, status_style) = if is_complete {
@@ -326,12 +385,15 @@ impl ImportTui {
             };
 
             // Format: "2-grams: ████░░░░░░ 340/676 (50%) ACTIVE"
-            let line = Line::from(vec![
+            // The progress bar now has colored segments: green=success, yellow=skipped
+            let mut spans = vec![
                 Span::styled(format!("{}-grams: ", order), Style::default().fg(Color::Cyan)),
-                Span::raw(progress_bar),
-                Span::raw(format!(" {}/{} ({:.0}%) ", files_completed, total_files, percent)),
-                Span::styled(status, status_style),
-            ]);
+            ];
+            spans.extend(bar_spans);
+            spans.push(Span::raw(format!(" {}/{} ({:.0}%) ", files_completed, total_files, percent)));
+            spans.push(Span::styled(status, status_style));
+
+            let line = Line::from(spans);
 
             lines.push(line);
         }
@@ -377,6 +439,29 @@ impl ImportTui {
             Row::new(vec!["Workers:", workers_str.as_str()]),
         ];
 
+        // Add backoff queue row (jobs waiting on exponential backoff in current session)
+        let backoff_queue_str = format!("{}", self.state.backoff_queue_count);
+        let backoff_queue_row = if self.state.backoff_queue_count > 0 {
+            Row::new(vec!["Backoff queue:", backoff_queue_str.as_str()])
+                .style(Style::default().fg(Color::Yellow))
+        } else {
+            Row::new(vec!["Backoff queue:", backoff_queue_str.as_str()])
+        };
+        rows.push(backoff_queue_row);
+
+        // Add checkpoint retries row (from previous session)
+        let checkpoint_retries = self.state.failed_prefixes_count
+            + self.state.retrying_prefixes_count
+            + self.state.recovering_prefixes_count;
+        let checkpoint_retries_str = format!("{}", checkpoint_retries);
+        let checkpoint_retries_row = if checkpoint_retries > 0 {
+            Row::new(vec!["Checkpoint retries:", checkpoint_retries_str.as_str()])
+                .style(Style::default().fg(Color::Yellow))
+        } else {
+            Row::new(vec!["Checkpoint retries:", checkpoint_retries_str.as_str()])
+        };
+        rows.push(checkpoint_retries_row);
+
         // Add warnings row if there are failed/recovering prefixes
         if self.state.has_prefix_warnings() {
             rows.push(
@@ -385,9 +470,49 @@ impl ImportTui {
             );
         }
 
+        // Pre-allocate formatted strings for MKN progress (lifetime extension)
+        let mkn_phase_str: String;
+        let mkn_progress_str: String;
+
+        // Add MKN progress if active
+        if self.state.mkn_in_progress {
+            if let Some(ref mkn) = self.state.mkn_progress {
+                mkn_phase_str = format!("Phase {}/{}", mkn.phase, mkn.total_phases);
+                mkn_progress_str = format!("{:.1}%", mkn.percent_complete);
+                rows.push(
+                    Row::new(vec!["MKN Progress:", mkn_phase_str.as_str()])
+                        .style(Style::default().fg(Color::Magenta))
+                );
+                rows.push(
+                    Row::new(vec!["  Completion:", mkn_progress_str.as_str()])
+                        .style(Style::default().fg(Color::Magenta))
+                );
+            }
+        }
+
+        // Pre-allocate formatted strings for merge progress (lifetime extension)
+        let merge_shards_str: String;
+        let merge_progress_str: String;
+
+        // Add merge progress if active
+        if self.state.merge_in_progress {
+            if let Some(ref merge) = self.state.merge_progress {
+                merge_shards_str = format!("{}/{} shards", merge.shards_processed, merge.total_shards);
+                merge_progress_str = format!("{:.1}%", merge.percent_complete);
+                rows.push(
+                    Row::new(vec!["Merge Progress:", merge_shards_str.as_str()])
+                        .style(Style::default().fg(Color::Blue))
+                );
+                rows.push(
+                    Row::new(vec!["  Completion:", merge_progress_str.as_str()])
+                        .style(Style::default().fg(Color::Blue))
+                );
+            }
+        }
+
         let table = Table::new(
             rows,
-            [Constraint::Length(16), Constraint::Fill(1)],
+            [Constraint::Length(20), Constraint::Fill(1)],
         )
         .column_spacing(1);
 
@@ -489,6 +614,115 @@ impl ImportTui {
 
         let list = List::new(items);
         frame.render_widget(list, inner);
+    }
+
+    /// Render the completion dialog.
+    fn render_completion_dialog(&self, frame: &mut Frame, area: Rect) {
+        // Calculate dialog size (60% width, 14 lines height)
+        let dialog_width = (area.width as f32 * 0.6).max(50.0).min(80.0) as u16;
+        let dialog_height = 14u16;
+
+        // Center the dialog
+        let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+        let y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+        let dialog_area = Rect::new(x, y, dialog_width, dialog_height);
+
+        // Clear the area behind the dialog
+        frame.render_widget(Clear, dialog_area);
+
+        // Determine title and border color based on state
+        let (title, border_style) = if self.state.error_message.is_some() {
+            (" Import Failed ", Style::default().fg(Color::Red))
+        } else if self.state.cancelled {
+            (" Import Cancelled ", Style::default().fg(Color::Yellow))
+        } else {
+            (" Import Complete ", Style::default().fg(Color::Green))
+        };
+
+        // Build content lines
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(""));
+
+        if let Some(ref stats) = self.state.completion_stats {
+            lines.push(Line::from(vec![
+                Span::styled("  Total n-grams:  ", Style::default().fg(Color::Cyan)),
+                Span::raw(format_count(stats.total_ngrams)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  Files processed: ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!("{}", stats.files_processed)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  Duration:        ", Style::default().fg(Color::Cyan)),
+                Span::raw(format_duration(stats.total_duration)),
+            ]));
+
+            if stats.merge_performed {
+                lines.push(Line::from(vec![
+                    Span::styled("  Shards:          ", Style::default().fg(Color::Cyan)),
+                    Span::raw(if stats.shards_kept {
+                        "kept (--keep-shards)"
+                    } else {
+                        "deleted after merge"
+                    }),
+                ]));
+            }
+        } else {
+            // Fallback if no stats available
+            lines.push(Line::from(vec![
+                Span::styled("  Total n-grams:  ", Style::default().fg(Color::Cyan)),
+                Span::raw(format_count(self.state.total_ngrams)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  Files processed: ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!("{}", self.state.files_completed)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  Duration:        ", Style::default().fg(Color::Cyan)),
+                Span::raw(format_duration(self.state.elapsed)),
+            ]));
+        }
+
+        // Add error message if present
+        if let Some(ref error) = self.state.error_message {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("  Error: ", Style::default().fg(Color::Red)),
+                Span::raw(error.clone()),
+            ]));
+        }
+
+        // Add warnings if there were failures
+        if self.state.failed_prefixes_count > 0 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {} prefixes failed (will retry next run)", self.state.failed_prefixes_count),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            "          Press [Enter] or [Q] to exit",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )]));
+
+        let dialog = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(title)
+                    .title_style(border_style.add_modifier(Modifier::BOLD))
+                    .borders(Borders::ALL)
+                    .border_style(border_style),
+            )
+            .alignment(Alignment::Left);
+
+        frame.render_widget(dialog, dialog_area);
     }
 }
 

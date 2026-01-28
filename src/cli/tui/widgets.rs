@@ -2,6 +2,8 @@
 
 use std::collections::VecDeque;
 
+use ratatui::prelude::*;
+
 /// Create a sparkline widget showing throughput history.
 ///
 /// Note: Due to ratatui's Sparkline requiring owned data, this function
@@ -49,6 +51,33 @@ pub fn format_si(n: u64) -> String {
     } else {
         format!("{}", n)
     }
+}
+
+/// Creates a progress bar with colored segments for different outcomes.
+///
+/// Returns a `Vec<Span>` that can be used in a `Line`:
+/// - Green segment: successfully completed files
+/// - Yellow segment: skipped/failed files (will retry next session)
+/// - Empty segment: remaining files
+pub fn segmented_progress_bar(
+    succeeded: u64,
+    skipped: u64,
+    total: u64,
+    width: usize,
+) -> Vec<Span<'static>> {
+    if total == 0 {
+        return vec![Span::raw("░".repeat(width))];
+    }
+
+    let succeeded_width = ((succeeded as f64 / total as f64) * width as f64).round() as usize;
+    let skipped_width = ((skipped as f64 / total as f64) * width as f64).round() as usize;
+    let empty_width = width.saturating_sub(succeeded_width + skipped_width);
+
+    vec![
+        Span::styled("█".repeat(succeeded_width), Style::default().fg(Color::Green)),
+        Span::styled("█".repeat(skipped_width), Style::default().fg(Color::Yellow)),
+        Span::raw("░".repeat(empty_width)),
+    ]
 }
 
 #[cfg(test)]

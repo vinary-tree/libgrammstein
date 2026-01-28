@@ -119,6 +119,18 @@ pub struct ShardCoordinator {
     /// Uses DashMap for concurrent access.
     shards: DashMap<ShardKey, Arc<RwLock<ShardHandle>>>,
 
+    /// Per-shard creation locks to prevent TOCTOU races during shard creation.
+    ///
+    /// When multiple threads attempt to create the same shard simultaneously,
+    /// this lock ensures only one thread performs the actual file creation
+    /// while others wait and then use the already-created shard.
+    ///
+    /// This prevents the race condition where:
+    /// 1. Thread A checks if file exists (false)
+    /// 2. Thread B checks if file exists (false)
+    /// 3. Both threads try to create the file, causing corruption
+    creation_locks: DashMap<ShardKey, Arc<std::sync::Mutex<()>>>,
+
     /// LRU cache for tracking shard access order (for eviction).
     /// Only used when max_open_shards > 0.
     lru_tracker: Option<Mutex<LruCache<ShardKey, ()>>>,
@@ -175,6 +187,7 @@ impl ShardCoordinator {
         Ok(Self {
             config,
             shards: DashMap::new(),
+            creation_locks: DashMap::new(),
             lru_tracker,
             checkpoint_manager,
             stats: Arc::new(CoordinatorStats::default()),
@@ -267,44 +280,49 @@ impl ShardCoordinator {
     }
 
     /// Create or open a shard (internal, handles race conditions).
+    ///
+    /// Uses a per-shard mutex to serialize shard creation attempts. This prevents
+    /// TOCTOU race conditions where multiple workers might both see the file
+    /// doesn't exist and then both try to create it, leading to file corruption.
+    ///
+    /// The double-check pattern ensures that:
+    /// 1. We first acquire the creation lock for this specific shard key
+    /// 2. We re-check if another thread created the shard while we waited
+    /// 3. Only if still needed, we perform the actual create/open operation
     fn create_or_open_shard(&self, key: &ShardKey) -> CoordinatorResult<Arc<RwLock<ShardHandle>>> {
-        // Check LRU eviction first
-        self.maybe_evict_shard();
+        // Get or create a mutex for this specific shard key.
+        // This serializes creation attempts for the same shard while allowing
+        // parallel creation of different shards.
+        let lock = self
+            .creation_locks
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone();
 
+        // Acquire the lock - blocks other threads trying to create the same shard
+        let _guard = lock.lock().expect("shard creation lock poisoned");
+
+        // Double-check pattern: another thread may have created while we waited
+        if let Some(shard) = self.shards.get(key) {
+            self.touch_lru(key);
+            return Ok(Arc::clone(&shard));
+        }
+
+        // Now safe to create/open - we hold the exclusive lock for this key
+        self.maybe_evict_shard();
         let path = self.config.shard_path(&key.as_file_stem());
 
-        // Try to create/open the shard, handling race conditions.
-        // Multiple threads may try to create the same shard simultaneously.
-        // If path.exists() is false but create fails with "AlreadyExists",
-        // another thread won the race - fall back to open.
-        let shard = if path.exists() {
-            ShardHandle::open(key.clone(), &path)?
-        } else {
-            match ShardHandle::create(key.clone(), &path) {
-                Ok(shard) => shard,
-                Err(e) => {
-                    // Check if this is a race condition (another thread created it)
-                    let error_msg = e.to_string();
-                    if error_msg.contains("AlreadyExists") || error_msg.contains("already exists") {
-                        // Race condition: another thread created it first, open instead
-                        ShardHandle::open(key.clone(), &path)?
-                    } else {
-                        return Err(e.into());
-                    }
-                }
-            }
-        };
-
+        let shard = ShardHandle::open_or_create(key.clone(), &path)?;
         let shard = Arc::new(RwLock::new(shard));
 
-        // Insert into map (may race with another thread)
-        let entry = self.shards.entry(key.clone()).or_insert(Arc::clone(&shard));
+        // Insert into map - no race now since we hold the lock
+        self.shards.insert(key.clone(), Arc::clone(&shard));
 
         // Update LRU
         self.touch_lru(key);
         self.stats.active_shards.fetch_add(1, Ordering::Relaxed);
 
-        Ok(Arc::clone(&entry))
+        Ok(shard)
     }
 
     /// Update LRU tracker for a shard.

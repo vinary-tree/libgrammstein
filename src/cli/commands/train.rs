@@ -963,12 +963,79 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
             // Subscribe to events for TUI
             let tui_event_rx = event_tx.subscribe();
 
+            // Subscribe to events for file-based logging (separate from TUI)
+            let mut log_rx = event_tx.subscribe();
+            let log_task = runtime.spawn(async move {
+                while let Ok(event) = log_rx.recv().await {
+                    match event {
+                        ImportEvent::OrderStarted { order, total_files } => {
+                            log::info!("[EVENT] Started order {} ({} files)", order, total_files);
+                        }
+                        ImportEvent::OrderProgress { order, files_completed, total_files, ngrams_processed, .. } => {
+                            log::debug!(
+                                "[EVENT] Order {} progress: {}/{} files, {} n-grams",
+                                order, files_completed, total_files, ngrams_processed
+                            );
+                        }
+                        ImportEvent::OrderCompleted { order, ngram_count, duration } => {
+                            log::info!(
+                                "[EVENT] Completed order {}: {} n-grams in {:.1}s",
+                                order, ngram_count, duration.as_secs_f64()
+                            );
+                        }
+                        ImportEvent::ImportCompleted { total_ngrams, duration } => {
+                            log::info!(
+                                "[EVENT] Import completed: {} n-grams in {:.1}s",
+                                total_ngrams, duration.as_secs_f64()
+                            );
+                        }
+                        ImportEvent::MergeStarted { shard_count, .. } => {
+                            log::info!("[EVENT] Starting merge of {} shards...", shard_count);
+                        }
+                        ImportEvent::MergeCompleted { total_ngrams, bytes_written, duration } => {
+                            log::info!(
+                                "[EVENT] Merge completed: {} n-grams ({} bytes) in {:.1}s",
+                                total_ngrams, bytes_written, duration.as_secs_f64()
+                            );
+                        }
+                        ImportEvent::MknStarted { source, estimated_ngrams } => {
+                            log::info!(
+                                "[EVENT] Computing MKN statistics from {} (~{} n-grams)...",
+                                source, estimated_ngrams
+                            );
+                        }
+                        ImportEvent::MknCompleted { continuation_entries, frequency_entries, duration } => {
+                            log::info!(
+                                "[EVENT] MKN statistics complete: {} continuation, {} frequency entries in {:.1}s",
+                                continuation_entries, frequency_entries, duration.as_secs_f64()
+                            );
+                        }
+                        ImportEvent::MknFailed { error } => {
+                            log::error!("[EVENT] MKN computation failed: {}", error);
+                        }
+                        ImportEvent::AllWorkCompleted { total_ngrams, total_duration, .. } => {
+                            log::info!(
+                                "[EVENT] All work completed: {} n-grams in {:.1}s",
+                                total_ngrams, total_duration.as_secs_f64()
+                            );
+                        }
+                        ImportEvent::WorkerRetrying { prefix, attempt, error, .. } => {
+                            log::warn!("[EVENT] Retry {}: {} - {}", attempt, prefix, error);
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
             // Clone event_tx for the import task
             let event_tx_clone = event_tx.clone();
 
+            // Capture keep_shards flag
+            let keep_shards = args.keep_shards;
+
             // Run import in background
             let import_handle = runtime.spawn(async move {
-                importer.import_http_reactive(event_tx_clone, command_rx).await
+                importer.import_http_reactive(event_tx_clone, command_rx, keep_shards).await
             });
 
             // Set up file-based tracing for debugging (works even when TUI is active)
@@ -991,11 +1058,43 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
                     .with_ansi(false)
                     .with_target(true))
                 .with(tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "libgrammstein::sources::google_books=debug".parse().expect("valid filter")))
+                    .unwrap_or_else(|_| "libgrammstein::sources::google_books=debug,libgrammstein::cli::tui=debug".parse().expect("valid filter")))
                 .try_init();
 
             // Note: tracing-subscriber with 'fmt' feature automatically sets up
             // a LogTracer to bridge log:: calls to tracing. No explicit init needed.
+
+            // Install panic hook to capture panics to the log file.
+            // When TUI is active, panics write directly to stderr which can corrupt
+            // terminal output and cause panic information to be lost.
+            let default_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |panic_info| {
+                // Log the panic to tracing (which goes to the file)
+                let location = panic_info
+                    .location()
+                    .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                let message = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic payload".to_string()
+                };
+
+                // Use error! to ensure it goes to the log file
+                tracing::error!(
+                    target: "panic",
+                    location = %location,
+                    message = %message,
+                    backtrace = %std::backtrace::Backtrace::force_capture(),
+                    "PANIC occurred"
+                );
+
+                // Call the default panic hook to write to stderr as normal
+                default_hook(panic_info);
+            }));
 
             // Print log location to stderr before TUI takes over the terminal
             let log_path = log_dir.join("import-debug.log");
@@ -1017,18 +1116,44 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
 
             let tui_result = tui.run(tui_event_rx);
 
+            // Abort the logging task before dropping tracing
+            log_task.abort();
+
             // Flush and drop file-based tracing
             drop(tracing_guard);
 
-            // Wait for import to finish
-            let import_result = runtime.block_on(async {
-                import_handle.await
-            });
+            // Check TUI result - if user cancelled (returned Ok(false)), abort the import
+            let user_cancelled = match &tui_result {
+                Ok(completed) => !completed, // false means user quit before completion
+                Err(_) => false, // Error in TUI, not user cancellation
+            };
 
-            // Handle TUI result
+            if user_cancelled {
+                // User pressed Q - abort the import task immediately
+                log::info!("User cancelled, aborting import task...");
+                import_handle.abort();
+
+                // Brief wait for cleanup (with timeout)
+                let _ = runtime.block_on(async {
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        import_handle
+                    ).await
+                });
+
+                log::info!("Import cancelled by user");
+                return Ok(());
+            }
+
+            // Handle TUI error
             if let Err(e) = tui_result {
                 return Err(CliError::io(format!("TUI error: {}", e)));
             }
+
+            // Wait for import to finish (normal completion path)
+            let import_result = runtime.block_on(async {
+                import_handle.await
+            });
 
             // Handle import result
             let import_result = import_result
@@ -1041,6 +1166,9 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
 
             // Clone event_tx for the import task
             let event_tx_clone = event_tx.clone();
+
+            // Capture keep_shards flag
+            let keep_shards = args.keep_shards;
 
             // Simple logging subscriber
             let mut log_rx = event_tx.subscribe();
@@ -1062,6 +1190,36 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
                                 total_ngrams, duration.as_secs_f64()
                             );
                         }
+                        ImportEvent::MergeStarted { shard_count, .. } => {
+                            log::info!("Starting merge of {} shards...", shard_count);
+                        }
+                        ImportEvent::MergeCompleted { total_ngrams, bytes_written, duration } => {
+                            log::info!(
+                                "Merge completed: {} n-grams ({} bytes) in {:.1}s",
+                                total_ngrams, bytes_written, duration.as_secs_f64()
+                            );
+                        }
+                        ImportEvent::MknStarted { source, estimated_ngrams } => {
+                            log::info!(
+                                "Computing MKN statistics from {} (~{} n-grams)...",
+                                source, estimated_ngrams
+                            );
+                        }
+                        ImportEvent::MknCompleted { continuation_entries, frequency_entries, duration } => {
+                            log::info!(
+                                "MKN statistics complete: {} continuation, {} frequency entries in {:.1}s",
+                                continuation_entries, frequency_entries, duration.as_secs_f64()
+                            );
+                        }
+                        ImportEvent::MknFailed { error } => {
+                            log::error!("MKN computation failed: {}", error);
+                        }
+                        ImportEvent::AllWorkCompleted { total_ngrams, total_duration, .. } => {
+                            log::info!(
+                                "All work completed: {} n-grams in {:.1}s",
+                                total_ngrams, total_duration.as_secs_f64()
+                            );
+                        }
                         ImportEvent::WorkerRetrying { prefix, attempt, error, .. } => {
                             log::warn!("Retry {}: {} - {}", attempt, prefix, error);
                         }
@@ -1072,7 +1230,7 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
 
             let result = runtime
                 .block_on(async {
-                    importer.import_http_reactive(event_tx_clone, command_rx).await
+                    importer.import_http_reactive(event_tx_clone, command_rx, keep_shards).await
                 })
                 .map_err(|e| CliError::io(format!("HTTP import failed: {}", e)))?;
 

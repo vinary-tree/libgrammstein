@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
 use parking_lot::RwLock;
 
-use super::sharding::MknAggregator;
+use super::sharding::{MergeCoordinator, MergeStats, MknAggregator};
 use super::storage::NgramStorage;
+use crate::ngram::vocabulary::{decode_ngram_key, encode_indices_to_key, SharedVocabulary};
 
 
 use super::aggregator::YearAggregator;
@@ -23,6 +24,7 @@ use super::config::GoogleBooksConfig;
 use super::events::{ImportCommand, ImportEvent, LogLevel};
 use super::languages::{get_file_url, get_metadata, get_prefixes, is_supported};
 use super::reader::{FileNgramReader, ReaderError};
+use super::state_machine::CleanupResources;
 #[cfg(feature = "google-books")]
 use super::task_manager::RetryAfter;
 
@@ -201,10 +203,11 @@ fn store_ngram_shared(
     count: u64,
     storage: &Arc<NgramStorage>,
 ) -> Result<NgramStorageResult, ImportError> {
-    // Store using the storage abstraction (handles both single-trie and sharded)
-    let is_new = storage.store(ngram, count).map_err(|e| {
-        ImportError::Trie(format!("Failed to store ngram '{}': {}", ngram, e))
-    })?;
+    // Split n-gram into tokens for vocabulary encoding
+    let tokens: Vec<&str> = ngram.split(' ').collect();
+
+    // Store using token-based API which applies vocabulary encoding
+    let is_new = storage.store_tokens(&tokens, count)?;
 
     Ok(NgramStorageResult { is_new })
 }
@@ -519,12 +522,26 @@ struct WorkerSharedState {
     paused: Arc<AtomicBool>,
     /// Current number of jobs in the queue (for all-deferred detection)
     queue_size: Arc<AtomicUsize>,
+    /// Per-worker packed stats for non-blocking, race-free sampling.
+    /// Each AtomicU64 packs: upper 32 bits = total n-grams, lower 32 bits = unique n-grams.
+    /// Single atomic ensures both counts are read/written atomically together.
+    /// Maximum workers supported: length of this Vec.
+    worker_stats: Vec<AtomicU64>,
+    /// Shared HTTP client for connection pooling and HTTP/2 multiplexing.
+    /// Creating one client and sharing it across workers avoids the concurrency
+    /// amplification bug where each worker creates independent connection pools,
+    /// causing Google to see a spike in connections and trigger rate limiting.
+    http_client: reqwest::Client,
 }
 
 /// Process a single job attempt (no retry loop - single attempt only).
 ///
 /// This helper extracts the core processing logic from worker_task to enable
 /// non-blocking retry with DelayQueue.
+///
+/// Per-worker stats are updated continuously via packed atomics for race-free
+/// sampling by the stats sampler task. No batching or progress channel sends
+/// are needed - the stats sampler reads per-worker counters every 3 seconds.
 #[cfg(feature = "google-books")]
 async fn process_single_attempt(
     job: &Job,
@@ -544,19 +561,17 @@ async fn process_single_attempt(
         shared.config.min_count,
     );
 
-    let stream = reader.stream_aggregated(shared.config.year_range);
+    // Use the shared HTTP client for connection pooling and HTTP/2 multiplexing
+    let stream = reader.stream_aggregated_with_client(
+        shared.config.year_range,
+        Some(shared.http_client.clone()),
+    );
     tokio::pin!(stream);
 
-    // Progress is emitted every 5 seconds (time-based, not count-based)
-    // Longer interval reduces channel pressure and TUI overhead
-    let mut last_progress_time = Instant::now();
-    let progress_interval = Duration::from_secs(5);
-
-    // Local counters for batched atomic updates (reduces cache-line bouncing)
-    let mut local_total: u64 = 0;
-    let mut local_unique: u64 = 0;
-
+    // Local counters for this job (packed into per-worker atomic for race-free sampling)
     let mut count = 0u64;
+    let mut unique_count = 0u64;
+
     while let Some(result) = stream.next().await {
         let agg = result?;
         let storage_result = store_ngram_shared(
@@ -565,37 +580,28 @@ async fn process_single_attempt(
             &shared.storage,
         )?;
         count += 1;
-        local_total += 1;
         if storage_result.is_new {
-            local_unique += 1;
+            unique_count += 1;
         }
 
-        // Batch flush atomic counters every COUNTER_BATCH_SIZE n-grams
-        if local_total >= COUNTER_BATCH_SIZE {
-            shared.total_ngrams.fetch_add(local_total, Ordering::Relaxed);
-            if local_unique > 0 {
-                shared.unique_ngrams.fetch_add(local_unique, Ordering::Relaxed);
-            }
-            local_total = 0;
-            local_unique = 0;
-        }
-
-        // Emit progress at 5-second intervals to reduce channel pressure
-        if last_progress_time.elapsed() >= progress_interval {
-            let _ = shared.progress_tx.try_send(WorkerUpdate::NgramProgress {
-                worker_id,
-                ngram_count: count,
-            });
-            last_progress_time = Instant::now();
+        // Update per-worker atomic with packed counts (race-free, no batching needed)
+        // Upper 32 bits = total n-grams, lower 32 bits = unique n-grams
+        // Single atomic store ensures consistent total/unique pair for sampling
+        if worker_id < shared.worker_stats.len() {
+            let packed = ((count as u64) << 32) | (unique_count as u64 & 0xFFFFFFFF);
+            shared.worker_stats[worker_id].store(packed, Ordering::Relaxed);
         }
     }
 
-    // Flush remaining counts
-    if local_total > 0 {
-        shared.total_ngrams.fetch_add(local_total, Ordering::Relaxed);
+    // Final flush to global counters (for checkpoint persistence)
+    shared.total_ngrams.fetch_add(count, Ordering::Relaxed);
+    if unique_count > 0 {
+        shared.unique_ngrams.fetch_add(unique_count, Ordering::Relaxed);
     }
-    if local_unique > 0 {
-        shared.unique_ngrams.fetch_add(local_unique, Ordering::Relaxed);
+
+    // Reset per-worker stats after job completion (so next job starts fresh)
+    if worker_id < shared.worker_stats.len() {
+        shared.worker_stats[worker_id].store(0, Ordering::Relaxed);
     }
 
     Ok(count)
@@ -627,8 +633,8 @@ async fn process_single_attempt(
 #[cfg(feature = "google-books")]
 async fn worker_task(
     worker_id: usize,
-    job_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Job>>>,
-    job_tx: tokio::sync::mpsc::Sender<Job>,
+    job_rx: async_channel::Receiver<Job>,
+    job_tx: async_channel::Sender<Job>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     shared: Arc<WorkerSharedState>,
     result_tx: tokio::sync::mpsc::Sender<JobResult>,
@@ -644,20 +650,17 @@ async fn worker_task(
             break;
         }
 
-        // Get next job from queue
-        let job = {
-            let mut rx = job_rx.lock().await;
-            tokio::select! {
-                biased;
-                _ = shutdown_rx.changed() => {
-                    if *shutdown_rx.borrow() {
-                        log::debug!("Worker {} received shutdown signal while waiting for job", worker_id);
-                        break;
-                    }
-                    continue;
+        // Get next job from queue (no mutex needed - async_channel receiver is Clone)
+        let job = tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    log::debug!("Worker {} received shutdown signal while waiting for job", worker_id);
+                    break;
                 }
-                job = rx.recv() => job,
+                continue;
             }
+            result = job_rx.recv() => result.ok(),
         };
 
         let Some(job) = job else {
@@ -694,11 +697,17 @@ async fn worker_task(
                 if let Some(ready_at) = earliest_ready {
                     let wait = ready_at.saturating_duration_since(Instant::now());
                     if !wait.is_zero() {
-                        log::debug!(
-                            "Worker {} blocking {}ms - all {} jobs deferred",
-                            worker_id, wait.as_millis(), queue_size
+                        // Add per-worker jitter to prevent thundering herd when all workers
+                        // wake up simultaneously after all-deferred sleep
+                        let jitter = Duration::from_millis(
+                            (worker_id as u64 * 100) + (rand::random::<u64>() % 500)
                         );
-                        tokio::time::sleep(wait).await;
+                        let staggered_wait = wait + jitter;
+                        log::debug!(
+                            "Worker {} blocking {}ms (+{}ms jitter) - all {} jobs deferred",
+                            worker_id, wait.as_millis(), jitter.as_millis(), queue_size
+                        );
+                        tokio::time::sleep(staggered_wait).await;
                     }
                 }
                 consecutive_deferred = 0;
@@ -711,8 +720,11 @@ async fn worker_task(
         consecutive_deferred = 0;
         earliest_ready = None;
 
-        // Decrement queue size since we're executing this job (not requeuing)
-        shared.queue_size.fetch_sub(1, Ordering::SeqCst);
+        // NOTE: We do NOT decrement queue_size here. The new accounting model:
+        // - queue_size represents "jobs remaining to complete"
+        // - Decrement ONLY when a job is finished (success, skipped, or failed permanently)
+        // - Never decrement on job pickup (avoids phantom jobs from deferred requeues)
+        // - Never increment on retry (job was never "completed", so nothing to restore)
 
         // Check for pause before processing
         while shared.paused.load(Ordering::SeqCst) {
@@ -727,6 +739,7 @@ async fn worker_task(
             worker_id,
             order: job.order,
             prefix: job.prefix.clone(),
+            attempt: job.attempt,
         });
 
         // Single attempt - no blocking retry loop
@@ -737,6 +750,9 @@ async fn worker_task(
 
         match result {
             Ok(count) => {
+                // Job completed successfully - decrement queue size
+                shared.queue_size.fetch_sub(1, Ordering::SeqCst);
+
                 // Success - send completion update and result
                 let _ = shared.progress_tx.try_send(WorkerUpdate::Finished {
                     worker_id,
@@ -797,14 +813,17 @@ async fn worker_task(
                 });
 
                 // Requeue with ready_at set - will be picked up after delay
-                // Increment queue size since we're adding back
-                shared.queue_size.fetch_add(1, Ordering::SeqCst);
+                // NOTE: Do NOT increment queue_size here. The job was never "completed"
+                // so it still counts as a pending job in the logical queue.
                 let _ = job_tx.send(retry_job).await;
 
                 // Worker immediately picks up next job (non-blocking)
             }
             Err(error) => {
                 // Non-retryable error or max retries exceeded - skip for this session
+                // Job completed (with error) - decrement queue size
+                shared.queue_size.fetch_sub(1, Ordering::SeqCst);
+
                 let debug_info = RequestDebugInfo::from_error(&job.url, &error, elapsed);
 
                 // Determine if this was max retries exceeded (retryable) or non-retryable
@@ -956,23 +975,15 @@ async fn process_prefix_file(
         let _ = pool_tx.send(id).await;
     };
 
-    // Send "Started" update (include retry info if this is a retry)
+    // Send "Started" update (always include attempt for retry tracking)
     // Using try_send for backpressure - dropping updates is acceptable for progress
     if let Some(ref tx) = progress_tx {
-        if attempt > 0 {
-            let _ = tx.try_send(WorkerUpdate::Retrying {
-                worker_id,
-                prefix: Arc::clone(&prefix),
-                attempt: attempt as u32,
-                error: Arc::from("Resuming deferred retry"),
-            });
-        } else {
-            let _ = tx.try_send(WorkerUpdate::Started {
-                worker_id,
-                order,
-                prefix: Arc::clone(&prefix),
-            });
-        }
+        let _ = tx.try_send(WorkerUpdate::Started {
+            worker_id,
+            order,
+            prefix: Arc::clone(&prefix),
+            attempt,
+        });
     }
 
     // Add small random delay to stagger connection starts (reduces rate limiting)
@@ -1178,6 +1189,8 @@ pub enum WorkerUpdate {
         order: u8,
         /// Prefix being downloaded (e.g., "th", "to").
         prefix: Arc<str>,
+        /// Retry attempt number (0 = first attempt, 1+ = retry).
+        attempt: u8,
     },
     /// Worker finished downloading a prefix file.
     Finished {
@@ -1288,6 +1301,10 @@ pub enum ImportError {
     /// Trie error.
     #[error("Trie error: {0}")]
     Trie(String),
+
+    /// Storage error.
+    #[error("Storage error: {0}")]
+    Storage(#[from] super::storage::StorageError),
 }
 
 /// Google Books N-gram importer.
@@ -1377,16 +1394,29 @@ impl GoogleBooksImporter {
         let estimated_ngrams = estimate_ngram_count(&config);
         log::info!("Estimated n-gram count: {}", estimated_ngrams);
 
-        // Create storage backend based on sharding configuration
-        let storage = NgramStorage::create(&config, estimated_ngrams).map_err(|e| {
+        // Create or open shared vocabulary for compact PUA encoding
+        let vocabulary_path = config.vocabulary_path();
+        log::info!("Using vocabulary at {:?}", vocabulary_path);
+        let vocabulary = Arc::new(
+            SharedVocabulary::open_or_create(&vocabulary_path).map_err(|e| {
+                ImportError::Trie(format!("Failed to create/open vocabulary: {}", e))
+            })?
+        );
+
+        // Create storage backend with vocabulary for compact encoding
+        let storage = NgramStorage::resume_or_start_with_vocabulary(
+            &config,
+            estimated_ngrams,
+            Some(vocabulary),
+        ).map_err(|e| {
             ImportError::Trie(format!("Failed to create storage: {}", e))
         })?;
 
-        // Log which storage mode is being used
+        // Log storage mode and vocabulary status
         if storage.is_sharded() {
-            log::info!("Using sharded storage for parallel writes");
+            log::info!("Using sharded storage with vocabulary-indexed encoding");
         } else {
-            log::info!("Using single-trie storage");
+            log::info!("Using single-trie storage with vocabulary-indexed encoding");
         }
 
         // For checkpoint compatibility, we also need a trie reference
@@ -1620,6 +1650,12 @@ impl GoogleBooksImporter {
                 let ngrams_in_file = self.process_file(&file_path)?;
 
                 self.checkpoint.complete_prefix(order, prefix);
+
+                // Mark completion in storage layer (important for sharded storage)
+                if let Err(e) = self.storage.mark_prefix_completed(prefix, order) {
+                    log::warn!("Failed to mark prefix {} as completed in storage: {}", prefix, e);
+                }
+
                 self.checkpoint.stats.ngrams_by_order[(order - 1) as usize] += ngrams_in_file;
 
                 // Report progress
@@ -1834,6 +1870,12 @@ impl GoogleBooksImporter {
                 match outcome {
                     PrefixOutcome::Success { prefix, ngram_count } => {
                         self.checkpoint.complete_prefix(order, &prefix);
+
+                        // Mark completion in storage layer (important for sharded storage)
+                        if let Err(e) = self.storage.mark_prefix_completed(&prefix, order) {
+                            log::warn!("Failed to mark prefix {} as completed in storage: {}", prefix, e);
+                        }
+
                         self.checkpoint.stats.ngrams_by_order[(order - 1) as usize] += ngram_count;
                         completed_in_order += 1;
 
@@ -1920,6 +1962,12 @@ impl GoogleBooksImporter {
                     match outcome {
                         PrefixOutcome::Success { prefix, ngram_count } => {
                             self.checkpoint.complete_prefix(order, &prefix);
+
+                            // Mark completion in storage layer (important for sharded storage)
+                            if let Err(e) = self.storage.mark_prefix_completed(&prefix, order) {
+                                log::warn!("Failed to mark prefix {} as completed in storage: {}", prefix, e);
+                            }
+
                             self.checkpoint.stats.ngrams_by_order[(order - 1) as usize] += ngram_count;
                             completed_in_order += 1;
 
@@ -2023,6 +2071,7 @@ impl GoogleBooksImporter {
         &mut self,
         event_tx: tokio::sync::broadcast::Sender<ImportEvent>,
         mut command_rx: tokio::sync::mpsc::Receiver<ImportCommand>,
+        keep_shards: bool,
     ) -> Result<ImportStats, ImportError> {
         use futures::stream::StreamExt;
         use std::time::{Duration, Instant};
@@ -2091,6 +2140,8 @@ impl GoogleBooksImporter {
         let mut jobs_per_order: std::collections::HashMap<u8, u64> =
             std::collections::HashMap::new();
         let mut order_files_completed: std::collections::HashMap<u8, u64> =
+            std::collections::HashMap::new();
+        let mut order_files_skipped: std::collections::HashMap<u8, u64> =
             std::collections::HashMap::new();
         let mut order_total_files: std::collections::HashMap<u8, u64> =
             std::collections::HashMap::new();
@@ -2174,46 +2225,75 @@ impl GoogleBooksImporter {
         let event_tx_worker = event_tx.clone();
         let worker_converter = tokio::spawn(async move {
             while let Some(update) = worker_rx.recv().await {
-                let event = match update {
-                    WorkerUpdate::Started { worker_id, order, prefix } => {
-                        ImportEvent::WorkerStarted { worker_id, order, prefix: prefix.to_string() }
+                // Most updates map to a single event, but some need multiple events
+                match update {
+                    WorkerUpdate::Started { worker_id, order, prefix, attempt } => {
+                        // Always emit WorkerStarted
+                        let _ = event_tx_worker.send(ImportEvent::WorkerStarted {
+                            worker_id,
+                            order,
+                            prefix: prefix.to_string(),
+                        });
+                        // If this is a retry attempt, also emit DeferredRetryStarted
+                        // to decrement the backoff queue counter
+                        if attempt > 0 {
+                            let _ = event_tx_worker.send(ImportEvent::DeferredRetryStarted {
+                                prefix: prefix.to_string(),
+                                order,
+                            });
+                        }
                     }
                     WorkerUpdate::Finished { worker_id, order, prefix, ngram_count } => {
-                        ImportEvent::WorkerFinished {
+                        let _ = event_tx_worker.send(ImportEvent::WorkerFinished {
                             worker_id,
                             order,
                             prefix: prefix.to_string(),
                             ngram_count,
                             duration: Duration::ZERO, // Duration tracked at higher level
-                        }
+                        });
                     }
                     WorkerUpdate::NgramProgress { worker_id, ngram_count } => {
-                        ImportEvent::WorkerNgramProgress { worker_id, ngram_count }
+                        let _ = event_tx_worker.send(ImportEvent::WorkerNgramProgress {
+                            worker_id,
+                            ngram_count,
+                        });
                     }
                     WorkerUpdate::Retrying { worker_id, prefix, attempt, error } => {
-                        ImportEvent::WorkerRetrying {
-                            worker_id,
-                            prefix: prefix.to_string(),
-                            attempt,
-                            max_attempts: 5,
-                            error: error.to_string(),
-                        }
-                    }
-                    WorkerUpdate::Deferred { worker_id, order: _, prefix, attempt, delay_seconds: _, error } => {
-                        // Deferred is similar to Retrying - map to same event
-                        ImportEvent::WorkerRetrying {
+                        // Emit WorkerRetrying for TUI worker status display
+                        let _ = event_tx_worker.send(ImportEvent::WorkerRetrying {
                             worker_id,
                             prefix: prefix.to_string(),
                             attempt,
                             max_attempts: MAX_RETRIES as u32,
                             error: error.to_string(),
-                        }
+                        });
+                        // Also emit DeferredRetry to track backoff queue count
+                        let _ = event_tx_worker.send(ImportEvent::DeferredRetry {
+                            prefix: prefix.to_string(),
+                            attempt,
+                            order: 0, // Order not available in Retrying, use 0 as placeholder
+                        });
+                    }
+                    WorkerUpdate::Deferred { worker_id, order, prefix, attempt, delay_seconds: _, error } => {
+                        // Emit WorkerRetrying for TUI worker status display
+                        let _ = event_tx_worker.send(ImportEvent::WorkerRetrying {
+                            worker_id,
+                            prefix: prefix.to_string(),
+                            attempt,
+                            max_attempts: MAX_RETRIES as u32,
+                            error: error.to_string(),
+                        });
+                        // Also emit DeferredRetry to track backoff queue count
+                        let _ = event_tx_worker.send(ImportEvent::DeferredRetry {
+                            prefix: prefix.to_string(),
+                            attempt,
+                            order,
+                        });
                     }
                     WorkerUpdate::Exited { worker_id } => {
-                        ImportEvent::WorkerExited { worker_id }
+                        let _ = event_tx_worker.send(ImportEvent::WorkerExited { worker_id });
                     }
-                };
-                let _ = event_tx_worker.send(event);
+                }
             }
         });
 
@@ -2226,10 +2306,12 @@ impl GoogleBooksImporter {
             .map(|o| self.checkpoint.failed_prefix_count(o))
             .sum();
         let requeue_capacity = parallel_downloads * MAX_RETRIES as usize;
-        let (job_tx, job_rx) = tokio::sync::mpsc::channel::<Job>(
+        // Use async_channel for lock-free MPMC queue - each worker gets a clone of the receiver
+        // This eliminates the Tokio Mutex bottleneck that caused all workers to synchronize
+        let (job_tx, job_rx) = async_channel::bounded::<Job>(
             total_pending as usize + failed_retry_count + requeue_capacity + 1
         );
-        let job_rx = Arc::new(tokio::sync::Mutex::new(job_rx));
+        // Note: job_rx is Clone - no Arc<Mutex<...>> wrapper needed
 
         // Populate job queue with jobs from ALL orders (in priority order: 1-grams first)
         // Jobs are sorted by order so workers process lower orders first
@@ -2281,6 +2363,27 @@ impl GoogleBooksImporter {
         // Track queue size for all-deferred detection
         let queue_size = Arc::new(AtomicUsize::new(total_pending as usize + failed_retry_count));
 
+        // Pre-allocate per-worker stats atomics for race-free sampling.
+        // Use 2x parallel_downloads to handle dynamic spawning without reallocation.
+        let max_workers = parallel_downloads * 2;
+        let worker_stats: Vec<AtomicU64> = (0..max_workers)
+            .map(|_| AtomicU64::new(0))
+            .collect();
+
+        // Create shared HTTP client with connection pooling for all workers.
+        // This prevents the concurrency amplification bug where each worker creating
+        // independent clients causes Google to see a spike in connections.
+        // - pool_max_idle_per_host: Allow connection reuse with reasonable pool size
+        // - HTTP/2 multiplexing will automatically combine requests on shared connections
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(300))        // 5 minute total timeout
+            .connect_timeout(Duration::from_secs(30)) // 30 second connection timeout
+            .read_timeout(Duration::from_secs(60))    // 60 second read timeout
+            .pool_max_idle_per_host(4)                // Allow connection reuse
+            .user_agent("Mozilla/5.0 (compatible; libgrammstein/0.1; +https://github.com/vinary-tree/libgrammstein)")
+            .build()
+            .expect("Failed to build shared HTTP client");
+
         // Create shared state for workers
         let shared_state = Arc::new(WorkerSharedState {
             config: config.clone(),
@@ -2290,6 +2393,8 @@ impl GoogleBooksImporter {
             progress_tx: worker_tx.clone(),
             paused: Arc::clone(&paused),
             queue_size: Arc::clone(&queue_size),
+            worker_stats,
+            http_client,
         });
 
         // Create result channel for receiving job completions
@@ -2314,11 +2419,12 @@ impl GoogleBooksImporter {
             std::collections::HashMap::new();
 
         // Spawn initial workers, each with their own shutdown channel
+        // Each worker gets a clone of the async_channel receiver (no mutex needed)
         for worker_id in 0..parallel_downloads {
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             let handle = tokio::spawn(worker_task(
                 worker_id,
-                Arc::clone(&job_rx),
+                job_rx.clone(),
                 job_tx.clone(),
                 shutdown_rx,
                 Arc::clone(&shared_state),
@@ -2347,11 +2453,11 @@ impl GoogleBooksImporter {
         // Total files across all orders for stats display
         let grand_total_files: u64 = order_total_files.values().sum();
 
-        // Spawn periodic stats emitter task (1 second interval)
-        // This ensures the TUI receives real-time updates even when no files are completing
+        // Spawn periodic stats emitter task (3 second interval)
+        // Samples per-worker packed atomics for race-free, synchronized statistics.
+        // This ensures the TUI receives real-time updates even when no files are completing.
         let stats_event_tx = event_tx.clone();
-        let stats_total_ngrams = Arc::clone(&total_ngrams);
-        let stats_unique_ngrams = Arc::clone(&unique_ngrams);
+        let stats_shared_state = Arc::clone(&shared_state);
         let stats_files_completed = Arc::clone(&files_completed);
         let stats_start_time = self.start_time;
         let stats_cancelled = Arc::clone(&cancelled);
@@ -2371,8 +2477,33 @@ impl GoogleBooksImporter {
                     break;
                 }
 
-                let total = stats_total_ngrams.load(Ordering::Relaxed);
-                let unique = stats_unique_ngrams.load(Ordering::Relaxed);
+                // Sample all per-worker counters (non-blocking, race-free reads)
+                // Each packed atomic: upper 32 bits = total, lower 32 bits = unique
+                let mut live_total_ngrams = 0u64;
+                let mut live_unique_ngrams = 0u64;
+
+                for (worker_id, worker_stat) in stats_shared_state.worker_stats.iter().enumerate() {
+                    let packed = worker_stat.load(Ordering::Relaxed);
+                    let ngrams = packed >> 32;
+                    let unique = packed & 0xFFFFFFFF;
+                    live_total_ngrams += ngrams;
+                    live_unique_ngrams += unique;
+
+                    // Send per-worker progress event for TUI worker display
+                    if ngrams > 0 {
+                        let _ = stats_event_tx.send(ImportEvent::WorkerNgramProgress {
+                            worker_id,
+                            ngram_count: ngrams,
+                        });
+                    }
+                }
+
+                // Combine live in-progress counts with global completed counts
+                let completed_total = stats_shared_state.total_ngrams.load(Ordering::Relaxed);
+                let completed_unique = stats_shared_state.unique_ngrams.load(Ordering::Relaxed);
+                let total = completed_total + live_total_ngrams;
+                let unique = completed_unique + live_unique_ngrams;
+
                 let completed = stats_files_completed.load(Ordering::Relaxed);
                 let elapsed = stats_start_time.elapsed();
 
@@ -2392,6 +2523,11 @@ impl GoogleBooksImporter {
                     elapsed,
                 });
             }
+        });
+
+        // Emit phase change: now importing n-grams
+        let _ = event_tx.send(ImportEvent::PhaseChanged {
+            phase: "Importing N-grams".to_string(),
         });
 
         // Process results from workers using tokio::select! to handle parallelism
@@ -2420,8 +2556,8 @@ impl GoogleBooksImporter {
             tokio::sync::watch::Sender<bool>,
         >,
                                          next_worker_id: &mut usize,
-                                         job_rx: &Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Job>>>,
-                                         job_tx: &tokio::sync::mpsc::Sender<Job>,
+                                         job_rx: &async_channel::Receiver<Job>,
+                                         job_tx: &async_channel::Sender<Job>,
                                          shared_state: &Arc<WorkerSharedState>,
                                          result_tx: &tokio::sync::mpsc::Sender<JobResult>,
                                          worker_exit_tx: &tokio::sync::mpsc::Sender<usize>,
@@ -2431,12 +2567,12 @@ impl GoogleBooksImporter {
             let mut spawned = 0usize;
 
             if target > current_count {
-                // Spawn additional workers immediately
+                // Spawn additional workers immediately (each worker gets a clone of the receiver)
                 for _ in 0..(target - current_count) {
                     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
                     let handle = tokio::spawn(worker_task(
                         *next_worker_id,
-                        Arc::clone(job_rx),
+                        job_rx.clone(),
                         job_tx.clone(),
                         shutdown_rx,
                         Arc::clone(shared_state),
@@ -2616,6 +2752,26 @@ impl GoogleBooksImporter {
                             // Count this as "processed" for progress purposes (even though it failed)
                             // The prefix will be retried on the next import run
                             files_completed.fetch_add(1, Ordering::Relaxed);
+                            *order_files_completed.entry(result_order).or_insert(0) += 1;
+                            *order_files_skipped.entry(result_order).or_insert(0) += 1;
+
+                            // Emit per-order progress event (so TUI updates immediately)
+                            let order_done = order_files_completed.get(&result_order).copied().unwrap_or(0);
+                            let order_skipped = order_files_skipped.get(&result_order).copied().unwrap_or(0);
+                            let order_total = order_total_files.get(&result_order).copied().unwrap_or(0);
+                            let order_ngrams = self.checkpoint.stats.ngrams_by_order[(result_order - 1) as usize];
+                            let order_pending = jobs_per_order.get(&result_order).copied().unwrap_or(0);
+                            let order_already_complete = order_total - order_pending;
+
+                            let _ = event_tx.send(ImportEvent::OrderProgress {
+                                order: result_order,
+                                files_completed: order_done,
+                                total_files: order_total,
+                                ngrams_processed: order_ngrams,
+                                is_complete: order_done >= order_pending,
+                                files_succeeded: order_done - order_skipped + order_already_complete,
+                                files_skipped: order_skipped,
+                            });
 
                             // Continue to next result (don't abort the import!)
                             continue;
@@ -2647,6 +2803,26 @@ impl GoogleBooksImporter {
 
                             // Count this as "processed" for progress purposes
                             files_completed.fetch_add(1, Ordering::Relaxed);
+                            *order_files_completed.entry(result_order).or_insert(0) += 1;
+                            *order_files_skipped.entry(result_order).or_insert(0) += 1;
+
+                            // Emit per-order progress event (so TUI updates immediately)
+                            let order_done = order_files_completed.get(&result_order).copied().unwrap_or(0);
+                            let order_skipped = order_files_skipped.get(&result_order).copied().unwrap_or(0);
+                            let order_total = order_total_files.get(&result_order).copied().unwrap_or(0);
+                            let order_ngrams = self.checkpoint.stats.ngrams_by_order[(result_order - 1) as usize];
+                            let order_pending = jobs_per_order.get(&result_order).copied().unwrap_or(0);
+                            let order_already_complete = order_total - order_pending;
+
+                            let _ = event_tx.send(ImportEvent::OrderProgress {
+                                order: result_order,
+                                files_completed: order_done,
+                                total_files: order_total,
+                                ngrams_processed: order_ngrams,
+                                is_complete: order_done >= order_pending,
+                                files_succeeded: order_done - order_skipped + order_already_complete,
+                                files_skipped: order_skipped,
+                            });
 
                             // Continue to next result
                             continue;
@@ -2656,28 +2832,36 @@ impl GoogleBooksImporter {
                     // Update per-order progress tracking (success case)
                     *order_files_completed.entry(result_order).or_insert(0) += 1;
                     self.checkpoint.complete_prefix(result_order, &prefix);
+
+                    // Mark completion in storage layer (important for sharded storage)
+                    if let Err(e) = self.storage.mark_prefix_completed(&prefix, result_order) {
+                        log::warn!("Failed to mark prefix {} as completed in storage: {}", prefix, e);
+                    }
+
                     self.checkpoint.add_ngrams(result_order, ngrams_in_file);
                     self.checkpoint.stats.ngrams_by_order[(result_order - 1) as usize] += ngrams_in_file;
                     files_completed.fetch_add(1, Ordering::Relaxed);
 
                     // Emit per-order progress event
                     let order_done = order_files_completed.get(&result_order).copied().unwrap_or(0);
+                    let order_skipped = order_files_skipped.get(&result_order).copied().unwrap_or(0);
                     let order_total = order_total_files.get(&result_order).copied().unwrap_or(0);
                     let order_ngrams = self.checkpoint.stats.ngrams_by_order[(result_order - 1) as usize];
                     let order_pending = jobs_per_order.get(&result_order).copied().unwrap_or(0);
                     let order_already_complete = order_total - order_pending;
 
-                    // Order is complete when all successfully processed + failed = pending
-                    // Note: failed prefixes count toward completion (they'll be retried next run)
-                    let failed_count = self.checkpoint.failed_prefix_count(result_order) as u64;
-                    let is_order_complete = order_done + failed_count >= order_pending;
+                    // Order is complete when all files have been processed (success + fail + skip)
+                    // Note: order_done now includes all outcomes; failed prefixes will be retried next run
+                    let is_order_complete = order_done >= order_pending;
 
                     let _ = event_tx.send(ImportEvent::OrderProgress {
                         order: result_order,
-                        files_completed: order_already_complete + order_done,
+                        files_completed: order_done,
                         total_files: order_total,
                         ngrams_processed: order_ngrams,
                         is_complete: is_order_complete,
+                        files_succeeded: order_done - order_skipped + order_already_complete,
+                        files_skipped: order_skipped,
                     });
 
                     // Check if order is now complete
@@ -2695,11 +2879,11 @@ impl GoogleBooksImporter {
                         });
 
                         // Log if there were failures in this order
-                        if failed_count > 0 {
+                        if order_skipped > 0 {
                             log::warn!(
                                 "Order {} completed with {} failed prefixes (will be retried on next run): {} n-grams in {:?}",
                                 result_order,
-                                failed_count,
+                                order_skipped,
                                 order_ngrams,
                                 order_duration
                             );
@@ -2730,21 +2914,40 @@ impl GoogleBooksImporter {
             }
         }
 
-        // Drop channel senders to allow proper cleanup
-        drop(result_tx);
-        drop(worker_exit_tx);
+        // ====================================================================
+        // CLEANUP: Use CleanupGuard for deterministic LIFO cleanup order.
+        // See state_machine.rs for detailed explanation of why order matters.
+        // ====================================================================
+        //
+        // Workers hold Arc<WorkerSharedState> references. The shared_state
+        // contains progress_tx, which keeps the worker_converter channel open.
+        // CleanupGuard ensures proper cleanup order:
+        //   1. Signal shutdown -> 2. Wait workers -> 3. Drop shared_state
+        //   -> 4. Drop channels -> 5. Wait converter -> 6. Abort stats
+        //   -> 7. Abort command handler
 
-        // Wait for all workers to finish
-        for (_, handle) in worker_handles {
-            let _ = handle.await;
-        }
+        // Emit phase change: entering cleanup phase
+        let _ = event_tx.send(ImportEvent::PhaseChanged {
+            phase: "Cleaning Up".to_string(),
+        });
 
-        // Wait for worker converter to finish
-        let _ = worker_converter.await;
+        // Build cleanup resources and execute cleanup guard (LIFO order guaranteed)
+        let cleanup_resources = CleanupResources::new()
+            .with_worker_handles(worker_handles)
+            .with_worker_shutdown_txs(worker_shutdown_txs)
+            .with_shared_state(shared_state)
+            .with_result_tx(result_tx)
+            .with_worker_exit_tx(worker_exit_tx)
+            .with_worker_converter(worker_converter)
+            .with_stats_task(stats_task)
+            .with_command_handler(command_handler);
 
-        // Stop periodic stats emitter
-        stats_task.abort();
-        let _ = stats_task.await;
+        let cleanup_guard = cleanup_resources.into_cleanup_guard();
+        cleanup_guard.cleanup().await;
+
+        // Allow TUI to catch up with cleanup events before sending post-cleanup phases
+        // This prevents broadcast channel lagging from dropping PhaseChanged events
+        tokio::task::yield_now().await;
 
         // Sync atomic counters back to self
         self.total_ngrams
@@ -2761,20 +2964,43 @@ impl GoogleBooksImporter {
             return Err(e);
         }
 
-        // Emit ImportCompleted event
-        let total_duration = self.start_time.elapsed();
+        // Emit ImportCompleted event (n-gram collection done)
+        let collection_duration = self.start_time.elapsed();
         let total = self.total_ngrams.load(Ordering::Relaxed);
+        log::debug!("[IMPORTER] Cleanup complete, sending ImportCompleted");
         let _ = event_tx.send(ImportEvent::ImportCompleted {
             total_ngrams: total,
-            duration: total_duration,
+            duration: collection_duration,
         });
 
-        // Abort command handler to ensure clean shutdown
-        command_handler.abort();
-        let _ = command_handler.await;
+        // Emit phase change: now computing MKN statistics
+        log::debug!("[IMPORTER] Sending PhaseChanged: 'Computing MKN Statistics'");
+        let _ = event_tx.send(ImportEvent::PhaseChanged {
+            phase: "Computing MKN Statistics".to_string(),
+        });
 
         // Finalize: compute MKN stats, sync storage, and return final stats
-        self.finalize()
+        let import_stats = self.finalize_with_events(&event_tx)?;
+
+        // Emit phase change: now merging shards
+        log::debug!("[IMPORTER] MKN complete, sending PhaseChanged: 'Merging Shards'");
+        let _ = event_tx.send(ImportEvent::PhaseChanged {
+            phase: "Merging Shards".to_string(),
+        });
+
+        // Merge shards if using sharded storage
+        let merge_performed = self.merge_shards(keep_shards, &event_tx).await?;
+
+        // Emit AllWorkCompleted event (triggers completion dialog)
+        let total_duration = self.start_time.elapsed();
+        log::debug!("[IMPORTER] Merge complete, sending AllWorkCompleted");
+        let _ = event_tx.send(ImportEvent::AllWorkCompleted {
+            total_ngrams: import_stats.total_ngrams,
+            total_duration,
+            shards_kept: keep_shards || !merge_performed,
+        });
+
+        Ok(import_stats)
     }
 
     /// Process a single local file.
@@ -2848,10 +3074,26 @@ impl GoogleBooksImporter {
 
     /// Finalize import: compute MKN statistics, sync storage, and return stats.
     pub fn finalize(&mut self) -> Result<ImportStats, ImportError> {
+        self.finalize_with_events_inner(None)
+    }
+
+    /// Finalize import with event emission for TUI progress updates.
+    fn finalize_with_events(
+        &mut self,
+        event_tx: &tokio::sync::broadcast::Sender<ImportEvent>,
+    ) -> Result<ImportStats, ImportError> {
+        self.finalize_with_events_inner(Some(event_tx))
+    }
+
+    /// Inner finalize implementation that optionally emits events.
+    fn finalize_with_events_inner(
+        &mut self,
+        event_tx: Option<&tokio::sync::broadcast::Sender<ImportEvent>>,
+    ) -> Result<ImportStats, ImportError> {
         log::info!("Finalizing import...");
 
         // Compute MKN continuation counts
-        self.compute_mkn_stats()?;
+        self.compute_mkn_stats_with_events(event_tx)?;
 
         // Sync and checkpoint the storage to ensure all data is persisted
         log::info!("Syncing storage to disk...");
@@ -2879,6 +3121,161 @@ impl GoogleBooksImporter {
         Ok(stats)
     }
 
+    /// Merge shards into the final output file (sharded storage only).
+    ///
+    /// This method performs post-import merge of shards into a single trie file.
+    /// It emits progress events for the TUI and optionally cleans up shard files.
+    ///
+    /// # Arguments
+    ///
+    /// * `keep_shards` - If true, preserve shard files after merge
+    /// * `event_tx` - Broadcast sender for TUI progress events
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if merge was performed, `false` if not using sharded storage.
+    async fn merge_shards(
+        &self,
+        keep_shards: bool,
+        event_tx: &tokio::sync::broadcast::Sender<ImportEvent>,
+    ) -> Result<bool, ImportError> {
+        // Check if we're using sharded storage
+        let coordinator = match self.storage.as_sharded() {
+            Some(c) => c,
+            None => {
+                log::info!("Not using sharded storage, skipping merge phase");
+                return Ok(false);
+            }
+        };
+
+        let shard_count = coordinator.open_shard_keys().len();
+        let estimated_ngrams = coordinator.total_entry_count();
+
+        if shard_count == 0 {
+            log::warn!("No shards to merge");
+            return Ok(false);
+        }
+
+        log::info!("Starting merge of {} shards (~{} n-grams)", shard_count, estimated_ngrams);
+
+        // Emit MergeStarted event
+        log::debug!("[IMPORTER] Sending MergeStarted: shard_count={}, estimated_ngrams={}", shard_count, estimated_ngrams);
+        let _ = event_tx.send(ImportEvent::MergeStarted {
+            shard_count,
+            estimated_ngrams,
+        });
+
+        // Create merge coordinator
+        let merger = MergeCoordinator::new(coordinator);
+
+        // Merge to the output trie
+        let merge_start = Instant::now();
+        let merge_result = merger.merge_to_trie(&self.config.output_path, |progress| {
+            let _ = event_tx.send(ImportEvent::MergeProgress {
+                shards_processed: progress.total_shards - progress.shards_remaining,
+                total_shards: progress.total_shards,
+                ngrams_merged: progress.ngrams_merged,
+                percent_complete: progress.percent_complete,
+            });
+        });
+
+        match merge_result {
+            Ok(stats) => {
+                let merge_duration = merge_start.elapsed();
+                log::info!(
+                    "Merge completed: {} n-grams, {} bytes in {:.1}s",
+                    stats.total_ngrams,
+                    stats.bytes_written,
+                    merge_duration.as_secs_f64()
+                );
+
+                // Emit MergeCompleted event
+                log::debug!("[IMPORTER] Sending MergeCompleted: total_ngrams={}, bytes_written={}", stats.total_ngrams, stats.bytes_written);
+                let _ = event_tx.send(ImportEvent::MergeCompleted {
+                    total_ngrams: stats.total_ngrams,
+                    bytes_written: stats.bytes_written,
+                    duration: merge_duration,
+                });
+
+                // Clean up shards if requested
+                if !keep_shards {
+                    self.cleanup_shards(shard_count, event_tx)?;
+                }
+
+                Ok(true)
+            }
+            Err(e) => {
+                log::error!("Merge failed: {}", e);
+                let _ = event_tx.send(ImportEvent::MergeFailed {
+                    error: e.to_string(),
+                });
+                Err(ImportError::Trie(format!("Merge failed: {}", e)))
+            }
+        }
+    }
+
+    /// Clean up shard files after successful merge.
+    fn cleanup_shards(
+        &self,
+        shard_count: usize,
+        event_tx: &tokio::sync::broadcast::Sender<ImportEvent>,
+    ) -> Result<(), ImportError> {
+        log::info!("Cleaning up {} shard files...", shard_count);
+
+        // Emit cleanup started event
+        let _ = event_tx.send(ImportEvent::ShardCleanupStarted { shard_count });
+
+        // Get the shard directory from coordinator
+        let coordinator = self.storage.as_sharded().ok_or_else(|| {
+            ImportError::Trie("Expected sharded storage for cleanup".to_string())
+        })?;
+
+        let shard_dir = coordinator.config().shard_dir.clone();
+
+        // Count files and bytes before deletion
+        let mut shards_deleted = 0usize;
+        let mut bytes_freed = 0u64;
+
+        // Read the shard directory and delete shard files
+        if shard_dir.exists() {
+            match std::fs::read_dir(&shard_dir) {
+                Ok(entries) => {
+                    for entry in entries.filter_map(|e| e.ok()) {
+                        let path = entry.path();
+                        // Delete shard trie files (*.artrie) and WAL files (*.artrie.wal)
+                        if let Some(ext) = path.extension() {
+                            if ext == "artrie" || path.to_string_lossy().ends_with(".artrie.wal") {
+                                if let Ok(metadata) = std::fs::metadata(&path) {
+                                    bytes_freed += metadata.len();
+                                }
+                                if std::fs::remove_file(&path).is_ok() {
+                                    shards_deleted += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to read shard directory for cleanup: {}", e);
+                }
+            }
+        }
+
+        log::info!(
+            "Cleanup complete: deleted {} shard files, freed {} bytes",
+            shards_deleted,
+            bytes_freed
+        );
+
+        // Emit cleanup completed event
+        let _ = event_tx.send(ImportEvent::ShardCleanupCompleted {
+            shards_deleted,
+            bytes_freed,
+        });
+
+        Ok(())
+    }
+
     /// Compute Modified Kneser-Ney smoothing statistics as a post-processing step.
     ///
     /// This function computes MKN statistics differently based on storage mode:
@@ -2892,40 +3289,118 @@ impl GoogleBooksImporter {
     /// These statistics are used by MKN smoothing to estimate probabilities
     /// for unseen n-grams based on lower-order distributions.
     fn compute_mkn_stats(&mut self) -> Result<(), ImportError> {
+        self.compute_mkn_stats_with_events(None)
+    }
+
+    /// Compute MKN stats with optional event emission for TUI progress.
+    fn compute_mkn_stats_with_events(
+        &mut self,
+        event_tx: Option<&tokio::sync::broadcast::Sender<ImportEvent>>,
+    ) -> Result<(), ImportError> {
         if self.checkpoint.mkn_phase == MknPhase::Complete {
             log::info!("MKN statistics already computed");
             return Ok(());
         }
 
         log::info!("Computing MKN statistics (post-processing)...");
+        let mkn_start = std::time::Instant::now();
+        let estimated_ngrams = self.total_ngrams.load(Ordering::Relaxed);
 
-        if self.storage.is_sharded() {
-            // Sharded mode: use MknAggregator which iterates over all shards
-            self.compute_mkn_stats_sharded()?;
-        } else {
-            // Single-trie mode: iterate over trie and store stats inline
-            self.compute_mkn_stats_single_trie()?;
+        // Emit MknStarted event
+        let source = if self.storage.is_sharded() { "shards" } else { "single_trie" };
+        if let Some(tx) = event_tx {
+            log::debug!("[IMPORTER] Sending MknStarted: source={}, estimated_ngrams={}", source, estimated_ngrams);
+            let _ = tx.send(ImportEvent::MknStarted {
+                source: source.to_string(),
+                estimated_ngrams,
+            });
         }
 
-        self.checkpoint.mkn_phase = MknPhase::Complete;
-        self.save_checkpoint()?;
+        let result = if self.storage.is_sharded() {
+            // Sharded mode: use MknAggregator which iterates over all shards
+            self.compute_mkn_stats_sharded_with_events(event_tx)
+        } else {
+            // Single-trie mode: iterate over trie and store stats inline
+            self.compute_mkn_stats_single_trie_with_events(event_tx)
+        };
 
-        log::info!("MKN statistics computed successfully");
-        Ok(())
+        match result {
+            Ok((continuation_entries, frequency_entries)) => {
+                self.checkpoint.mkn_phase = MknPhase::Complete;
+                self.save_checkpoint()?;
+
+                let duration = mkn_start.elapsed();
+                log::info!("MKN statistics computed successfully in {:.1}s", duration.as_secs_f64());
+
+                // Emit MknCompleted event
+                if let Some(tx) = event_tx {
+                    log::debug!("[IMPORTER] Sending MknCompleted: continuation={}, frequency={}", continuation_entries, frequency_entries);
+                    let _ = tx.send(ImportEvent::MknCompleted {
+                        continuation_entries,
+                        frequency_entries,
+                        duration,
+                    });
+                }
+
+                Ok(())
+            }
+            Err(e) => {
+                // Emit MknFailed event
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(ImportEvent::MknFailed {
+                        error: e.to_string(),
+                    });
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Compute MKN stats for sharded storage using MknAggregator.
     fn compute_mkn_stats_sharded(&self) -> Result<(), ImportError> {
+        self.compute_mkn_stats_sharded_with_events(None).map(|_| ())
+    }
+
+    /// Compute MKN stats for sharded storage with optional event emission.
+    ///
+    /// Returns (continuation_entries, frequency_entries) counts on success.
+    fn compute_mkn_stats_sharded_with_events(
+        &self,
+        event_tx: Option<&tokio::sync::broadcast::Sender<ImportEvent>>,
+    ) -> Result<(u64, u64), ImportError> {
         let coordinator = self.storage.as_sharded().ok_or_else(|| {
             ImportError::Trie("Expected sharded storage".to_string())
         })?;
+
+        // Phase 1: Compute MKN statistics (parallel over shards via rayon)
+        log::info!("MKN Phase 1: Computing statistics across shards...");
+        if let Some(tx) = event_tx {
+            let _ = tx.send(ImportEvent::MknProgress {
+                phase: 1,
+                total_phases: 2,
+                items_processed: 0,
+                total_items: self.total_ngrams.load(Ordering::Relaxed),
+                percent_complete: 0.0,
+            });
+        }
 
         let aggregator = MknAggregator::new(coordinator);
         let mkn_stats = aggregator.compute_all().map_err(|e| {
             ImportError::Trie(format!("Failed to compute MKN statistics: {}", e))
         })?;
 
-        // Save MKN stats to a separate file alongside the shards
+        if let Some(tx) = event_tx {
+            let _ = tx.send(ImportEvent::MknProgress {
+                phase: 1,
+                total_phases: 2,
+                items_processed: self.total_ngrams.load(Ordering::Relaxed),
+                total_items: self.total_ngrams.load(Ordering::Relaxed),
+                percent_complete: 50.0,
+            });
+        }
+
+        // Phase 2: Write MKN statistics to trie
+        log::info!("MKN Phase 2: Writing statistics to MKN trie...");
         let mkn_path = self.config.output_path.with_extension("mkn.artrie");
         log::info!("Saving MKN statistics to {:?}...", mkn_path);
 
@@ -2933,6 +3408,9 @@ impl GoogleBooksImporter {
             ImportError::Trie(format!("Failed to create MKN trie: {}", e))
         })?;
         let mkn_trie = Arc::new(RwLock::new(mkn_trie));
+
+        let mut continuation_entries = 0u64;
+        let mut frequency_entries = 0u64;
 
         {
             let mut trie = mkn_trie.write();
@@ -2958,6 +3436,7 @@ impl GoogleBooksImporter {
                 trie.upsert(&format!("{}total_count", prefix), counts.total_count).map_err(|e| {
                     ImportError::Trie(format!("Failed to write total_count: {}", e))
                 })?;
+                frequency_entries += 6;
             }
 
             // Store continuation counts for each order
@@ -2968,6 +3447,7 @@ impl GoogleBooksImporter {
                     trie.upsert(&key, *count).map_err(|e| {
                         ImportError::Trie(format!("Failed to write predecessor count: {}", e))
                     })?;
+                    continuation_entries += 1;
                 }
 
                 // Store successor counts (N1+(w•) - unique successors for each context)
@@ -2976,6 +3456,7 @@ impl GoogleBooksImporter {
                     trie.upsert(&key, *count).map_err(|e| {
                         ImportError::Trie(format!("Failed to write successor count: {}", e))
                     })?;
+                    continuation_entries += 1;
                 }
             }
 
@@ -2985,50 +3466,121 @@ impl GoogleBooksImporter {
             })?;
         }
 
+        if let Some(tx) = event_tx {
+            let _ = tx.send(ImportEvent::MknProgress {
+                phase: 2,
+                total_phases: 2,
+                items_processed: continuation_entries + frequency_entries,
+                total_items: continuation_entries + frequency_entries,
+                percent_complete: 100.0,
+            });
+        }
+
         log::info!(
             "MKN statistics saved: {} orders with frequency and continuation counts",
             mkn_stats.max_order
         );
 
-        Ok(())
+        Ok((continuation_entries, frequency_entries))
     }
 
     /// Compute MKN stats for single-trie storage (original behavior).
     fn compute_mkn_stats_single_trie(&self) -> Result<(), ImportError> {
-        // Collect unique (suffix, prefix) and (context, following) pairs
-        // using HashSets for deduplication
-        use std::collections::HashSet;
-        let mut continuation_pairs: HashSet<(String, String)> = HashSet::new();
-        let mut unique_cont_pairs: HashSet<(String, String)> = HashSet::new();
+        self.compute_mkn_stats_single_trie_with_events(None).map(|_| ())
+    }
 
-        // Phase 1: Iterate all n-grams and collect pairs
-        log::info!("Phase 1: Collecting continuation pairs from n-grams...");
+    /// Compute MKN stats for single-trie storage with optional event emission.
+    ///
+    /// Returns (continuation_entries, frequency_entries) counts on success.
+    ///
+    /// N-grams are stored as varint-encoded Latin-1 strings (LEB128 encoding).
+    /// This function properly decodes them to extract word indices for
+    /// computing predecessor and successor contexts.
+    fn compute_mkn_stats_single_trie_with_events(
+        &self,
+        event_tx: Option<&tokio::sync::broadcast::Sender<ImportEvent>>,
+    ) -> Result<(u64, u64), ImportError> {
+        // Collect unique (suffix, prefix) and (context, following) pairs
+        // using HashSets for deduplication.
+        //
+        // We store contexts as varint-encoded keys (same format as n-gram keys)
+        // and use u64 indices for efficient comparison.
+        use std::collections::HashSet;
+        let mut continuation_pairs: HashSet<(String, u64)> = HashSet::new();
+        let mut unique_cont_pairs: HashSet<(String, u64)> = HashSet::new();
+
+        // Frequency count accumulators
+        let mut n1 = 0u64;
+        let mut n2 = 0u64;
+        let mut n3 = 0u64;
+        let mut n4 = 0u64;
+        let mut total_unique = 0u64;
+        let mut total_count = 0u64;
+
+        let estimated_ngrams = self.total_ngrams.load(Ordering::Relaxed);
+
+        // Phase 1: Iterate all n-grams, collect pairs and compute frequency counts
+        log::info!("Phase 1: Collecting continuation pairs and frequency counts from n-grams...");
+        if let Some(tx) = event_tx {
+            let _ = tx.send(ImportEvent::MknProgress {
+                phase: 1,
+                total_phases: 3,
+                items_processed: 0,
+                total_items: estimated_ngrams,
+                percent_complete: 0.0,
+            });
+        }
+
         {
             let trie = self.trie.read();
             // Use iter_prefix_with_values("") to iterate all entries
             if let Some(entries) = trie.iter_prefix_with_values("").map_err(|e| {
                 ImportError::Trie(format!("Failed to iterate trie: {}", e))
             })? {
-                for (ngram, _count) in entries {
+                for (ngram, count) in entries {
                     // Skip metadata keys (they start with \x00)
                     if ngram.starts_with('\x00') {
                         continue;
                     }
 
-                    let words: Vec<&str> = ngram.split_whitespace().collect();
-                    if words.len() >= 2 {
+                    // Accumulate frequency counts
+                    total_unique += 1;
+                    total_count += count;
+                    match count {
+                        1 => n1 += 1,
+                        2 => n2 += 1,
+                        3 => n3 += 1,
+                        4 => n4 += 1,
+                        _ => {}
+                    }
+
+                    // Decode varint-encoded key to word indices
+                    let indices = decode_ngram_key(&ngram);
+                    if indices.len() >= 2 {
                         // MKN Pass 1: continuation counts (suffix → unique prefixes)
-                        let prefix = words[0].to_string();
-                        let suffix = words[1..].join(" ");
+                        // e.g., indices [0, 1, 2] → prefix=0, suffix=encode([1, 2])
+                        let prefix = indices[0];
+                        let suffix = encode_indices_to_key(&indices[1..]);
                         continuation_pairs.insert((suffix, prefix));
 
                         // MKN Pass 2: unique continuations (context → unique following)
-                        let context = words[..words.len() - 1].join(" ");
-                        let following = words[words.len() - 1].to_string();
+                        // e.g., indices [0, 1, 2] → context=encode([0, 1]), following=2
+                        let context = encode_indices_to_key(&indices[..indices.len() - 1]);
+                        let following = indices[indices.len() - 1];
                         unique_cont_pairs.insert((context, following));
                     }
                 }
             }
+        }
+
+        if let Some(tx) = event_tx {
+            let _ = tx.send(ImportEvent::MknProgress {
+                phase: 1,
+                total_phases: 3,
+                items_processed: estimated_ngrams,
+                total_items: estimated_ngrams,
+                percent_complete: 33.0,
+            });
         }
 
         log::info!(
@@ -3036,9 +3588,24 @@ impl GoogleBooksImporter {
             continuation_pairs.len(),
             unique_cont_pairs.len()
         );
+        log::info!(
+            "Frequency counts: n1={}, n2={}, n3={}, n4={}, total_unique={}, total_count={}",
+            n1, n2, n3, n4, total_unique, total_count
+        );
 
-        // Phase 2: Compute and write MKN counts
-        log::info!("Phase 2: Writing MKN statistics to trie...");
+        // Phase 2: Compute and write continuation counts
+        log::info!("Phase 2: Writing continuation statistics to trie...");
+        if let Some(tx) = event_tx {
+            let _ = tx.send(ImportEvent::MknProgress {
+                phase: 2,
+                total_phases: 3,
+                items_processed: 0,
+                total_items: continuation_pairs.len() as u64 + unique_cont_pairs.len() as u64,
+                percent_complete: 33.0,
+            });
+        }
+
+        let mut continuation_entries = 0u64;
         {
             let mut trie = self.trie.write();
 
@@ -3054,10 +3621,11 @@ impl GoogleBooksImporter {
                 let count_key = format!("\x00N1+\x00{}", suffix);
                 trie.upsert(&count_key, *count).map_err(|e| {
                     ImportError::Trie(format!(
-                        "Failed to write MKN continuation count for '{}': {}",
-                        suffix, e
+                        "Failed to write MKN continuation count: {}",
+                        e
                     ))
                 })?;
+                continuation_entries += 1;
             }
 
             // Count unique following words per context (N1+prefix(context))
@@ -3072,14 +3640,82 @@ impl GoogleBooksImporter {
                 let count_key = format!("\x00N1+prefix\x00{}", context);
                 trie.upsert(&count_key, *count).map_err(|e| {
                     ImportError::Trie(format!(
-                        "Failed to write MKN unique continuation count for '{}': {}",
-                        context, e
+                        "Failed to write MKN unique continuation count: {}",
+                        e
                     ))
                 })?;
+                continuation_entries += 1;
             }
         }
 
-        Ok(())
+        if let Some(tx) = event_tx {
+            let _ = tx.send(ImportEvent::MknProgress {
+                phase: 2,
+                total_phases: 3,
+                items_processed: continuation_entries,
+                total_items: continuation_entries,
+                percent_complete: 66.0,
+            });
+        }
+
+        // Phase 3: Write frequency counts to trie
+        log::info!("Phase 3: Writing frequency statistics to trie...");
+        if let Some(tx) = event_tx {
+            let _ = tx.send(ImportEvent::MknProgress {
+                phase: 3,
+                total_phases: 3,
+                items_processed: 0,
+                total_items: 6,
+                percent_complete: 66.0,
+            });
+        }
+
+        let mut frequency_entries = 0u64;
+        {
+            let mut trie = self.trie.write();
+
+            trie.upsert("\x00mkn\x00n1", n1).map_err(|e| {
+                ImportError::Trie(format!("Failed to write MKN n1: {}", e))
+            })?;
+            frequency_entries += 1;
+
+            trie.upsert("\x00mkn\x00n2", n2).map_err(|e| {
+                ImportError::Trie(format!("Failed to write MKN n2: {}", e))
+            })?;
+            frequency_entries += 1;
+
+            trie.upsert("\x00mkn\x00n3", n3).map_err(|e| {
+                ImportError::Trie(format!("Failed to write MKN n3: {}", e))
+            })?;
+            frequency_entries += 1;
+
+            trie.upsert("\x00mkn\x00n4", n4).map_err(|e| {
+                ImportError::Trie(format!("Failed to write MKN n4: {}", e))
+            })?;
+            frequency_entries += 1;
+
+            trie.upsert("\x00mkn\x00total_unique", total_unique).map_err(|e| {
+                ImportError::Trie(format!("Failed to write MKN total_unique: {}", e))
+            })?;
+            frequency_entries += 1;
+
+            trie.upsert("\x00mkn\x00total_count", total_count).map_err(|e| {
+                ImportError::Trie(format!("Failed to write MKN total_count: {}", e))
+            })?;
+            frequency_entries += 1;
+        }
+
+        if let Some(tx) = event_tx {
+            let _ = tx.send(ImportEvent::MknProgress {
+                phase: 3,
+                total_phases: 3,
+                items_processed: frequency_entries,
+                total_items: frequency_entries,
+                percent_complete: 100.0,
+            });
+        }
+
+        Ok((continuation_entries, frequency_entries))
     }
 
     /// Build final statistics.

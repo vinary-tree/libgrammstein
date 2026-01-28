@@ -67,6 +67,9 @@ async-compression = { version = "0.4", features = ["tokio", "gzip"], optional = 
 # Async stream generators (optional)
 async-stream = { version = "0.3", optional = true }
 
+# Multi-producer multi-consumer async channel (optional)
+async-channel = { version = "2.3", optional = true }
+
 # Sync gzip for local files (optional)
 flate2 = { version = "1.0", optional = true }
 
@@ -157,6 +160,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.4"
 tempfile = "3.14"
 env_logger = "0.11"
+# Varint encoding benchmark candidates
+varint-simd = "0.3"
+vu128 = "1"
+stream-vbyte = "0.4"
 
 [features]
 default = []
@@ -251,6 +258,7 @@ google-books = [
     "dep:futures",
     "dep:async-compression",
     "dep:async-stream",
+    "dep:async-channel",
     "dep:flate2",
     "dep:indicatif",
     "dep:ratatui",
@@ -327,3 +335,7 @@ required-features = ["google-books"]
 name = "checkpoint_ops"
 harness = false
 required-features = ["google-books"]
+
+[[bench]]
+name = "varint_encoding"
+harness = false

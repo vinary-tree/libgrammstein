@@ -338,12 +338,8 @@ where
         // Convert vocabulary to portable format if provided
         let portable_vocab = vocabulary.map(|vocab| {
             let reverse_cache = vocab.build_reverse_cache();
-            let mut indexed_words: Vec<(u32, String)> = reverse_cache
-                .into_iter()
-                .filter_map(|(c, word)| {
-                    crate::ngram::pua_char_to_index(c).map(|idx| (idx, word))
-                })
-                .collect();
+            // reverse_cache is now HashMap<u64, String> (index -> word)
+            let mut indexed_words: Vec<(u64, String)> = reverse_cache.into_iter().collect();
 
             // Sort by index to ensure consistent ordering
             indexed_words.sort_by_key(|(idx, _)| *idx);

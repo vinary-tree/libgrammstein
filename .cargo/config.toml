@@ -16,18 +16,20 @@ rustflags = ["-C", "target-cpu=native"]
 # for portable binaries.
 
 [target.x86_64-unknown-linux-gnu]
-# Linux x86_64: Require AES and SSE2 instruction sets
+# Linux x86_64: Require AES, SSE2, and SSSE3 instruction sets
+# SSSE3 is needed for varint-simd SIMD decoding
 # For local development, uncomment the next line to use native optimizations:
 # rustflags = ["-C", "target-cpu=native"]
-rustflags = ["-C", "target-feature=+aes,+sse2"]
+rustflags = ["-C", "target-feature=+aes,+sse2,+ssse3"]
 
 [target.aarch64-unknown-linux-gnu]
 # Linux ARM64: Require AES and NEON instruction sets
 rustflags = ["-C", "target-feature=+aes,+neon"]
 
 [target.x86_64-apple-darwin]
-# macOS x86_64: Require AES and SSE2 instruction sets
-rustflags = ["-C", "target-feature=+aes,+sse2"]
+# macOS x86_64: Require AES, SSE2, and SSSE3 instruction sets
+# SSSE3 is needed for varint-simd SIMD decoding
+rustflags = ["-C", "target-feature=+aes,+sse2,+ssse3"]
 
 [target.aarch64-apple-darwin]
 # macOS ARM64 (Apple Silicon): Require AES and NEON instruction sets

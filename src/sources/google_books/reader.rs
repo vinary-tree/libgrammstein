@@ -514,8 +514,22 @@ impl HttpNgramReader {
         let byte_stream = response.bytes_stream();
 
         // Map stream items to io::Result for StreamReader compatibility
-        let mapped_stream = byte_stream.map(|result| {
-            result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+        // Preserve error context through the translation for better debugging
+        let url_for_errors = self.url.clone();
+        let mapped_stream = byte_stream.map(move |result| {
+            result.map_err(|e| {
+                // Categorize error kind based on reqwest error type
+                let kind = if e.is_timeout() {
+                    std::io::ErrorKind::TimedOut
+                } else if e.is_connect() {
+                    std::io::ErrorKind::ConnectionRefused
+                } else if e.is_body() || e.is_decode() {
+                    std::io::ErrorKind::InvalidData
+                } else {
+                    std::io::ErrorKind::Other
+                };
+                std::io::Error::new(kind, format!("HTTP stream error for {}: {}", url_for_errors, e))
+            })
         });
 
         // Create async reader from stream
@@ -688,6 +702,25 @@ impl HttpNgramReader {
         &mut self,
         year_range: Option<(u16, u16)>,
     ) -> impl tokio_stream::Stream<Item = Result<AggregatedNgram, ReaderError>> + '_ {
+        self.stream_aggregated_with_client(year_range, None)
+    }
+
+    /// Stream aggregated records by year using an optional shared HTTP client.
+    ///
+    /// This variant accepts an optional pre-built `reqwest::Client` for connection
+    /// pooling and HTTP/2 multiplexing across multiple workers. When `client` is
+    /// `None`, a new client is created per-call (useful for standalone use).
+    ///
+    /// # Arguments
+    ///
+    /// * `year_range` - Optional (start, end) year filter (inclusive)
+    /// * `client` - Optional shared HTTP client for connection pooling
+    #[cfg(feature = "google-books")]
+    pub fn stream_aggregated_with_client(
+        &mut self,
+        year_range: Option<(u16, u16)>,
+        client: Option<reqwest::Client>,
+    ) -> impl tokio_stream::Stream<Item = Result<AggregatedNgram, ReaderError>> + '_ {
         use super::aggregator::YearAggregator;
 
         let skip_pos = self.skip_pos_tags;
@@ -701,18 +734,24 @@ impl HttpNgramReader {
             use tokio_stream::StreamExt;
             use tokio_util::io::StreamReader;
 
-            // Create HTTP client with timeouts for long-running imports
-            // - timeout: Total request timeout (5 min for large files)
-            // - connect_timeout: Time to establish connection (30s)
-            // - read_timeout: Time allowed without receiving data (60s)
-            //   Prevents hanging on slow/stalled connections that trickle data
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(300))
-                .connect_timeout(Duration::from_secs(30))
-                .read_timeout(Duration::from_secs(60))
-                .user_agent("Mozilla/5.0 (compatible; libgrammstein/0.1; +https://github.com/vinary-tree/libgrammstein)")
-                .build()
-                .map_err(|e| ReaderError::Http(format!("Failed to build HTTP client: {}", e)))?;
+            // Use provided shared client or create a new one for standalone use
+            let client = match client {
+                Some(c) => c,
+                None => {
+                    // Create HTTP client with timeouts for long-running imports
+                    // - timeout: Total request timeout (5 min for large files)
+                    // - connect_timeout: Time to establish connection (30s)
+                    // - read_timeout: Time allowed without receiving data (60s)
+                    //   Prevents hanging on slow/stalled connections that trickle data
+                    reqwest::Client::builder()
+                        .timeout(Duration::from_secs(300))
+                        .connect_timeout(Duration::from_secs(30))
+                        .read_timeout(Duration::from_secs(60))
+                        .user_agent("Mozilla/5.0 (compatible; libgrammstein/0.1; +https://github.com/vinary-tree/libgrammstein)")
+                        .build()
+                        .map_err(|e| ReaderError::Http(format!("Failed to build HTTP client: {}", e)))?
+                }
+            };
 
             // Make HTTP request
             let response = client
@@ -815,8 +854,22 @@ impl HttpNgramReader {
                 let byte_stream = response.bytes_stream();
 
                 // Map stream items to io::Result for StreamReader compatibility
-                let mapped_stream = byte_stream.map(|result| {
-                    result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                // Preserve error context through the translation for better debugging
+                let url_for_errors = url.clone();
+                let mapped_stream = byte_stream.map(move |result| {
+                    result.map_err(|e| {
+                        // Categorize error kind based on reqwest error type
+                        let kind = if e.is_timeout() {
+                            std::io::ErrorKind::TimedOut
+                        } else if e.is_connect() {
+                            std::io::ErrorKind::ConnectionRefused
+                        } else if e.is_body() || e.is_decode() {
+                            std::io::ErrorKind::InvalidData
+                        } else {
+                            std::io::ErrorKind::Other
+                        };
+                        std::io::Error::new(kind, format!("HTTP stream error for {}: {}", url_for_errors, e))
+                    })
                 });
 
                 // Create async reader from stream

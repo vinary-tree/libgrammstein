@@ -249,6 +249,36 @@ impl ShardHandle {
         Ok(handle)
     }
 
+    /// Open an existing shard or create a new one.
+    ///
+    /// This method is designed to be called under a per-shard creation lock
+    /// managed by `ShardCoordinator`. The coordinator serializes creation
+    /// attempts for the same shard key, eliminating TOCTOU race conditions.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The shard key identifying this shard.
+    /// * `path` - File path for the shard.
+    ///
+    /// # Returns
+    ///
+    /// A `ShardHandle` for the opened or newly created shard.
+    ///
+    /// # Thread Safety
+    ///
+    /// Callers MUST ensure this is called under appropriate synchronization
+    /// (e.g., via `ShardCoordinator::create_or_open_shard`) to prevent
+    /// concurrent creation attempts on the same path.
+    pub fn open_or_create(key: ShardKey, path: impl AsRef<Path>) -> ShardResult<Self> {
+        let path = path.as_ref();
+
+        if path.exists() {
+            Self::open(key, path)
+        } else {
+            Self::create(key, path)
+        }
+    }
+
     /// Get the shard key.
     pub fn key(&self) -> &ShardKey {
         &self.key
@@ -568,5 +598,50 @@ mod tests {
             let shard = ShardHandle::open(key, &path).expect("Failed to open shard");
             assert_eq!(shard.get("the|quick"), Some(10));
         }
+    }
+
+    #[test]
+    fn test_open_or_create_new_shard() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("new_shard.artrie");
+        let key = ShardKey::new("ab");
+
+        // File doesn't exist - should create
+        assert!(!path.exists());
+        let mut shard = ShardHandle::open_or_create(key.clone(), &path)
+            .expect("Failed to open_or_create shard");
+        assert!(path.exists());
+
+        // Write data
+        let token = shard.try_acquire_write(0).unwrap();
+        shard.increment("apple|pie", 5, &token).unwrap();
+        shard.sync().unwrap();
+        shard.release_write(token);
+
+        assert_eq!(shard.get("apple|pie"), Some(5));
+    }
+
+    #[test]
+    fn test_open_or_create_existing_shard() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("existing_shard.artrie");
+        let key = ShardKey::new("cd");
+
+        // Create initial shard with data
+        {
+            let mut shard = ShardHandle::create(key.clone(), &path)
+                .expect("Failed to create shard");
+            let token = shard.try_acquire_write(0).unwrap();
+            shard.increment("cat|dog", 7, &token).unwrap();
+            shard.sync().unwrap();
+            shard.release_write(token);
+        }
+
+        // open_or_create should open existing shard
+        let shard = ShardHandle::open_or_create(key, &path)
+            .expect("Failed to open_or_create existing shard");
+
+        // Verify data is preserved
+        assert_eq!(shard.get("cat|dog"), Some(7));
     }
 }

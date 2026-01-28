@@ -44,6 +44,7 @@
 //! ```
 
 use super::coordinator::ShardCoordinator;
+use crate::ngram::vocabulary::{decode_ngram_key, encode_indices_to_key, ngram_order};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -341,6 +342,10 @@ impl<'a> MknAggregator<'a> {
             if let Ok(shard) = self.coordinator.get_or_create_shard(key) {
                 let guard = shard.read();
                 for (ngram, count) in guard.iter_with_counts() {
+                    // Skip metadata keys (they start with \x00)
+                    if ngram.starts_with('\x00') {
+                        continue;
+                    }
                     let order = ngram_order(&ngram);
                     if order <= max_order {
                         counts[order as usize].observe(count);
@@ -381,11 +386,18 @@ impl<'a> MknAggregator<'a> {
     }
 
     /// Compute continuation counts for a specific order.
+    ///
+    /// N-grams are stored as varint-encoded Latin-1 strings (LEB128 encoding).
+    /// This function properly decodes them to extract word indices for
+    /// computing predecessor and successor contexts.
     fn compute_continuation_counts_for_order(&self, order: u8) -> MknResult<ContinuationCounts> {
         // Track unique predecessors/successors for each context
         // Context for order n is the (n-1)-gram prefix/suffix
-        let mut predecessor_sets: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut successor_sets: HashMap<String, HashSet<String>> = HashMap::new();
+        //
+        // We store contexts as varint-encoded keys (same format as n-gram keys)
+        // and predecessors/successors as u64 indices for efficient comparison.
+        let mut predecessor_sets: HashMap<String, HashSet<u64>> = HashMap::new();
+        let mut successor_sets: HashMap<String, HashSet<u64>> = HashMap::new();
 
         let shard_keys: Vec<_> = self.coordinator.open_shard_keys();
 
@@ -393,28 +405,30 @@ impl<'a> MknAggregator<'a> {
             if let Ok(shard) = self.coordinator.get_or_create_shard(key) {
                 let guard = shard.read();
                 for (ngram, _count) in guard.iter_with_counts() {
-                    if ngram_order(&ngram) != order {
+                    // Skip metadata keys (they start with \x00)
+                    if ngram.starts_with('\x00') {
                         continue;
                     }
 
-                    let words: Vec<&str> = ngram.split('|').collect();
-                    if words.len() < 2 {
+                    // Decode varint-encoded key to word indices
+                    let indices = decode_ngram_key(&ngram);
+                    if indices.len() as u8 != order || indices.len() < 2 {
                         continue;
                     }
 
-                    // Predecessor context: all but first word
-                    // e.g., "the|quick|brown" -> context="quick|brown", predecessor="the"
-                    let predecessor = words[0].to_string();
-                    let pred_context = words[1..].join("|");
+                    // Predecessor context: all but first index (varint-encoded)
+                    // e.g., indices [0, 1, 2] → predecessor=0, context=encode([1, 2])
+                    let predecessor = indices[0];
+                    let pred_context = encode_indices_to_key(&indices[1..]);
                     predecessor_sets
                         .entry(pred_context)
                         .or_default()
                         .insert(predecessor);
 
-                    // Successor context: all but last word
-                    // e.g., "the|quick|brown" -> context="the|quick", successor="brown"
-                    let successor = words[words.len() - 1].to_string();
-                    let succ_context = words[..words.len() - 1].join("|");
+                    // Successor context: all but last index (varint-encoded)
+                    // e.g., indices [0, 1, 2] → context=encode([0, 1]), successor=2
+                    let successor = indices[indices.len() - 1];
+                    let succ_context = encode_indices_to_key(&indices[..indices.len() - 1]);
                     successor_sets
                         .entry(succ_context)
                         .or_default()
@@ -478,11 +492,6 @@ impl<'a> MknAggregator<'a> {
         let frequency_counts = self.compute_frequency_counts()?;
         Ok(self.compute_discounts(&frequency_counts))
     }
-}
-
-/// Get the order of an n-gram (number of words).
-fn ngram_order(ngram: &str) -> u8 {
-    ngram.split('|').count() as u8
 }
 
 /// Summary statistics for logging/debugging.
@@ -556,45 +565,64 @@ impl MknStats {
 mod tests {
     use super::*;
     use super::super::config::{ShardConfig, ShardGranularity};
+    use crate::ngram::vocabulary::SharedVocabulary;
     use tempfile::TempDir;
 
-    fn create_test_coordinator() -> (TempDir, ShardCoordinator) {
+    /// Create a test coordinator with varint-encoded n-grams.
+    ///
+    /// N-grams are properly encoded using the vocabulary, matching
+    /// the production format (LEB128 varint-encoded Latin-1 strings).
+    fn create_test_coordinator() -> (TempDir, ShardCoordinator, SharedVocabulary) {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let config = ShardConfig::new(dir.path().join("shards"))
             .with_granularity(ShardGranularity::TwoChar);
 
         let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
 
+        // Create vocabulary for encoding
+        let vocab_path = dir.path().join("vocab.artrie");
+        let vocab = SharedVocabulary::create(&vocab_path).expect("Failed to create vocab");
+
+        // Helper to encode n-gram using vocabulary
+        let encode = |words: &[&str]| -> String {
+            let mut buf = Vec::with_capacity(words.len() * 2);
+            for word in words {
+                let idx = vocab.get_or_insert(word);
+                crate::ngram::vocabulary::encode_varint(idx, &mut buf);
+            }
+            buf.into_iter().map(|b| char::from(b)).collect()
+        };
+
         // Add test data with various counts
-        // 1-grams
-        coordinator.store_ngram("the", 100).expect("store");
-        coordinator.store_ngram("a", 50).expect("store");
-        coordinator.store_ngram("an", 1).expect("store"); // count=1
-        coordinator.store_ngram("is", 2).expect("store"); // count=2
-        coordinator.store_ngram("at", 3).expect("store"); // count=3
-        coordinator.store_ngram("in", 4).expect("store"); // count=4
+        // 1-grams (encoded as single varint)
+        coordinator.store_ngram(&encode(&["the"]), 100).expect("store");
+        coordinator.store_ngram(&encode(&["a"]), 50).expect("store");
+        coordinator.store_ngram(&encode(&["an"]), 1).expect("store"); // count=1
+        coordinator.store_ngram(&encode(&["is"]), 2).expect("store"); // count=2
+        coordinator.store_ngram(&encode(&["at"]), 3).expect("store"); // count=3
+        coordinator.store_ngram(&encode(&["in"]), 4).expect("store"); // count=4
 
-        // 2-grams
-        coordinator.store_ngram("the|quick", 10).expect("store");
-        coordinator.store_ngram("the|slow", 5).expect("store");
-        coordinator.store_ngram("a|big", 1).expect("store"); // count=1
-        coordinator.store_ngram("a|small", 2).expect("store"); // count=2
-        coordinator.store_ngram("is|very", 3).expect("store"); // count=3
-        coordinator.store_ngram("in|the", 4).expect("store"); // count=4
+        // 2-grams (encoded as two varints)
+        coordinator.store_ngram(&encode(&["the", "quick"]), 10).expect("store");
+        coordinator.store_ngram(&encode(&["the", "slow"]), 5).expect("store");
+        coordinator.store_ngram(&encode(&["a", "big"]), 1).expect("store"); // count=1
+        coordinator.store_ngram(&encode(&["a", "small"]), 2).expect("store"); // count=2
+        coordinator.store_ngram(&encode(&["is", "very"]), 3).expect("store"); // count=3
+        coordinator.store_ngram(&encode(&["in", "the"]), 4).expect("store"); // count=4
 
-        // 3-grams
+        // 3-grams (encoded as three varints)
         coordinator
-            .store_ngram("the|quick|brown", 5)
+            .store_ngram(&encode(&["the", "quick", "brown"]), 5)
             .expect("store");
-        coordinator.store_ngram("the|quick|red", 1).expect("store"); // count=1
-        coordinator.store_ngram("the|slow|green", 2).expect("store"); // count=2
+        coordinator.store_ngram(&encode(&["the", "quick", "red"]), 1).expect("store"); // count=1
+        coordinator.store_ngram(&encode(&["the", "slow", "green"]), 2).expect("store"); // count=2
 
-        (dir, coordinator)
+        (dir, coordinator, vocab)
     }
 
     #[test]
     fn test_frequency_counts() {
-        let (_dir, coordinator) = create_test_coordinator();
+        let (_dir, coordinator, _vocab) = create_test_coordinator();
         let aggregator = MknAggregator::new(&coordinator);
 
         let counts = aggregator.compute_frequency_counts().expect("compute");
@@ -658,27 +686,42 @@ mod tests {
 
     #[test]
     fn test_continuation_counts() {
-        let (_dir, coordinator) = create_test_coordinator();
+        let (_dir, coordinator, vocab) = create_test_coordinator();
         let aggregator = MknAggregator::new(&coordinator).with_continuations();
 
         let counts = aggregator
             .compute_continuation_counts_for_order(2)
             .expect("compute");
 
-        // "the|quick" and "the|slow" share predecessor "the" for context "quick" and "slow"
+        // "the quick" and "the slow" share predecessor "the" for contexts "quick" and "slow"
         // So we should have entries in predecessor_counts
+        //
+        // Note: contexts are now varint-encoded Latin-1 strings, not raw words
 
-        // For context "quick", predecessor is "the"
-        assert!(counts.predecessor_counts.contains_key("quick"));
+        // Get the index for "quick" to check predecessor counts
+        let quick_idx = vocab.get("quick").expect("quick should be in vocab");
+        let quick_key = encode_indices_to_key(&[quick_idx]);
+        assert!(
+            counts.predecessor_counts.contains_key(&quick_key),
+            "Should have predecessor count for context 'quick' (encoded as {:?})",
+            quick_key
+        );
 
-        // For context "the", successors are "quick", "slow"
-        assert!(counts.successor_counts.contains_key("the"));
-        assert_eq!(*counts.successor_counts.get("the").unwrap(), 2); // "quick" and "slow"
+        // Get the index for "the" to check successor counts
+        let the_idx = vocab.get("the").expect("the should be in vocab");
+        let the_key = encode_indices_to_key(&[the_idx]);
+        assert!(
+            counts.successor_counts.contains_key(&the_key),
+            "Should have successor count for context 'the' (encoded as {:?})",
+            the_key
+        );
+        // "the" should have 2 unique successors: "quick" and "slow"
+        assert_eq!(*counts.successor_counts.get(&the_key).unwrap(), 2);
     }
 
     #[test]
     fn test_compute_all() {
-        let (_dir, coordinator) = create_test_coordinator();
+        let (_dir, coordinator, _vocab) = create_test_coordinator();
         let aggregator = MknAggregator::new(&coordinator);
 
         let stats = aggregator.compute_all().expect("compute");
@@ -696,7 +739,7 @@ mod tests {
 
     #[test]
     fn test_format_table() {
-        let (_dir, coordinator) = create_test_coordinator();
+        let (_dir, coordinator, _vocab) = create_test_coordinator();
         let aggregator = MknAggregator::new(&coordinator);
 
         let stats = aggregator.compute_all().expect("compute");
