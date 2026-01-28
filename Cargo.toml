@@ -39,6 +39,7 @@ crossbeam-channel = "0.5"
 
 # Hashing (collision reduction from MeTTaTron)
 gxhash = "3.5"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Caching
 lru = "0.12"
@@ -164,6 +165,8 @@ env_logger = "0.11"
 varint-simd = "0.3"
 vu128 = "1"
 stream-vbyte = "0.4"
+# Hash benchmark candidate
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [features]
 default = []
@@ -338,4 +341,8 @@ required-features = ["google-books"]
 
 [[bench]]
 name = "varint_encoding"
+harness = false
+
+[[bench]]
+name = "hash_comparison"
 harness = false
