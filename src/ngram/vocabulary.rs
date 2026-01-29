@@ -346,6 +346,20 @@ impl SharedVocabulary {
     pub fn trie_arc(&self) -> Arc<RwLock<DiskBackedCharTrieInner<u64>>> {
         Arc::clone(&self.trie)
     }
+
+    /// Get the vocabulary format version.
+    ///
+    /// This returns the current vocabulary version constant. It can be used
+    /// to verify compatibility when loading vocabularies or for metadata
+    /// reporting purposes.
+    ///
+    /// # Current Version
+    ///
+    /// - Version 3: Start indices at 1 (not 0) to avoid collision with
+    ///   `\x00` metadata prefix in varint encoding.
+    pub fn version(&self) -> u64 {
+        VOCABULARY_VERSION
+    }
 }
 
 /// Encode an n-gram as a varint-encoded Latin-1 string.
@@ -800,5 +814,13 @@ mod tests {
         }
 
         assert_eq!(vocab.len(), 1000);
+    }
+
+    #[test]
+    fn test_version_accessor() {
+        let (_dir, vocab) = create_temp_vocab();
+
+        // Version should be the current constant (3)
+        assert_eq!(vocab.version(), 3);
     }
 }

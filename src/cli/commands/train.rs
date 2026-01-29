@@ -821,7 +821,8 @@ fn create_corpus_reader(path: &str, format: CorpusFormat) -> CliResult<Box<dyn C
 /// Import N-gram model from Google Books N-grams.
 #[cfg(feature = "google-books")]
 fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) -> CliResult<()> {
-    use crate::sources::google_books::{GoogleBooksConfig, GoogleBooksImporter, LanguageInfo, ShardingMode};
+    use crate::cli::args::ShardingModeArg;
+    use crate::sources::google_books::{GoogleBooksConfig, GoogleBooksImporter, LanguageInfo, ShardingMode, ShardingOptions};
 
     if verbose {
         eprintln!("Importing Google Books N-grams");
@@ -871,7 +872,10 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
         parallel_downloads: args.parallel,
         progress_interval: 100_000,
         skip_pos_tags: args.skip_pos_tags,
-        sharding: ShardingMode::default(),
+        sharding: match args.sharding {
+            ShardingModeArg::Enabled => ShardingMode::Enabled(ShardingOptions::default()),
+            ShardingModeArg::Disabled => ShardingMode::Disabled,
+        },
     };
 
     // Create importer (resume from checkpoint if one exists)

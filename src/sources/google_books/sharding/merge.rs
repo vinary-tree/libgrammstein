@@ -188,12 +188,14 @@ impl<'a> MergeCoordinator<'a> {
         let output_path = output_path.as_ref();
         let start_time = std::time::Instant::now();
 
-        // Get all shard keys
-        let shard_keys: Vec<ShardKey> = self.coordinator.open_shard_keys();
-        if shard_keys.is_empty() {
+        // Discover all shard files on disk (not just cached ones)
+        let shard_files = self.coordinator.discover_shard_files()
+            .map_err(|e| MergeError::Trie(format!("Failed to discover shard files: {}", e)))?;
+        if shard_files.is_empty() {
             return Err(MergeError::NoShards);
         }
 
+        let shard_keys: Vec<ShardKey> = shard_files.into_iter().map(|(key, _)| key).collect();
         let total_shards = shard_keys.len();
 
         log::info!("Starting merge of {} shards to {:?}", total_shards, output_path);
@@ -219,7 +221,11 @@ impl<'a> MergeCoordinator<'a> {
             if let Ok(shard) = self.coordinator.get_or_create_shard(key) {
                 let guard = shard.read();
 
-                for (ngram, count) in guard.iter_with_counts() {
+                let iter = guard.iter_with_counts().map_err(|e| {
+                    MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
+                })?;
+
+                for (ngram, count) in iter {
                     output_trie
                         .increment(&ngram, count as i64)
                         .map_err(|e| MergeError::Trie(format!("Increment failed: {}", e)))?;
@@ -264,29 +270,35 @@ impl<'a> MergeCoordinator<'a> {
     /// This is useful for smaller datasets where all n-grams fit in memory.
     /// Returns a HashMap of (ngram, count) pairs.
     pub fn merge_to_memory(&self) -> MergeResult<HashMap<String, u64>> {
-        let shard_keys: Vec<ShardKey> = self.coordinator.open_shard_keys();
-        if shard_keys.is_empty() {
+        // Discover all shard files on disk (not just cached ones)
+        let shard_files = self.coordinator.discover_shard_files()
+            .map_err(|e| MergeError::Trie(format!("Failed to discover shard files: {}", e)))?;
+        if shard_files.is_empty() {
             return Err(MergeError::NoShards);
         }
+
+        let shard_keys: Vec<ShardKey> = shard_files.into_iter().map(|(key, _)| key).collect();
 
         log::info!("Merging {} shards to memory", shard_keys.len());
 
         // Collect all n-grams from all shards
-        let results: Vec<HashMap<String, u64>> = shard_keys
+        // Use try_fold pattern to propagate errors from shard iteration
+        let results: Result<Vec<HashMap<String, u64>>, MergeError> = shard_keys
             .par_iter()
-            .filter_map(|key| {
-                self.coordinator
+            .map(|key| {
+                let shard = self
+                    .coordinator
                     .get_or_create_shard(key)
-                    .ok()
-                    .map(|shard| {
-                        let guard = shard.read();
-                        guard
-                            .iter_with_counts()
-                            .map(|(k, v)| (k, v))
-                            .collect::<HashMap<_, _>>()
-                    })
+                    .map_err(|e| MergeError::Trie(format!("Failed to open shard {}: {}", key, e)))?;
+                let guard = shard.read();
+                let iter = guard.iter_with_counts().map_err(|e| {
+                    MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
+                })?;
+                Ok(iter.collect::<HashMap<_, _>>())
             })
             .collect();
+
+        let results = results?;
 
         // Merge all results
         let mut merged: HashMap<String, u64> = HashMap::new();
@@ -304,17 +316,33 @@ impl<'a> MergeCoordinator<'a> {
     ///
     /// This avoids loading all data into memory by streaming through shards.
     /// Note: Duplicate n-grams across shards are NOT aggregated in this mode.
-    pub fn iter_all(&self) -> impl Iterator<Item = (String, u64)> + '_ {
-        let shard_keys: Vec<ShardKey> = self.coordinator.open_shard_keys();
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shard discovery fails or any shard iteration fails.
+    pub fn iter_all(&self) -> MergeResult<impl Iterator<Item = (String, u64)>> {
+        // Discover all shard files on disk (not just cached ones)
+        let shard_keys: Vec<ShardKey> = self
+            .coordinator
+            .discover_shard_files()
+            .map_err(|e| MergeError::Trie(format!("Failed to discover shard files: {}", e)))?
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
 
-        shard_keys.into_iter().flat_map(move |key| {
+        // Pre-collect all entries to avoid lifetime issues and propagate errors early
+        let mut all_entries = Vec::new();
+        for key in shard_keys {
             if let Ok(shard) = self.coordinator.get_or_create_shard(&key) {
                 let guard = shard.read();
-                guard.iter_with_counts().collect::<Vec<_>>()
-            } else {
-                Vec::new()
+                let iter = guard.iter_with_counts().map_err(|e| {
+                    MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
+                })?;
+                all_entries.extend(iter);
             }
-        })
+        }
+
+        Ok(all_entries.into_iter())
     }
 
     /// Get the estimated final size (total entries across all shards).
@@ -418,7 +446,7 @@ mod tests {
         let (_dir, coordinator) = create_test_coordinator();
         let merger = MergeCoordinator::new(&coordinator);
 
-        let all: Vec<_> = merger.iter_all().collect();
+        let all: Vec<_> = merger.iter_all().expect("iter_all").collect();
 
         assert_eq!(all.len(), 7);
     }

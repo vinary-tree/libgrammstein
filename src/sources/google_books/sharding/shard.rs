@@ -19,6 +19,10 @@ pub enum ShardError {
     #[error("Failed to create/open shard at {path}: {message}")]
     Open { path: PathBuf, message: String },
 
+    /// Read operation failed.
+    #[error("Read failed for shard {shard_key}: {message}")]
+    Read { shard_key: String, message: String },
+
     /// Write operation failed.
     #[error("Write failed for shard {shard_key}: {message}")]
     Write { shard_key: String, message: String },
@@ -413,15 +417,27 @@ impl ShardHandle {
     }
 
     /// Iterate over all n-grams with their counts.
-    pub fn iter_with_counts(&self) -> impl Iterator<Item = (String, u64)> {
-        self.trie
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying trie iteration fails. This can happen
+    /// due to I/O errors, corrupted data, or other trie-level issues.
+    pub fn iter_with_counts(
+        &self,
+    ) -> ShardResult<impl Iterator<Item = (String, u64)>> {
+        let entries = self
+            .trie
             .iter_prefix_with_values("")
-            .ok()
-            .flatten()
-            .unwrap_or_default()
+            .map_err(|e| ShardError::Read {
+                shard_key: self.key.to_string(),
+                message: format!("Failed to iterate: {}", e),
+            })?
+            .unwrap_or_default();
+
+        Ok(entries
             .into_iter()
             .filter(|(k, _)| !k.starts_with(Self::CHECKPOINT_PREFIX))
-            .map(|(k, v)| (k, v as u64))
+            .map(|(k, v)| (k, v as u64)))
     }
 
     /// Sync WAL to disk.

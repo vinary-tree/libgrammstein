@@ -286,6 +286,13 @@ pub struct ImportGoogleBooksArgs {
     #[arg(long)]
     pub keep_shards: bool,
 
+    /// Sharding mode for storage.
+    ///
+    /// - enabled: Use sharding to reduce thread contention (default)
+    /// - disabled: Use single trie (for debugging or constrained environments)
+    #[arg(long, value_enum, default_value = "enabled")]
+    pub sharding: ShardingModeArg,
+
     /// Resource management options.
     #[command(flatten)]
     pub resources: ResourceArgs,
@@ -788,4 +795,15 @@ pub enum CorpusSource {
     Gutenberg,
     /// OSCAR corpus.
     Oscar,
+}
+
+/// CLI argument for sharding mode.
+#[cfg(feature = "google-books")]
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShardingModeArg {
+    /// Use sharding to reduce thread contention (default).
+    #[default]
+    Enabled,
+    /// Use single trie (for debugging or constrained environments).
+    Disabled,
 }

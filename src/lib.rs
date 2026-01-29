@@ -93,6 +93,9 @@ pub mod topic;
 #[cfg(any(feature = "google-books", feature = "pdf-extraction"))]
 pub mod sources;
 
+#[cfg(feature = "google-books")]
+pub mod aggregated;
+
 #[cfg(feature = "code")]
 pub mod code;
 

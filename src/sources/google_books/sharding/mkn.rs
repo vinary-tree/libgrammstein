@@ -335,20 +335,29 @@ impl<'a> MknAggregator<'a> {
             .map(|_| AtomicFrequencyCounts::default())
             .collect();
 
-        // Iterate through all open shards in parallel
-        let shard_keys: Vec<_> = self.coordinator.open_shard_keys();
+        // Discover and iterate through all shards on disk (not just in-memory cached ones)
+        let shard_files = self.coordinator.discover_shard_files()
+            .map_err(|e| MknError::Coordinator(e))?;
+        let shard_keys: Vec<_> = shard_files.into_iter().map(|(key, _)| key).collect();
 
         shard_keys.par_iter().for_each(|key| {
             if let Ok(shard) = self.coordinator.get_or_create_shard(key) {
                 let guard = shard.read();
-                for (ngram, count) in guard.iter_with_counts() {
-                    // Skip metadata keys (they start with \x00)
-                    if ngram.starts_with('\x00') {
-                        continue;
+                match guard.iter_with_counts() {
+                    Ok(iter) => {
+                        for (ngram, count) in iter {
+                            // Skip metadata keys (they start with \x00)
+                            if ngram.starts_with('\x00') {
+                                continue;
+                            }
+                            let order = ngram_order(&ngram);
+                            if order <= max_order {
+                                counts[order as usize].observe(count);
+                            }
+                        }
                     }
-                    let order = ngram_order(&ngram);
-                    if order <= max_order {
-                        counts[order as usize].observe(count);
+                    Err(e) => {
+                        log::warn!("Failed to iterate shard {}: {}", key, e);
                     }
                 }
             }
@@ -399,12 +408,22 @@ impl<'a> MknAggregator<'a> {
         let mut predecessor_sets: HashMap<String, HashSet<u64>> = HashMap::new();
         let mut successor_sets: HashMap<String, HashSet<u64>> = HashMap::new();
 
-        let shard_keys: Vec<_> = self.coordinator.open_shard_keys();
+        // Discover all shards on disk (not just in-memory cached ones)
+        let shard_files = self.coordinator.discover_shard_files()
+            .map_err(|e| MknError::Coordinator(e))?;
+        let shard_keys: Vec<_> = shard_files.into_iter().map(|(key, _)| key).collect();
 
         for key in &shard_keys {
             if let Ok(shard) = self.coordinator.get_or_create_shard(key) {
                 let guard = shard.read();
-                for (ngram, _count) in guard.iter_with_counts() {
+                let iter = match guard.iter_with_counts() {
+                    Ok(iter) => iter,
+                    Err(e) => {
+                        log::warn!("Failed to iterate shard {}: {}", key, e);
+                        continue;
+                    }
+                };
+                for (ngram, _count) in iter {
                     // Skip metadata keys (they start with \x00)
                     if ngram.starts_with('\x00') {
                         continue;

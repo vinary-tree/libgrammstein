@@ -1556,9 +1556,11 @@ impl GoogleBooksImporter {
     ///
     /// The trie checkpoint truncates the WAL to prevent unbounded growth.
     pub fn save_checkpoint(&mut self) -> Result<(), ImportError> {
-        // Update stats before saving
-        self.checkpoint.stats.ngrams_processed = self.total_ngrams.load(Ordering::Relaxed);
-        self.checkpoint.stats.unique_ngrams = self.unique_ngrams.load(Ordering::Relaxed);
+        // Sync atomic counters FROM checkpoint stats (source of truth).
+        // The checkpoint.add_ngrams() method maintains accurate counts incrementally.
+        // We sync the atomics from checkpoint to keep real-time display consistent.
+        self.total_ngrams.store(self.checkpoint.stats.ngrams_processed, Ordering::Relaxed);
+        self.unique_ngrams.store(self.checkpoint.stats.unique_ngrams, Ordering::Relaxed);
         self.checkpoint.stats.elapsed_seconds = self.start_time.elapsed().as_secs();
 
         // Save checkpoint to trie FIRST (atomic with n-gram data)
@@ -1656,6 +1658,7 @@ impl GoogleBooksImporter {
                     log::warn!("Failed to mark prefix {} as completed in storage: {}", prefix, e);
                 }
 
+                self.checkpoint.add_ngrams(order, ngrams_in_file);
                 self.checkpoint.stats.ngrams_by_order[(order - 1) as usize] += ngrams_in_file;
 
                 // Report progress
@@ -2182,6 +2185,22 @@ impl GoogleBooksImporter {
                 order,
                 total_files,
             });
+
+            // Emit initial OrderProgress with checkpoint state for resume.
+            // This ensures the TUI displays correct progress immediately on resume
+            // rather than showing 0 until the first file completes.
+            if already_completed > 0 {
+                let order_ngrams = self.checkpoint.stats.ngrams_by_order[(order - 1) as usize];
+                let _ = event_tx.send(ImportEvent::OrderProgress {
+                    order,
+                    files_completed: already_completed,
+                    total_files,
+                    ngrams_processed: order_ngrams,
+                    is_complete: false, // We wouldn't be here if complete (pending_count > 0)
+                    files_succeeded: already_completed,
+                    files_skipped: 0, // On resume we don't know which were skipped vs succeeded
+                });
+            }
 
             log::info!(
                 "Queued {} pending files for order {} ({} already complete)",
@@ -3092,19 +3111,27 @@ impl GoogleBooksImporter {
     ) -> Result<ImportStats, ImportError> {
         log::info!("Finalizing import...");
 
-        // Compute MKN continuation counts
-        self.compute_mkn_stats_with_events(event_tx)?;
-
-        // Sync and checkpoint the storage to ensure all data is persisted
+        // IMPORTANT: Sync and checkpoint FIRST to ensure all data is persisted
+        // before computing MKN stats. MKN uses discover_shard_files() which reads
+        // from disk, so data must be flushed first.
         log::info!("Syncing storage to disk...");
         self.storage.sync().map_err(|e| {
             ImportError::Trie(format!("Failed to sync storage: {}", e))
+        })?;
+        self.storage.sync_vocabulary().map_err(|e| {
+            ImportError::Trie(format!("Failed to sync vocabulary: {}", e))
         })?;
 
         log::info!("Creating storage checkpoint...");
         self.storage.checkpoint().map_err(|e| {
             ImportError::Trie(format!("Failed to checkpoint storage: {}", e))
         })?;
+        self.storage.checkpoint_vocabulary().map_err(|e| {
+            ImportError::Trie(format!("Failed to checkpoint vocabulary: {}", e))
+        })?;
+
+        // Now compute MKN stats (has access to all flushed shard data)
+        self.compute_mkn_stats_with_events(event_tx)?;
 
         // Build final stats
         let stats = self.build_stats()?;
@@ -3242,9 +3269,9 @@ impl GoogleBooksImporter {
                 Ok(entries) => {
                     for entry in entries.filter_map(|e| e.ok()) {
                         let path = entry.path();
-                        // Delete shard trie files (*.artrie) and WAL files (*.artrie.wal)
+                        // Delete shard trie files (*.artrie) and WAL files (*.wal)
                         if let Some(ext) = path.extension() {
-                            if ext == "artrie" || path.to_string_lossy().ends_with(".artrie.wal") {
+                            if ext == "artrie" || ext == "wal" {
                                 if let Ok(metadata) = std::fs::metadata(&path) {
                                     bytes_freed += metadata.len();
                                 }
@@ -3257,6 +3284,22 @@ impl GoogleBooksImporter {
                 }
                 Err(e) => {
                     log::warn!("Failed to read shard directory for cleanup: {}", e);
+                }
+            }
+
+            // Delete wal_archive directory if it exists
+            let wal_archive_dir = shard_dir.join("wal_archive");
+            if wal_archive_dir.exists() && wal_archive_dir.is_dir() {
+                // Calculate size of files in wal_archive
+                if let Ok(entries) = std::fs::read_dir(&wal_archive_dir) {
+                    for entry in entries.filter_map(|e| e.ok()) {
+                        if let Ok(meta) = entry.metadata() {
+                            bytes_freed += meta.len();
+                        }
+                    }
+                }
+                if std::fs::remove_dir_all(&wal_archive_dir).is_ok() {
+                    log::info!("Deleted wal_archive directory");
                 }
             }
         }

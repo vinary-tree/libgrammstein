@@ -3919,7 +3919,6 @@ dependencies = [
  "arrayvec",
  "dyn-clone",
  "fast-slice-utils",
- "gxhash",
  "libz-ng-sys",
  "local-or-heap",
  "maybe-dangling",

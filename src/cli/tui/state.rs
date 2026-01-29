@@ -331,6 +331,11 @@ impl TuiState {
                 self.current_order = *order;
                 self.total_files = *total_files;
                 self.files_completed = 0;
+
+                // Initialize order_progress entry so display shows ACTIVE immediately
+                let progress = self.order_progress.entry(*order).or_default();
+                progress.total_files = *total_files;
+
                 self.add_log(
                     LogLevel::Info,
                     format!("Started order {} ({} files)", order, total_files),
@@ -875,6 +880,14 @@ impl TuiState {
             || self.recovering_prefixes_count > 0
     }
 
+    /// Compute total files completed across all orders.
+    ///
+    /// Derives from per-order progress data, ensuring consistency
+    /// with the Order Progress display.
+    pub fn total_files_completed(&self) -> u64 {
+        self.order_progress.values().map(|p| p.files_completed).sum()
+    }
+
     /// Get the display phase, inferring from state if PhaseChanged event was missed.
     ///
     /// This provides resilience against broadcast channel lagging by deriving
@@ -1128,5 +1141,51 @@ mod tests {
 
         // Should infer we're finalizing
         assert_eq!(state.display_phase(), "Finalizing...");
+    }
+
+    #[test]
+    fn test_total_files_completed_derives_from_order_progress() {
+        let mut state = TuiState::new("en", 1, 3, 4);
+
+        // Simulate OrderProgress events for multiple orders
+        state.order_progress.insert(1, OrderProgressState {
+            files_completed: 10,
+            total_files: 27,
+            is_complete: false,
+            files_succeeded: 8,
+            files_skipped: 2,
+            ngrams_processed: 1000,
+        });
+        state.order_progress.insert(2, OrderProgressState {
+            files_completed: 15,
+            total_files: 676,
+            is_complete: false,
+            files_succeeded: 15,
+            files_skipped: 0,
+            ngrams_processed: 5000,
+        });
+        state.order_progress.insert(3, OrderProgressState {
+            files_completed: 5,
+            total_files: 676,
+            is_complete: false,
+            files_succeeded: 5,
+            files_skipped: 0,
+            ngrams_processed: 2000,
+        });
+
+        // total_files_completed should sum across all orders
+        assert_eq!(state.total_files_completed(), 30); // 10 + 15 + 5
+
+        // Verify it matches what Order Progress bar would show
+        let sum: u64 = state.order_progress.values().map(|p| p.files_completed).sum();
+        assert_eq!(state.total_files_completed(), sum);
+    }
+
+    #[test]
+    fn test_total_files_completed_empty_when_no_orders() {
+        let state = TuiState::new("en", 1, 5, 4);
+
+        // No orders have started yet
+        assert_eq!(state.total_files_completed(), 0);
     }
 }

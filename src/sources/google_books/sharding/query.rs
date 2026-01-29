@@ -93,10 +93,13 @@ impl<'a> ShardedTrieView<'a> {
     fn prefix_search_shard(&self, key: &ShardKey, prefix: &str) -> Vec<(String, u64)> {
         if let Ok(shard) = self.coordinator.get_or_create_shard(key) {
             let guard = shard.read();
-            guard
-                .iter_with_counts()
-                .filter(|(ngram, _)| ngram.starts_with(prefix))
-                .collect()
+            match guard.iter_with_counts() {
+                Ok(iter) => iter.filter(|(ngram, _)| ngram.starts_with(prefix)).collect(),
+                Err(e) => {
+                    log::warn!("Failed to iterate shard {}: {}", key, e);
+                    Vec::new()
+                }
+            }
         } else {
             Vec::new()
         }
@@ -109,9 +112,16 @@ impl<'a> ShardedTrieView<'a> {
         for key in self.coordinator.open_shard_keys() {
             if let Ok(shard) = self.coordinator.get_or_create_shard(&key) {
                 let guard = shard.read();
-                for (ngram, count) in guard.iter_with_counts() {
-                    if ngram.starts_with(prefix) {
-                        results.insert(ngram, count);
+                match guard.iter_with_counts() {
+                    Ok(iter) => {
+                        for (ngram, count) in iter {
+                            if ngram.starts_with(prefix) {
+                                results.insert(ngram, count);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to iterate shard {}: {}", key, e);
                     }
                 }
             }
@@ -162,13 +172,20 @@ impl<'a> ShardedTrieView<'a> {
     /// # Returns
     ///
     /// An iterator over (n-gram, count) pairs. Order is not guaranteed.
+    /// Shards that fail to iterate are logged and skipped.
     pub fn iter_all(&self) -> impl Iterator<Item = (String, u64)> + '_ {
         let keys = self.coordinator.open_shard_keys();
 
         keys.into_iter().flat_map(move |key| {
             if let Ok(shard) = self.coordinator.get_or_create_shard(&key) {
                 let guard = shard.read();
-                guard.iter_with_counts().collect::<Vec<_>>()
+                match guard.iter_with_counts() {
+                    Ok(iter) => iter.collect::<Vec<_>>(),
+                    Err(e) => {
+                        log::warn!("Failed to iterate shard {}: {}", key, e);
+                        Vec::new()
+                    }
+                }
             } else {
                 Vec::new()
             }

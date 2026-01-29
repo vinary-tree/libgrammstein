@@ -88,8 +88,8 @@ pub struct GoogleBooksConfig {
     /// When enabled, n-grams are distributed across multiple trie instances
     /// based on prefix routing, eliminating lock contention for parallel imports.
     ///
-    /// Default: `ShardingMode::Auto` - automatically enables sharding for large
-    /// datasets (estimated >10M n-grams).
+    /// Default: `ShardingMode::Enabled` - sharding is always enabled to reduce
+    /// thread contention among parallel workers, regardless of dataset size.
     #[serde(default)]
     pub sharding: ShardingMode,
 }
@@ -114,9 +114,11 @@ pub enum ShardingMode {
 
 impl Default for ShardingMode {
     fn default() -> Self {
-        Self::Auto {
-            threshold: default_auto_threshold(),
-        }
+        // Always enable sharding by default.
+        // Sharding reduces thread contention among parallel workers writing to the ARTrie,
+        // regardless of dataset size. Even with small datasets, multiple workers benefit
+        // from having separate shards to write to concurrently.
+        Self::Enabled(ShardingOptions::default())
     }
 }
 
@@ -162,7 +164,7 @@ fn default_max_open_shards() -> usize {
 
 /// Sharding granularity for configuration.
 /// This wraps the internal ShardGranularity enum for serde compatibility.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum ShardingGranularity {
     /// 26 shards (a-z).
     FirstChar,
@@ -171,8 +173,37 @@ pub enum ShardingGranularity {
     TwoChar,
 
     /// Adaptive: 26 for 1-grams, 676 for 2-5 grams (matches Google Books).
-    #[default]
     Adaptive,
+
+    /// CPU-proportional sharding with consistent hashing.
+    ///
+    /// Creates `max(num_cpus * multiplier, minimum)` shards. This is the
+    /// recommended default as it balances parallelism with file count.
+    CpuProportional {
+        /// Multiplier for CPU count (default: 2).
+        #[serde(default = "default_cpu_multiplier")]
+        multiplier: usize,
+        /// Minimum number of shards (default: 8).
+        #[serde(default = "default_cpu_minimum")]
+        minimum: usize,
+    },
+}
+
+fn default_cpu_multiplier() -> usize {
+    2
+}
+
+fn default_cpu_minimum() -> usize {
+    8
+}
+
+impl Default for ShardingGranularity {
+    fn default() -> Self {
+        Self::CpuProportional {
+            multiplier: default_cpu_multiplier(),
+            minimum: default_cpu_minimum(),
+        }
+    }
 }
 
 impl From<ShardingGranularity> for ShardGranularity {
@@ -181,6 +212,9 @@ impl From<ShardingGranularity> for ShardGranularity {
             ShardingGranularity::FirstChar => ShardGranularity::FirstChar,
             ShardingGranularity::TwoChar => ShardGranularity::TwoChar,
             ShardingGranularity::Adaptive => ShardGranularity::Adaptive,
+            ShardingGranularity::CpuProportional { multiplier, minimum } => {
+                ShardGranularity::CpuProportional { multiplier, minimum }
+            }
         }
     }
 }

@@ -46,11 +46,13 @@
 //! ```
 
 mod entry;
+pub mod metadata_filtering_zipper;
 mod model;
 pub mod smoothing;
 mod trainer;
 mod trie;
 pub mod vocabulary;
+pub mod vocabulary_indexed;
 
 #[cfg(feature = "serde-extras")]
 pub mod accumulator;
@@ -67,6 +69,10 @@ pub use trie::{IterableDictionary, NgramTrie, NGRAM_SEPARATOR};
 pub use vocabulary::{
     decode_ngram_key, decode_varint, encode_ngram_key, encode_ngram_key_existing, encode_varint,
     ngram_order, try_encode_ngram_key, SharedVocabulary, VocabularyError, VocabularyResult,
+};
+pub use metadata_filtering_zipper::{MetadataFilteringZipper, METADATA_PREFIX};
+pub use vocabulary_indexed::{
+    decode_key_to_indices, VocabularyIndexedDictionary, VocabularyIndexedNode,
 };
 
 #[cfg(feature = "serde-extras")]

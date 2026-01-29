@@ -317,6 +317,11 @@ name = "grammstein"
 path = "src/bin/grammstein.rs"
 required-features = ["cli"]
 
+[[bin]]
+name = "compare_artries"
+path = "src/bin/compare_artries.rs"
+required-features = ["cli", "google-books"]
+
 [[bench]]
 name = "ngram_query"
 harness = false

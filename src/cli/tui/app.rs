@@ -424,7 +424,8 @@ impl ImportTui {
         // Stats table - create bindings for formatted strings to extend lifetimes
         let total_ngrams_str = format_count(self.state.total_ngrams);
         let unique_ngrams_str = format_count(self.state.unique_ngrams);
-        let files_completed_str = format!("{}", self.state.files_completed);
+        // Use derived total to stay in sync with Order Progress display
+        let files_completed_str = format!("{}", self.state.total_files_completed());
         let rate_str = format!("{:.0}/s", self.state.ngrams_per_second);
         let elapsed_str = format_duration(self.state.elapsed);
         let workers_str = format!("{}", self.state.parallel_downloads);
@@ -675,7 +676,8 @@ impl ImportTui {
             ]));
             lines.push(Line::from(vec![
                 Span::styled("  Files processed: ", Style::default().fg(Color::Cyan)),
-                Span::raw(format!("{}", self.state.files_completed)),
+                // Use derived total to stay in sync with Order Progress display
+                Span::raw(format!("{}", self.state.total_files_completed())),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("  Duration:        ", Style::default().fg(Color::Cyan)),

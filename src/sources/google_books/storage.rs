@@ -453,6 +453,34 @@ impl NgramStorage {
         }
     }
 
+    /// Sync the vocabulary WAL (if present).
+    pub fn sync_vocabulary(&self) -> StorageResult<()> {
+        let vocab = match self {
+            Self::SingleTrie { vocabulary, .. } => vocabulary,
+            Self::Sharded { vocabulary, .. } => vocabulary,
+        };
+        if let Some(v) = vocab {
+            v.sync().map_err(|e| {
+                StorageError::Trie(format!("Vocabulary sync failed: {}", e))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Checkpoint the vocabulary (if present).
+    pub fn checkpoint_vocabulary(&self) -> StorageResult<()> {
+        let vocab = match self {
+            Self::SingleTrie { vocabulary, .. } => vocabulary,
+            Self::Sharded { vocabulary, .. } => vocabulary,
+        };
+        if let Some(v) = vocab {
+            v.checkpoint().map_err(|e| {
+                StorageError::Trie(format!("Vocabulary checkpoint failed: {}", e))
+            })?;
+        }
+        Ok(())
+    }
+
     /// Close the storage (checkpoint and release resources).
     pub fn close(&self) -> StorageResult<()> {
         match self {
@@ -669,10 +697,14 @@ mod tests {
             SharedVocabulary::open_or_create(&vocab_path).expect("Failed to create vocabulary"),
         );
 
-        // Create sharded storage with vocabulary
+        // Create sharded storage with vocabulary using Adaptive granularity
+        // to test prefix-based routing behavior
         let config = GoogleBooksConfig {
             output_path: dir.path().join("output.artrie"),
-            sharding: ShardingMode::Enabled(super::super::config::ShardingOptions::default()),
+            sharding: ShardingMode::Enabled(super::super::config::ShardingOptions {
+                granularity: super::super::config::ShardingGranularity::Adaptive,
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
