@@ -386,6 +386,24 @@ impl GlobalCheckpoint {
             .collect()
     }
 
+    /// Get completed prefixes for a specific n-gram order.
+    ///
+    /// Returns all prefixes that have been marked complete in shards
+    /// associated with the given order. For order-specific sharding,
+    /// only shards with matching order are considered. For non-order
+    /// sharding (order = None), all shards contribute.
+    pub fn completed_prefixes_for_order(&self, order: u8) -> HashSet<String> {
+        self.shards
+            .values()
+            .filter(|r| {
+                // Include if shard has no order (contains all orders)
+                // or if shard order matches the requested order
+                r.order.is_none() || r.order == Some(order)
+            })
+            .flat_map(|r| r.completed_prefixes.iter().cloned())
+            .collect()
+    }
+
     /// Get shards that were in progress when checkpointed.
     pub fn in_progress_shards(&self) -> Vec<&ShardCheckpointRecord> {
         self.shards.values().filter(|r| r.is_in_progress()).collect()

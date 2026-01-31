@@ -1,4 +1,4 @@
-//! Persistent N-gram accumulator using liblevenshtein's DiskBackedCharTrieInner.
+//! Persistent N-gram accumulator using libdictenstein's PersistentARTrieChar.
 //!
 //! This module provides crash-safe N-gram counting for training with:
 //! - WAL-based durability (automatic crash recovery)
@@ -9,7 +9,7 @@
 //!
 //! The accumulator uses a three-tier persistence strategy:
 //!
-//! 1. **Hot State (DiskBackedCharTrieInner)**: WAL-based crash recovery during training
+//! 1. **Hot State (PersistentARTrieChar)**: WAL-based crash recovery during training
 //! 2. **Checkpoints (metadata)**: Periodic snapshots of training progress
 //! 3. **Final Model (PathMap)**: Convert to optimized inference structure
 //!
@@ -38,7 +38,7 @@
 //! }
 //! ```
 
-use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
+use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -64,7 +64,7 @@ pub type AccumulatorResult<T> = std::result::Result<T, AccumulatorError>;
 /// N-gram count accumulator using persistent ART with WAL.
 ///
 /// Provides atomic increment for frequency counting with crash recovery.
-/// The underlying DiskBackedCharTrieInner uses Write-Ahead Logging (WAL) for durability
+/// The underlying PersistentARTrieChar uses Write-Ahead Logging (WAL) for durability
 /// and automatic ARIES-style recovery on open.
 ///
 /// This uses the character-based trie variant for proper Unicode support in
@@ -77,7 +77,7 @@ pub type AccumulatorResult<T> = std::result::Result<T, AccumulatorError>;
 pub struct NgramAccumulator {
     /// Persistent ART-based trie with WAL (stores i64 for increment compatibility)
     /// Uses character-based trie for proper Unicode n-gram support.
-    trie: DiskBackedCharTrieInner<i64>,
+    trie: PersistentARTrieChar<i64>,
 
     /// File path for the trie
     path: PathBuf,
@@ -89,7 +89,7 @@ pub struct NgramAccumulator {
 impl NgramAccumulator {
     /// Create a new persistent accumulator.
     ///
-    /// Creates a new DiskBackedCharTrieInner at the specified path. If the path
+    /// Creates a new PersistentARTrieChar at the specified path. If the path
     /// already exists, it will be overwritten.
     ///
     /// # Arguments
@@ -100,7 +100,7 @@ impl NgramAccumulator {
     ///
     /// Returns an error if the file cannot be created or initialized.
     pub fn create(path: &Path) -> AccumulatorResult<Self> {
-        let trie = DiskBackedCharTrieInner::create(path).map_err(|e| {
+        let trie = PersistentARTrieChar::create(path).map_err(|e| {
             AccumulatorError::Dictionary(format!("Failed to create persistent trie: {}", e))
         })?;
 
@@ -113,7 +113,7 @@ impl NgramAccumulator {
 
     /// Open an existing accumulator with automatic crash recovery.
     ///
-    /// Opens an existing DiskBackedCharTrieInner with automatic corruption detection
+    /// Opens an existing PersistentARTrieChar with automatic corruption detection
     /// and recovery from WAL archive segments. If corruption is detected,
     /// the trie is rebuilt from archived WAL segments.
     ///
@@ -135,7 +135,7 @@ impl NgramAccumulator {
     /// - Corruption is detected but no WAL archive segments exist
     /// - Recovery fails
     pub fn open(path: &Path) -> AccumulatorResult<Self> {
-        let (trie, report) = DiskBackedCharTrieInner::open_with_recovery(path).map_err(|e| {
+        let (trie, report) = PersistentARTrieChar::open_with_recovery(path).map_err(|e| {
             AccumulatorError::Dictionary(format!("Failed to open/recover persistent trie: {}", e))
         })?;
 
@@ -149,8 +149,8 @@ impl NgramAccumulator {
             );
         }
 
-        // Get current count (len is a direct field access)
-        let count = trie.len;
+        // Get current count
+        let count = trie.len();
 
         Ok(Self {
             trie,
@@ -226,7 +226,8 @@ impl NgramAccumulator {
     ///
     /// Returns an error if the sync operation fails.
     pub fn sync(&mut self) -> AccumulatorResult<()> {
-        self.trie.sync().map_err(|e| {
+        // PersistentARTrieChar uses checkpoint() for durability
+        self.trie.checkpoint().map_err(|e| {
             AccumulatorError::Dictionary(format!("Failed to sync WAL: {}", e))
         })
     }
@@ -290,9 +291,9 @@ impl NgramAccumulator {
 
     /// Get the exact count of unique n-grams.
     ///
-    /// This directly accesses the trie's length field.
+    /// This directly accesses the trie's length method.
     pub fn exact_len(&self) -> usize {
-        self.trie.len
+        self.trie.len()
     }
 }
 

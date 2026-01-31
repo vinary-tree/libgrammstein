@@ -10,89 +10,15 @@
 use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
 
-use liblevenshtein::dictionary::persistent_artrie_char::dict_impl_char::{
-    CharTrieNodeInner, CharTrieRoot,
-};
-use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
+use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
 use pathmap::paths_serialization::{serialize_paths_with_auxdata, for_each_deserialized_path};
 use pathmap::PathMap;
 
-/// Recursively traverse the trie and collect all entries.
-///
-/// # Arguments
-///
-/// * `node` - Current trie node being traversed
-/// * `prefix` - Current string prefix built during traversal
-/// * `entries` - Output vector to collect (key, value) pairs
-/// * `entries_count` - Counter for entries processed
-fn collect_entries_recursive(
-    node: &CharTrieNodeInner<u64>,
-    prefix: &mut String,
-    entries: &mut Vec<(String, u64)>,
-    entries_count: &mut u64,
-) {
-    // Check if this node represents a complete term
-    if node.is_final() {
-        // Skip MKN metadata entries (they start with \x00)
-        if !prefix.starts_with('\x00') {
-            if let Some(count) = node.value.as_ref() {
-                entries.push((prefix.clone(), *count));
-                *entries_count += 1;
-            }
-        }
-    }
-
-    // Recursively traverse children
-    for (c, child) in node.iter_children() {
-        prefix.push(c);
-        collect_entries_recursive(child, prefix, entries, entries_count);
-        prefix.pop();
-    }
-}
-
-/// Recursively traverse the trie with progress reporting.
-fn collect_entries_with_progress<F>(
-    node: &CharTrieNodeInner<u64>,
-    prefix: &mut String,
-    entries: &mut Vec<(String, u64)>,
-    entries_count: &mut u64,
-    progress_callback: &mut F,
-    last_progress: &mut u64,
-    start_time: std::time::Instant,
-) where
-    F: FnMut(TranslationProgress),
-{
-    // Check if this node represents a complete term
-    if node.is_final() {
-        // Skip MKN metadata entries (they start with \x00)
-        if !prefix.starts_with('\x00') {
-            if let Some(count) = node.value.as_ref() {
-                entries.push((prefix.clone(), *count));
-                *entries_count += 1;
-
-                // Report progress every 100k entries
-                if *entries_count - *last_progress >= 100_000 {
-                    *last_progress = *entries_count;
-                    progress_callback(TranslationProgress {
-                        phase: TranslationPhase::Iterating,
-                        entries_processed: *entries_count,
-                        entries_total: None,
-                        bytes_written: 0,
-                        elapsed_seconds: start_time.elapsed().as_secs_f64(),
-                    });
-                }
-            }
-        }
-    }
-
-    // Recursively traverse children
-    for (c, child) in node.iter_children() {
-        prefix.push(c);
-        collect_entries_with_progress(
-            child, prefix, entries, entries_count, progress_callback, last_progress, start_time,
-        );
-        prefix.pop();
-    }
+/// Check if an entry should be included (filters out metadata).
+#[inline]
+fn is_valid_entry(key: &str) -> bool {
+    // Skip MKN metadata entries (they start with \x00)
+    !key.starts_with('\x00')
 }
 
 /// Statistics from PathMap translation.
@@ -205,22 +131,20 @@ impl PathMapTranslator {
         );
 
         // Open the disk-backed trie
-        let trie: DiskBackedCharTrieInner<u64> = DiskBackedCharTrieInner::open(artrie_path)
+        let trie: PersistentARTrieChar<u64> = PersistentARTrieChar::open(artrie_path)
             .map_err(|e| TranslationError::Io(std::io::Error::other(format!(
                 "Failed to open trie: {}", e
             ))))?;
 
-        // Collect all entries by traversing the trie
-        let mut entries = Vec::new();
+        // Collect all entries using iter_with_values
+        let mut entries: Vec<(String, u64)> = Vec::new();
         let mut entries_count = 0u64;
 
-        match &trie.root {
-            CharTrieRoot::Empty => {
-                return Err(TranslationError::EmptySource);
-            }
-            CharTrieRoot::Node(root_node) => {
-                let mut prefix = String::new();
-                collect_entries_recursive(root_node, &mut prefix, &mut entries, &mut entries_count);
+        for (key, value) in trie.iter_with_values() {
+            // Skip MKN metadata entries (they start with \x00)
+            if is_valid_entry(&key) {
+                entries.push((key, value));
+                entries_count += 1;
             }
         }
 
@@ -344,31 +268,33 @@ impl PathMapTranslator {
         );
 
         // Open the disk-backed trie
-        let trie: DiskBackedCharTrieInner<u64> = DiskBackedCharTrieInner::open(artrie_path)
+        let trie: PersistentARTrieChar<u64> = PersistentARTrieChar::open(artrie_path)
             .map_err(|e| TranslationError::Io(std::io::Error::other(format!(
                 "Failed to open trie: {}", e
             ))))?;
 
         // Phase 2: Iterating - collect all entries with progress
-        let mut entries = Vec::new();
+        let mut entries: Vec<(String, u64)> = Vec::new();
         let mut entries_count = 0u64;
         let mut last_progress = 0u64;
 
-        match &trie.root {
-            CharTrieRoot::Empty => {
-                return Err(TranslationError::EmptySource);
-            }
-            CharTrieRoot::Node(root_node) => {
-                let mut prefix = String::new();
-                collect_entries_with_progress(
-                    root_node,
-                    &mut prefix,
-                    &mut entries,
-                    &mut entries_count,
-                    &mut progress,
-                    &mut last_progress,
-                    start,
-                );
+        for (key, value) in trie.iter_with_values() {
+            // Skip MKN metadata entries (they start with \x00)
+            if is_valid_entry(&key) {
+                entries.push((key, value));
+                entries_count += 1;
+
+                // Report progress every 100k entries
+                if entries_count - last_progress >= 100_000 {
+                    last_progress = entries_count;
+                    progress(TranslationProgress {
+                        phase: TranslationPhase::Iterating,
+                        entries_processed: entries_count,
+                        entries_total: None,
+                        bytes_written: 0,
+                        elapsed_seconds: start.elapsed().as_secs_f64(),
+                    });
+                }
             }
         }
 
@@ -508,7 +434,7 @@ impl PathMapTranslator {
         );
 
         // Open the source ARTrie and collect all entries
-        let trie: DiskBackedCharTrieInner<u64> = DiskBackedCharTrieInner::open(artrie_path)
+        let trie: PersistentARTrieChar<u64> = PersistentARTrieChar::open(artrie_path)
             .map_err(|e| TranslationError::Io(std::io::Error::other(format!(
                 "Failed to open trie: {}", e
             ))))?;
@@ -517,19 +443,9 @@ impl PathMapTranslator {
         let mut source_entries: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
 
-        match &trie.root {
-            CharTrieRoot::Empty => {
-                return Err(TranslationError::EmptySource);
-            }
-            CharTrieRoot::Node(root_node) => {
-                let mut prefix = String::new();
-                let mut entries = Vec::new();
-                let mut entries_count = 0u64;
-                collect_entries_recursive(root_node, &mut prefix, &mut entries, &mut entries_count);
-
-                for (key, value) in entries {
-                    source_entries.insert(key, value);
-                }
+        for (key, value) in trie.iter_with_values() {
+            if is_valid_entry(&key) {
+                source_entries.insert(key, value);
             }
         }
 
@@ -710,5 +626,17 @@ mod tests {
 
         assert!(result.verified);
         assert_eq!(result.mismatches, 0);
+    }
+
+    #[test]
+    fn test_is_valid_entry() {
+        // Valid entries
+        assert!(is_valid_entry("hello"));
+        assert!(is_valid_entry("the quick brown"));
+        assert!(is_valid_entry("café"));
+
+        // Invalid: metadata entries
+        assert!(!is_valid_entry("\x00metadata"));
+        assert!(!is_valid_entry("\x00__checkpoint__"));
     }
 }

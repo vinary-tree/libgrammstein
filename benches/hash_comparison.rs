@@ -28,10 +28,12 @@ fn load_vocabulary_words() -> Vec<String> {
     }
 
     let vocab = SharedVocabulary::open(vocab_path).expect("Failed to open vocabulary");
-    let reverse_cache = vocab.build_reverse_cache();
 
-    // Collect all words from the vocabulary
-    reverse_cache.into_values().collect()
+    // Use O(1) get_term() lookups to collect all words
+    let count = vocab.len();
+    (1..=count)
+        .filter_map(|i| vocab.get_term(i))
+        .collect()
 }
 
 fn generate_synthetic_words(count: usize) -> Vec<String> {

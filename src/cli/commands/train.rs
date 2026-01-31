@@ -1133,19 +1133,31 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
             };
 
             if user_cancelled {
-                // User pressed Q - abort the import task immediately
-                log::info!("User cancelled, aborting import task...");
-                import_handle.abort();
+                // User pressed Q - wait for import to finish gracefully
+                // (The import task will call save_checkpoint() when it sees cancelled=true)
+                log::info!("User cancelled, waiting for checkpoint to complete...");
 
-                // Brief wait for cleanup (with timeout)
-                let _ = runtime.block_on(async {
+                // Wait for import to finish normally (with generous timeout)
+                let import_result = runtime.block_on(async {
                     tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
+                        std::time::Duration::from_secs(60), // 60 seconds for checkpoint
                         import_handle
                     ).await
                 });
 
-                log::info!("Import cancelled by user");
+                match import_result {
+                    Ok(Ok(Ok(_))) => log::info!("Import cancelled and checkpoint saved"),
+                    Ok(Ok(Err(e))) => {
+                        // Import error (e.g., Interrupted) - checkpoint was saved
+                        log::info!("Import stopped: {} (checkpoint saved)", e);
+                    }
+                    Ok(Err(e)) => log::error!("Import task panicked: {}", e),
+                    Err(_) => {
+                        log::warn!("Checkpoint timeout - import task may not have saved progress");
+                        // Note: import_handle is consumed by the timeout, cannot abort
+                    }
+                }
+
                 return Ok(());
             }
 

@@ -731,7 +731,7 @@ pub enum CheckpointError {
 // Trie-based Checkpoint Storage
 // =============================================================================
 //
-// Since DiskBackedCharTrieInner<u64> stores u64 values (not byte arrays),
+// Since PersistentARTrieChar<u64> stores u64 values (not byte arrays),
 // we use a key-based storage approach where each piece of checkpoint data
 // becomes its own key with a u64 value encoding status or count.
 //

@@ -9,133 +9,15 @@
 use std::io::Write;
 use std::path::Path;
 
-use liblevenshtein::dictionary::double_array_trie_char::DoubleArrayTrieChar;
-use liblevenshtein::dictionary::persistent_artrie_char::dict_impl_char::{
-    CharTrieNodeInner, CharTrieRoot,
-};
-use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
+use libdictenstein::double_array_trie_char::DoubleArrayTrieChar;
+use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
 
-/// Recursively traverse the trie and collect unigrams (single words without spaces).
+/// Check if a term is a unigram (single word without whitespace).
 ///
-/// # Arguments
-///
-/// * `node` - Current trie node being traversed
-/// * `prefix` - Current string prefix built during traversal
-/// * `min_count` - Minimum frequency threshold for inclusion
-/// * `words` - Output vector to collect matching words
-/// * `total_unigrams` - Counter for total 1-grams examined
-/// * `filtered_count` - Counter for 1-grams filtered by threshold
-fn collect_unigrams_recursive(
-    node: &CharTrieNodeInner<u64>,
-    prefix: &mut String,
-    min_count: u64,
-    words: &mut Vec<String>,
-    total_unigrams: &mut u64,
-    filtered_count: &mut u64,
-) {
-    // Check if this node represents a complete term
-    if node.is_final() {
-        // Check if this is a unigram (no whitespace = single word)
-        // Also skip MKN metadata entries (they start with \x00)
-        if !prefix.starts_with('\x00') && !prefix.contains(char::is_whitespace) {
-            *total_unigrams += 1;
-
-            // Get the count value stored at this node
-            if let Some(count) = node.value.as_ref() {
-                if *count >= min_count {
-                    words.push(prefix.clone());
-                } else {
-                    *filtered_count += 1;
-                }
-            } else {
-                // If no count value, skip
-                *filtered_count += 1;
-            }
-        }
-    }
-
-    // Recursively traverse children
-    for (c, child) in node.iter_children() {
-        prefix.push(c);
-        collect_unigrams_recursive(child, prefix, min_count, words, total_unigrams, filtered_count);
-        prefix.pop();
-    }
-}
-
-/// Recursively traverse the trie and collect unigrams with progress reporting.
-///
-/// # Arguments
-///
-/// * `node` - Current trie node being traversed
-/// * `prefix` - Current string prefix built during traversal
-/// * `min_count` - Minimum frequency threshold for inclusion
-/// * `words` - Output vector to collect matching words
-/// * `total_unigrams` - Counter for total 1-grams examined
-/// * `filtered_count` - Counter for 1-grams filtered by threshold
-/// * `progress_callback` - Called periodically with progress updates
-/// * `last_progress` - Tracks when we last called the progress callback
-fn collect_unigrams_with_progress<F>(
-    node: &CharTrieNodeInner<u64>,
-    prefix: &mut String,
-    min_count: u64,
-    words: &mut Vec<String>,
-    total_unigrams: &mut u64,
-    filtered_count: &mut u64,
-    progress_callback: &mut F,
-    last_progress: &mut u64,
-    start_time: std::time::Instant,
-) where
-    F: FnMut(ExtractionProgress),
-{
-    // Check if this node represents a complete term
-    if node.is_final() {
-        // Check if this is a unigram (no whitespace = single word)
-        // Also skip MKN metadata entries (they start with \x00)
-        if !prefix.starts_with('\x00') && !prefix.contains(char::is_whitespace) {
-            *total_unigrams += 1;
-
-            // Get the count value stored at this node
-            if let Some(count) = node.value.as_ref() {
-                if *count >= min_count {
-                    words.push(prefix.clone());
-                } else {
-                    *filtered_count += 1;
-                }
-            } else {
-                *filtered_count += 1;
-            }
-
-            // Report progress every 100k words
-            if *total_unigrams - *last_progress >= 100_000 {
-                *last_progress = *total_unigrams;
-                progress_callback(ExtractionProgress {
-                    phase: ExtractionPhase::Filtering,
-                    items_processed: *total_unigrams,
-                    items_total: None,
-                    items_accepted: words.len() as u64,
-                    elapsed_seconds: start_time.elapsed().as_secs_f64(),
-                    words_processed: *total_unigrams,
-                });
-            }
-        }
-    }
-
-    // Recursively traverse children
-    for (c, child) in node.iter_children() {
-        prefix.push(c);
-        collect_unigrams_with_progress(
-            child,
-            prefix,
-            min_count,
-            words,
-            total_unigrams,
-            filtered_count,
-            progress_callback,
-            last_progress,
-            start_time,
-        );
-        prefix.pop();
-    }
+/// Also filters out MKN metadata entries (they start with \x00).
+#[inline]
+fn is_unigram(term: &str) -> bool {
+    !term.starts_with('\x00') && !term.contains(char::is_whitespace)
 }
 
 /// Statistics from dictionary extraction.
@@ -255,30 +137,27 @@ impl DictionaryExtractor {
         );
 
         // Open the disk-backed trie
-        let trie: DiskBackedCharTrieInner<u64> = DiskBackedCharTrieInner::open(model_path)
+        let trie: PersistentARTrieChar<u64> = PersistentARTrieChar::open(model_path)
             .map_err(|e| ExtractionError::Io(std::io::Error::other(format!(
                 "Failed to open trie: {}", e
             ))))?;
 
-        // Collect unigrams by traversing the trie
+        // Collect unigrams using the public iteration API
         let mut words = Vec::new();
         let mut total_unigrams = 0u64;
         let mut filtered_unigrams = 0u64;
 
-        match &trie.root {
-            CharTrieRoot::Empty => {
-                log::warn!("Trie is empty, no words to extract");
-            }
-            CharTrieRoot::Node(root_node) => {
-                let mut prefix = String::new();
-                collect_unigrams_recursive(
-                    root_node,
-                    &mut prefix,
-                    min_count,
-                    &mut words,
-                    &mut total_unigrams,
-                    &mut filtered_unigrams,
-                );
+        // Use iter_with_values to iterate all entries
+        for (term, count) in trie.iter_with_values() {
+            // Check if this is a unigram (no whitespace = single word)
+            if is_unigram(&term) {
+                total_unigrams += 1;
+
+                if count >= min_count {
+                    words.push(term);
+                } else {
+                    filtered_unigrams += 1;
+                }
             }
         }
 
@@ -411,34 +290,41 @@ impl DictionaryExtractor {
         });
 
         // Open the disk-backed trie
-        let trie: DiskBackedCharTrieInner<u64> = DiskBackedCharTrieInner::open(model_path)
+        let trie: PersistentARTrieChar<u64> = PersistentARTrieChar::open(model_path)
             .map_err(|e| ExtractionError::Io(std::io::Error::other(format!(
                 "Failed to open trie: {}", e
             ))))?;
 
-        // Phase 2: Filtering - traverse trie and collect unigrams with progress
+        // Phase 2: Filtering - iterate trie and collect unigrams with progress
         let mut words = Vec::new();
         let mut total_unigrams = 0u64;
         let mut filtered_unigrams = 0u64;
         let mut last_progress = 0u64;
 
-        match &trie.root {
-            CharTrieRoot::Empty => {
-                log::warn!("Trie is empty, no words to extract");
-            }
-            CharTrieRoot::Node(root_node) => {
-                let mut prefix = String::new();
-                collect_unigrams_with_progress(
-                    root_node,
-                    &mut prefix,
-                    min_count,
-                    &mut words,
-                    &mut total_unigrams,
-                    &mut filtered_unigrams,
-                    &mut progress,
-                    &mut last_progress,
-                    start,
-                );
+        // Use iter_with_values to iterate all entries
+        for (term, count) in trie.iter_with_values() {
+            // Check if this is a unigram (no whitespace = single word)
+            if is_unigram(&term) {
+                total_unigrams += 1;
+
+                if count >= min_count {
+                    words.push(term);
+                } else {
+                    filtered_unigrams += 1;
+                }
+
+                // Report progress every 100k words
+                if total_unigrams - last_progress >= 100_000 {
+                    last_progress = total_unigrams;
+                    progress(ExtractionProgress {
+                        phase: ExtractionPhase::Filtering,
+                        items_processed: total_unigrams,
+                        items_total: None,
+                        items_accepted: words.len() as u64,
+                        elapsed_seconds: start.elapsed().as_secs_f64(),
+                        words_processed: total_unigrams,
+                    });
+                }
             }
         }
 
@@ -567,7 +453,6 @@ pub enum ExtractionPhase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
 
     #[test]
     fn test_extraction_stats_default() {
@@ -596,5 +481,21 @@ mod tests {
         assert_eq!(progress.phase, ExtractionPhase::Filtering);
         assert_eq!(progress.items_processed, 1000);
         assert_eq!(progress.items_accepted, 500);
+    }
+
+    #[test]
+    fn test_is_unigram() {
+        // Valid unigrams
+        assert!(is_unigram("hello"));
+        assert!(is_unigram("world123"));
+        assert!(is_unigram("café"));
+
+        // Invalid: contains whitespace (n-grams)
+        assert!(!is_unigram("hello world"));
+        assert!(!is_unigram("the quick"));
+
+        // Invalid: metadata entries
+        assert!(!is_unigram("\x00metadata"));
+        assert!(!is_unigram("\x00__checkpoint__"));
     }
 }

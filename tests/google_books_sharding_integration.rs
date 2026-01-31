@@ -14,7 +14,7 @@ use libgrammstein::sources::google_books::sharding::{
     MergeCoordinator, MknAggregator, ShardConfig, ShardCoordinator, ShardGranularity,
     ShardedTrieView,
 };
-use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
+use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
 use tempfile::TempDir;
 
 /// Create a test coordinator with sample data.
@@ -126,7 +126,7 @@ fn test_full_workflow() {
 
     // 8. Verify merged trie
     let (merged, _) =
-        DiskBackedCharTrieInner::<u64>::open_with_recovery(&output_path).expect("Failed to open");
+        PersistentARTrieChar::<u64>::open_with_recovery(&output_path).expect("Failed to open");
     assert_eq!(merged.get("the").map(|v| *v), Some(1_000_000));
     assert_eq!(merged.get("the|quick").map(|v| *v), Some(50_000));
 }
@@ -282,7 +282,7 @@ fn test_merge_preserves_counts() {
         .expect("Failed to merge");
 
     let (merged, _) =
-        DiskBackedCharTrieInner::<u64>::open_with_recovery(&output_path).expect("Failed to open");
+        PersistentARTrieChar::<u64>::open_with_recovery(&output_path).expect("Failed to open");
 
     // Verify all counts are preserved
     assert_eq!(merged.get("the").map(|v| *v), Some(1_000_000));

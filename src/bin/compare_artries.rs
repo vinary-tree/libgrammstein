@@ -1,23 +1,40 @@
 //! Compare two artrie files to verify n-gram content equivalence.
 //!
-//! This tool decodes n-gram keys from two artrie files using their respective
-//! vocabularies and compares them for equality. It verifies that sharded and
-//! non-sharded imports produce identical results.
+//! This tool compares vocabularies and n-gram tries using true on-disk streaming
+//! iteration. It does NOT load entire tries into memory, instead processing one
+//! entry at a time to enable comparison of arbitrarily large tries.
+//!
+//! # Comparison Strategy
+//!
+//! 1. **Vocabulary comparison**: Finds terms that exist in only one vocabulary
+//! 2. **N-gram comparison**: Bidirectional streaming comparison
+//!    - Forward pass: For each entry in trie1, decode → re-encode → lookup in trie2
+//!    - Reverse pass: For each entry in trie2, check existence in trie1
+//!
+//! # Memory Efficiency
+//!
+//! - O(1) memory per entry during iteration
+//! - O(k) memory for single n-gram decoding (k = ngram order, typically ≤5)
+//! - Vocabulary reverse Vec in memory (~100MB for 10M words)
+//! - Buffer pool cache: 64MB (configurable by libdictenstein)
 //!
 //! # Usage
 //!
 //! ```bash
 //! cargo run --bin compare_artries --features cli,google-books -- \
-//!     --trie1 bak-non-sharded/english.artrie \
-//!     --vocab1 bak-non-sharded/english.vocab.artrie \
-//!     --trie2 english.artrie \
-//!     --vocab2 english.vocab.artrie
+//!     --trie1 bak-sharded-e2e/english.artrie \
+//!     --vocab1 bak-sharded-e2e/english.vocab.artrie \
+//!     --trie2 bak-sharded-e2e-2/english.artrie \
+//!     --vocab2 bak-sharded-e2e-2/english.vocab.artrie \
+//!     --max-mismatches 100
 //! ```
 
 use clap::Parser;
-use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
-use libgrammstein::ngram::vocabulary::decode_ngram_key;
-use std::collections::{BTreeMap, HashMap};
+use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
+use libgrammstein::ngram::vocabulary::{
+    decode_ngram_key, encode_ngram_key_existing, SharedVocabulary,
+};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -44,9 +61,67 @@ struct Args {
     #[arg(long, default_value = "100")]
     max_mismatches: usize,
 
-    /// Show progress during extraction
+    /// Show progress during comparison
     #[arg(long, short = 'v')]
     verbose: bool,
+}
+
+/// Result of vocabulary comparison.
+#[derive(Default)]
+struct VocabComparisonResult {
+    /// Terms that exist only in vocabulary 1.
+    only_in_1: Vec<String>,
+    /// Terms that exist only in vocabulary 2.
+    only_in_2: Vec<String>,
+    /// Total terms in vocabulary 1.
+    vocab1_count: u64,
+    /// Total terms in vocabulary 2.
+    vocab2_count: u64,
+}
+
+/// A count mismatch between tries.
+struct CountMismatch {
+    /// The n-gram as a vector of words.
+    ngram: Vec<String>,
+    /// Count in trie 1.
+    count1: u64,
+    /// Count in trie 2.
+    count2: u64,
+}
+
+/// An entry missing from one trie.
+struct MissingEntry {
+    /// The n-gram as a vector of words.
+    ngram: Vec<String>,
+    /// Count in the trie that has it.
+    count: u64,
+}
+
+/// Result of n-gram comparison.
+#[derive(Default)]
+struct NgramComparisonResult {
+    /// Number of entries in trie 1.
+    trie1_count: u64,
+    /// Number of entries in trie 2.
+    trie2_count: u64,
+    /// Number of entries that failed to decode in trie 1.
+    decode_failures_1: u64,
+    /// Number of entries that failed to decode in trie 2.
+    decode_failures_2: u64,
+    /// Entries with different counts between tries.
+    count_mismatches: Vec<CountMismatch>,
+    /// Entries in trie 2 but missing in trie 1.
+    missing_in_1: Vec<MissingEntry>,
+    /// Entries in trie 1 but missing in trie 2.
+    missing_in_2: Vec<MissingEntry>,
+    /// Whether the comparison was truncated due to max_mismatches.
+    truncated: bool,
+}
+
+impl NgramComparisonResult {
+    fn total_errors(&self) -> usize {
+        self.count_mismatches.len() + self.missing_in_1.len() + self.missing_in_2.len()
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -57,214 +132,374 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
 
-    // Load vocabularies directly as tries and build reverse caches
+    // Load vocabularies using SharedVocabulary for O(1) reverse lookups
     println!("Loading vocabulary 1: {:?}", args.vocab1);
-    let vocab1_trie = DiskBackedCharTrieInner::<u64>::open(&args.vocab1)?;
-    let reverse1 = build_reverse_vocab(&vocab1_trie)?;
-    println!("  {} terms in vocabulary 1", reverse1.len());
+    let vocab1 = SharedVocabulary::open(&args.vocab1)?;
+    println!("  {} terms in vocabulary 1", vocab1.len());
 
     println!("Loading vocabulary 2: {:?}", args.vocab2);
-    let vocab2_trie = DiskBackedCharTrieInner::<u64>::open(&args.vocab2)?;
-    let reverse2 = build_reverse_vocab(&vocab2_trie)?;
-    println!("  {} terms in vocabulary 2", reverse2.len());
+    let vocab2 = SharedVocabulary::open(&args.vocab2)?;
+    println!("  {} terms in vocabulary 2", vocab2.len());
 
-    // Load n-gram tries
-    println!("Loading trie 1: {:?}", args.trie1);
-    let trie1 = DiskBackedCharTrieInner::<u64>::open(&args.trie1)?;
-    println!("  Trie 1 opened successfully, len = {}", trie1.len);
+    // Compare vocabularies
+    println!("\nComparing vocabularies...");
+    let vocab_result = compare_vocabularies(&vocab1, &vocab2, args.verbose)?;
+    print_vocab_results(&vocab_result);
+
+    // Load n-gram tries (lazy loading - only root loaded initially)
+    println!("\nLoading trie 1: {:?}", args.trie1);
+    let trie1 = PersistentARTrieChar::<u64>::open(&args.trie1)?;
+    println!("  Trie 1 opened successfully");
 
     println!("Loading trie 2: {:?}", args.trie2);
-    let trie2 = DiskBackedCharTrieInner::<u64>::open(&args.trie2)?;
-    println!("  Trie 2 opened successfully, len = {}", trie2.len);
+    let trie2 = PersistentARTrieChar::<u64>::open(&args.trie2)?;
+    println!("  Trie 2 opened successfully");
 
-    // Extract entries (filtering metadata)
-    println!("Extracting entries from trie 1...");
-    let entries1 = extract_entries(&trie1)?;
-    println!("  Found {} entries", entries1.len());
+    // Compare n-grams using streaming iteration
+    println!("\nComparing n-grams (streaming)...");
+    let ngram_result = compare_ngrams_streaming(
+        &trie1,
+        &vocab1,
+        &trie2,
+        &vocab2,
+        args.max_mismatches,
+        args.verbose,
+    )?;
 
-    println!("Extracting entries from trie 2...");
-    let entries2 = extract_entries(&trie2)?;
-    println!("  Found {} entries", entries2.len());
+    // Print results
+    print_ngram_results(&ngram_result, args.max_mismatches);
 
-    // Decode entries to word-based representation for comparison
-    println!("Decoding entries from trie 1...");
-    let decoded1 = decode_entries(&entries1, &reverse1, args.verbose);
-    println!("  Decoded {} entries", decoded1.len());
+    // Determine exit code
+    let has_vocab_errors = !vocab_result.only_in_1.is_empty() || !vocab_result.only_in_2.is_empty();
+    let has_ngram_errors = !ngram_result.count_mismatches.is_empty()
+        || !ngram_result.missing_in_1.is_empty()
+        || !ngram_result.missing_in_2.is_empty();
 
-    println!("Decoding entries from trie 2...");
-    let decoded2 = decode_entries(&entries2, &reverse2, args.verbose);
-    println!("  Decoded {} entries", decoded2.len());
+    if has_vocab_errors || has_ngram_errors {
+        let total_errors = vocab_result.only_in_1.len()
+            + vocab_result.only_in_2.len()
+            + ngram_result.total_errors();
+        println!("\nFAILED: {} total differences found", total_errors);
+        std::process::exit(1);
+    } else {
+        println!("\nPASS: All vocabularies and n-grams match!");
+        Ok(())
+    }
+}
 
-    println!(
-        "\nComparing {} vs {} decoded entries...",
-        decoded1.len(),
-        decoded2.len()
-    );
+/// Compare vocabularies to find terms that exist in only one.
+fn compare_vocabularies(
+    vocab1: &SharedVocabulary,
+    vocab2: &SharedVocabulary,
+    verbose: bool,
+) -> Result<VocabComparisonResult, Box<dyn std::error::Error>> {
+    let mut result = VocabComparisonResult::default();
 
-    // Compare the decoded maps
-    let mut mismatches = 0;
-    let mut missing_in_2 = 0;
-    let mut missing_in_1 = 0;
-    let mut count_mismatches = 0;
-    let max_to_show = if args.max_mismatches == 0 {
+    // Get all terms from vocab1 using iter_terms()
+    let mut terms1 = HashSet::new();
+    for (term, _index) in vocab1.iter_terms() {
+        result.vocab1_count += 1;
+        terms1.insert(term);
+    }
+
+    // Get all terms from vocab2 using iter_terms()
+    let mut terms2 = HashSet::new();
+    for (term, _index) in vocab2.iter_terms() {
+        result.vocab2_count += 1;
+        terms2.insert(term);
+    }
+
+    // Find symmetric difference
+    for term in &terms1 {
+        if !terms2.contains(term) {
+            result.only_in_1.push(term.clone());
+        }
+    }
+
+    for term in &terms2 {
+        if !terms1.contains(term) {
+            result.only_in_2.push(term.clone());
+        }
+    }
+
+    // Sort for consistent output
+    result.only_in_1.sort();
+    result.only_in_2.sort();
+
+    if verbose {
+        println!(
+            "  Vocab 1: {} terms, Vocab 2: {} terms",
+            result.vocab1_count, result.vocab2_count
+        );
+        println!(
+            "  Only in vocab 1: {}, Only in vocab 2: {}",
+            result.only_in_1.len(),
+            result.only_in_2.len()
+        );
+    }
+
+    Ok(result)
+}
+
+/// Compare n-grams using streaming iteration (one entry at a time).
+fn compare_ngrams_streaming(
+    trie1: &PersistentARTrieChar<u64>,
+    vocab1: &SharedVocabulary,
+    trie2: &PersistentARTrieChar<u64>,
+    vocab2: &SharedVocabulary,
+    max_mismatches: usize,
+    verbose: bool,
+) -> Result<NgramComparisonResult, Box<dyn std::error::Error>> {
+    let mut result = NgramComparisonResult::default();
+    let max_to_track = if max_mismatches == 0 {
         usize::MAX
     } else {
-        args.max_mismatches
+        max_mismatches
     };
 
-    // Check entries in 1 but not in 2
-    for (words, count1) in &decoded1 {
-        if let Some(count2) = decoded2.get(words) {
-            if count1 != count2 {
-                count_mismatches += 1;
-                if mismatches < max_to_show {
-                    println!(
-                        "COUNT MISMATCH: {:?} has {} vs {}",
-                        words_to_string(words),
-                        count1,
-                        count2
-                    );
-                }
-                mismatches += 1;
-            }
-        } else {
-            missing_in_2 += 1;
-            if mismatches < max_to_show {
-                println!(
-                    "MISSING in trie2: {:?} (count={})",
-                    words_to_string(words),
-                    count1
-                );
-            }
-            mismatches += 1;
-        }
+    // Forward pass: trie1 → trie2
+    if verbose {
+        println!("  Forward pass: checking trie1 entries against trie2...");
     }
 
-    // Check entries in 2 but not in 1
-    for (words, count2) in &decoded2 {
-        if !decoded1.contains_key(words) {
-            missing_in_1 += 1;
-            if mismatches < max_to_show {
-                println!(
-                    "MISSING in trie1: {:?} (count={})",
-                    words_to_string(words),
-                    count2
-                );
-            }
-            mismatches += 1;
+    if let Some(entries) = trie1.iter_prefix_with_values("")? {
+    for (key1, value1) in entries {
+        // Skip metadata
+        if key1.starts_with('\x00') {
+            continue;
         }
-    }
+        result.trie1_count += 1;
 
-    // Summary
-    println!("\n=== SUMMARY ===");
-    println!("Trie 1 entries (raw): {}", entries1.len());
-    println!("Trie 2 entries (raw): {}", entries2.len());
-    println!("Trie 1 entries (decoded): {}", decoded1.len());
-    println!("Trie 2 entries (decoded): {}", decoded2.len());
-    println!("Missing in trie 2: {}", missing_in_2);
-    println!("Missing in trie 1: {}", missing_in_1);
-    println!("Count mismatches: {}", count_mismatches);
+        // Decode to word indices
+        let indices = decode_ngram_key(&key1);
 
-    if mismatches == 0 {
-        println!("\n✅ PASS: All n-grams match!");
-        Ok(())
-    } else {
-        println!("\n❌ FAIL: {} total mismatches", mismatches);
-        if mismatches > max_to_show {
-            println!(
-                "   (showing first {} of {} mismatches)",
-                max_to_show, mismatches
-            );
-        }
-        // Return success even on mismatch so we can see the summary
-        Ok(())
-    }
-}
-
-/// Build a reverse vocabulary lookup (index -> word) from a vocabulary trie.
-fn build_reverse_vocab(
-    trie: &DiskBackedCharTrieInner<u64>,
-) -> Result<HashMap<u64, String>, Box<dyn std::error::Error>> {
-    let mut reverse = HashMap::new();
-
-    // Use prefix iteration with empty string to get all entries
-    if let Some(entries) = trie.iter_prefix_with_values("")? {
-        for (word, index) in entries {
-            // Skip metadata keys (start with \x00)
-            if word.starts_with('\x00') {
-                continue;
-            }
-            reverse.insert(index, word);
-        }
-    }
-
-    Ok(reverse)
-}
-
-/// Extract all non-metadata entries from a trie.
-fn extract_entries(
-    trie: &DiskBackedCharTrieInner<u64>,
-) -> Result<BTreeMap<String, u64>, Box<dyn std::error::Error>> {
-    let mut entries = BTreeMap::new();
-
-    if let Some(all) = trie.iter_prefix_with_values("")? {
-        for (key, value) in all {
-            // Skip metadata keys (start with \x00)
-            if !key.starts_with('\x00') {
-                entries.insert(key, value);
-            }
-        }
-    }
-
-    Ok(entries)
-}
-
-/// Decode encoded keys to word vectors using the reverse vocabulary cache.
-fn decode_entries(
-    entries: &BTreeMap<String, u64>,
-    reverse: &HashMap<u64, String>,
-    verbose: bool,
-) -> BTreeMap<Vec<String>, u64> {
-    let mut decoded = BTreeMap::new();
-    let mut decode_failures = 0;
-
-    for (key, &count) in entries {
-        let indices = decode_ngram_key(key);
+        // Reverse lookup to get words (O(1) per index)
         let words: Vec<String> = indices
             .iter()
-            .filter_map(|idx| reverse.get(idx).cloned())
+            .filter_map(|&idx| {
+                if idx == 0 {
+                    return None; // index 0 is reserved
+                }
+                vocab1.get_term(idx)
+            })
             .collect();
 
-        // Check if all indices were resolved
         if words.len() != indices.len() {
-            decode_failures += 1;
-            if verbose {
-                let missing: Vec<_> = indices
-                    .iter()
-                    .filter(|idx| !reverse.contains_key(idx))
-                    .collect();
+            result.decode_failures_1 += 1;
+            if verbose && result.decode_failures_1 <= 5 {
                 eprintln!(
-                    "  Warning: Could not decode all indices for key (indices: {:?}, missing: {:?})",
-                    indices, missing
+                    "  Warning: Could not decode all indices for key (indices: {:?})",
+                    indices
                 );
             }
             continue;
         }
 
-        decoded.insert(words, count);
+        // Re-encode with vocab2's indices
+        let word_refs: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
+        match encode_ngram_key_existing(&word_refs, vocab2) {
+            Some(key2) => {
+                // Lookup in trie2 (on-disk, lazy loaded)
+                match trie2.get(&key2) {
+                    Some(&value2) => {
+                        if value2 != value1 {
+                            if result.count_mismatches.len() < max_to_track {
+                                result.count_mismatches.push(CountMismatch {
+                                    ngram: words,
+                                    count1: value1,
+                                    count2: value2,
+                                });
+                            }
+                        }
+                    }
+                    None => {
+                        if result.missing_in_2.len() < max_to_track {
+                            result.missing_in_2.push(MissingEntry {
+                                ngram: words,
+                                count: value1,
+                            });
+                        }
+                    }
+                }
+            }
+            None => {
+                // Word not in vocab2 - this means a vocab mismatch
+                if result.missing_in_2.len() < max_to_track {
+                    result.missing_in_2.push(MissingEntry {
+                        ngram: words,
+                        count: value1,
+                    });
+                }
+            }
+        }
+
+        // Early exit if max mismatches reached
+        if max_mismatches > 0 && result.total_errors() >= max_mismatches {
+            result.truncated = true;
+            break;
+        }
+    }
     }
 
-    if decode_failures > 0 {
-        eprintln!(
-            "  Warning: {} entries had unresolvable indices",
-            decode_failures
+    // Reverse pass: trie2 → trie1 (find entries only in trie2)
+    if !result.truncated {
+        if verbose {
+            println!("  Reverse pass: checking trie2 entries against trie1...");
+        }
+
+        if let Some(entries) = trie2.iter_prefix_with_values("")? {
+        for (key2, value2) in entries {
+            if key2.starts_with('\x00') {
+                continue;
+            }
+            result.trie2_count += 1;
+
+            let indices = decode_ngram_key(&key2);
+            let words: Vec<String> = indices
+                .iter()
+                .filter_map(|&idx| {
+                    if idx == 0 {
+                        return None;
+                    }
+                    vocab2.get_term(idx)
+                })
+                .collect();
+
+            if words.len() != indices.len() {
+                result.decode_failures_2 += 1;
+                continue;
+            }
+
+            let word_refs: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
+            match encode_ngram_key_existing(&word_refs, vocab1) {
+                Some(key1) => {
+                    // Only check existence (values already compared in forward pass)
+                    if trie1.get(&key1).is_none() {
+                        if result.missing_in_1.len() < max_to_track {
+                            result.missing_in_1.push(MissingEntry {
+                                ngram: words,
+                                count: value2,
+                            });
+                        }
+                    }
+                }
+                None => {
+                    if result.missing_in_1.len() < max_to_track {
+                        result.missing_in_1.push(MissingEntry {
+                            ngram: words,
+                            count: value2,
+                        });
+                    }
+                }
+            }
+
+            if max_mismatches > 0 && result.total_errors() >= max_mismatches {
+                result.truncated = true;
+                break;
+            }
+        }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Print vocabulary comparison results.
+fn print_vocab_results(result: &VocabComparisonResult) {
+    println!("\n=== Vocabulary Comparison ===");
+    println!("Vocabulary 1: {} terms", result.vocab1_count);
+    println!("Vocabulary 2: {} terms", result.vocab2_count);
+
+    if !result.only_in_1.is_empty() {
+        println!("\nTerms only in vocabulary 1: {}", result.only_in_1.len());
+        for (i, term) in result.only_in_1.iter().take(10).enumerate() {
+            println!("  {}. {}", i + 1, term);
+        }
+        if result.only_in_1.len() > 10 {
+            println!("  ... and {} more", result.only_in_1.len() - 10);
+        }
+    }
+
+    if !result.only_in_2.is_empty() {
+        println!("\nTerms only in vocabulary 2: {}", result.only_in_2.len());
+        for (i, term) in result.only_in_2.iter().take(10).enumerate() {
+            println!("  {}. {}", i + 1, term);
+        }
+        if result.only_in_2.len() > 10 {
+            println!("  ... and {} more", result.only_in_2.len() - 10);
+        }
+    }
+
+    if result.only_in_1.is_empty() && result.only_in_2.is_empty() {
+        println!("\nVocabularies match exactly.");
+    }
+}
+
+/// Print n-gram comparison results.
+fn print_ngram_results(result: &NgramComparisonResult, max_mismatches: usize) {
+    println!("\n=== N-gram Comparison ===");
+    println!("Trie 1: {} entries", result.trie1_count);
+    println!("Trie 2: {} entries", result.trie2_count);
+
+    if result.decode_failures_1 > 0 {
+        println!(
+            "Decode failures in trie 1: {} (indices not in vocabulary)",
+            result.decode_failures_1
+        );
+    }
+    if result.decode_failures_2 > 0 {
+        println!(
+            "Decode failures in trie 2: {} (indices not in vocabulary)",
+            result.decode_failures_2
         );
     }
 
-    decoded
-}
+    if !result.count_mismatches.is_empty() {
+        println!("\nCount mismatches: {}", result.count_mismatches.len());
+        for mismatch in result.count_mismatches.iter().take(10) {
+            println!(
+                "  {}: {} vs {}",
+                mismatch.ngram.join("|"),
+                mismatch.count1,
+                mismatch.count2
+            );
+        }
+        if result.count_mismatches.len() > 10 {
+            println!("  ... and {} more", result.count_mismatches.len() - 10);
+        }
+    }
 
-/// Convert a word vector to a displayable string.
-fn words_to_string(words: &[String]) -> String {
-    words.join(" ")
+    if !result.missing_in_2.is_empty() {
+        println!("\nMissing in trie 2: {}", result.missing_in_2.len());
+        for entry in result.missing_in_2.iter().take(10) {
+            println!("  {}: {}", entry.ngram.join("|"), entry.count);
+        }
+        if result.missing_in_2.len() > 10 {
+            println!("  ... and {} more", result.missing_in_2.len() - 10);
+        }
+    }
+
+    if !result.missing_in_1.is_empty() {
+        println!("\nMissing in trie 1: {}", result.missing_in_1.len());
+        for entry in result.missing_in_1.iter().take(10) {
+            println!("  {}: {}", entry.ngram.join("|"), entry.count);
+        }
+        if result.missing_in_1.len() > 10 {
+            println!("  ... and {} more", result.missing_in_1.len() - 10);
+        }
+    }
+
+    if result.truncated {
+        println!(
+            "\n(Comparison truncated after {} mismatches)",
+            max_mismatches
+        );
+    }
+
+    if result.count_mismatches.is_empty()
+        && result.missing_in_1.is_empty()
+        && result.missing_in_2.is_empty()
+    {
+        println!("\nN-grams match exactly.");
+    }
 }

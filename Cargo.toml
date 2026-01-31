@@ -15,6 +15,9 @@ categories = ["text-processing", "science"]
 # Serialization uses portable format (IterableDictionary) that doesn't require D: Serialize.
 liblevenshtein = { path = "../liblevenshtein-rust", features = ["pathmap-backend", "persistent-artrie", "embedded-rules"] }
 
+# Dictionary implementations (needed for IndexedVocabularyART and LSN tracking)
+libdictenstein = { path = "../libdictenstein", features = ["persistent-artrie", "parking_lot"] }
+
 # PathMap for efficient trie storage (production deployment after training)
 pathmap = { path = "../PathMap", default-features = true }
 ndarray = { version = "0.16", features = ["serde"] }
@@ -320,6 +323,11 @@ required-features = ["cli"]
 [[bin]]
 name = "compare_artries"
 path = "src/bin/compare_artries.rs"
+required-features = ["cli", "google-books"]
+
+[[bin]]
+name = "dump_checkpoint"
+path = "src/bin/dump_checkpoint.rs"
 required-features = ["cli", "google-books"]
 
 [[bench]]

@@ -8,11 +8,11 @@ use std::sync::atomic::{AtomicU64, AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
+use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
 use parking_lot::RwLock;
 
 use super::sharding::{MergeCoordinator, MergeStats, MknAggregator};
-use super::storage::NgramStorage;
+use super::storage::{NgramStorage, StoragePrefixTx};
 use crate::ngram::vocabulary::{decode_ngram_key, encode_indices_to_key, SharedVocabulary};
 
 
@@ -217,7 +217,7 @@ fn store_ngram_shared(
 fn store_ngram_shared_legacy(
     ngram: &str,
     count: u64,
-    trie: &Arc<RwLock<DiskBackedCharTrieInner<u64>>>,
+    trie: &Arc<RwLock<PersistentARTrieChar<u64>>>,
 ) -> Result<NgramStorageResult, ImportError> {
     let mut trie_guard = trie.write();
     let is_new = trie_guard.get(ngram).is_none();
@@ -239,7 +239,7 @@ pub enum TrieCheckpointError {
     TrieError(String),
 }
 
-impl TrieCheckpointStorage for DiskBackedCharTrieInner<u64> {
+impl TrieCheckpointStorage for PersistentARTrieChar<u64> {
     type Error = TrieCheckpointError;
 
     fn store_checkpoint_u64(&mut self, key: &str, value: u64) -> Result<(), Self::Error> {
@@ -539,6 +539,20 @@ struct WorkerSharedState {
 /// This helper extracts the core processing logic from worker_task to enable
 /// non-blocking retry with DelayQueue.
 ///
+/// ## Transaction-Based Atomicity (Sharded Mode)
+///
+/// For sharded storage, this function uses document transactions to ensure
+/// idempotent imports:
+///
+/// 1. Begin a transaction before processing n-grams
+/// 2. Buffer all n-grams in the transaction using SET semantics
+/// 3. Commit atomically after all n-grams are processed
+/// 4. On error, abort the transaction (buffered n-grams are discarded)
+///
+/// This prevents double-counting when an import is interrupted and resumed:
+/// uncommitted transactions are discarded on recovery, and re-processing
+/// simply SETs the same values again (idempotent).
+///
 /// Per-worker stats are updated continuously via packed atomics for race-free
 /// sampling by the stats sampler task. No batching or progress channel sends
 /// are needed - the stats sampler reads per-worker counters every 3 seconds.
@@ -570,33 +584,91 @@ async fn process_single_attempt(
 
     // Local counters for this job (packed into per-worker atomic for race-free sampling)
     let mut count = 0u64;
-    let mut unique_count = 0u64;
 
-    while let Some(result) = stream.next().await {
-        let agg = result?;
-        let storage_result = store_ngram_shared(
-            &agg.ngram,
-            agg.total_count,
-            &shared.storage,
-        )?;
-        count += 1;
-        if storage_result.is_new {
-            unique_count += 1;
+    // Try to begin a transaction for atomic, idempotent import (sharded mode only)
+    let maybe_tx = shared.storage.begin_prefix_tx(&job.prefix, job.order)?;
+
+    // Process based on whether we have a transaction
+    let result = if let Some(mut tx) = maybe_tx {
+        // Sharded mode: use transaction for atomic import
+        let process_result: Result<u64, ImportError> = async {
+            while let Some(result) = stream.next().await {
+                let agg = result?;
+
+                // Split n-gram into tokens for vocabulary encoding
+                let tokens: Vec<&str> = agg.ngram.split(' ').collect();
+
+                // Insert into transaction (SET semantics, not increment)
+                shared.storage.tx_insert_tokens(&mut tx, &tokens, agg.total_count)?;
+                count += 1;
+
+                // Update per-worker atomic with count (for progress display)
+                if worker_id < shared.worker_stats.len() {
+                    // Pack count in upper 32 bits (unique_count not tracked with tx)
+                    let packed = (count as u64) << 32;
+                    shared.worker_stats[worker_id].store(packed, Ordering::Relaxed);
+                }
+            }
+            Ok(count)
+        }
+        .await;
+
+        match process_result {
+            Ok(ngram_count) => {
+                // Commit the transaction atomically
+                let committed = shared.storage.commit_prefix_tx(tx)?;
+                log::trace!(
+                    "Worker {}: committed prefix '{}' with {} n-grams",
+                    worker_id, job.prefix, committed
+                );
+                Ok(ngram_count)
+            }
+            Err(e) => {
+                // Abort the transaction - buffered n-grams are discarded
+                if let Err(abort_err) = shared.storage.abort_prefix_tx(tx) {
+                    log::warn!(
+                        "Worker {}: failed to abort transaction for prefix '{}': {}",
+                        worker_id, job.prefix, abort_err
+                    );
+                }
+                Err(e)
+            }
+        }
+    } else {
+        // Single-trie mode: use original increment-based approach
+        // (No transaction support - caller must handle resume correctly)
+        let mut unique_count = 0u64;
+
+        while let Some(result) = stream.next().await {
+            let agg = result?;
+            let storage_result = store_ngram_shared(
+                &agg.ngram,
+                agg.total_count,
+                &shared.storage,
+            )?;
+            count += 1;
+            if storage_result.is_new {
+                unique_count += 1;
+            }
+
+            // Update per-worker atomic with packed counts (race-free, no batching needed)
+            if worker_id < shared.worker_stats.len() {
+                let packed = ((count as u64) << 32) | (unique_count as u64 & 0xFFFFFFFF);
+                shared.worker_stats[worker_id].store(packed, Ordering::Relaxed);
+            }
         }
 
-        // Update per-worker atomic with packed counts (race-free, no batching needed)
-        // Upper 32 bits = total n-grams, lower 32 bits = unique n-grams
-        // Single atomic store ensures consistent total/unique pair for sampling
-        if worker_id < shared.worker_stats.len() {
-            let packed = ((count as u64) << 32) | (unique_count as u64 & 0xFFFFFFFF);
-            shared.worker_stats[worker_id].store(packed, Ordering::Relaxed);
+        // Update unique_ngrams counter for single-trie mode
+        if unique_count > 0 {
+            shared.unique_ngrams.fetch_add(unique_count, Ordering::Relaxed);
         }
-    }
+
+        Ok(count)
+    };
 
     // Final flush to global counters (for checkpoint persistence)
-    shared.total_ngrams.fetch_add(count, Ordering::Relaxed);
-    if unique_count > 0 {
-        shared.unique_ngrams.fetch_add(unique_count, Ordering::Relaxed);
+    if let Ok(ngram_count) = result {
+        shared.total_ngrams.fetch_add(ngram_count, Ordering::Relaxed);
     }
 
     // Reset per-worker stats after job completion (so next job starts fresh)
@@ -604,7 +676,7 @@ async fn process_single_attempt(
         shared.worker_stats[worker_id].store(0, Ordering::Relaxed);
     }
 
-    Ok(count)
+    result
 }
 
 /// Persistent worker task that polls jobs from a shared queue.
@@ -726,6 +798,57 @@ async fn worker_task(
         // - Never decrement on job pickup (avoids phantom jobs from deferred requeues)
         // - Never increment on retry (job was never "completed", so nothing to restore)
 
+        // ===== DEFER-AND-CONTINUE: Check if target shard is syncing =====
+        // If the shard that would store this job's n-grams is currently being synced
+        // (as part of a parallel checkpoint), defer the job and pick up the next one.
+        // This prevents workers from blocking on a syncing shard.
+        //
+        // Key points:
+        // - We do NOT increment attempt count (this isn't an error/retry)
+        // - Small delay (50ms) prevents busy-spin while still being responsive
+        // - Leverages existing all-deferred starvation prevention
+        //
+        // Formally verified in formal/tla/AsyncShardSync.tla
+        if shared.storage.is_prefix_shard_syncing(&job.prefix, job.order) {
+            // Shard is syncing - defer without incrementing retry count
+            let deferred_job = Job {
+                url: Arc::clone(&job.url),
+                prefix: Arc::clone(&job.prefix),
+                order: job.order,
+                attempt: job.attempt,        // NO increment (not an error)
+                backoff_ms: job.backoff_ms,  // NO change
+                ready_at: Some(Instant::now() + Duration::from_millis(50)), // Small delay
+            };
+
+            log::trace!(
+                "Worker {} deferring {} (order {}) - shard syncing",
+                worker_id,
+                job.prefix,
+                job.order
+            );
+
+            let _ = job_tx.send(deferred_job).await; // Back to primary queue
+            consecutive_deferred += 1;
+
+            // Use existing starvation prevention mechanism
+            let queue_size = shared.queue_size.load(Ordering::SeqCst);
+            if queue_size > 0 && consecutive_deferred >= queue_size {
+                // All jobs deferred (all targeting syncing shards) - wait briefly
+                let jitter = Duration::from_millis(
+                    (worker_id as u64 * 10) + (rand::random::<u64>() % 100)
+                );
+                log::debug!(
+                    "Worker {} blocking {}ms - all {} jobs targeting syncing shards",
+                    worker_id,
+                    jitter.as_millis(),
+                    queue_size
+                );
+                tokio::time::sleep(jitter).await;
+                consecutive_deferred = 0;
+            }
+            continue;
+        }
+
         // Check for pause before processing
         while shared.paused.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -759,6 +882,7 @@ async fn worker_task(
                     order: job.order,
                     prefix: job.prefix.clone(),
                     ngram_count: count,
+                    duration: elapsed,
                 });
                 let job_result = JobResult {
                     order: job.order,
@@ -807,6 +931,7 @@ async fn worker_task(
                 // Emit deferred event (using Retrying for UI compatibility)
                 let _ = shared.progress_tx.try_send(WorkerUpdate::Retrying {
                     worker_id,
+                    order: retry_job.order,
                     prefix: Arc::clone(&retry_job.prefix),
                     attempt: retry_job.attempt as u32,
                     error: Arc::from(e.to_string()),
@@ -990,7 +1115,10 @@ async fn process_prefix_file(
     let jitter_ms = rand::random::<u64>() % 500;
     tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
 
-    // Single attempt processing
+    // Track processing time (after jitter delay)
+    let start_time = Instant::now();
+
+    // Single attempt processing with transaction-based atomicity
     let result: Result<u64, ImportError> = async {
         let mut reader = HttpNgramReader::with_options(
             &url,
@@ -1007,59 +1135,119 @@ async fn process_prefix_file(
         // Larger interval reduces channel pressure for high-volume files.
         const NGRAM_PROGRESS_INTERVAL: u64 = 50_000;
 
-        // Local counters for batched atomic updates (reduces cache-line bouncing)
-        let mut local_total: u64 = 0;
-        let mut local_unique: u64 = 0;
+        // Try to begin a transaction for atomic, idempotent import (sharded mode only)
+        let maybe_tx = storage.begin_prefix_tx(&prefix, order)?;
 
-        let mut count = 0u64;
-        while let Some(result) = stream.next().await {
-            let agg = result?;
-            let storage_result = store_ngram_shared(
-                &agg.ngram,
-                agg.total_count,
-                &storage,
-            )?;
-            count += 1;
-            local_total += 1;
-            if storage_result.is_new {
-                local_unique += 1;
+        if let Some(mut tx) = maybe_tx {
+            // Sharded mode: use transaction for atomic import
+            let mut count = 0u64;
+
+            let process_result: Result<u64, ImportError> = async {
+                while let Some(result) = stream.next().await {
+                    let agg = result?;
+
+                    // Split n-gram into tokens for vocabulary encoding
+                    let tokens: Vec<&str> = agg.ngram.split(' ').collect();
+
+                    // Insert into transaction (SET semantics, not increment)
+                    storage.tx_insert_tokens(&mut tx, &tokens, agg.total_count)?;
+                    count += 1;
+
+                    // Emit periodic progress for TUI display
+                    if count % NGRAM_PROGRESS_INTERVAL == 0 {
+                        if let Some(ref tx) = progress_tx {
+                            let _ = tx.try_send(WorkerUpdate::NgramProgress {
+                                worker_id,
+                                ngram_count: count,
+                            });
+                        }
+                    }
+                }
+                Ok(count)
+            }
+            .await;
+
+            match process_result {
+                Ok(ngram_count) => {
+                    // Commit the transaction atomically
+                    let committed = storage.commit_prefix_tx(tx)?;
+                    total_ngrams.fetch_add(ngram_count, Ordering::Relaxed);
+                    unique_ngrams.fetch_add(committed as u64, Ordering::Relaxed);
+                    log::trace!(
+                        "Worker {}: committed prefix '{}' with {} n-grams ({} inserted)",
+                        worker_id, prefix, ngram_count, committed
+                    );
+                    Ok(ngram_count)
+                }
+                Err(e) => {
+                    // Abort the transaction - buffered n-grams are discarded
+                    if let Err(abort_err) = storage.abort_prefix_tx(tx) {
+                        log::warn!(
+                            "Worker {}: failed to abort transaction for prefix '{}': {}",
+                            worker_id, prefix, abort_err
+                        );
+                    }
+                    Err(e)
+                }
+            }
+        } else {
+            // Single-trie mode: use original increment-based approach
+            // Local counters for batched atomic updates (reduces cache-line bouncing)
+            let mut local_total: u64 = 0;
+            let mut local_unique: u64 = 0;
+
+            let mut count = 0u64;
+            while let Some(result) = stream.next().await {
+                let agg = result?;
+                let storage_result = store_ngram_shared(
+                    &agg.ngram,
+                    agg.total_count,
+                    &storage,
+                )?;
+                count += 1;
+                local_total += 1;
+                if storage_result.is_new {
+                    local_unique += 1;
+                }
+
+                // Batch flush atomic counters every COUNTER_BATCH_SIZE n-grams
+                if local_total >= COUNTER_BATCH_SIZE {
+                    total_ngrams.fetch_add(local_total, Ordering::Relaxed);
+                    if local_unique > 0 {
+                        unique_ngrams.fetch_add(local_unique, Ordering::Relaxed);
+                    }
+                    local_total = 0;
+                    local_unique = 0;
+                }
+
+                // Emit periodic progress for TUI display
+                if count % NGRAM_PROGRESS_INTERVAL == 0 {
+                    if let Some(ref tx) = progress_tx {
+                        let _ = tx.try_send(WorkerUpdate::NgramProgress {
+                            worker_id,
+                            ngram_count: count,
+                        });
+                    }
+                }
             }
 
-            // Batch flush atomic counters every COUNTER_BATCH_SIZE n-grams
-            if local_total >= COUNTER_BATCH_SIZE {
+            // Flush remaining counts
+            if local_total > 0 {
                 total_ngrams.fetch_add(local_total, Ordering::Relaxed);
-                if local_unique > 0 {
-                    unique_ngrams.fetch_add(local_unique, Ordering::Relaxed);
-                }
-                local_total = 0;
-                local_unique = 0;
+            }
+            if local_unique > 0 {
+                unique_ngrams.fetch_add(local_unique, Ordering::Relaxed);
             }
 
-            // Emit periodic progress for TUI display
-            if count % NGRAM_PROGRESS_INTERVAL == 0 {
-                if let Some(ref tx) = progress_tx {
-                    let _ = tx.try_send(WorkerUpdate::NgramProgress {
-                        worker_id,
-                        ngram_count: count,
-                    });
-                }
-            }
+            Ok(count)
         }
-
-        // Flush remaining counts
-        if local_total > 0 {
-            total_ngrams.fetch_add(local_total, Ordering::Relaxed);
-        }
-        if local_unique > 0 {
-            unique_ngrams.fetch_add(local_unique, Ordering::Relaxed);
-        }
-
-        Ok(count)
     }
     .await;
 
     // Return worker ID to pool before returning result
     return_worker_id(worker_id_pool_tx, worker_id).await;
+
+    let elapsed = start_time.elapsed();
 
     match result {
         Ok(count) => {
@@ -1070,6 +1258,7 @@ async fn process_prefix_file(
                     order,
                     prefix: Arc::clone(&prefix),
                     ngram_count: count,
+                    duration: elapsed,
                 });
             }
             PrefixOutcome::Success {
@@ -1202,6 +1391,8 @@ pub enum WorkerUpdate {
         prefix: Arc<str>,
         /// Number of n-grams processed from this file.
         ngram_count: u64,
+        /// Time taken to process this file.
+        duration: Duration,
     },
     /// Periodic n-gram processing progress.
     NgramProgress {
@@ -1214,6 +1405,8 @@ pub enum WorkerUpdate {
     Retrying {
         /// Worker slot ID.
         worker_id: usize,
+        /// N-gram order being retried.
+        order: u8,
         /// Prefix being retried.
         prefix: Arc<str>,
         /// Current retry attempt (1-based).
@@ -1375,7 +1568,7 @@ pub struct GoogleBooksImporter {
     /// Legacy trie field for checkpoint compatibility.
     /// Only used when storage is single-trie mode.
     /// TODO: Remove once checkpoint migration to storage is complete.
-    trie: Arc<RwLock<DiskBackedCharTrieInner<u64>>>,
+    trie: Arc<RwLock<PersistentARTrieChar<u64>>>,
 }
 
 impl GoogleBooksImporter {
@@ -1427,11 +1620,11 @@ impl GoogleBooksImporter {
             // Sharded mode: create a checkpoint-only trie at output path
             let checkpoint_trie_path = config.output_path.with_extension("checkpoint.artrie");
             let trie = if checkpoint_trie_path.exists() {
-                DiskBackedCharTrieInner::open(&checkpoint_trie_path).map_err(|e| {
+                PersistentARTrieChar::open(&checkpoint_trie_path).map_err(|e| {
                     ImportError::Trie(format!("Failed to open checkpoint trie: {}", e))
                 })?
             } else {
-                DiskBackedCharTrieInner::create(&checkpoint_trie_path).map_err(|e| {
+                PersistentARTrieChar::create(&checkpoint_trie_path).map_err(|e| {
                     ImportError::Trie(format!("Failed to create checkpoint trie: {}", e))
                 })?
             };
@@ -1461,8 +1654,16 @@ impl GoogleBooksImporter {
     ///
     /// If a JSON checkpoint exists but no trie checkpoint, the JSON data
     /// is migrated to trie storage for future consistency.
+    ///
+    /// **Safety Check**: If a checkpoint exists but the vocabulary WAL is
+    /// unexpectedly large (> 1MB), this indicates a previous checkpoint
+    /// didn't properly flush the vocabulary. A warning is logged.
     pub fn resume_or_start(config: GoogleBooksConfig) -> Result<Self, ImportError> {
         let checkpoint_path = config.output_path.with_extension("checkpoint.json");
+        let vocabulary_path = config.vocabulary_path();
+
+        // Check for vocabulary WAL inconsistency before proceeding
+        Self::check_vocabulary_wal_consistency(&vocabulary_path, &checkpoint_path);
 
         // First, create the importer to get access to the trie
         let mut importer = Self::new(config)?;
@@ -1481,6 +1682,68 @@ impl GoogleBooksImporter {
             );
 
             importer.checkpoint = checkpoint;
+
+            // Recover in-progress prefixes as failed for retry (crash recovery).
+            // This aligns with CheckpointStateMachine.tla CrashRecoverySound property:
+            // on resume, in-progress prefixes must be moved to failed state since
+            // they may have partial data that needs cleanup before retry.
+            for order in importer.config.orders.clone() {
+                let in_progress = importer.checkpoint.in_progress_prefixes(order);
+                if !in_progress.is_empty() {
+                    log::warn!(
+                        "Order {}: recovering {} in-progress prefixes as failed for retry: {:?}",
+                        order,
+                        in_progress.len(),
+                        in_progress
+                    );
+                    importer.checkpoint.recover_in_progress_as_failed(order);
+                }
+            }
+
+            // CRITICAL: Reconcile importer checkpoint with shard state.
+            // Verify that prefixes marked complete in the importer checkpoint
+            // actually have data in the shards. If not, mark them for retry.
+            // This handles the case where the importer checkpoint was saved but
+            // shard data was lost (e.g., due to OS buffer cache not being flushed).
+            if let Some(coordinator) = importer.storage.as_sharded() {
+                let mut reconciled_count = 0usize;
+
+                for order in importer.config.orders.clone() {
+                    // Get completed prefixes from shard state (authoritative)
+                    let shard_completed = coordinator.completed_prefixes_for_order(order);
+
+                    // Get completed prefixes from importer checkpoint
+                    let importer_completed: Vec<String> = importer
+                        .checkpoint
+                        .order_progress
+                        .get(&order)
+                        .map(|p| p.completed_prefixes().cloned().collect())
+                        .unwrap_or_default();
+
+                    // Check each prefix marked complete in importer checkpoint
+                    for prefix in importer_completed {
+                        if !shard_completed.contains(&prefix) {
+                            log::warn!(
+                                "Order {}: prefix '{}' marked complete in importer checkpoint but \
+                                 not found in shard state - marking for retry",
+                                order,
+                                prefix
+                            );
+                            // Mark as failed so it will be retried
+                            importer.checkpoint.fail_prefix(order, &prefix);
+                            reconciled_count += 1;
+                        }
+                    }
+                }
+
+                if reconciled_count > 0 {
+                    log::warn!(
+                        "Reconciliation: {} prefixes marked for retry due to missing shard data",
+                        reconciled_count
+                    );
+                }
+            }
+
             importer.total_ngrams.store(
                 importer.checkpoint.stats.ngrams_processed,
                 Ordering::Relaxed,
@@ -1512,6 +1775,61 @@ impl GoogleBooksImporter {
             );
 
             importer.checkpoint = checkpoint;
+
+            // Recover in-progress prefixes as failed for retry (crash recovery).
+            // This aligns with CheckpointStateMachine.tla CrashRecoverySound property:
+            // on resume, in-progress prefixes must be moved to failed state since
+            // they may have partial data that needs cleanup before retry.
+            for order in importer.config.orders.clone() {
+                let in_progress = importer.checkpoint.in_progress_prefixes(order);
+                if !in_progress.is_empty() {
+                    log::warn!(
+                        "Order {}: recovering {} in-progress prefixes as failed for retry: {:?}",
+                        order,
+                        in_progress.len(),
+                        in_progress
+                    );
+                    importer.checkpoint.recover_in_progress_as_failed(order);
+                }
+            }
+
+            // CRITICAL: Reconcile importer checkpoint with shard state.
+            // (Same logic as trie checkpoint case above)
+            if let Some(coordinator) = importer.storage.as_sharded() {
+                let mut reconciled_count = 0usize;
+
+                for order in importer.config.orders.clone() {
+                    let shard_completed = coordinator.completed_prefixes_for_order(order);
+
+                    let importer_completed: Vec<String> = importer
+                        .checkpoint
+                        .order_progress
+                        .get(&order)
+                        .map(|p| p.completed_prefixes().cloned().collect())
+                        .unwrap_or_default();
+
+                    for prefix in importer_completed {
+                        if !shard_completed.contains(&prefix) {
+                            log::warn!(
+                                "Order {}: prefix '{}' marked complete in importer checkpoint but \
+                                 not found in shard state - marking for retry",
+                                order,
+                                prefix
+                            );
+                            importer.checkpoint.fail_prefix(order, &prefix);
+                            reconciled_count += 1;
+                        }
+                    }
+                }
+
+                if reconciled_count > 0 {
+                    log::warn!(
+                        "Reconciliation: {} prefixes marked for retry due to missing shard data",
+                        reconciled_count
+                    );
+                }
+            }
+
             importer.total_ngrams.store(
                 importer.checkpoint.stats.ngrams_processed,
                 Ordering::Relaxed,
@@ -1537,6 +1855,61 @@ impl GoogleBooksImporter {
         Ok(importer)
     }
 
+    /// Check for vocabulary WAL consistency issues.
+    ///
+    /// If a checkpoint exists but the vocabulary WAL is unexpectedly large,
+    /// this indicates a previous checkpoint didn't properly flush the vocabulary.
+    /// This can lead to index inconsistency on resume.
+    ///
+    /// **Warning threshold**: 1 MB (WAL files should be ~64 bytes when checkpointed)
+    fn check_vocabulary_wal_consistency(
+        vocabulary_path: &Path,
+        checkpoint_path: &Path,
+    ) {
+        // Only check if a checkpoint exists (indicating a resume scenario)
+        let checkpoint_trie_path = checkpoint_path.with_extension("checkpoint.artrie");
+        let has_checkpoint = checkpoint_path.exists() || checkpoint_trie_path.exists();
+
+        if !has_checkpoint {
+            return; // Fresh start, no need to check
+        }
+
+        // Check vocabulary WAL size
+        let vocab_wal_path = vocabulary_path.with_extension("vocab.wal");
+        let vocab_wal_path2 = {
+            let mut p = vocabulary_path.to_path_buf();
+            p.set_extension("wal");
+            p
+        };
+
+        // Try both possible WAL paths
+        for wal_path in [vocab_wal_path, vocab_wal_path2] {
+            if wal_path.exists() {
+                if let Ok(metadata) = std::fs::metadata(&wal_path) {
+                    let size = metadata.len();
+                    const WARNING_THRESHOLD: u64 = 1_000_000; // 1 MB
+
+                    if size > WARNING_THRESHOLD {
+                        log::warn!(
+                            "VOCABULARY WAL INCONSISTENCY DETECTED: {} is {} bytes",
+                            wal_path.display(),
+                            size
+                        );
+                        log::warn!(
+                            "This indicates a previous checkpoint did not properly flush the vocabulary."
+                        );
+                        log::warn!(
+                            "Resume may result in index inconsistency and duplicated n-gram counts."
+                        );
+                        log::warn!(
+                            "Consider starting a fresh import or manually checkpointing the vocabulary."
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Signal the importer to stop gracefully.
     pub fn interrupt(&self) {
         self.interrupted.store(true, Ordering::Release);
@@ -1555,7 +1928,57 @@ impl GoogleBooksImporter {
     /// 2. A JSON file (for backwards compatibility and easy inspection)
     ///
     /// The trie checkpoint truncates the WAL to prevent unbounded growth.
+    ///
+    /// **IMPORTANT**: This checkpoints both vocabulary and n-gram shards to ensure
+    /// consistency on resume. The order of operations is:
+    ///
+    /// 1. Sync atomic counters from checkpoint stats
+    /// 2. Sync and checkpoint vocabulary WAL
+    /// 3. Sync and checkpoint n-gram shard WALs
+    /// 4. Save checkpoint metadata to trie
+    /// 5. Checkpoint metadata trie
+    ///
+    /// Without vocabulary checkpointing, an interrupted import can result in lost
+    /// vocabulary mappings, causing the resumed import to re-index words with
+    /// different indices.
+    ///
+    /// Without shard checkpointing, n-grams in shard WALs are replayed on resume,
+    /// causing counts to double (since `increment()` accumulates values).
     pub fn save_checkpoint(&mut self) -> Result<(), ImportError> {
+        self.save_checkpoint_with_parallelism(Self::DEFAULT_CHECKPOINT_PARALLELISM)
+    }
+
+    /// Default number of shards to sync in parallel during checkpoint.
+    /// Set to 8 for good SSD performance without overwhelming I/O.
+    const DEFAULT_CHECKPOINT_PARALLELISM: usize = 8;
+
+    /// Save checkpoint with configurable parallelism for shard syncing.
+    ///
+    /// This is the core checkpoint implementation that:
+    /// 1. Syncs atomic counters from checkpoint stats
+    /// 2. Syncs and checkpoints vocabulary WAL (synchronous, single resource)
+    /// 3. Syncs n-gram shard WALs in parallel
+    /// 4. Checkpoints n-gram shards
+    /// 5. Saves checkpoint metadata to trie
+    /// 6. Checkpoints metadata trie
+    ///
+    /// Workers can continue on non-syncing shards during step 3, enabling
+    /// non-blocking checkpoints that don't stall the entire import.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_concurrent_syncs` - Maximum shards to sync in parallel.
+    ///   Recommended: 8 for SSDs, 2 for HDDs.
+    ///
+    /// # Performance
+    ///
+    /// With 100 shards @ 50ms each:
+    /// - Sequential: ~5000ms total blocking
+    /// - Parallel (8 concurrent): ~625ms + workers continue on other shards
+    pub fn save_checkpoint_with_parallelism(
+        &mut self,
+        max_concurrent_syncs: usize,
+    ) -> Result<(), ImportError> {
         // Sync atomic counters FROM checkpoint stats (source of truth).
         // The checkpoint.add_ngrams() method maintains accurate counts incrementally.
         // We sync the atomics from checkpoint to keep real-time display consistent.
@@ -1563,7 +1986,33 @@ impl GoogleBooksImporter {
         self.unique_ngrams.store(self.checkpoint.stats.unique_ngrams, Ordering::Relaxed);
         self.checkpoint.stats.elapsed_seconds = self.start_time.elapsed().as_secs();
 
-        // Save checkpoint to trie FIRST (atomic with n-gram data)
+        // CRITICAL: Checkpoint vocabulary FIRST to ensure vocabulary indices are
+        // persisted before the checkpoint marks prefixes as completed. This prevents
+        // the bug where vocabulary entries are in the WAL (not persisted) when the
+        // checkpoint claims prefixes are done, leading to index inconsistency on resume.
+        self.storage.sync_vocabulary().map_err(|e| {
+            ImportError::Trie(format!("Failed to sync vocabulary: {}", e))
+        })?;
+        self.storage.checkpoint_vocabulary().map_err(|e| {
+            ImportError::Trie(format!("Failed to checkpoint vocabulary: {}", e))
+        })?;
+
+        // CRITICAL: Sync and checkpoint n-gram shards to prevent WAL replay on resume.
+        // Without this, n-grams written to shard WALs before a checkpoint are replayed
+        // on resume, causing counts to double (since increment() accumulates values).
+        //
+        // Use parallel sync for non-blocking operation:
+        // - Workers can continue on shards that aren't syncing
+        // - Only workers targeting a syncing shard defer their job
+        // - Formally verified in formal/tla/AsyncShardSync.tla
+        self.storage.sync_parallel(max_concurrent_syncs).map_err(|e| {
+            ImportError::Trie(format!("Failed to sync storage: {}", e))
+        })?;
+        self.storage.checkpoint_parallel(max_concurrent_syncs).map_err(|e| {
+            ImportError::Trie(format!("Failed to checkpoint storage: {}", e))
+        })?;
+
+        // Save checkpoint to trie AFTER syncing all data
         // This ensures consistency between data and progress tracking.
         {
             let mut trie = self.trie.write();
@@ -1742,8 +2191,8 @@ impl GoogleBooksImporter {
     ///             WorkerUpdate::Finished { worker_id, prefix, ngram_count } => {
     ///                 println!("[{}] Done: {} ({} n-grams)", worker_id, prefix, ngram_count);
     ///             }
-    ///             WorkerUpdate::Retrying { worker_id, prefix, attempt, error } => {
-    ///                 println!("[{}] Retry {}: {} - {}", worker_id, attempt, prefix, error);
+    ///             WorkerUpdate::Retrying { worker_id, order, prefix, attempt, error } => {
+    ///                 println!("[{}] Retry {} (order {}): {} - {}", worker_id, attempt, order, prefix, error);
     ///             }
     ///         }
     ///     }
@@ -2262,13 +2711,13 @@ impl GoogleBooksImporter {
                             });
                         }
                     }
-                    WorkerUpdate::Finished { worker_id, order, prefix, ngram_count } => {
+                    WorkerUpdate::Finished { worker_id, order, prefix, ngram_count, duration } => {
                         let _ = event_tx_worker.send(ImportEvent::WorkerFinished {
                             worker_id,
                             order,
                             prefix: prefix.to_string(),
                             ngram_count,
-                            duration: Duration::ZERO, // Duration tracked at higher level
+                            duration,
                         });
                     }
                     WorkerUpdate::NgramProgress { worker_id, ngram_count } => {
@@ -2277,7 +2726,7 @@ impl GoogleBooksImporter {
                             ngram_count,
                         });
                     }
-                    WorkerUpdate::Retrying { worker_id, prefix, attempt, error } => {
+                    WorkerUpdate::Retrying { worker_id, order, prefix, attempt, error } => {
                         // Emit WorkerRetrying for TUI worker status display
                         let _ = event_tx_worker.send(ImportEvent::WorkerRetrying {
                             worker_id,
@@ -2290,7 +2739,7 @@ impl GoogleBooksImporter {
                         let _ = event_tx_worker.send(ImportEvent::DeferredRetry {
                             prefix: prefix.to_string(),
                             attempt,
-                            order: 0, // Order not available in Retrying, use 0 as placeholder
+                            order,
                         });
                     }
                     WorkerUpdate::Deferred { worker_id, order, prefix, attempt, delay_seconds: _, error } => {
@@ -2674,7 +3123,58 @@ impl GoogleBooksImporter {
 
                 _ = async {}, if cancelled.load(Ordering::SeqCst) => {
                     drop(parallelism_rx);
+
+                    // Signal all workers to shutdown
                     signal_all_shutdown(&worker_shutdown_txs);
+
+                    // Wait for ALL workers to fully exit before checkpointing.
+                    // This ensures no vocabulary writes can occur after checkpoint.
+                    //
+                    // IMPORTANT: Draining results is NOT sufficient because a worker
+                    // can send its result while still holding the vocabulary write lock.
+                    // We must wait for worker_exit_rx notifications which are sent
+                    // AFTER the worker has fully terminated.
+                    log::info!(
+                        "Cancellation: waiting for {} active workers to exit...",
+                        active_workers
+                    );
+
+                    while active_workers > 0 {
+                        tokio::select! {
+                            biased;
+
+                            // Track worker exits (highest priority)
+                            Some(exited_worker_id) = worker_exit_rx.recv() => {
+                                active_workers = active_workers.saturating_sub(1);
+                                worker_handles.remove(&exited_worker_id);
+                                worker_shutdown_txs.remove(&exited_worker_id);
+                                log::debug!(
+                                    "Cancellation: worker {} exited, {} remaining",
+                                    exited_worker_id,
+                                    active_workers
+                                );
+                            }
+
+                            // Drain results concurrently to prevent channel backpressure
+                            Some(_job_result) = result_rx.recv() => {
+                                results_received += 1;
+                            }
+
+                            // Timeout safety net (shouldn't happen in normal operation)
+                            _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                                log::error!(
+                                    "Cancellation: timeout waiting for {} workers to exit, \
+                                     proceeding with checkpoint anyway",
+                                    active_workers
+                                );
+                                break;
+                            }
+                        }
+                    }
+
+                    log::info!("Cancellation: all workers exited, saving checkpoint");
+
+                    // NOW safe to checkpoint - no more vocabulary writes can occur
                     self.save_checkpoint()?;
                     let _ = event_tx.send(ImportEvent::CheckpointSaved {
                         prefix: "all".to_string(),
@@ -3447,7 +3947,7 @@ impl GoogleBooksImporter {
         let mkn_path = self.config.output_path.with_extension("mkn.artrie");
         log::info!("Saving MKN statistics to {:?}...", mkn_path);
 
-        let mkn_trie = DiskBackedCharTrieInner::create(&mkn_path).map_err(|e| {
+        let mkn_trie = PersistentARTrieChar::create(&mkn_path).map_err(|e| {
             ImportError::Trie(format!("Failed to create MKN trie: {}", e))
         })?;
         let mkn_trie = Arc::new(RwLock::new(mkn_trie));
@@ -3792,6 +4292,19 @@ impl GoogleBooksImporter {
     }
 }
 
+impl Drop for GoogleBooksImporter {
+    /// Best-effort checkpoint of vocabulary on drop.
+    ///
+    /// This is a safety net to ensure vocabulary data is persisted even if the
+    /// normal checkpoint path is bypassed (e.g., panic, unexpected exit).
+    /// Uses checkpoint() instead of sync() to ensure the WAL is truncated.
+    fn drop(&mut self) {
+        if let Err(e) = self.storage.checkpoint_vocabulary() {
+            log::error!("Failed to checkpoint vocabulary on drop: {}", e);
+        }
+    }
+}
+
 /// Install a signal handler for graceful shutdown.
 ///
 /// Returns a future that completes when SIGINT or SIGTERM is received.
@@ -3854,6 +4367,287 @@ where
 
     result
 }
+
+// ============================================================================
+// Periodic Checkpoint Support with Lock-Free Cron Scheduler
+// ============================================================================
+
+/// Shared state for periodic checkpoint tasks (lock-free reads).
+///
+/// This struct enables the cron scheduler to perform checkpoints without
+/// holding locks on the importer. It uses atomic types and ArcSwap for
+/// lock-free reads, with locking only during actual I/O operations.
+#[cfg(feature = "google-books")]
+pub struct CheckpointState {
+    /// Current n-gram count (atomic).
+    pub ngrams_processed: AtomicU64,
+    /// Current unique n-gram count (atomic).
+    pub unique_ngrams: AtomicU64,
+    /// Storage handle (Arc - read-only from cron thread).
+    pub storage: Arc<NgramStorage>,
+    /// Main trie (Arc<RwLock> - uses RwLock only during checkpoint).
+    pub trie: Arc<RwLock<PersistentARTrieChar<u64>>>,
+    /// Checkpoint data (swapped atomically via ArcSwap).
+    pub checkpoint: arc_swap::ArcSwap<ImportCheckpoint>,
+    /// Flag indicating checkpoint in progress (atomic).
+    pub checkpoint_in_progress: AtomicBool,
+    /// Start time for elapsed time calculation.
+    pub start_time: Instant,
+}
+
+#[cfg(feature = "google-books")]
+impl CheckpointState {
+    /// Perform a checkpoint (called from cron thread).
+    ///
+    /// Uses RwLock only for actual I/O - all state reads are lock-free.
+    pub fn perform_checkpoint(&self) -> Result<(), ImportError> {
+        // Set in-progress flag (atomic)
+        if self.checkpoint_in_progress.swap(true, Ordering::AcqRel) {
+            // Already in progress - skip
+            log::debug!("Checkpoint already in progress, skipping");
+            return Ok(());
+        }
+
+        // Read current state (atomic loads - no locks)
+        let ngrams = self.ngrams_processed.load(Ordering::Acquire);
+        let unique = self.unique_ngrams.load(Ordering::Acquire);
+
+        // Load checkpoint atomically
+        let checkpoint_guard = self.checkpoint.load();
+        let mut checkpoint = (**checkpoint_guard).clone();
+        checkpoint.stats.ngrams_processed = ngrams;
+        checkpoint.stats.unique_ngrams = unique;
+        checkpoint.stats.elapsed_seconds = self.start_time.elapsed().as_secs();
+
+        // Perform I/O (this is where we need locks)
+        log::debug!("Periodic checkpoint: syncing vocabulary...");
+        self.storage.sync_vocabulary().map_err(|e| {
+            self.checkpoint_in_progress.store(false, Ordering::Release);
+            ImportError::Trie(format!("Failed to sync vocabulary: {}", e))
+        })?;
+        self.storage.checkpoint_vocabulary().map_err(|e| {
+            self.checkpoint_in_progress.store(false, Ordering::Release);
+            ImportError::Trie(format!("Failed to checkpoint vocabulary: {}", e))
+        })?;
+
+        log::debug!("Periodic checkpoint: syncing shards...");
+        self.storage.sync_parallel(8).map_err(|e| {
+            self.checkpoint_in_progress.store(false, Ordering::Release);
+            ImportError::Trie(format!("Failed to sync storage: {}", e))
+        })?;
+        self.storage.checkpoint_parallel(8).map_err(|e| {
+            self.checkpoint_in_progress.store(false, Ordering::Release);
+            ImportError::Trie(format!("Failed to checkpoint storage: {}", e))
+        })?;
+
+        log::debug!("Periodic checkpoint: saving metadata...");
+        {
+            let mut trie = self.trie.write();
+            checkpoint.save_to_trie(&mut *trie).map_err(|e| {
+                self.checkpoint_in_progress.store(false, Ordering::Release);
+                ImportError::Trie(format!("Failed to save checkpoint to trie: {}", e))
+            })?;
+            trie.checkpoint().map_err(|e| {
+                self.checkpoint_in_progress.store(false, Ordering::Release);
+                ImportError::Trie(format!("Failed to checkpoint trie: {}", e))
+            })?;
+        }
+
+        // Store updated checkpoint (atomic swap)
+        self.checkpoint.store(Arc::new(checkpoint));
+
+        // Clear in-progress flag (atomic)
+        self.checkpoint_in_progress.store(false, Ordering::Release);
+
+        log::info!("Periodic checkpoint completed: {} n-grams", ngrams);
+        Ok(())
+    }
+
+    /// Check if a checkpoint is currently in progress.
+    pub fn is_checkpoint_in_progress(&self) -> bool {
+        self.checkpoint_in_progress.load(Ordering::Acquire)
+    }
+}
+
+/// Run import with graceful shutdown handling and periodic checkpointing.
+///
+/// This version uses a lock-free cron scheduler to perform periodic checkpoints
+/// every 5 seconds (configurable), ensuring that progress is not lost when the
+/// import is interrupted between file completions.
+///
+/// # Lock-Free Design
+///
+/// - **Task submission**: Lock-free MPSC channel (crossbeam-channel)
+/// - **Termination signal**: AtomicBool
+/// - **Statistics**: AtomicU64 counters
+/// - **Checkpoint state reads**: ArcSwap + AtomicU64
+/// - **Only blocking during I/O**: RwLock only used during actual file writes
+///
+/// # Arguments
+///
+/// * `importer` - The Google Books importer instance
+/// * `progress` - Progress callback for status updates
+/// * `checkpoint_interval_ms` - Interval between periodic checkpoints (default: 5000ms)
+///
+/// # Example
+///
+/// ```ignore
+/// let importer = GoogleBooksImporter::resume_or_start(config).await?;
+/// let stats = run_import_with_periodic_checkpoints(
+///     importer,
+///     |progress| println!("{:?}", progress),
+///     5000, // Checkpoint every 5 seconds
+/// ).await?;
+/// ```
+#[cfg(feature = "google-books")]
+pub async fn run_import_with_periodic_checkpoints<F>(
+    mut importer: GoogleBooksImporter,
+    progress: F,
+    checkpoint_interval_ms: u64,
+) -> Result<ImportStats, ImportError>
+where
+    F: FnMut(ImportProgress) + Send + 'static,
+{
+    use crate::util::cron::{spawn_cron_with_interval, TaskMetadata};
+    use std::sync::atomic::Ordering as AtomicOrdering;
+
+    let terminating = Arc::new(AtomicBool::new(false));
+
+    // Create shared checkpoint state (lock-free reads)
+    let checkpoint_state = Arc::new(CheckpointState {
+        ngrams_processed: AtomicU64::new(importer.total_ngrams.load(Ordering::Relaxed)),
+        unique_ngrams: AtomicU64::new(importer.unique_ngrams.load(Ordering::Relaxed)),
+        storage: Arc::clone(&importer.storage),
+        trie: Arc::clone(&importer.trie),
+        checkpoint: arc_swap::ArcSwap::from_pointee(importer.checkpoint.clone()),
+        checkpoint_in_progress: AtomicBool::new(false),
+        start_time: importer.start_time,
+    });
+
+    // Start cron state machine with 50ms poll interval for responsive shutdown
+    let (cron_handle, cron_thread, cron_stats, _cron_ready) =
+        spawn_cron_with_interval(Arc::clone(&terminating), 50);
+
+    // Schedule periodic checkpoints
+    let checkpoint_state_for_cron = Arc::clone(&checkpoint_state);
+    let checkpoint_interval = checkpoint_interval_ms;
+    cron_handle.schedule_recurring(
+        checkpoint_interval,
+        checkpoint_interval,
+        "periodic-checkpoint",
+        move || {
+            match checkpoint_state_for_cron.perform_checkpoint() {
+                Ok(()) => true,
+                Err(e) => {
+                    log::error!("Periodic checkpoint failed: {}", e);
+                    // Return true to keep rescheduling - transient errors should not stop checkpoints
+                    true
+                }
+            }
+        },
+    );
+
+    // Wrap importer in Arc<Mutex> for sharing with shutdown handler
+    let importer_ref = Arc::new(parking_lot::Mutex::new(importer));
+    let importer_for_shutdown = Arc::clone(&importer_ref);
+    let checkpoint_state_for_shutdown = Arc::clone(&checkpoint_state);
+    let terminating_for_shutdown = Arc::clone(&terminating);
+
+    // Spawn shutdown handler with user-visible status messages
+    let shutdown_handle = tokio::spawn(async move {
+        shutdown_signal().await;
+
+        // Display prominent shutdown message
+        eprintln!();
+        log::warn!("╔══════════════════════════════════════════════════════════╗");
+        log::warn!("║  Shutdown signal received - saving progress...           ║");
+        log::warn!("║  Please wait for checkpoint to complete.                 ║");
+        log::warn!("║  Press Ctrl+C again to force quit (may lose progress).   ║");
+        log::warn!("╚══════════════════════════════════════════════════════════╝");
+
+        // Check if checkpoint is in progress
+        if checkpoint_state_for_shutdown.is_checkpoint_in_progress() {
+            log::info!("Waiting for in-progress checkpoint to complete...");
+        }
+
+        // Signal termination and interrupt importer
+        terminating_for_shutdown.store(true, AtomicOrdering::Release);
+        if let Some(importer) = importer_for_shutdown.try_lock() {
+            importer.interrupt();
+        }
+    });
+
+    // Run import
+    let result = {
+        let mut importer = importer_ref.lock();
+
+        // Wrap progress callback to update checkpoint state atomics
+        let checkpoint_state_for_progress = Arc::clone(&checkpoint_state);
+        let mut user_progress = progress;
+        let progress_wrapper = move |p: ImportProgress| {
+            // Update atomics for cron thread
+            checkpoint_state_for_progress
+                .ngrams_processed
+                .store(p.total_ngrams, AtomicOrdering::Release);
+            // Call user's progress callback
+            user_progress(p);
+        };
+
+        importer.import_http(progress_wrapper).await
+    };
+
+    // Signal termination to stop cron scheduler
+    terminating.store(true, AtomicOrdering::Release);
+
+    // Wait for cron manager to stop
+    log::info!("Stopping periodic checkpoint scheduler...");
+    if let Err(e) = cron_thread.join() {
+        log::warn!("Cron thread panicked: {:?}", e);
+    }
+
+    let stats = cron_stats;
+    log::info!(
+        "Cron manager stopped. Tasks executed: {}, failed: {}, panicked: {}",
+        stats.tasks_executed.load(AtomicOrdering::Relaxed),
+        stats.tasks_failed.load(AtomicOrdering::Relaxed),
+        stats.tasks_panicked.load(AtomicOrdering::Relaxed)
+    );
+
+    // Final checkpoint with detailed status
+    log::info!("╔══════════════════════════════════════════════════════════╗");
+    log::info!("║  Saving final checkpoint and flushing data to disk...    ║");
+    log::info!("╚══════════════════════════════════════════════════════════╝");
+
+    log::info!("  → Syncing vocabulary WAL...");
+    log::info!("  → Syncing n-gram shards...");
+    log::info!("  → Writing checkpoint metadata...");
+
+    let checkpoint_start = Instant::now();
+    {
+        let mut importer = importer_ref.lock();
+        if let Err(e) = importer.save_checkpoint() {
+            log::error!("Final checkpoint failed: {}", e);
+        } else {
+            let elapsed = checkpoint_start.elapsed();
+            log::info!(
+                "  ✓ Checkpoint saved successfully in {:.2}s",
+                elapsed.as_secs_f64()
+            );
+        }
+    }
+
+    log::info!("╔══════════════════════════════════════════════════════════╗");
+    log::info!("║  Shutdown complete. Safe to exit.                        ║");
+    log::info!("╚══════════════════════════════════════════════════════════╝");
+
+    // Cancel shutdown handler if import completed normally
+    shutdown_handle.abort();
+
+    result
+}
+
+/// Default checkpoint interval for periodic checkpoints (5 seconds).
+pub const DEFAULT_CHECKPOINT_INTERVAL_MS: u64 = 5000;
 
 #[cfg(test)]
 mod tests {

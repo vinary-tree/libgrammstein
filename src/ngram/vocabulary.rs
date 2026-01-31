@@ -5,7 +5,12 @@
 //!
 //! # Architecture
 //!
-//! The vocabulary maps each unique word to a sequential u64 index (0, 1, 2, ...).
+//! The vocabulary uses [`PersistentVocabARTrie`] from libdictenstein, which provides:
+//! - **O(k) forward lookup** (word → index) via adaptive radix trie (k = word length)
+//! - **O(k) reverse lookup** (index → word) via parent pointer backtracking (O(1) cache hit)
+//! - **Thread-safe** atomic index assignment and RwLock-protected access
+//! - **ACID-compliant** with WAL-based crash recovery
+//!
 //! N-gram keys are encoded as concatenated LEB128 varints, with each byte stored
 //! as a Latin-1 character (0x00-0xFF → U+0000-U+00FF) for trie compatibility.
 //!
@@ -15,7 +20,8 @@
 //! - **Compact encoding**: Common words (index 0-127) use just 1 byte
 //! - **Unlimited vocabulary**: u64 indices support up to 2^64 words
 //! - **Standard encoding**: LEB128 is widely used (protobuf, DWARF, WebAssembly)
-//! - **Thread-safe**: Uses double-checked locking for concurrent access
+//! - **Thread-safe**: Built-in atomic index assignment + RwLock for concurrent access
+//! - **O(k) reverse lookups**: Use `get_term()` with cached hot lookups
 //!
 //! # Encoding Format
 //!
@@ -30,32 +36,22 @@
 //!
 //! let vocab = SharedVocabulary::create(path)?;
 //!
-//! // Each word maps to a unique u64 index
-//! let the_idx = vocab.get_or_insert("the");   // Returns 0
-//! let quick_idx = vocab.get_or_insert("quick"); // Returns 1
+//! // Each word maps to a unique u64 index (idempotent insert)
+//! let the_idx = vocab.insert("the");   // Returns 1
+//! let quick_idx = vocab.insert("quick"); // Returns 2
 //!
 //! // N-gram keys are varint-encoded Latin-1 strings
 //! let bigram_key = encode_ngram_key(&["the", "quick"], &vocab);
+//!
+//! // O(k) reverse lookups (O(1) cache hit)
+//! assert_eq!(vocab.get_term(1), Some("the".to_string()));
+//! assert_eq!(vocab.get_term(2), Some("quick".to_string()));
 //! ```
 
-use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
+use libdictenstein::persistent_vocab_artrie::PersistentVocabARTrie;
 use parking_lot::RwLock;
-use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use thiserror::Error;
-
-/// Metadata key for the next index.
-const META_NEXT_INDEX: &str = "\x00__meta__:next_index";
-
-/// Metadata key for the vocabulary version.
-const META_VERSION: &str = "\x00__meta__:version";
-
-/// Current vocabulary format version.
-/// Version 2: Switched from PUA character encoding to varint-encoded u64 indices.
-/// Version 3: Start indices at 1 (not 0) to avoid collision with \x00 metadata prefix.
-const VOCABULARY_VERSION: u64 = 3;
 
 /// First valid vocabulary index.
 ///
@@ -83,6 +79,10 @@ pub enum VocabularyError {
         /// Found vocabulary version.
         found: u64,
     },
+
+    /// Persistent ARTrie error.
+    #[error("Persistent ARTrie error: {0}")]
+    PersistentARTrie(#[from] libdictenstein::persistent_artrie::error::PersistentARTrieError),
 }
 
 /// Result type for vocabulary operations.
@@ -137,26 +137,25 @@ pub fn decode_varint(bytes: &[u8]) -> Option<(u64, usize)> {
 /// Shared vocabulary mapping words to u64 indices.
 ///
 /// This struct provides thread-safe word-to-index mapping backed by a
-/// disk-persistent trie. Each unique word is assigned a sequential u64 index.
+/// disk-persistent trie with O(k) reverse lookups via parent pointers.
 ///
 /// # Thread Safety
 ///
-/// Uses double-checked locking to ensure only one thread assigns an index
-/// for each word. The `fetch_add` on `next_index` is only called while holding
-/// the write lock, preventing TOCTOU race conditions.
+/// Thread-safe via internal RwLock protection. Can be safely shared across threads.
 ///
 /// # Persistence
 ///
-/// The vocabulary is stored in a `DiskBackedCharTrieInner<u64>` with WAL-based
-/// crash recovery. The next index is stored in the trie as metadata to survive
-/// restarts.
+/// The vocabulary uses WAL-based crash recovery. Call `checkpoint()` to persist
+/// state durably.
+///
+/// # Reverse Lookups
+///
+/// Use `get_term(index)` for O(k) reverse lookups (index → word).
+/// Hot lookups are cached for O(1) access.
 #[derive(Debug)]
 pub struct SharedVocabulary {
-    /// The underlying trie mapping words to u64 indices.
-    trie: Arc<RwLock<DiskBackedCharTrieInner<u64>>>,
-
-    /// Next index to assign (sequential: 0, 1, 2, ...).
-    next_index: AtomicU64,
+    /// The underlying PersistentVocabARTrie with interior mutability.
+    inner: RwLock<PersistentVocabARTrie>,
 }
 
 impl SharedVocabulary {
@@ -173,192 +172,156 @@ impl SharedVocabulary {
     }
 
     /// Create a new empty vocabulary at the given path.
+    ///
+    /// Starts indices at FIRST_VALID_INDEX (1) to avoid \x00 collision
+    /// with metadata key prefixes.
     pub fn create(path: &Path) -> VocabularyResult<Self> {
-        let trie = DiskBackedCharTrieInner::create(path)
-            .map_err(|e| VocabularyError::Trie(format!("Failed to create vocabulary: {}", e)))?;
-
-        let trie = Arc::new(RwLock::new(trie));
-
-        // Initialize metadata
-        // Start at FIRST_VALID_INDEX to avoid \x00 collision with metadata prefix
-        {
-            let mut guard = trie.write();
-            guard.upsert(META_VERSION, VOCABULARY_VERSION).map_err(|e| {
-                VocabularyError::Trie(format!("Failed to initialize version: {}", e))
-            })?;
-            guard.upsert(META_NEXT_INDEX, FIRST_VALID_INDEX).map_err(|e| {
-                VocabularyError::Trie(format!("Failed to initialize next_index: {}", e))
-            })?;
-        }
-
-        Ok(Self {
-            trie,
-            next_index: AtomicU64::new(FIRST_VALID_INDEX),
-        })
+        let inner = PersistentVocabARTrie::create_with_start_index(path, FIRST_VALID_INDEX)?;
+        Ok(Self { inner: RwLock::new(inner) })
     }
 
     /// Open an existing vocabulary from the given path.
+    ///
+    /// This method uses WAL recovery to restore the vocabulary state.
+    /// The underlying `PersistentVocabARTrie::open()` only restores metadata,
+    /// so we use `open_with_recovery()` to replay the WAL and restore data.
     pub fn open(path: &Path) -> VocabularyResult<Self> {
-        let trie = DiskBackedCharTrieInner::open(path)
-            .map_err(|e| VocabularyError::Trie(format!("Failed to open vocabulary: {}", e)))?;
+        // Use open_with_recovery to replay WAL and restore vocabulary state
+        let (inner, _report) = PersistentVocabARTrie::open_with_recovery(path)?;
+        Ok(Self { inner: RwLock::new(inner) })
+    }
 
-        // Check version
-        if let Some(&version) = trie.get(META_VERSION) {
-            if version != VOCABULARY_VERSION {
-                return Err(VocabularyError::VersionMismatch {
-                    expected: VOCABULARY_VERSION,
-                    found: version,
-                });
-            }
-        }
+    /// Open an existing vocabulary with crash recovery.
+    ///
+    /// Returns a tuple of (vocabulary, recovery_report).
+    pub fn open_with_recovery(
+        path: &Path,
+    ) -> VocabularyResult<(Self, libdictenstein::persistent_artrie::recovery::RecoveryReport)> {
+        let (inner, report) = PersistentVocabARTrie::open_with_recovery(path)?;
+        Ok((Self { inner: RwLock::new(inner) }, report))
+    }
 
-        // Load next_index from metadata
-        let next_index = trie
-            .get(META_NEXT_INDEX)
-            .copied()
-            .unwrap_or(0);
-
-        Ok(Self {
-            trie: Arc::new(RwLock::new(trie)),
-            next_index: AtomicU64::new(next_index),
-        })
+    /// Insert a word and get its index (idempotent).
+    ///
+    /// If the word already exists, returns its existing index.
+    /// Otherwise, assigns the next available index.
+    ///
+    /// This is the primary method for vocabulary insertion. It is idempotent:
+    /// calling `insert("word")` multiple times returns the same index.
+    #[inline]
+    pub fn insert(&self, word: &str) -> u64 {
+        self.inner.write().insert(word)
     }
 
     /// Get or assign an index for a word (thread-safe).
     ///
-    /// Uses double-checked locking to avoid TOCTOU race conditions.
-    /// If the word already exists, returns its existing index.
-    /// Otherwise, assigns the next available index.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the trie operation fails. Use `try_get_or_insert`
-    /// for fallible insertion.
+    /// This is an alias for `insert()` for backward compatibility.
+    /// Uses idempotent insertion: returns existing index if word exists.
+    #[inline]
     pub fn get_or_insert(&self, word: &str) -> u64 {
-        self.try_get_or_insert(word)
-            .expect("Failed to insert word into vocabulary")
+        self.insert(word)
     }
 
     /// Try to get or assign an index for a word (thread-safe, fallible).
     ///
-    /// Returns the u64 index for this word in the vocabulary.
+    /// This is an alias for `insert()` wrapped in Ok for backward compatibility.
+    /// The underlying operation is infallible.
+    #[inline]
     pub fn try_get_or_insert(&self, word: &str) -> VocabularyResult<u64> {
-        // Fast path: read lock to check if word exists
-        {
-            let guard = self.trie.read();
-            if let Some(&index) = guard.get(word) {
-                return Ok(index);
-            }
-        }
-
-        // Slow path: acquire write lock and re-check
-        let mut guard = self.trie.write();
-
-        // Re-check after acquiring write lock (another thread may have inserted)
-        if let Some(&index) = guard.get(word) {
-            return Ok(index);
-        }
-
-        // This thread wins - assign the next index atomically
-        // Use Relaxed ordering since the write lock already provides synchronization
-        // between the fetch_add and the trie upsert
-        let index = self.next_index.fetch_add(1, Ordering::Relaxed);
-
-        // Store the word -> index mapping
-        // Note: Metadata (META_NEXT_INDEX) is persisted only in checkpoint(), not per-insert.
-        // This reduces lock contention significantly since we don't need an extra upsert
-        // on every word insert. The atomic next_index tracks the current value in memory.
-        guard.upsert(word, index).map_err(|e| {
-            VocabularyError::Trie(format!("Failed to insert word '{}': {}", word, e))
-        })?;
-
-        Ok(index)
+        Ok(self.insert(word))
     }
 
     /// Look up index for word (None if not in vocabulary).
+    #[inline]
     pub fn get(&self, word: &str) -> Option<u64> {
-        self.trie.read().get(word).copied()
+        self.inner.read().get_index(word)
+    }
+
+    /// Look up index for word (None if not in vocabulary).
+    ///
+    /// This is an alias for `get()` matching the PersistentVocabARTrie API.
+    #[inline]
+    pub fn get_index(&self, word: &str) -> Option<u64> {
+        self.inner.read().get_index(word)
+    }
+
+    /// O(k) reverse lookup: get the word for an index.
+    ///
+    /// Returns `None` if the index is not in the vocabulary.
+    ///
+    /// # Performance
+    ///
+    /// - O(1) for cached (hot) lookups via LRU cache
+    /// - O(k) for cold lookups via parent pointer backtracking (k = word length)
+    #[inline]
+    pub fn get_term(&self, index: u64) -> Option<String> {
+        self.inner.read().get_term(index)
     }
 
     /// Check if a word exists in the vocabulary.
+    #[inline]
     pub fn contains(&self, word: &str) -> bool {
-        self.trie.read().get(word).is_some()
+        self.inner.read().contains(word)
+    }
+
+    /// Check if an index exists in the vocabulary.
+    #[inline]
+    pub fn contains_index(&self, index: u64) -> bool {
+        self.inner.read().contains_index(index)
     }
 
     /// Get the number of words in the vocabulary.
+    #[inline]
     pub fn len(&self) -> u64 {
-        // Subtract FIRST_VALID_INDEX since we start at 1, not 0
-        self.next_index.load(Ordering::Relaxed) - FIRST_VALID_INDEX
+        self.inner.read().len() as u64
     }
 
     /// Check if the vocabulary is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
-        self.next_index.load(Ordering::Relaxed) == FIRST_VALID_INDEX
+        self.inner.read().is_empty()
     }
 
-    /// Build a reverse lookup cache (index -> word).
-    ///
-    /// This is useful for decoding n-gram keys back to words.
-    /// Note: This iterates over all entries and allocates a HashMap.
-    pub fn build_reverse_cache(&self) -> HashMap<u64, String> {
-        let guard = self.trie.read();
-        let mut cache = HashMap::new();
+    /// Get the starting index for vocabulary entries.
+    #[inline]
+    pub fn start_index(&self) -> u64 {
+        self.inner.read().start_index()
+    }
 
-        // Iterate over all entries using prefix iteration with empty prefix
-        // This returns all (term, value) pairs in the trie
-        if let Ok(Some(entries)) = guard.iter_prefix_with_values("") {
-            for (key, value) in entries {
-                // Skip metadata keys (start with \x00)
-                if key.starts_with('\x00') {
-                    continue;
-                }
-
-                cache.insert(value, key);
-            }
-        }
-
-        cache
+    /// Check if there are unsaved changes.
+    #[inline]
+    pub fn is_dirty(&self) -> bool {
+        self.inner.read().is_dirty()
     }
 
     /// Checkpoint the vocabulary to disk.
     pub fn checkpoint(&self) -> VocabularyResult<()> {
-        let mut guard = self.trie.write();
-
-        // Ensure next_index metadata is up to date
-        let current = self.next_index.load(Ordering::Relaxed);
-        guard.upsert(META_NEXT_INDEX, current).map_err(|e| {
-            VocabularyError::Trie(format!("Failed to update next_index metadata: {}", e))
-        })?;
-
-        guard.checkpoint().map_err(|e| {
-            VocabularyError::Trie(format!("Checkpoint failed: {}", e))
-        })
+        self.inner.write().checkpoint().map_err(VocabularyError::from)
     }
 
-    /// Sync the vocabulary to disk (WAL flush).
+    /// Sync the vocabulary to disk.
+    ///
+    /// This is an alias for `checkpoint()` for backward compatibility.
     pub fn sync(&self) -> VocabularyResult<()> {
-        self.trie.write().sync().map_err(|e| {
-            VocabularyError::Trie(format!("Sync failed: {}", e))
+        self.checkpoint()
+    }
+
+    /// Iterate over all terms in the vocabulary.
+    ///
+    /// Returns an iterator that yields `(term, index)` pairs.
+    /// Uses the reverse lookup capability to iterate by index.
+    ///
+    /// # Note
+    ///
+    /// This method iterates sequentially from `start_index` to `start_index + len`,
+    /// using `get_term()` for each index. This is O(n * k) where n is the vocabulary
+    /// size and k is the average term length.
+    pub fn iter_terms(&self) -> impl Iterator<Item = (String, u64)> + '_ {
+        let start = self.start_index();
+        let count = self.len();
+        (start..start + count).filter_map(move |idx| {
+            self.get_term(idx).map(|term| (term, idx))
         })
-    }
-
-    /// Get a clone of the Arc-wrapped trie (for sharing across threads).
-    pub fn trie_arc(&self) -> Arc<RwLock<DiskBackedCharTrieInner<u64>>> {
-        Arc::clone(&self.trie)
-    }
-
-    /// Get the vocabulary format version.
-    ///
-    /// This returns the current vocabulary version constant. It can be used
-    /// to verify compatibility when loading vocabularies or for metadata
-    /// reporting purposes.
-    ///
-    /// # Current Version
-    ///
-    /// - Version 3: Start indices at 1 (not 0) to avoid collision with
-    ///   `\x00` metadata prefix in varint encoding.
-    pub fn version(&self) -> u64 {
-        VOCABULARY_VERSION
     }
 }
 
@@ -625,17 +588,14 @@ mod tests {
         let words = ["the", "quick", "brown", "fox"];
         let key = encode_ngram_key(&words, &vocab);
 
-        // Build reverse cache
-        let reverse = vocab.build_reverse_cache();
-
         // Decode should recover original indices
         let indices = decode_ngram_key(&key);
         assert_eq!(indices.len(), words.len());
 
-        // Use reverse cache to get words back
+        // Use get_term() for O(1) reverse lookups
         let decoded: Vec<_> = indices
             .iter()
-            .map(|idx| reverse.get(idx).unwrap().as_str())
+            .map(|&idx| vocab.get_term(idx).expect("index should exist"))
             .collect();
 
         assert_eq!(decoded, words);
@@ -653,14 +613,32 @@ mod tests {
         let indices = decode_ngram_key(&key);
         assert_eq!(indices.len(), 2);
 
-        // Build reverse cache and verify roundtrip
-        let reverse = vocab.build_reverse_cache();
+        // Use get_term() for O(1) reverse lookups
         let decoded: Vec<_> = indices
             .iter()
-            .map(|idx| reverse.get(idx).unwrap().as_str())
+            .map(|&idx| vocab.get_term(idx).expect("index should exist"))
             .collect();
 
         assert_eq!(decoded, tokens);
+    }
+
+    #[test]
+    fn test_get_term_o1_lookup() {
+        let (_dir, vocab) = create_temp_vocab();
+
+        // Insert words
+        let idx1 = vocab.get_or_insert("hello");
+        let idx2 = vocab.get_or_insert("world");
+        let idx3 = vocab.get_or_insert("rust");
+
+        // O(1) reverse lookups should work
+        assert_eq!(vocab.get_term(idx1), Some("hello".to_string()));
+        assert_eq!(vocab.get_term(idx2), Some("world".to_string()));
+        assert_eq!(vocab.get_term(idx3), Some("rust".to_string()));
+
+        // Invalid indices should return None
+        assert_eq!(vocab.get_term(0), None); // Below FIRST_VALID_INDEX
+        assert_eq!(vocab.get_term(999), None); // Above range
     }
 
     #[test]
@@ -817,10 +795,36 @@ mod tests {
     }
 
     #[test]
-    fn test_version_accessor() {
+    fn test_start_index() {
         let (_dir, vocab) = create_temp_vocab();
 
-        // Version should be the current constant (3)
-        assert_eq!(vocab.version(), 3);
+        // Start index should be 1 (FIRST_VALID_INDEX)
+        assert_eq!(vocab.start_index(), 1);
+    }
+
+    #[test]
+    fn test_is_dirty() {
+        let (_dir, vocab) = create_temp_vocab();
+
+        // After inserting, vocabulary should be dirty
+        vocab.get_or_insert("test");
+        assert!(vocab.is_dirty());
+
+        // After checkpoint, should no longer be dirty
+        vocab.checkpoint().expect("checkpoint failed");
+        assert!(!vocab.is_dirty());
+    }
+
+    #[test]
+    fn test_contains_index() {
+        let (_dir, vocab) = create_temp_vocab();
+
+        // Index 0 should never exist (reserved)
+        assert!(!vocab.contains_index(0));
+
+        // After insert, index 1 should exist
+        vocab.get_or_insert("test");
+        assert!(vocab.contains_index(1));
+        assert!(!vocab.contains_index(2)); // Not yet inserted
     }
 }

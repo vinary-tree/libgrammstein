@@ -46,7 +46,7 @@
 
 use super::coordinator::ShardCoordinator;
 use super::routing::ShardKey;
-use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
+use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -78,6 +78,15 @@ pub enum MergeError {
     /// Merge cancelled.
     #[error("Merge cancelled")]
     Cancelled,
+
+    /// A shard failed to open during merge.
+    #[error("Failed to open shard '{shard_key}': {message}")]
+    ShardOpen {
+        /// The key of the shard that failed to open.
+        shard_key: String,
+        /// The error message describing why the shard failed to open.
+        message: String,
+    },
 }
 
 /// Result type for merge operations.
@@ -201,7 +210,7 @@ impl<'a> MergeCoordinator<'a> {
         log::info!("Starting merge of {} shards to {:?}", total_shards, output_path);
 
         // Create output trie
-        let mut output_trie = DiskBackedCharTrieInner::<u64>::create(output_path)
+        let mut output_trie = PersistentARTrieChar::<u64>::create(output_path)
             .map_err(|e| MergeError::Trie(format!("Failed to create output trie: {}", e)))?;
 
         let mut ngrams_merged = 0u64;
@@ -218,19 +227,31 @@ impl<'a> MergeCoordinator<'a> {
                 percent_complete: (shards_processed as f32 / total_shards as f32) * 100.0,
             });
 
-            if let Ok(shard) = self.coordinator.get_or_create_shard(key) {
-                let guard = shard.read();
+            log::trace!(
+                "Merging shard '{}' ({}/{})",
+                key,
+                shards_processed + 1,
+                total_shards
+            );
 
-                let iter = guard.iter_with_counts().map_err(|e| {
-                    MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
+            let shard = self
+                .coordinator
+                .get_or_create_shard(key)
+                .map_err(|e| MergeError::ShardOpen {
+                    shard_key: key.to_string(),
+                    message: e.to_string(),
                 })?;
+            let guard = shard.read();
 
-                for (ngram, count) in iter {
-                    output_trie
-                        .increment(&ngram, count as i64)
-                        .map_err(|e| MergeError::Trie(format!("Increment failed: {}", e)))?;
-                    ngrams_merged += 1;
-                }
+            let iter = guard.iter_with_counts().map_err(|e| {
+                MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
+            })?;
+
+            for (ngram, count) in iter {
+                output_trie
+                    .increment(&ngram, count as i64)
+                    .map_err(|e| MergeError::Trie(format!("Increment failed: {}", e)))?;
+                ngrams_merged += 1;
             }
 
             shards_processed += 1;
@@ -286,10 +307,15 @@ impl<'a> MergeCoordinator<'a> {
         let results: Result<Vec<HashMap<String, u64>>, MergeError> = shard_keys
             .par_iter()
             .map(|key| {
+                log::trace!("Merging shard '{}' to memory", key);
+
                 let shard = self
                     .coordinator
                     .get_or_create_shard(key)
-                    .map_err(|e| MergeError::Trie(format!("Failed to open shard {}: {}", key, e)))?;
+                    .map_err(|e| MergeError::ShardOpen {
+                        shard_key: key.to_string(),
+                        message: e.to_string(),
+                    })?;
                 let guard = shard.read();
                 let iter = guard.iter_with_counts().map_err(|e| {
                     MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
@@ -333,13 +359,20 @@ impl<'a> MergeCoordinator<'a> {
         // Pre-collect all entries to avoid lifetime issues and propagate errors early
         let mut all_entries = Vec::new();
         for key in shard_keys {
-            if let Ok(shard) = self.coordinator.get_or_create_shard(&key) {
-                let guard = shard.read();
-                let iter = guard.iter_with_counts().map_err(|e| {
-                    MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
+            log::trace!("Iterating shard '{}'", key);
+
+            let shard = self
+                .coordinator
+                .get_or_create_shard(&key)
+                .map_err(|e| MergeError::ShardOpen {
+                    shard_key: key.to_string(),
+                    message: e.to_string(),
                 })?;
-                all_entries.extend(iter);
-            }
+            let guard = shard.read();
+            let iter = guard.iter_with_counts().map_err(|e| {
+                MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
+            })?;
+            all_entries.extend(iter);
         }
 
         Ok(all_entries.into_iter())
@@ -476,7 +509,7 @@ mod tests {
         assert!(stats.total_ngrams > 0);
 
         // Verify merged trie contents
-        let merged_trie = DiskBackedCharTrieInner::<u64>::open(&output_path).expect("open");
+        let merged_trie = PersistentARTrieChar::<u64>::open(&output_path).expect("open");
         assert_eq!(merged_trie.get("the|quick").map(|v| *v), Some(100));
         assert_eq!(merged_trie.get("apple|pie").map(|v| *v), Some(30));
     }

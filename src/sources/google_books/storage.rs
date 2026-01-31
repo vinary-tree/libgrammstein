@@ -5,7 +5,7 @@
 //!
 //! # Backends
 //!
-//! - **SingleTrie**: Original behavior using a single `DiskBackedCharTrieInner<u64>`
+//! - **SingleTrie**: Original behavior using a single `PersistentARTrieChar<u64>`
 //!   protected by `Arc<RwLock>`. Simple but has write contention with multiple workers.
 //!
 //! - **Sharded**: Distributes n-grams across multiple tries based on prefix routing.
@@ -22,7 +22,7 @@
 use super::config::GoogleBooksConfig;
 use super::sharding::{ShardCoordinator, ShardKey};
 use crate::ngram::vocabulary::{try_encode_ngram_key, SharedVocabulary, VocabularyError};
-use liblevenshtein::dictionary::persistent_artrie_char::DiskBackedCharTrieInner;
+use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -85,7 +85,7 @@ pub enum NgramStorage {
     /// Single trie storage (original behavior).
     SingleTrie {
         /// The trie instance.
-        trie: Arc<RwLock<DiskBackedCharTrieInner<u64>>>,
+        trie: Arc<RwLock<PersistentARTrieChar<u64>>>,
         /// Optional shared vocabulary for PUA encoding.
         vocabulary: Option<Arc<SharedVocabulary>>,
         /// Storage statistics.
@@ -130,11 +130,11 @@ impl NgramStorage {
     ) -> StorageResult<Self> {
         let trie = if output_path.exists() {
             log::info!("Opening existing trie at {:?}", output_path);
-            DiskBackedCharTrieInner::open(output_path)
+            PersistentARTrieChar::open(output_path)
                 .map_err(|e| StorageError::Trie(format!("Failed to open trie: {}", e)))?
         } else {
             log::info!("Creating new trie at {:?}", output_path);
-            DiskBackedCharTrieInner::create(output_path)
+            PersistentARTrieChar::create(output_path)
                 .map_err(|e| StorageError::Trie(format!("Failed to create trie: {}", e)))?
         };
 
@@ -228,6 +228,14 @@ impl NgramStorage {
             Self::SingleTrie { vocabulary, .. } => vocabulary.as_ref(),
             Self::Sharded { vocabulary, .. } => vocabulary.as_ref(),
         }
+    }
+
+    /// Check if the vocabulary has unsaved changes.
+    ///
+    /// This replaces `vocabulary_current_lsn()` and `vocabulary_synced_lsn()`.
+    /// Returns `false` if no vocabulary is configured or vocabulary is clean.
+    pub fn vocabulary_is_dirty(&self) -> bool {
+        self.vocabulary().is_some_and(|v| v.is_dirty())
     }
 
     /// Encode tokens to an n-gram key using vocabulary.
@@ -442,7 +450,7 @@ impl NgramStorage {
         match self {
             Self::SingleTrie { trie, .. } => {
                 let mut guard = trie.write();
-                guard.sync().map_err(|e| {
+                guard.checkpoint().map_err(|e| {
                     StorageError::Trie(format!("Sync failed: {}", e))
                 })
             }
@@ -481,6 +489,130 @@ impl NgramStorage {
         Ok(())
     }
 
+    /// Check if a shard is currently syncing (for defer-and-continue pattern).
+    ///
+    /// Workers can use this to check if their target shard is syncing and
+    /// defer to another job if so, avoiding blocking.
+    ///
+    /// For single-trie mode, always returns `false`.
+    ///
+    /// # Arguments
+    ///
+    /// * `tokens` - The n-gram tokens to check routing for
+    ///
+    /// # Returns
+    ///
+    /// `true` if the shard that would store these tokens is currently syncing.
+    pub fn is_shard_syncing(&self, tokens: &[&str]) -> bool {
+        match self {
+            Self::SingleTrie { .. } => false, // Single trie is never "syncing"
+            Self::Sharded { coordinator, .. } => {
+                let shard_key = coordinator.route_tokens(tokens);
+                coordinator.is_shard_syncing(&shard_key)
+            }
+        }
+    }
+
+    /// Check if a shard (by key) is currently syncing.
+    ///
+    /// For single-trie mode, always returns `false`.
+    pub fn is_shard_key_syncing(&self, shard_key: &ShardKey) -> bool {
+        match self {
+            Self::SingleTrie { .. } => false,
+            Self::Sharded { coordinator, .. } => coordinator.is_shard_syncing(shard_key),
+        }
+    }
+
+    /// Check if the shard for a given file prefix is currently syncing.
+    ///
+    /// This is used by workers to check if they should defer a job
+    /// because the target shard is being synced.
+    ///
+    /// For single-trie mode, always returns `false`.
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - The file prefix (e.g., "th", "to")
+    /// * `order` - The n-gram order (1-5)
+    ///
+    /// # Returns
+    ///
+    /// `true` if the shard that would store n-grams from this prefix is syncing.
+    pub fn is_prefix_shard_syncing(&self, prefix: &str, order: u8) -> bool {
+        match self {
+            Self::SingleTrie { .. } => false,
+            Self::Sharded { coordinator, .. } => {
+                let shard_key = super::sharding::shard_key_for_file_prefix(
+                    prefix,
+                    order,
+                    &coordinator.config().granularity,
+                );
+                coordinator.is_shard_syncing(&shard_key)
+            }
+        }
+    }
+
+    /// Sync all shards in parallel.
+    ///
+    /// This enables non-blocking checkpoints where workers can continue
+    /// on non-syncing shards while the sync is in progress.
+    ///
+    /// For single-trie mode, performs a regular sync.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_concurrent` - Maximum shards to sync in parallel (recommended: 8)
+    ///
+    /// # Returns
+    ///
+    /// Number of shards synced, or error if any sync failed.
+    pub fn sync_parallel(&self, max_concurrent: usize) -> StorageResult<usize> {
+        match self {
+            Self::SingleTrie { trie, .. } => {
+                let mut guard = trie.write();
+                guard.checkpoint().map_err(|e| {
+                    StorageError::Trie(format!("Sync failed: {}", e))
+                })?;
+                Ok(1) // Single trie counts as 1 sync
+            }
+            Self::Sharded { coordinator, .. } => {
+                coordinator.sync_all_parallel(max_concurrent)?;
+                Ok(coordinator.open_shard_count())
+            }
+        }
+    }
+
+    /// Checkpoint with parallel WAL flushing for non-blocking operation.
+    ///
+    /// This provides the same guarantees as `checkpoint()` but with better
+    /// performance for large shard counts:
+    ///
+    /// 1. Parallel WAL sync across all shards
+    /// 2. Sequential checkpoint/truncate (fast since data is synced)
+    /// 3. Global checkpoint save
+    ///
+    /// Workers can continue on non-syncing shards during the sync phase.
+    ///
+    /// For single-trie mode, performs a regular checkpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_concurrent_syncs` - Maximum shards to sync in parallel (recommended: 8)
+    pub fn checkpoint_parallel(&self, max_concurrent_syncs: usize) -> StorageResult<()> {
+        match self {
+            Self::SingleTrie { trie, .. } => {
+                let mut guard = trie.write();
+                guard.checkpoint().map_err(|e| {
+                    StorageError::Trie(format!("Checkpoint failed: {}", e))
+                })
+            }
+            Self::Sharded { coordinator, .. } => {
+                coordinator.coordinated_checkpoint_parallel(max_concurrent_syncs)?;
+                Ok(())
+            }
+        }
+    }
+
     /// Close the storage (checkpoint and release resources).
     pub fn close(&self) -> StorageResult<()> {
         match self {
@@ -502,7 +634,7 @@ impl NgramStorage {
         match self {
             Self::SingleTrie { trie, .. } => {
                 let guard = trie.read();
-                guard.len as u64
+                guard.len() as u64
             }
             Self::Sharded { coordinator, .. } => coordinator.total_entry_count(),
         }
@@ -526,7 +658,7 @@ impl NgramStorage {
     /// Get the underlying trie (for single-trie mode only).
     ///
     /// Returns `None` for sharded mode.
-    pub fn as_single_trie(&self) -> Option<&Arc<RwLock<DiskBackedCharTrieInner<u64>>>> {
+    pub fn as_single_trie(&self) -> Option<&Arc<RwLock<PersistentARTrieChar<u64>>>> {
         match self {
             Self::SingleTrie { trie, .. } => Some(trie),
             Self::Sharded { .. } => None,
@@ -562,6 +694,164 @@ impl NgramStorage {
             Self::SingleTrie { .. } => false, // Single trie doesn't track prefixes
             Self::Sharded { coordinator, .. } => coordinator.is_prefix_completed(prefix),
         }
+    }
+
+    // ========================================================================
+    // Document Transaction API (for idempotent prefix imports)
+    // ========================================================================
+
+    /// Begin a prefix transaction for atomic, idempotent n-gram import.
+    ///
+    /// This creates a document transaction that buffers all n-gram inserts
+    /// until `commit_prefix_tx()` is called. If interrupted before commit,
+    /// the transaction is automatically discarded on recovery.
+    ///
+    /// **Only supported for sharded storage.** Returns `None` for single-trie mode.
+    ///
+    /// # Key Properties
+    ///
+    /// - **Atomicity**: Either all n-grams are committed or none are
+    /// - **Idempotency**: Uses SET semantics, so re-imports produce the same result
+    /// - **Crash Safety**: Uncommitted transactions are discarded on WAL recovery
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - The prefix file being imported (used as document ID)
+    /// * `order` - The n-gram order (1-5), used for shard routing
+    ///
+    /// # Returns
+    ///
+    /// A `StoragePrefixTx` that must be passed to `tx_insert()` and
+    /// eventually to `commit_prefix_tx()`, or `None` for single-trie mode.
+    pub fn begin_prefix_tx(&self, prefix: &str, order: u8) -> StorageResult<Option<StoragePrefixTx>> {
+        match self {
+            Self::SingleTrie { .. } => {
+                // Single-trie mode doesn't support transactions
+                // Caller should use store() directly
+                Ok(None)
+            }
+            Self::Sharded { coordinator, .. } => {
+                let shard_key = super::sharding::shard_key_for_file_prefix(
+                    prefix,
+                    order,
+                    &coordinator.config().granularity,
+                );
+                let inner = coordinator.begin_prefix_tx(&shard_key, prefix)?;
+                Ok(Some(StoragePrefixTx { inner }))
+            }
+        }
+    }
+
+    /// Insert an n-gram (as tokens) into a pending prefix transaction.
+    ///
+    /// The n-gram is encoded using the vocabulary (if present) and buffered
+    /// in memory. It will be written atomically when the transaction is committed.
+    /// Uses SET semantics (not increment), making re-imports idempotent.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The active transaction from `begin_prefix_tx()`
+    /// * `tokens` - The n-gram tokens (e.g., ["the", "quick"])
+    /// * `count` - The n-gram count
+    pub fn tx_insert_tokens(
+        &self,
+        tx: &mut StoragePrefixTx,
+        tokens: &[&str],
+        count: u64,
+    ) -> StorageResult<()> {
+        // Encode tokens using vocabulary
+        let encoded_key = self.encode_tokens(tokens)?;
+
+        match self {
+            Self::Sharded { coordinator, .. } => {
+                coordinator.tx_insert(&mut tx.inner, &encoded_key, count);
+                Ok(())
+            }
+            Self::SingleTrie { .. } => {
+                // Should not happen - caller should check begin_prefix_tx result
+                Err(StorageError::Config(
+                    "Cannot use transaction with single-trie storage".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// Commit a prefix transaction atomically and mark the prefix as completed.
+    ///
+    /// This:
+    /// 1. Writes all buffered n-grams to the WAL as a single batch
+    /// 2. Applies them to the trie atomically
+    /// 3. Marks the prefix as completed in the checkpoint state
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The transaction to commit (consumed)
+    ///
+    /// # Returns
+    ///
+    /// The number of n-grams that were committed.
+    pub fn commit_prefix_tx(&self, tx: StoragePrefixTx) -> StorageResult<usize> {
+        match self {
+            Self::Sharded { coordinator, stats, .. } => {
+                let count = coordinator.commit_prefix_tx(tx.inner)?;
+                stats.record(count as u64, count as u64);
+                Ok(count)
+            }
+            Self::SingleTrie { .. } => Err(StorageError::Config(
+                "Cannot use transaction with single-trie storage".to_string(),
+            )),
+        }
+    }
+
+    /// Abort a prefix transaction, discarding all buffered n-grams.
+    ///
+    /// Use this if an error occurs during processing and you want to
+    /// discard the partial work without committing it.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The transaction to abort (consumed)
+    pub fn abort_prefix_tx(&self, tx: StoragePrefixTx) -> StorageResult<()> {
+        match self {
+            Self::Sharded { coordinator, .. } => {
+                coordinator.abort_prefix_tx(tx.inner)?;
+                Ok(())
+            }
+            Self::SingleTrie { .. } => Err(StorageError::Config(
+                "Cannot use transaction with single-trie storage".to_string(),
+            )),
+        }
+    }
+}
+
+/// A prefix transaction for atomic n-gram imports via NgramStorage.
+///
+/// This wraps the coordinator-level transaction and provides the same
+/// atomicity, idempotency, and crash-safety guarantees.
+///
+/// # Usage
+///
+/// ```ignore
+/// if let Some(mut tx) = storage.begin_prefix_tx("th", 2)? {
+///     for (tokens, count) in ngrams {
+///         storage.tx_insert_tokens(&mut tx, &tokens, count)?;
+///     }
+///     storage.commit_prefix_tx(tx)?;
+/// }
+/// ```
+pub struct StoragePrefixTx {
+    inner: super::sharding::CoordinatorPrefixTx,
+}
+
+impl StoragePrefixTx {
+    /// Get the prefix being imported.
+    pub fn prefix(&self) -> Option<&str> {
+        self.inner.prefix()
+    }
+
+    /// Get the number of n-grams buffered so far.
+    pub fn ngram_count(&self) -> usize {
+        self.inner.ngram_count()
     }
 }
 

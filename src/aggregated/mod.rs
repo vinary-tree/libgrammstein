@@ -286,11 +286,21 @@ impl AggregatedLanguageModelDictionary {
         decode_ngram_key(key)
     }
 
-    /// Build a reverse vocabulary cache (index → word).
+    /// Build a reverse vocabulary map (index → word).
     ///
     /// Useful for decoding n-gram keys back to human-readable form.
+    ///
+    /// Note: Prefer using `vocabulary().get_term(index)` for O(1) lookups
+    /// instead of building a full HashMap when only a few lookups are needed.
     pub fn build_reverse_vocabulary(&self) -> std::collections::HashMap<u64, String> {
-        self.vocabulary.build_reverse_cache()
+        let len = self.vocabulary.len();
+        let mut map = std::collections::HashMap::with_capacity(len as usize);
+        for i in 1..=len {
+            if let Some(term) = self.vocabulary.get_term(i) {
+                map.insert(i, term);
+            }
+        }
+        map
     }
 
     /// Checkpoint all shards and vocabulary.

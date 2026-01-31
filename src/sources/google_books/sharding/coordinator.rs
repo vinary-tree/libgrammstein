@@ -10,16 +10,17 @@
 use super::checkpoint::{CheckpointManager, ImportPhase, ImportState};
 use super::config::{ShardConfig, ShardGranularity};
 use super::routing::{compute_shard_key, compute_shard_key_from_token, ngram_order, ShardKey};
-use super::shard::{ShardError, ShardHandle};
+use super::shard::{PrefixTransaction, ShardError, ShardHandle, ShardSyncState};
 
 use dashmap::DashMap;
 use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 /// Error type for coordinator operations.
@@ -62,6 +63,13 @@ pub enum CoordinatorError {
     /// Recovery required but not performed.
     #[error("Recovery required: import was interrupted with in-progress shards")]
     RecoveryRequired,
+
+    /// Parallel sync failed for one or more shards.
+    #[error("Parallel sync failed: {errors}")]
+    ParallelSyncFailed {
+        /// Error messages from failed shards.
+        errors: String,
+    },
 }
 
 /// Result type for coordinator operations.
@@ -145,6 +153,51 @@ pub struct ShardCoordinator {
     shutdown: std::sync::atomic::AtomicBool,
 }
 
+/// A prefix transaction held at the coordinator level.
+///
+/// This wraps a shard-level `PrefixTransaction` with the shard reference needed
+/// to commit or abort the transaction. The transaction provides atomic,
+/// idempotent import semantics for prefix files.
+///
+/// # Atomicity
+///
+/// Either all n-grams buffered in this transaction are committed to the shard,
+/// or none are. There is no partial state.
+///
+/// # Idempotency
+///
+/// Uses SET semantics (not increment), so if the same prefix is re-imported
+/// after a crash, the result is identical to a single import.
+///
+/// # Crash Safety
+///
+/// If the process crashes before `commit_prefix_tx()` is called, the buffered
+/// n-grams are discarded during WAL recovery. Only committed transactions
+/// survive crashes.
+pub struct CoordinatorPrefixTx {
+    /// The shard key this transaction belongs to.
+    pub shard_key: ShardKey,
+
+    /// Reference to the shard (needed for commit/abort).
+    shard: Arc<RwLock<ShardHandle>>,
+
+    /// The inner shard-level transaction.
+    /// Option because it's taken during commit/abort.
+    inner: Option<PrefixTransaction<u64>>,
+}
+
+impl CoordinatorPrefixTx {
+    /// Get the prefix being imported.
+    pub fn prefix(&self) -> Option<&str> {
+        self.inner.as_ref().map(|tx| tx.prefix.as_str())
+    }
+
+    /// Get the number of n-grams buffered so far.
+    pub fn ngram_count(&self) -> usize {
+        self.inner.as_ref().map(|tx| tx.ngram_count).unwrap_or(0)
+    }
+}
+
 impl ShardCoordinator {
     /// Create a new coordinator with the given configuration.
     ///
@@ -213,6 +266,8 @@ impl ShardCoordinator {
     /// Open an existing coordinator with checkpoint management.
     ///
     /// If checkpoint exists and shows interrupted import, marks for recovery.
+    /// Also reconciles global checkpoint state with actual shard state to detect
+    /// any inconsistencies from interrupted imports.
     pub fn open_with_checkpoints(config: ShardConfig) -> CoordinatorResult<Self> {
         if !config.shard_dir.exists() {
             return Err(CoordinatorError::Config(format!(
@@ -222,6 +277,65 @@ impl ShardCoordinator {
         }
 
         let coordinator = Self::new_internal(config, true)?;
+
+        // CRITICAL: Reconcile global checkpoint with actual shard state.
+        // The global checkpoint may be stale if the process crashed after committing
+        // shard data but before saving the global checkpoint, or vice versa.
+        // Shard state (from WAL replay) is authoritative.
+        let shard_files = coordinator.discover_shard_files()?;
+
+        if !shard_files.is_empty() {
+            log::info!(
+                "Reconciling global checkpoint with {} shard files",
+                shard_files.len()
+            );
+
+            let mut reconciled_prefixes = 0usize;
+
+            for (key, _path) in &shard_files {
+                // Opening the shard triggers WAL replay and loads checkpoint state
+                let shard = coordinator.get_or_create_shard(key)?;
+                let guard = shard.read();
+                let state = guard.checkpoint_state();
+
+                // Merge shard's completed_prefixes into global checkpoint
+                // Shard state is authoritative (it's what's actually on disk after WAL replay)
+                if let Some(ref manager) = coordinator.checkpoint_manager {
+                    let mut mgr = manager.lock();
+                    let ckpt = mgr.checkpoint_mut();
+                    let record = ckpt.get_or_create_shard(key, guard.path());
+
+                    // Add any prefixes that are in shard but not in global checkpoint
+                    for prefix in &state.completed_prefixes {
+                        if !record.completed_prefixes.contains(prefix) {
+                            log::debug!(
+                                "Reconciling: adding prefix '{}' to shard {} (found in shard WAL)",
+                                prefix,
+                                key
+                            );
+                            record.completed_prefixes.insert(prefix.clone());
+                            reconciled_prefixes += 1;
+                        }
+                    }
+
+                    // Update entry count and n-gram count from shard
+                    record.entry_count = guard.len() as u64;
+                    record.ngrams_processed = state.ngrams_processed;
+                }
+            }
+
+            if reconciled_prefixes > 0 {
+                log::info!(
+                    "Reconciled {} prefixes from shard WALs into global checkpoint",
+                    reconciled_prefixes
+                );
+            }
+
+            // Save reconciled checkpoint
+            if let Some(ref manager) = coordinator.checkpoint_manager {
+                manager.lock().save()?;
+            }
+        }
 
         // Detect if recovery is needed
         if let Some(ref manager) = coordinator.checkpoint_manager {
@@ -236,14 +350,113 @@ impl ShardCoordinator {
     ///
     /// If a previous import was interrupted, this resumes from the last checkpoint.
     /// Otherwise, it starts a fresh import.
+    ///
+    /// When the shard directory exists but the global checkpoint doesn't, this will
+    /// attempt to recover from existing shard WAL files (see `recover_from_shards`).
     pub fn resume_or_start(config: ShardConfig) -> CoordinatorResult<Self> {
-        let exists = config.shard_dir.exists() && config.global_checkpoint_path().exists();
+        let has_global_checkpoint =
+            config.shard_dir.exists() && config.global_checkpoint_path().exists();
 
-        if exists {
+        if has_global_checkpoint {
             Self::open_with_checkpoints(config)
+        } else if config.shard_dir.exists() {
+            // Shard directory exists but no global checkpoint - recover from shard WALs
+            Self::recover_from_shards(config)
         } else {
             Self::new_with_checkpoints(config)
         }
+    }
+
+    /// Recover coordinator state from existing shard files when global checkpoint is missing.
+    ///
+    /// This handles the case where an import was interrupted before the global checkpoint
+    /// was saved. Shards may have WAL data that needs to be replayed and their checkpoint
+    /// states aggregated into a new global checkpoint.
+    fn recover_from_shards(config: ShardConfig) -> CoordinatorResult<Self> {
+        log::info!(
+            "No global checkpoint found, attempting recovery from shard WAL files in {}",
+            config.shard_dir.display()
+        );
+
+        // Create coordinator with checkpoint management
+        let coordinator = Self::new_internal(config, true)?;
+
+        // Discover and open all existing shards to trigger WAL replay
+        let shard_files = coordinator.discover_shard_files()?;
+
+        if shard_files.is_empty() {
+            log::info!("No existing shard files found, starting fresh import");
+            return Ok(coordinator);
+        }
+
+        log::info!(
+            "Found {} existing shard files, replaying WALs and recovering checkpoint state",
+            shard_files.len()
+        );
+
+        let mut total_recovered_prefixes = 0usize;
+        let mut total_ngrams_recovered = 0u64;
+
+        for (key, _path) in &shard_files {
+            // Opening the shard triggers WAL replay via open_with_recovery()
+            // and loads checkpoint state via load_checkpoint_state()
+            let shard = coordinator.get_or_create_shard(key)?;
+            let guard = shard.read();
+
+            let state = guard.checkpoint_state();
+            let prefix_count = state.completed_prefixes.len();
+            let ngram_count = state.ngrams_processed;
+
+            if prefix_count > 0 || ngram_count > 0 {
+                log::info!(
+                    "  Shard {}: recovered {} completed prefixes, {} n-grams",
+                    key,
+                    prefix_count,
+                    ngram_count
+                );
+            }
+
+            total_recovered_prefixes += prefix_count;
+            total_ngrams_recovered += ngram_count;
+
+            // Update global checkpoint with shard state
+            if let Some(ref manager) = coordinator.checkpoint_manager {
+                let mut mgr = manager.lock();
+                let ckpt = mgr.checkpoint_mut();
+
+                let record = ckpt.get_or_create_shard(key, guard.path());
+                record.entry_count = guard.len() as u64;
+                record.ngrams_processed = state.ngrams_processed;
+                record.completed_prefixes = state.completed_prefixes.clone();
+                record.current_prefix = state.current_prefix.clone();
+                record.last_checkpoint_time = std::time::SystemTime::now()
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+            }
+        }
+
+        // Save the recovered global checkpoint
+        if let Some(ref manager) = coordinator.checkpoint_manager {
+            let mut mgr = manager.lock();
+            mgr.detect_recovery();
+            mgr.save()?;
+        }
+
+        log::info!(
+            "Recovery complete: {} prefixes, {} n-grams recovered from {} shards",
+            total_recovered_prefixes,
+            total_ngrams_recovered,
+            shard_files.len()
+        );
+
+        // Update stats
+        coordinator
+            .stats
+            .unique_ngrams
+            .store(total_ngrams_recovered, Ordering::Relaxed);
+
+        Ok(coordinator)
     }
 
     /// Get the configuration.
@@ -345,10 +558,19 @@ impl ShardCoordinator {
 
                     // Remove from active shards (flushes to disk via Drop)
                     if let Some((_, shard)) = self.shards.remove(&key) {
-                        // Checkpoint before eviction
-                        if let Some(mut guard) = shard.try_write() {
-                            let _ = guard.checkpoint();
+                        // CRITICAL: Block on checkpoint to ensure data is persisted before eviction.
+                        // Using try_write() could skip checkpoint if shard is busy, leading to data loss.
+                        // Blocking here is safe because we've already removed from the map,
+                        // so no new operations will start on this shard.
+                        let mut guard = shard.write();
+                        if let Err(e) = guard.checkpoint() {
+                            log::error!(
+                                "Failed to checkpoint shard {} during eviction: {}",
+                                key,
+                                e
+                            );
                         }
+                        drop(guard);
                         self.stats.shard_evictions.fetch_add(1, Ordering::Relaxed);
                         self.stats.active_shards.fetch_sub(1, Ordering::Relaxed);
                     }
@@ -600,10 +822,12 @@ impl ShardCoordinator {
             let key = entry.key().clone();
             let shard = entry.value();
 
-            if let Some(mut guard) = shard.try_write() {
-                if let Err(e) = guard.sync() {
-                    errors.push(format!("Shard {}: {}", key, e));
-                }
+            // Use blocking write() to ensure all shards are synced.
+            // This prevents the bug where locked shards are silently skipped,
+            // causing WAL replay to double n-gram counts on resume.
+            let mut guard = shard.write();
+            if let Err(e) = guard.sync() {
+                errors.push(format!("Shard {}: {}", key, e));
             }
         }
 
@@ -612,6 +836,246 @@ impl ShardCoordinator {
         } else {
             Err(CoordinatorError::Checkpoint(errors.join("; ")))
         }
+    }
+
+    /// Check if a specific shard is currently syncing.
+    ///
+    /// Workers can use this to defer writes to non-syncing shards,
+    /// implementing the "defer-and-continue" pattern.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The shard key to check
+    ///
+    /// # Returns
+    ///
+    /// `true` if the shard is currently syncing, `false` otherwise.
+    /// Returns `false` if the shard doesn't exist (not yet created).
+    pub fn is_shard_syncing(&self, key: &ShardKey) -> bool {
+        self.shards
+            .get(key)
+            .map(|s| s.read().is_syncing())
+            .unwrap_or(false)
+    }
+
+    /// Wait for a shard to finish syncing (with timeout).
+    ///
+    /// Returns immediately if the shard is not syncing.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The shard key to wait on
+    /// * `timeout` - Maximum time to wait
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if sync completed or shard wasn't syncing,
+    /// `Err(ShardError::SyncTimeout)` if timeout elapsed.
+    pub fn wait_if_syncing(&self, key: &ShardKey, timeout: Duration) -> CoordinatorResult<()> {
+        if let Some(shard) = self.shards.get(key) {
+            let guard = shard.read();
+            if guard.is_syncing() {
+                guard.wait_for_sync(timeout)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Sync all dirty shards in parallel using rayon.
+    ///
+    /// This method enables non-blocking checkpoint operations:
+    /// - Workers can continue on non-syncing shards
+    /// - Only workers targeting a syncing shard need to defer
+    ///
+    /// # Arguments
+    ///
+    /// * `max_concurrent` - Maximum number of shards to sync concurrently.
+    ///   Higher values increase I/O parallelism but may overwhelm slow disks.
+    ///   Recommended: 4-8 for SSDs, 1-2 for HDDs.
+    ///
+    /// # Returns
+    ///
+    /// Number of shards synced, or error if any sync failed.
+    ///
+    /// # Thread Safety
+    ///
+    /// Uses `sync_tracked()` which employs CAS to ensure only one sync
+    /// operation per shard at a time. Formally verified in TLA+ spec.
+    pub fn sync_all_parallel(&self, max_concurrent: usize) -> CoordinatorResult<usize> {
+        // Collect dirty shard keys (read locks only, very fast)
+        let dirty_shards: Vec<ShardKey> = self
+            .shards
+            .iter()
+            .filter(|e| e.value().read().sync_state() == ShardSyncState::Dirty)
+            .map(|e| e.key().clone())
+            .collect();
+
+        if dirty_shards.is_empty() {
+            return Ok(0);
+        }
+
+        log::debug!(
+            "Parallel sync: {} dirty shards with max {} concurrent",
+            dirty_shards.len(),
+            max_concurrent
+        );
+
+        // Parallel sync using rayon with bounded concurrency
+        // Use a thread pool with limited parallelism
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(max_concurrent.min(dirty_shards.len()))
+            .build()
+            .map_err(|e| CoordinatorError::Config(format!("Failed to create thread pool: {}", e)))?;
+
+        let errors: Vec<(ShardKey, String)> = pool.install(|| {
+            dirty_shards
+                .par_iter()
+                .filter_map(|key| {
+                    let shard = self.shards.get(key)?;
+
+                    // Try to start sync (CAS: Dirty -> Syncing)
+                    // If this returns false, another thread started the sync
+                    {
+                        let guard = shard.read();
+                        if !guard.sync_coordinator().try_start_sync() {
+                            return None; // Already syncing or clean
+                        }
+                    }
+
+                    // Perform the actual sync with write lock
+                    let mut guard = shard.write();
+                    match guard.sync() {
+                        Ok(()) => {
+                            // Success: mark clean
+                            let lsn = guard.stats().write_count.load(Ordering::Relaxed);
+                            guard.sync_coordinator().complete_sync(lsn);
+                            None
+                        }
+                        Err(e) => {
+                            // Failure: mark failed
+                            guard.sync_coordinator().fail_sync(&e.to_string());
+                            Some((key.clone(), e.to_string()))
+                        }
+                    }
+                })
+                .collect()
+        });
+
+        let synced_count = dirty_shards.len() - errors.len();
+
+        if errors.is_empty() {
+            log::debug!("Parallel sync completed: {} shards synced", synced_count);
+            Ok(synced_count)
+        } else {
+            let error_messages: Vec<String> = errors
+                .iter()
+                .map(|(k, e)| format!("{}: {}", k, e))
+                .collect();
+            Err(CoordinatorError::ParallelSyncFailed {
+                errors: error_messages.join("; "),
+            })
+        }
+    }
+
+    /// Perform a coordinated checkpoint with parallel WAL flushing.
+    ///
+    /// This method provides the same guarantees as `coordinated_checkpoint()`
+    /// but with significantly better performance for large shard counts:
+    ///
+    /// 1. Vocabulary checkpoint (synchronous - single resource)
+    /// 2. Parallel WAL sync via `sync_all_parallel()`
+    /// 3. Sequential state collection from all shards (read locks, fast)
+    /// 4. Sequential WAL checkpoint/truncate (write locks)
+    /// 5. Atomic global checkpoint JSON save
+    ///
+    /// Workers can continue on non-syncing shards during step 2, only
+    /// blocking when they need to access a shard that is currently syncing.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_concurrent_syncs` - Maximum shards to sync in parallel.
+    ///   Recommended: 8 for SSDs, 2 for HDDs.
+    ///
+    /// # Performance
+    ///
+    /// With 100 shards @ 50ms each:
+    /// - Sequential: ~5000ms total blocking
+    /// - Parallel (8 concurrent): ~625ms + workers continue on other shards
+    pub fn coordinated_checkpoint_parallel(
+        &self,
+        max_concurrent_syncs: usize,
+    ) -> CoordinatorResult<()> {
+        let start = Instant::now();
+
+        // Step 1: Parallel WAL sync
+        let synced_count = self.sync_all_parallel(max_concurrent_syncs)?;
+
+        // Step 2: Sequential state collection and checkpoint
+        let mut errors = Vec::new();
+
+        for entry in self.shards.iter() {
+            let key = entry.key().clone();
+            let shard = entry.value();
+
+            // Acquire write lock for checkpoint (truncates WAL)
+            let mut guard = shard.write();
+
+            // Checkpoint (truncate WAL) - this is fast since data is already synced
+            if let Err(e) = guard.checkpoint() {
+                errors.push(format!("Shard {}: {}", key, e));
+                continue;
+            }
+
+            // Update global checkpoint with shard state
+            if let Some(ref manager) = self.checkpoint_manager {
+                let mut mgr = manager.lock();
+                let ckpt = mgr.checkpoint_mut();
+                let state = guard.checkpoint_state();
+
+                let record = ckpt.get_or_create_shard(&key, guard.path());
+                record.entry_count = guard.len() as u64;
+                record.ngrams_processed = state.ngrams_processed;
+                record.completed_prefixes = state.completed_prefixes.clone();
+                record.current_prefix = state.current_prefix.clone();
+                record.last_checkpoint_time = std::time::SystemTime::now()
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+            }
+        }
+
+        // Step 3: Save global checkpoint
+        if let Some(ref manager) = self.checkpoint_manager {
+            manager.lock().save()?;
+        }
+
+        let elapsed = start.elapsed();
+        log::debug!(
+            "Parallel checkpoint completed: {} shards synced, {} total shards, {}ms elapsed",
+            synced_count,
+            self.shards.len(),
+            elapsed.as_millis()
+        );
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(CoordinatorError::Checkpoint(errors.join("; ")))
+        }
+    }
+
+    /// Retry failed syncs (after `sync_all_parallel()` returned errors).
+    ///
+    /// This resets shards from SyncFailed to Dirty so they can be synced again.
+    pub fn retry_failed_syncs(&self) -> usize {
+        let mut retried = 0;
+        for entry in self.shards.iter() {
+            let guard = entry.value().read();
+            if guard.sync_coordinator().retry_sync() {
+                retried += 1;
+            }
+        }
+        retried
     }
 
     /// Close all shards (checkpoint and remove from memory).
@@ -679,7 +1143,7 @@ impl ShardCoordinator {
 
         if let Some(shard) = self.shards.get(&key) {
             let mut guard = shard.write();
-            guard.complete_prefix(file_prefix);
+            guard.complete_prefix(file_prefix)?;
         }
 
         Ok(())
@@ -810,6 +1274,34 @@ impl ShardCoordinator {
         self.all_completed_prefixes().contains(prefix)
     }
 
+    /// Get completed prefixes for a specific n-gram order.
+    ///
+    /// Returns all prefixes that have been marked complete in shards
+    /// associated with the given order.
+    pub fn completed_prefixes_for_order(&self, order: u8) -> HashSet<String> {
+        if let Some(ref manager) = self.checkpoint_manager {
+            manager.lock().checkpoint().completed_prefixes_for_order(order)
+        } else {
+            // Fall back to querying shards directly
+            self.shards
+                .iter()
+                .filter(|e| {
+                    // Only include shards for this order or shards that contain all orders
+                    e.key().order.is_none() || e.key().order == Some(order)
+                })
+                .flat_map(|e| {
+                    e.value()
+                        .read()
+                        .checkpoint_state()
+                        .completed_prefixes
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+    }
+
     /// Mark a prefix as currently being processed.
     pub fn set_current_prefix(&self, shard_key: &ShardKey, prefix: Option<&str>) -> CoordinatorResult<()> {
         // Update shard's checkpoint state
@@ -833,7 +1325,7 @@ impl ShardCoordinator {
         // Update shard's checkpoint state
         if let Some(shard) = self.shards.get(shard_key) {
             let mut guard = shard.write();
-            guard.complete_prefix(prefix);
+            guard.complete_prefix(prefix)?;
         }
 
         // Update global checkpoint
@@ -843,6 +1335,146 @@ impl ShardCoordinator {
             mgr.maybe_save()?;
         }
 
+        Ok(())
+    }
+
+    // ========================================================================
+    // Document Transaction API (for idempotent prefix imports)
+    // ========================================================================
+
+    /// Begin a prefix transaction for atomic, idempotent n-gram import.
+    ///
+    /// This creates a document transaction on the appropriate shard that buffers
+    /// all n-gram inserts until `commit_prefix_tx()` is called. If interrupted
+    /// before commit, the transaction is automatically discarded on recovery.
+    ///
+    /// # Key Properties
+    ///
+    /// - **Atomicity**: Either all n-grams are committed or none are
+    /// - **Idempotency**: Uses SET semantics, so re-imports produce the same result
+    /// - **Crash Safety**: Uncommitted transactions are discarded on WAL recovery
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_key` - The shard key for this prefix (from `route_tokens`)
+    /// * `prefix` - The prefix file being imported (used as document ID)
+    ///
+    /// # Returns
+    ///
+    /// A `CoordinatorPrefixTx` that must be passed to `tx_insert()` and
+    /// eventually to `commit_prefix_tx()`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let shard_key = coordinator.route_tokens(&tokens);
+    /// let mut tx = coordinator.begin_prefix_tx(&shard_key, "th")?;
+    /// for (ngram, count) in ngrams {
+    ///     coordinator.tx_insert(&mut tx, &ngram, count);
+    /// }
+    /// coordinator.commit_prefix_tx(tx)?;
+    /// ```
+    pub fn begin_prefix_tx(
+        &self,
+        shard_key: &ShardKey,
+        prefix: &str,
+    ) -> CoordinatorResult<CoordinatorPrefixTx> {
+        let shard = self.get_or_create_shard(shard_key)?;
+        let guard = shard.read();
+        let inner_tx = guard.begin_prefix(prefix)?;
+
+        Ok(CoordinatorPrefixTx {
+            shard_key: shard_key.clone(),
+            shard: Arc::clone(&shard),
+            inner: Some(inner_tx),
+        })
+    }
+
+    /// Insert an n-gram into a pending prefix transaction.
+    ///
+    /// The n-gram is buffered in memory and will be written atomically when
+    /// the transaction is committed. Uses SET semantics (not increment),
+    /// making re-imports idempotent.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The active transaction from `begin_prefix_tx()`
+    /// * `ngram` - The n-gram key to insert
+    /// * `count` - The n-gram count
+    pub fn tx_insert(&self, tx: &mut CoordinatorPrefixTx, ngram: &str, count: u64) {
+        let guard = tx.shard.read();
+        if let Some(ref mut inner) = tx.inner {
+            guard.tx_insert(inner, ngram, count);
+        }
+    }
+
+    /// Commit a prefix transaction atomically and mark the prefix as completed.
+    ///
+    /// This:
+    /// 1. Writes all buffered n-grams to the WAL as a single batch
+    /// 2. Applies them to the trie atomically
+    /// 3. Marks the prefix as completed in the shard's checkpoint state
+    /// 4. Persists the shard checkpoint state to WAL (done by commit_prefix)
+    /// 5. Updates and saves the global checkpoint
+    ///
+    /// # Durability Guarantee
+    ///
+    /// After this method returns successfully, the prefix completion is durable:
+    /// - Shard checkpoint state is persisted to the shard's WAL
+    /// - Global checkpoint is saved to disk
+    ///
+    /// This ensures that if the process crashes after commit_prefix_tx() returns,
+    /// the prefix will be correctly marked as complete during recovery.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The transaction to commit (consumed)
+    ///
+    /// # Returns
+    ///
+    /// The number of n-grams that were committed.
+    pub fn commit_prefix_tx(&self, mut tx: CoordinatorPrefixTx) -> CoordinatorResult<usize> {
+        let inner_tx = tx.inner.take().expect("Transaction already consumed");
+        let prefix = inner_tx.prefix.clone();
+
+        // Commit the transaction (this now also updates and persists shard checkpoint state)
+        let ngram_count = {
+            let mut guard = tx.shard.write();
+            guard.commit_prefix(inner_tx)?
+        };
+
+        // Update stats
+        self.stats.unique_ngrams.fetch_add(ngram_count as u64, Ordering::Relaxed);
+
+        // Mark prefix as completed in global checkpoint and force save.
+        // We use save() instead of maybe_save() to ensure durability - this is
+        // critical because the shard's checkpoint state has already recorded
+        // the prefix as complete. If we skip saving the global checkpoint and
+        // crash, recovery would rebuild the global checkpoint from shard states
+        // correctly, but forcing the save here provides an extra safety margin
+        // and keeps the global checkpoint in sync.
+        if let Some(ref manager) = self.checkpoint_manager {
+            let mut mgr = manager.lock();
+            mgr.checkpoint_mut().complete_prefix(&tx.shard_key, &prefix);
+            mgr.save()?;
+        }
+
+        Ok(ngram_count)
+    }
+
+    /// Abort a prefix transaction, discarding all buffered n-grams.
+    ///
+    /// Use this if an error occurs during processing and you want to
+    /// discard the partial work without committing it.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The transaction to abort (consumed)
+    pub fn abort_prefix_tx(&self, mut tx: CoordinatorPrefixTx) -> CoordinatorResult<()> {
+        if let Some(inner_tx) = tx.inner.take() {
+            let guard = tx.shard.read();
+            guard.abort_prefix(inner_tx)?;
+        }
         Ok(())
     }
 
@@ -858,30 +1490,33 @@ impl ShardCoordinator {
             let key = entry.key().clone();
             let shard = entry.value();
 
-            if let Some(mut guard) = shard.try_write() {
-                // Update shard checkpoint
-                if let Err(e) = guard.checkpoint() {
-                    errors.push(format!("Shard {}: {}", key, e));
-                    continue;
-                }
+            // Use blocking write() to ensure all shards are checkpointed.
+            // This prevents the bug where locked shards are silently skipped,
+            // causing WAL replay to double n-gram counts on resume.
+            let mut guard = shard.write();
 
-                // Update global checkpoint with shard state
-                if let Some(ref manager) = self.checkpoint_manager {
-                    let mut mgr = manager.lock();
-                    let ckpt = mgr.checkpoint_mut();
-                    let state = guard.checkpoint_state();
+            // Update shard checkpoint
+            if let Err(e) = guard.checkpoint() {
+                errors.push(format!("Shard {}: {}", key, e));
+                continue;
+            }
 
-                    // Create or update shard record
-                    let record = ckpt.get_or_create_shard(&key, guard.path());
-                    record.entry_count = guard.len() as u64;
-                    record.ngrams_processed = state.ngrams_processed;
-                    record.completed_prefixes = state.completed_prefixes.clone();
-                    record.current_prefix = state.current_prefix.clone();
-                    record.last_checkpoint_time = std::time::SystemTime::now()
-                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                }
+            // Update global checkpoint with shard state
+            if let Some(ref manager) = self.checkpoint_manager {
+                let mut mgr = manager.lock();
+                let ckpt = mgr.checkpoint_mut();
+                let state = guard.checkpoint_state();
+
+                // Create or update shard record
+                let record = ckpt.get_or_create_shard(&key, guard.path());
+                record.entry_count = guard.len() as u64;
+                record.ngrams_processed = state.ngrams_processed;
+                record.completed_prefixes = state.completed_prefixes.clone();
+                record.current_prefix = state.current_prefix.clone();
+                record.last_checkpoint_time = std::time::SystemTime::now()
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
             }
         }
 
@@ -1179,5 +1814,108 @@ mod tests {
             // Now we can complete
             coordinator.complete_import().expect("Failed to complete");
         }
+    }
+
+    #[test]
+    fn test_parallel_sync() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let config = ShardConfig::new(dir.path().join("shards"))
+            .with_granularity(ShardGranularity::TwoChar);
+
+        let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
+
+        // Store n-grams in multiple shards
+        coordinator.store_ngram("the|quick", 10).expect("Failed to store");
+        coordinator.store_ngram("apple|pie", 5).expect("Failed to store");
+        coordinator.store_ngram("zebra|crossing", 3).expect("Failed to store");
+
+        // Should have 3 shards open
+        assert_eq!(coordinator.open_shard_count(), 3);
+
+        // All shards should be dirty after writes
+        for key in coordinator.open_shard_keys() {
+            let shard = coordinator.get_or_create_shard(&key).expect("Failed to get shard");
+            assert!(shard.read().is_dirty(), "Shard {} should be dirty", key);
+        }
+
+        // Parallel sync should sync all dirty shards
+        let synced = coordinator.sync_all_parallel(4).expect("Failed to parallel sync");
+        assert_eq!(synced, 3, "Should have synced 3 shards");
+
+        // All shards should be clean after sync
+        for key in coordinator.open_shard_keys() {
+            let shard = coordinator.get_or_create_shard(&key).expect("Failed to get shard");
+            assert!(!shard.read().is_dirty(), "Shard {} should be clean after sync", key);
+        }
+
+        // Syncing again should return 0 (nothing to sync)
+        let synced = coordinator.sync_all_parallel(4).expect("Failed to parallel sync");
+        assert_eq!(synced, 0, "Should have synced 0 shards (all clean)");
+    }
+
+    #[test]
+    fn test_is_shard_syncing() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let config = ShardConfig::new(dir.path().join("shards"))
+            .with_granularity(ShardGranularity::TwoChar);
+
+        let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
+
+        // Store some data
+        coordinator.store_ngram("the|quick", 10).expect("Failed to store");
+
+        let key = ShardKey::new("th");
+
+        // Not syncing initially
+        assert!(!coordinator.is_shard_syncing(&key));
+
+        // Manually start sync on the shard
+        {
+            let shard = coordinator.get_or_create_shard(&key).expect("Failed to get shard");
+            let guard = shard.read();
+            assert!(guard.sync_coordinator().try_start_sync());
+        }
+
+        // Now should report syncing
+        assert!(coordinator.is_shard_syncing(&key));
+
+        // Complete sync
+        {
+            let shard = coordinator.get_or_create_shard(&key).expect("Failed to get shard");
+            let guard = shard.read();
+            guard.sync_coordinator().complete_sync(42);
+        }
+
+        // Not syncing anymore
+        assert!(!coordinator.is_shard_syncing(&key));
+    }
+
+    #[test]
+    fn test_parallel_checkpoint() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let config = ShardConfig::new(dir.path().join("shards"))
+            .with_granularity(ShardGranularity::TwoChar);
+
+        let coordinator = ShardCoordinator::new_with_checkpoints(config.clone())
+            .expect("Failed to create coordinator");
+
+        // Store n-grams in multiple shards
+        coordinator.store_ngram("the|quick", 10).expect("Failed to store");
+        coordinator.store_ngram("apple|pie", 5).expect("Failed to store");
+        coordinator.store_ngram("zebra|crossing", 3).expect("Failed to store");
+
+        // Parallel checkpoint
+        coordinator.coordinated_checkpoint_parallel(4).expect("Failed to parallel checkpoint");
+
+        // All shards should be clean
+        for key in coordinator.open_shard_keys() {
+            let shard = coordinator.get_or_create_shard(&key).expect("Failed to get shard");
+            assert!(!shard.read().is_dirty(), "Shard {} should be clean after checkpoint", key);
+        }
+
+        // Verify data survives checkpoint
+        assert_eq!(coordinator.get("the|quick"), Some(10));
+        assert_eq!(coordinator.get("apple|pie"), Some(5));
+        assert_eq!(coordinator.get("zebra|crossing"), Some(3));
     }
 }

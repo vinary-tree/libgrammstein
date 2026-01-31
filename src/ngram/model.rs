@@ -336,17 +336,19 @@ where
             .collect();
 
         // Convert vocabulary to portable format if provided
+        // Use O(1) get_term() lookups, iterating in index order
         let portable_vocab = vocabulary.map(|vocab| {
-            let reverse_cache = vocab.build_reverse_cache();
-            // reverse_cache is now HashMap<u64, String> (index -> word)
-            let mut indexed_words: Vec<(u64, String)> = reverse_cache.into_iter().collect();
+            let len = vocab.len();
+            let mut words = Vec::with_capacity(len as usize);
 
-            // Sort by index to ensure consistent ordering
-            indexed_words.sort_by_key(|(idx, _)| *idx);
-
-            PortableVocabulary {
-                words: indexed_words.into_iter().map(|(_, word)| word).collect(),
+            // Indices are 1-based (FIRST_VALID_INDEX = 1), iterate in order
+            for i in 1..=len {
+                if let Some(term) = vocab.get_term(i) {
+                    words.push(term);
+                }
             }
+
+            PortableVocabulary { words }
         });
 
         PortableNgramModel {
