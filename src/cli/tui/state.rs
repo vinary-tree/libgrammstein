@@ -798,6 +798,20 @@ impl TuiState {
                 self.add_log(LogLevel::Error, format!("MKN FAILED: {}", error));
             }
 
+            ImportEvent::CheckpointProgress {
+                shards_processed,
+                total_shards,
+                percent_complete,
+            } => {
+                log::debug!(
+                    "[TUI-STATE] CheckpointProgress: {}/{} ({:.1}%)",
+                    shards_processed,
+                    total_shards,
+                    percent_complete
+                );
+                // Could update a checkpoint progress state here if needed
+            }
+
             ImportEvent::PhaseChanged { phase } => {
                 log::debug!(
                     "[TUI-STATE] PhaseChanged event received: '{}' -> '{}'",

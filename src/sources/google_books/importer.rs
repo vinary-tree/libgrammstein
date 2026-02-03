@@ -2032,6 +2032,106 @@ impl GoogleBooksImporter {
         Ok(())
     }
 
+    /// Save checkpoint using async WAL sync.
+    ///
+    /// This is the recommended checkpoint method for high-throughput workloads.
+    /// It provides the same durability guarantees as `save_checkpoint()` but
+    /// with minimal blocking:
+    ///
+    /// 1. Vocabulary checkpoint (synchronous - single resource)
+    /// 2. Start async sync on all dirty shards (fast WAL rotation)
+    /// 3. Wait for all syncs in parallel
+    /// 4. Finish checkpoint (truncate WALs with bounded parallelism)
+    ///
+    /// # Performance
+    ///
+    /// With 100 shards at 50ms fsync each:
+    /// - `save_checkpoint()`: ~5000ms blocking (sequential)
+    /// - `save_checkpoint_async()`: ~50ms rotation + parallel wait
+    pub fn save_checkpoint_async(&mut self) -> Result<(), ImportError> {
+        self.save_checkpoint_async_with_events(None)
+    }
+
+    /// Save checkpoint with optional progress events.
+    ///
+    /// This variant accepts an optional broadcast sender for emitting
+    /// `CheckpointProgress` events during the checkpoint operation.
+    pub fn save_checkpoint_async_with_events(
+        &mut self,
+        event_tx: Option<&tokio::sync::broadcast::Sender<super::events::ImportEvent>>,
+    ) -> Result<(), ImportError> {
+        // Sync atomic counters FROM checkpoint stats (source of truth).
+        self.total_ngrams.store(self.checkpoint.stats.ngrams_processed, Ordering::Relaxed);
+        self.unique_ngrams.store(self.checkpoint.stats.unique_ngrams, Ordering::Relaxed);
+        self.checkpoint.stats.elapsed_seconds = self.start_time.elapsed().as_secs();
+
+        // CRITICAL: Checkpoint vocabulary FIRST to ensure vocabulary indices are
+        // persisted before the checkpoint marks prefixes as completed.
+        // Note: checkpoint_vocabulary() already syncs the WAL internally, so a separate
+        // sync_vocabulary() call is redundant and was removed to improve performance.
+        self.storage.checkpoint_vocabulary().map_err(|e| {
+            ImportError::Trie(format!("Failed to checkpoint vocabulary: {}", e))
+        })?;
+
+        // Start async checkpoint - this rotates WALs and returns immediately
+        let handle = self.storage.checkpoint_async().map_err(|e| {
+            ImportError::Trie(format!("Failed to start async checkpoint: {}", e))
+        })?;
+
+        log::debug!(
+            "Async checkpoint initiated: {} resources rotating",
+            handle.count()
+        );
+
+        // Wait for all syncs to complete using parallel waiting for sharded storage.
+        // This reduces wait time from O(n) to O(1) for n shards by waiting on all
+        // shard sync handles concurrently rather than sequentially.
+        handle.wait_all_parallel().map_err(|e| {
+            ImportError::Trie(format!("Async checkpoint sync failed: {}", e))
+        })?;
+
+        // Finish checkpoint - truncate WALs with bounded I/O parallelism
+        // Create a progress callback that emits CheckpointProgress events
+        let progress_callback: Option<Box<dyn Fn(usize, usize) + Send + Sync>> = event_tx.map(|tx| {
+            let tx = tx.clone();
+            Box::new(move |processed: usize, total: usize| {
+                let percent = if total > 0 {
+                    (processed as f32 / total as f32) * 100.0
+                } else {
+                    100.0
+                };
+                let _ = tx.send(super::events::ImportEvent::CheckpointProgress {
+                    shards_processed: processed,
+                    total_shards: total,
+                    percent_complete: percent,
+                });
+            }) as Box<dyn Fn(usize, usize) + Send + Sync>
+        });
+
+        self.storage.checkpoint_async_finish_with_progress(Self::DEFAULT_CHECKPOINT_PARALLELISM, progress_callback).map_err(|e| {
+            ImportError::Trie(format!("Failed to finish async checkpoint: {}", e))
+        })?;
+
+        // Save checkpoint metadata AFTER syncing all data
+        // This ensures consistency between data and progress tracking.
+        {
+            let mut trie = self.trie.write();
+
+            // Save checkpoint data to trie
+            self.checkpoint.save_to_trie(&mut *trie).map_err(|e| {
+                ImportError::Trie(format!("Failed to save checkpoint to trie: {}", e))
+            })?;
+
+            // Checkpoint the trie (persists data and truncates WAL)
+            trie.checkpoint().map_err(|e| {
+                ImportError::Trie(format!("Failed to checkpoint trie: {}", e))
+            })?;
+        }
+
+        log::debug!("Async checkpoint saved: {}", self.checkpoint.progress_summary());
+        Ok(())
+    }
+
     /// Delete checkpoint file and trie-based checkpoint data (call after successful completion).
     pub fn cleanup_checkpoint(&mut self) -> Result<(), ImportError> {
         // Delete JSON checkpoint

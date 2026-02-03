@@ -58,8 +58,10 @@ docs/optimization/*.txt
 checkpoints/
 wal_archive/
 *.artrie
+*.idx
 *.wal
 *.checkpoint.json
+global_checkpoint.json
 *_ckpt_*.bin
 *_latest.bin
 embedding_latest.bin
@@ -87,3 +89,4 @@ formal/rocq/.CoqMakefile.d
 
 # TLA+ model checker state files
 formal/tla/states/
+.aider*

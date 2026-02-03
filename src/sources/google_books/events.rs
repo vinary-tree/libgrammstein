@@ -121,6 +121,19 @@ pub enum ImportEvent {
         prefix: String,
     },
 
+    /// Checkpoint progress update.
+    ///
+    /// Emitted during async checkpoint finish phase to track progress
+    /// of persisting individual shards.
+    CheckpointProgress {
+        /// Number of shards that have been checkpointed.
+        shards_processed: usize,
+        /// Total number of shards to checkpoint.
+        total_shards: usize,
+        /// Completion percentage (0.0 to 100.0).
+        percent_complete: f32,
+    },
+
     /// Import completed (all orders).
     ImportCompleted {
         total_ngrams: u64,

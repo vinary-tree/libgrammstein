@@ -2887,6 +2887,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "bincode",
+ "dashmap",
  "log",
  "lru",
  "memmap2",

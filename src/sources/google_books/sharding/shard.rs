@@ -4,6 +4,8 @@
 //! Shards provide exclusive write access via WriteToken.
 
 use super::routing::ShardKey;
+use libdictenstein::persistent_artrie::wal::SyncHandle;
+use libdictenstein::persistent_artrie::wal_managed::WalManaged;
 use libdictenstein::persistent_artrie_char::{
     CharDocumentTransaction, PersistentARTrieChar,
 };
@@ -443,6 +445,86 @@ impl ShardStats {
     }
 }
 
+/// Handle for tracking completion of an async shard WAL sync.
+///
+/// This wraps the underlying `SyncHandle` from libdictenstein with shard-specific
+/// context (the shard key) for error messages and logging.
+///
+/// # Non-blocking Sync Pattern
+///
+/// The async sync pattern enables non-blocking checkpoints:
+/// 1. Call `sync_async()` on each shard - this rotates the WAL segment (O(1))
+/// 2. New writes go to the new segment - workers continue without blocking
+/// 3. The old segment is synced in the background
+/// 4. Call `wait()` when durability is needed (e.g., before marking checkpoint complete)
+///
+/// # Performance
+///
+/// With 100 shards at 50ms sync each:
+/// - **Blocking sync**: ~5000ms total (sequential) or ~625ms (8 concurrent)
+/// - **Async sync**: ~1-10ms rotation, workers continue immediately
+///
+/// The async pattern provides ~40-50x less blocking during checkpoints.
+pub struct ShardSyncHandle {
+    /// The underlying sync handle from libdictenstein.
+    inner: SyncHandle,
+
+    /// The shard key this handle belongs to.
+    shard_key: ShardKey,
+}
+
+impl ShardSyncHandle {
+    /// Check if sync has completed (non-blocking).
+    ///
+    /// Returns `true` if the target LSN is now durable on disk.
+    pub fn is_synced(&self) -> bool {
+        self.inner.is_synced()
+    }
+
+    /// Wait for sync to complete (blocking).
+    ///
+    /// Blocks until the target LSN is durable on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(ShardError::Sync)` if the sync failed or the
+    /// background sync thread crashed.
+    pub fn wait(self) -> ShardResult<()> {
+        self.inner.wait().map_err(|e| ShardError::Sync {
+            shard_key: self.shard_key.to_string(),
+            message: format!("Async sync wait failed: {}", e),
+        })
+    }
+
+    /// Wait for sync with timeout (blocking).
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - Maximum time to wait
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)` - Sync completed within timeout
+    /// - `Ok(false)` - Timeout elapsed, sync not yet complete
+    /// - `Err(...)` - Sync failed or thread crashed
+    pub fn wait_timeout(&self, timeout: Duration) -> ShardResult<bool> {
+        self.inner.wait_timeout(timeout).map_err(|e| ShardError::Sync {
+            shard_key: self.shard_key.to_string(),
+            message: format!("Async sync wait_timeout failed: {}", e),
+        })
+    }
+
+    /// Get the shard key this handle belongs to.
+    pub fn shard_key(&self) -> &ShardKey {
+        &self.shard_key
+    }
+
+    /// Get the target LSN that this handle is waiting for.
+    pub fn target_lsn(&self) -> u64 {
+        self.inner.target_lsn()
+    }
+}
+
 /// Handle to an individual shard.
 ///
 /// Wraps a `PersistentARTrieChar<u64>` with checkpoint state and
@@ -830,6 +912,54 @@ impl ShardHandle {
                 shard_key: self.key.to_string(),
             }
         })
+    }
+
+    /// Start async WAL sync - returns immediately, sync happens in background.
+    ///
+    /// This uses the WAL's segment rotation to enable non-blocking sync:
+    /// - O(1) rotation creates a new segment for new writes
+    /// - Previous segment is synced in the background
+    /// - Writers can continue immediately without blocking
+    ///
+    /// The returned `ShardSyncHandle` can be used to:
+    /// - Check sync status with `is_synced()` (non-blocking)
+    /// - Wait for completion with `wait()` (blocking)
+    /// - Wait with timeout via `wait_timeout()` (blocking with timeout)
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Some(handle))` - Async sync initiated, use handle to track completion
+    /// - `Ok(None)` - No WAL configured (in-memory mode), nothing to sync
+    /// - `Err(...)` - Failed to initiate async sync
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Start async sync
+    /// if let Some(handle) = shard.sync_async()? {
+    ///     // Continue processing while sync happens in background
+    ///     process_more_data();
+    ///
+    ///     // Check if done (non-blocking)
+    ///     if !handle.is_synced() {
+    ///         // Still syncing, do other work
+    ///     }
+    ///
+    ///     // Wait when durability is needed
+    ///     handle.wait()?;
+    /// }
+    /// ```
+    pub fn sync_async(&self) -> ShardResult<Option<ShardSyncHandle>> {
+        // Use WalManaged trait method to initiate async sync
+        let handle = self.trie.wal_sync_async().map_err(|e| ShardError::Sync {
+            shard_key: self.key.to_string(),
+            message: format!("Failed to initiate async sync: {}", e),
+        })?;
+
+        Ok(handle.map(|inner| ShardSyncHandle {
+            inner,
+            shard_key: self.key.clone(),
+        }))
     }
 
     /// Get the current LSN (Log Sequence Number) of this shard's trie.

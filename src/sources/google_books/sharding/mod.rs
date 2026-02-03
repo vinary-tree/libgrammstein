@@ -81,8 +81,8 @@ pub use checkpoint::{
 };
 pub use config::{MergeConfig, MergeMode, ShardConfig, ShardGranularity};
 pub use coordinator::{
-    CoordinatorError, CoordinatorPrefixTx, CoordinatorResult, CoordinatorStats, ShardCoordinator,
-    ShardSummary,
+    CheckpointHandle, CoordinatorError, CoordinatorPrefixTx, CoordinatorResult, CoordinatorStats,
+    ShardCoordinator, ShardSummary,
 };
 pub use merge::{MergeBuilder, MergeCoordinator, MergeError, MergeProgress, MergeResult, MergeStats};
 pub use mkn::{
@@ -94,4 +94,6 @@ pub use routing::{
     all_shard_keys, compute_shard_key, compute_shard_key_from_token, ngram_order,
     shard_key_for_file_prefix, ShardKey,
 };
-pub use shard::{PrefixTransaction, ShardError, ShardHandle, ShardResult, ShardStats, WriteToken};
+pub use shard::{
+    PrefixTransaction, ShardError, ShardHandle, ShardResult, ShardStats, ShardSyncHandle, WriteToken,
+};

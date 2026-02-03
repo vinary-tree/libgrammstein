@@ -20,7 +20,7 @@
 //! - Supports unlimited vocabulary size
 
 use super::config::GoogleBooksConfig;
-use super::sharding::{ShardCoordinator, ShardKey};
+use super::sharding::{CheckpointHandle, ShardCoordinator, ShardKey};
 use crate::ngram::vocabulary::{try_encode_ngram_key, SharedVocabulary, VocabularyError};
 use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
 use parking_lot::RwLock;
@@ -609,6 +609,87 @@ impl NgramStorage {
             Self::Sharded { coordinator, .. } => {
                 coordinator.coordinated_checkpoint_parallel(max_concurrent_syncs)?;
                 Ok(())
+            }
+        }
+    }
+
+    /// Start async checkpoint (non-blocking).
+    ///
+    /// This initiates WAL rotation on all dirty shards and returns immediately.
+    /// Workers can continue writing to the new WAL segments while background
+    /// threads sync the old segments.
+    ///
+    /// # Returns
+    ///
+    /// A `CheckpointHandle` that can be used to:
+    /// - Check if all syncs completed (`all_synced()`)
+    /// - Wait for all syncs to complete (`wait_all()` or `wait_all_parallel()`)
+    ///
+    /// # Usage Pattern
+    ///
+    /// ```ignore
+    /// let handle = storage.checkpoint_async()?;
+    /// // Workers continue...
+    /// handle.wait_all_parallel()?;
+    /// storage.checkpoint_async_finish(8)?;
+    /// ```
+    pub fn checkpoint_async(&self) -> StorageResult<CheckpointHandle> {
+        match self {
+            Self::SingleTrie { trie, .. } => {
+                // Single trie: checkpoint synchronously, return empty handle
+                let mut guard = trie.write();
+                guard.checkpoint().map_err(|e| {
+                    StorageError::Trie(format!("Checkpoint failed: {}", e))
+                })?;
+                // Return a dummy handle (no shards to track)
+                Ok(CheckpointHandle::empty())
+            }
+            Self::Sharded { coordinator, .. } => {
+                coordinator
+                    .coordinated_checkpoint_async()
+                    .map_err(StorageError::from)
+            }
+        }
+    }
+
+    /// Finish async checkpoint after sync is complete.
+    ///
+    /// Call this after `checkpoint_async().wait_all_parallel()` to truncate WALs
+    /// and update checkpoint metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_concurrent` - Maximum shards to persist in parallel.
+    pub fn checkpoint_async_finish(&self, max_concurrent: usize) -> StorageResult<()> {
+        self.checkpoint_async_finish_with_progress(max_concurrent, None::<fn(usize, usize)>)
+    }
+
+    /// Finish async checkpoint with progress callback.
+    ///
+    /// Same as `checkpoint_async_finish()` but invokes a callback after each
+    /// shard completes.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_concurrent` - Maximum shards to persist in parallel.
+    /// * `progress_callback` - Optional callback receiving (processed, total).
+    pub fn checkpoint_async_finish_with_progress<F>(
+        &self,
+        max_concurrent: usize,
+        progress_callback: Option<F>,
+    ) -> StorageResult<()>
+    where
+        F: Fn(usize, usize) + Send + Sync,
+    {
+        match self {
+            Self::SingleTrie { .. } => {
+                // Already checkpointed in checkpoint_async()
+                Ok(())
+            }
+            Self::Sharded { coordinator, .. } => {
+                coordinator
+                    .coordinated_checkpoint_finish_with_progress(max_concurrent, progress_callback)
+                    .map_err(StorageError::from)
             }
         }
     }

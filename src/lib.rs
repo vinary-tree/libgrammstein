@@ -137,6 +137,11 @@ pub mod error {
         /// Serialization error (general, e.g., JSON).
         #[error("Serialization error: {0}")]
         SerializationMessage(String),
+
+        /// Neural model error.
+        #[cfg(feature = "neural-rescore")]
+        #[error("Neural error: {0}")]
+        Neural(#[from] crate::neural::NeuralError),
     }
 
     /// Result type alias for libgrammstein operations.
