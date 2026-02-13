@@ -11,7 +11,7 @@
 //! │            AggregatedLanguageModelDictionary            │
 //! │            (this module)                                │
 //! ├─────────────────────────────────────────────────────────┤
-//! │  - vocabulary: Arc<SharedVocabulary>  ← SHARED across  │
+//! │  - vocabulary: SharedVocabARTrie  ← SHARED across  │
 //! │  - coordinator: Arc<ShardCoordinator>     all shards   │
 //! │  - config: AggregationConfig                           │
 //! └──────────────────────────┬──────────────────────────────┘
@@ -72,7 +72,7 @@
 //! ```
 
 use crate::ngram::vocabulary::{
-    decode_ngram_key, encode_ngram_key, encode_ngram_key_existing, SharedVocabulary,
+    encode_ngram_key_bytes, encode_ngram_key_existing_bytes, SharedVocabARTrie,
 };
 use crate::sources::google_books::sharding::coordinator::ShardCoordinator;
 #[allow(deprecated)]
@@ -123,7 +123,7 @@ impl Default for AggregationConfig {
 /// handle their own synchronization.
 pub struct AggregatedLanguageModelDictionary {
     /// Shared vocabulary for word ↔ index mapping.
-    vocabulary: Arc<SharedVocabulary>,
+    vocabulary: SharedVocabARTrie,
     /// Shard coordinator for routing and storage.
     coordinator: Arc<ShardCoordinator>,
     /// Aggregation configuration.
@@ -147,7 +147,7 @@ impl AggregatedLanguageModelDictionary {
     ///
     /// * `coordinator` - The shard coordinator managing n-gram storage
     /// * `vocabulary` - The shared vocabulary for word-to-index mapping
-    pub fn new(coordinator: Arc<ShardCoordinator>, vocabulary: Arc<SharedVocabulary>) -> Self {
+    pub fn new(coordinator: Arc<ShardCoordinator>, vocabulary: SharedVocabARTrie) -> Self {
         Self {
             vocabulary,
             coordinator,
@@ -164,7 +164,7 @@ impl AggregatedLanguageModelDictionary {
     /// * `config` - Aggregation configuration
     pub fn with_config(
         coordinator: Arc<ShardCoordinator>,
-        vocabulary: Arc<SharedVocabulary>,
+        vocabulary: SharedVocabARTrie,
         config: AggregationConfig,
     ) -> Self {
         Self {
@@ -175,7 +175,7 @@ impl AggregatedLanguageModelDictionary {
     }
 
     /// Get the vocabulary.
-    pub fn vocabulary(&self) -> &Arc<SharedVocabulary> {
+    pub fn vocabulary(&self) -> &SharedVocabARTrie {
         &self.vocabulary
     }
 
@@ -213,7 +213,7 @@ impl AggregatedLanguageModelDictionary {
         }
 
         // Encode using existing vocabulary only (OOV → None)
-        let encoded_key = match encode_ngram_key_existing(words, &self.vocabulary) {
+        let encoded_key = match encode_ngram_key_existing_bytes(words, &self.vocabulary) {
             Some(k) => k,
             None => return false,
         };
@@ -237,7 +237,7 @@ impl AggregatedLanguageModelDictionary {
         }
 
         // Encode using existing vocabulary only
-        let encoded_key = encode_ngram_key_existing(words, &self.vocabulary)?;
+        let encoded_key = encode_ngram_key_existing_bytes(words, &self.vocabulary)?;
 
         // Route to shard
         let shard_key = self.coordinator.route_tokens(words);
@@ -264,7 +264,7 @@ impl AggregatedLanguageModelDictionary {
         }
 
         // Encode with vocabulary acquisition
-        let encoded_key = encode_ngram_key(words, &self.vocabulary);
+        let encoded_key = encode_ngram_key_bytes(words, &self.vocabulary);
 
         // Route to shard
         let shard_key = self.coordinator.route_tokens(words);
@@ -282,8 +282,8 @@ impl AggregatedLanguageModelDictionary {
     /// Decode an encoded key back to word indices.
     ///
     /// Useful for debugging and reverse lookups.
-    pub fn decode_key(&self, key: &str) -> Vec<u64> {
-        decode_ngram_key(key)
+    pub fn decode_key(&self, key: &[u8]) -> Vec<u64> {
+        crate::ngram::vocabulary::decode_ngram_key_bytes(key)
     }
 
     /// Build a reverse vocabulary map (index → word).
@@ -293,10 +293,11 @@ impl AggregatedLanguageModelDictionary {
     /// Note: Prefer using `vocabulary().get_term(index)` for O(1) lookups
     /// instead of building a full HashMap when only a few lookups are needed.
     pub fn build_reverse_vocabulary(&self) -> std::collections::HashMap<u64, String> {
-        let len = self.vocabulary.len();
-        let mut map = std::collections::HashMap::with_capacity(len as usize);
-        for i in 1..=len {
-            if let Some(term) = self.vocabulary.get_term(i) {
+        let guard = self.vocabulary.read();
+        let len = guard.len();
+        let mut map = std::collections::HashMap::with_capacity(len);
+        for i in 1..=(len as u64) {
+            if let Some(term) = guard.get_term(i) {
                 map.insert(i, term);
             }
         }
@@ -307,6 +308,7 @@ impl AggregatedLanguageModelDictionary {
     pub fn checkpoint(&self) -> Result<(), String> {
         // Checkpoint vocabulary first
         self.vocabulary
+            .write()
             .checkpoint()
             .map_err(|e| format!("Vocabulary checkpoint failed: {}", e))?;
 
@@ -351,7 +353,7 @@ impl AggregatedLanguageModelDictionary {
         let reverse_vocab = self.build_reverse_vocabulary();
 
         // Collect all n-gram entries from all open shards
-        let mut all_entries: Vec<(String, u64)> = Vec::new();
+        let mut all_entries: Vec<(Vec<u8>, u64)> = Vec::new();
 
         for shard_key in self.coordinator.open_shard_keys() {
             if let Ok(shard) = self.coordinator.get_or_create_shard(&shard_key) {
@@ -366,10 +368,10 @@ impl AggregatedLanguageModelDictionary {
         // Filter and decode entries
         Ok(all_entries
             .into_iter()
-            .filter(|(key, _)| !key.starts_with('\x00'))
+            .filter(|(key, _)| !key.starts_with(&[0x00]))
             .filter_map(move |(key, count)| {
                 // Decode the vocabulary-indexed key back to words
-                let indices = decode_ngram_key(&key);
+                let indices = crate::ngram::vocabulary::decode_ngram_key_bytes(&key);
                 let words: Option<Vec<String>> = indices
                     .into_iter()
                     .map(|idx| reverse_vocab.get(&idx).cloned())
@@ -386,12 +388,12 @@ impl AggregatedLanguageModelDictionary {
     ///
     /// # Returns
     ///
-    /// An iterator yielding `(String, u64)` pairs where:
-    /// - `String` is the varint-encoded n-gram key (Latin-1 characters)
+    /// An iterator yielding `(Vec<u8>, u64)` pairs where:
+    /// - `Vec<u8>` is the varint-encoded n-gram key (raw bytes)
     /// - `u64` is the count for that n-gram
-    pub fn iter_ngrams_raw(&self) -> Result<impl Iterator<Item = (String, u64)> + '_, String> {
+    pub fn iter_ngrams_raw(&self) -> Result<impl Iterator<Item = (Vec<u8>, u64)> + '_, String> {
         // Collect all n-gram entries from all open shards
-        let mut all_entries: Vec<(String, u64)> = Vec::new();
+        let mut all_entries: Vec<(Vec<u8>, u64)> = Vec::new();
 
         for shard_key in self.coordinator.open_shard_keys() {
             if let Ok(shard) = self.coordinator.get_or_create_shard(&shard_key) {
@@ -406,7 +408,7 @@ impl AggregatedLanguageModelDictionary {
         // Filter out metadata entries
         Ok(all_entries
             .into_iter()
-            .filter(|(key, _)| !key.starts_with('\x00')))
+            .filter(|(key, _)| !key.starts_with(&[0x00])))
     }
 
     /// Get the number of n-grams in all open shards (excluding metadata).
@@ -548,14 +550,14 @@ mod tests {
 
     #[test]
     fn test_shared_vocabulary_methods() {
-        // Verify SharedVocabulary has the methods we need
+        // Verify SharedVocabARTrie has the methods we need
         // This test verifies the API we depend on exists
-        fn _check_api(v: &SharedVocabulary) {
-            let _: u64 = v.get_or_insert("word");
-            let _: Option<u64> = v.get("word");
-            let _: bool = v.contains("word");
-            let _: u64 = v.len();
-            let _: bool = v.is_empty();
+        fn _check_api(v: &SharedVocabARTrie) {
+            let _: u64 = v.write().insert("word");
+            let _: Option<u64> = v.read().get_index("word");
+            let _: bool = v.read().contains("word");
+            let _: usize = v.read().len();
+            let _: bool = v.read().is_empty();
         }
     }
 

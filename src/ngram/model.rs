@@ -324,7 +324,7 @@ where
     /// ```
     pub fn to_portable_with_vocabulary(
         &self,
-        vocabulary: Option<&crate::ngram::SharedVocabulary>,
+        vocabulary: Option<&crate::ngram::SharedVocabARTrie>,
     ) -> PortableNgramModel
     where
         D: crate::ngram::trie::IterableDictionary,
@@ -338,12 +338,13 @@ where
         // Convert vocabulary to portable format if provided
         // Use O(1) get_term() lookups, iterating in index order
         let portable_vocab = vocabulary.map(|vocab| {
-            let len = vocab.len();
-            let mut words = Vec::with_capacity(len as usize);
+            let guard = vocab.read();
+            let len = guard.len();
+            let mut words = Vec::with_capacity(len);
 
             // Indices are 1-based (FIRST_VALID_INDEX = 1), iterate in order
-            for i in 1..=len {
-                if let Some(term) = vocab.get_term(i) {
+            for i in 1..=(len as u64) {
+                if let Some(term) = guard.get_term(i) {
                     words.push(term);
                 }
             }
@@ -384,7 +385,7 @@ where
     pub fn save_portable_with_vocabulary<P: AsRef<Path>>(
         &self,
         path: P,
-        vocabulary: &crate::ngram::SharedVocabulary,
+        vocabulary: &crate::ngram::SharedVocabARTrie,
     ) -> crate::Result<()>
     where
         D: crate::ngram::trie::IterableDictionary,

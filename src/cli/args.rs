@@ -293,6 +293,13 @@ pub struct ImportGoogleBooksArgs {
     #[arg(long, value_enum, default_value = "enabled")]
     pub sharding: ShardingModeArg,
 
+    /// Import only this prefix (e.g., "j" for 1-grams, "th" for 2-5 grams).
+    ///
+    /// Valid prefixes for 1-grams: a-z, other
+    /// Valid prefixes for 2-5 grams: aa-zz, other, punctuation
+    #[arg(long)]
+    pub prefix: Option<String>,
+
     /// Resource management options.
     #[command(flatten)]
     pub resources: ResourceArgs,

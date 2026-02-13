@@ -32,7 +32,7 @@
 use clap::Parser;
 use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
 use libgrammstein::ngram::vocabulary::{
-    decode_ngram_key, encode_ngram_key_existing, SharedVocabulary,
+    decode_ngram_key, encode_ngram_key_existing, open_vocabulary, SharedVocabARTrie,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -132,14 +132,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
 
-    // Load vocabularies using SharedVocabulary for O(1) reverse lookups
+    // Load vocabularies using SharedVocabARTrie for O(1) reverse lookups
     println!("Loading vocabulary 1: {:?}", args.vocab1);
-    let vocab1 = SharedVocabulary::open(&args.vocab1)?;
-    println!("  {} terms in vocabulary 1", vocab1.len());
+    let vocab1 = open_vocabulary(&args.vocab1)?;
+    println!("  {} terms in vocabulary 1", vocab1.read().len());
 
     println!("Loading vocabulary 2: {:?}", args.vocab2);
-    let vocab2 = SharedVocabulary::open(&args.vocab2)?;
-    println!("  {} terms in vocabulary 2", vocab2.len());
+    let vocab2 = open_vocabulary(&args.vocab2)?;
+    println!("  {} terms in vocabulary 2", vocab2.read().len());
 
     // Compare vocabularies
     println!("\nComparing vocabularies...");
@@ -189,24 +189,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Compare vocabularies to find terms that exist in only one.
 fn compare_vocabularies(
-    vocab1: &SharedVocabulary,
-    vocab2: &SharedVocabulary,
+    vocab1: &SharedVocabARTrie,
+    vocab2: &SharedVocabARTrie,
     verbose: bool,
 ) -> Result<VocabComparisonResult, Box<dyn std::error::Error>> {
     let mut result = VocabComparisonResult::default();
 
     // Get all terms from vocab1 using iter_terms()
     let mut terms1 = HashSet::new();
-    for (term, _index) in vocab1.iter_terms() {
-        result.vocab1_count += 1;
-        terms1.insert(term);
+    {
+        let guard = vocab1.read();
+        for term in guard.iter_terms() {
+            result.vocab1_count += 1;
+            terms1.insert(term);
+        }
     }
 
     // Get all terms from vocab2 using iter_terms()
     let mut terms2 = HashSet::new();
-    for (term, _index) in vocab2.iter_terms() {
-        result.vocab2_count += 1;
-        terms2.insert(term);
+    {
+        let guard = vocab2.read();
+        for term in guard.iter_terms() {
+            result.vocab2_count += 1;
+            terms2.insert(term);
+        }
     }
 
     // Find symmetric difference
@@ -244,9 +250,9 @@ fn compare_vocabularies(
 /// Compare n-grams using streaming iteration (one entry at a time).
 fn compare_ngrams_streaming(
     trie1: &PersistentARTrieChar<u64>,
-    vocab1: &SharedVocabulary,
+    vocab1: &SharedVocabARTrie,
     trie2: &PersistentARTrieChar<u64>,
-    vocab2: &SharedVocabulary,
+    vocab2: &SharedVocabARTrie,
     max_mismatches: usize,
     verbose: bool,
 ) -> Result<NgramComparisonResult, Box<dyn std::error::Error>> {
@@ -274,15 +280,17 @@ fn compare_ngrams_streaming(
         let indices = decode_ngram_key(&key1);
 
         // Reverse lookup to get words (O(1) per index)
+        let guard = vocab1.read();
         let words: Vec<String> = indices
             .iter()
             .filter_map(|&idx| {
                 if idx == 0 {
                     return None; // index 0 is reserved
                 }
-                vocab1.get_term(idx)
+                guard.get_term(idx)
             })
             .collect();
+        drop(guard);
 
         if words.len() != indices.len() {
             result.decode_failures_1 += 1;
@@ -355,15 +363,17 @@ fn compare_ngrams_streaming(
             result.trie2_count += 1;
 
             let indices = decode_ngram_key(&key2);
+            let guard = vocab2.read();
             let words: Vec<String> = indices
                 .iter()
                 .filter_map(|&idx| {
                     if idx == 0 {
                         return None;
                     }
-                    vocab2.get_term(idx)
+                    guard.get_term(idx)
                 })
                 .collect();
+            drop(guard);
 
             if words.len() != indices.len() {
                 result.decode_failures_2 += 1;

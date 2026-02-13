@@ -1,4 +1,4 @@
-//! Individual shard wrapper around PersistentARTrieChar.
+//! Individual shard wrapper around PersistentARTrie.
 //!
 //! Each shard manages a subset of n-grams based on prefix routing.
 //! Shards provide exclusive write access via WriteToken.
@@ -6,9 +6,10 @@
 use super::routing::ShardKey;
 use libdictenstein::persistent_artrie::wal::SyncHandle;
 use libdictenstein::persistent_artrie::wal_managed::WalManaged;
-use libdictenstein::persistent_artrie_char::{
-    CharDocumentTransaction, PersistentARTrieChar,
+use libdictenstein::persistent_artrie::{
+    DocumentTransaction, PersistentARTrie,
 };
+use liblevenshtein::dictionary::Dictionary;
 use parking_lot::{Condvar, Mutex};
 use std::collections::HashSet;
 use std::marker::PhantomData;
@@ -527,14 +528,15 @@ impl ShardSyncHandle {
 
 /// Handle to an individual shard.
 ///
-/// Wraps a `PersistentARTrieChar<u64>` with checkpoint state and
-/// exclusive write access control.
+/// Wraps a `PersistentARTrie<u64>` (byte-keyed) with checkpoint state and
+/// exclusive write access control. N-gram keys are raw LEB128 varint-encoded
+/// byte sequences stored directly without Latin-1 char conversion.
 pub struct ShardHandle {
     /// The shard key identifying this shard.
     key: ShardKey,
 
-    /// The underlying trie.
-    trie: PersistentARTrieChar<u64>,
+    /// The underlying trie (byte-keyed).
+    trie: PersistentARTrie<u64>,
 
     /// File path for this shard.
     path: PathBuf,
@@ -565,6 +567,9 @@ impl ShardHandle {
     /// Reserved key prefix for checkpoint data within the trie.
     const CHECKPOINT_PREFIX: &'static str = "\x00__shard_ckpt__:";
 
+    /// Byte variant of CHECKPOINT_PREFIX for filtering iteration results.
+    const CHECKPOINT_PREFIX_BYTES: &'static [u8] = b"\x00__shard_ckpt__:";
+
     /// Create a new shard at the given path.
     ///
     /// Creates a new trie file, overwriting if it exists.
@@ -573,11 +578,14 @@ impl ShardHandle {
         let path = path.as_ref().to_path_buf();
 
         // Use create_with_slot_tracking for optimized incremental checkpoints
-        let trie =
-            PersistentARTrieChar::create_with_slot_tracking(&path).map_err(|e| ShardError::Open {
+        let mut trie =
+            PersistentARTrie::create_with_slot_tracking(&path).map_err(|e| ShardError::Open {
                 path: path.clone(),
                 message: e.to_string(),
             })?;
+
+        // Enable lock-free overlay for concurrent CAS-based increments
+        trie.enable_lockfree();
 
         Ok(Self {
             key,
@@ -598,14 +606,21 @@ impl ShardHandle {
     pub fn open(key: ShardKey, path: impl AsRef<Path>) -> ShardResult<Self> {
         let path = path.as_ref().to_path_buf();
 
-        let (trie, recovery_report) =
-            PersistentARTrieChar::open_with_recovery(&path).map_err(|e| ShardError::Open {
-                path: path.clone(),
-                message: e.to_string(),
+        let (mut trie, recovery_report) =
+            PersistentARTrie::open_with_recovery_and_slot_tracking(&path).map_err(|e| {
+                let msg = format!(
+                    "Failed to open shard at {:?}. If this shard was created with an older format \
+                     (PersistentARTrieChar), it must be re-imported. Error: {}",
+                    path, e
+                );
+                ShardError::Open {
+                    path: path.clone(),
+                    message: msg,
+                }
             })?;
 
-        // Note: Slot-level dirty tracking not available with open_with_recovery.
-        // PersistentARTrieChar uses its own internal dirty tracking.
+        // Enable lock-free overlay for concurrent CAS-based increments
+        trie.enable_lockfree();
 
         if recovery_report.mode.recovered() {
             log::info!(
@@ -630,7 +645,7 @@ impl ShardHandle {
 
         // Load checkpoint state from trie
         handle.load_checkpoint_state()?;
-        handle.stats.set_entry_count(handle.trie.len() as u64);
+        handle.stats.set_entry_count(handle.trie.len().unwrap_or(0) as u64);
 
         Ok(handle)
     }
@@ -677,12 +692,12 @@ impl ShardHandle {
 
     /// Get the entry count.
     pub fn len(&self) -> usize {
-        self.trie.len()
+        self.stats.entry_count.load(std::sync::atomic::Ordering::Relaxed) as usize
     }
 
     /// Check if the shard is empty.
     pub fn is_empty(&self) -> bool {
-        self.trie.len() == 0
+        self.len() == 0
     }
 
     /// Get the checkpoint state.
@@ -766,14 +781,14 @@ impl ShardHandle {
     /// The caller must hold a valid WriteToken for this shard.
     pub fn increment(
         &mut self,
-        ngram: &str,
+        ngram: &[u8],
         count: u64,
         _token: &WriteToken,
     ) -> ShardResult<bool> {
-        let was_new = self.trie.get(ngram).is_none();
+        let was_new = self.trie.get_value_bytes(ngram).is_none();
 
         self.trie
-            .increment(ngram, count as i64)
+            .increment_bytes(ngram, count as i64)
             .map_err(|e| ShardError::Write {
                 shard_key: self.key.to_string(),
                 message: e.to_string(),
@@ -790,46 +805,74 @@ impl ShardHandle {
         Ok(was_new)
     }
 
-    /// Get the count for an n-gram.
-    pub fn get(&self, ngram: &str) -> Option<u64> {
-        self.stats.record_read();
-        self.trie.get(ngram).map(|v| *v as u64)
+    /// Lock-free increment using CAS. Only needs `&self` (shared access).
+    ///
+    /// Uses the lock-free overlay's `increment_cas` — no WriteToken or
+    /// exclusive RwLock required, so multiple workers can increment the
+    /// same shard concurrently without serialization.
+    pub fn increment_lockfree(&self, ngram: &[u8], count: u64) -> ShardResult<bool> {
+        let lockfree_exists = self.trie.get_lockfree(ngram).is_some();
+        let persistent_exists = self.trie.get_value_bytes(ngram).is_some();
+        let was_new = !lockfree_exists && !persistent_exists;
+
+        self.trie.increment_cas(ngram, count);
+
+        self.stats.record_write();
+        if was_new {
+            self.stats.add_entries(1);
+        }
+
+        self.sync_coordinator.mark_dirty();
+
+        Ok(was_new)
     }
 
-    /// Check if an n-gram exists.
-    pub fn contains(&self, ngram: &str) -> bool {
-        self.trie.contains(ngram)
+    /// Get the count for an n-gram (dual-layer: lock-free overlay + persistent).
+    pub fn get(&self, ngram: &[u8]) -> Option<u64> {
+        self.stats.record_read();
+        let lockfree_val = self.trie.get_lockfree(ngram).unwrap_or(0);
+        let persistent_val = self.trie.get_value_bytes(ngram).unwrap_or(0);
+        let total = lockfree_val + persistent_val;
+        if total > 0 {
+            Some(total)
+        } else {
+            None
+        }
+    }
+
+    /// Check if an n-gram exists (dual-layer: lock-free overlay + persistent).
+    pub fn contains(&self, ngram: &[u8]) -> bool {
+        self.trie.get_lockfree(ngram).is_some() || self.trie.contains_bytes(ngram)
     }
 
     /// Iterate over all n-grams with their counts.
+    ///
+    /// Returns `(Vec<u8>, u64)` pairs where the key is the raw varint-encoded
+    /// byte key and the value is the n-gram count.
     ///
     /// # Errors
     ///
     /// Returns an error if the underlying trie iteration fails. This can happen
     /// due to I/O errors, corrupted data, or other trie-level issues.
-    pub fn iter_with_counts(
-        &self,
-    ) -> ShardResult<impl Iterator<Item = (String, u64)>> {
-        // iter_prefix_with_values returns Result<Option<Vec<(String, u64)>>>
-        let entries = self
-            .trie
-            .iter_prefix_with_values("")
-            .map_err(|e| ShardError::Read {
-                shard_key: self.key.to_string(),
-                message: format!("iteration failed: {}", e),
-            })?
-            .unwrap_or_default();
-
-        let iter = entries
-            .into_iter()
-            .filter(|(k, _)| !k.starts_with(Self::CHECKPOINT_PREFIX))
-            .map(|(k, v)| (k, v as u64));
-
-        Ok(iter)
+    pub fn iter_with_counts(&self) -> ShardResult<Vec<(Vec<u8>, u64)>> {
+        // iter_prefix_with_values on PersistentARTrie returns Option<impl Iterator<Item=(Vec<u8>, V)>>
+        // We collect into a Vec to avoid lifetime issues with borrowed iterators.
+        match self.trie.iter_prefix_with_values(b"") {
+            Some(iter) => Ok(iter
+                .filter(|(k, _)| !k.starts_with(Self::CHECKPOINT_PREFIX_BYTES))
+                .collect()),
+            None => Ok(Vec::new()),
+        }
     }
 
-    /// Sync WAL to disk.
+    /// Sync WAL to disk (merges lock-free overlay first).
     pub fn sync(&mut self) -> ShardResult<()> {
+        self.trie
+            .merge_lockfree_values_to_persistent()
+            .map_err(|e| ShardError::Checkpoint {
+                shard_key: self.key.to_string(),
+                message: format!("merge before sync failed: {}", e),
+            })?;
         self.trie.checkpoint().map_err(|e| ShardError::Checkpoint {
             shard_key: self.key.to_string(),
             message: format!("sync failed: {}", e),
@@ -850,6 +893,16 @@ impl ShardHandle {
         if !self.sync_coordinator.try_start_sync() {
             // Either clean (no sync needed) or already syncing
             return Ok(false);
+        }
+
+        // Merge lock-free overlay into persistent trie before syncing
+        if let Err(e) = self.trie.merge_lockfree_values_to_persistent() {
+            let error_msg = format!("merge before sync failed: {}", e);
+            self.sync_coordinator.fail_sync(&error_msg);
+            return Err(ShardError::Sync {
+                shard_key: self.key.to_string(),
+                message: error_msg,
+            });
         }
 
         // Perform the actual sync
@@ -978,10 +1031,41 @@ impl ShardHandle {
         self.trie.synced_lsn()
     }
 
+    /// Merge the lock-free overlay into the persistent trie.
+    ///
+    /// Call this before operations that iterate the persistent trie
+    /// (e.g., merge, query, MKN computation) to ensure they see all data.
+    /// Point lookups (`get`, `contains`) already check both layers.
+    pub fn flush_lockfree(&mut self) -> ShardResult<()> {
+        self.trie
+            .merge_lockfree_values_to_persistent()
+            .map_err(|e| ShardError::Checkpoint {
+                shard_key: self.key.to_string(),
+                message: format!("flush_lockfree failed: {}", e),
+            })?;
+        Ok(())
+    }
+
     /// Checkpoint the shard (persist to disk and truncate WAL).
+    ///
+    /// Uses sequential flush for optimized disk I/O (5-15% faster checkpoints).
     pub fn checkpoint(&mut self) -> ShardResult<()> {
+        // Merge lock-free overlay into persistent trie before checkpointing
+        self.trie
+            .merge_lockfree_values_to_persistent()
+            .map_err(|e| ShardError::Checkpoint {
+                shard_key: self.key.to_string(),
+                message: format!("merge before checkpoint failed: {}", e),
+            })?;
+
         // Save checkpoint state to trie
         self.save_checkpoint_state()?;
+
+        // Flush dirty arenas in sequential order for optimal I/O
+        self.trie.flush_sequential().map_err(|e| ShardError::Checkpoint {
+            shard_key: self.key.to_string(),
+            message: format!("flush_sequential failed: {}", e),
+        })?;
 
         // Checkpoint the trie
         self.trie.checkpoint().map_err(|e| ShardError::Checkpoint {
@@ -1018,21 +1102,25 @@ impl ShardHandle {
     fn load_checkpoint_state(&mut self) -> ShardResult<()> {
         // Load n-grams processed count
         let ngrams_key = format!("{}ngrams_processed", Self::CHECKPOINT_PREFIX);
-        if let Some(value) = self.trie.get(&ngrams_key) {
-            self.checkpoint_state.ngrams_processed = *value as u64;
+        if let Some(value) = self.trie.get_value_bytes(ngrams_key.as_bytes()) {
+            self.checkpoint_state.ngrams_processed = value as u64;
         }
 
         // Load completed prefixes by scanning for prefix keys
         // Key format: \x00__shard_ckpt__:prefix:XX
         let prefix_pattern = format!("{}prefix:", Self::CHECKPOINT_PREFIX);
+        let prefix_pattern_bytes = prefix_pattern.as_bytes();
 
-        if let Ok(Some(entries)) = self.trie.iter_prefix_with_values(&prefix_pattern) {
-            for (key, _value) in entries {
+        if let Some(iter) = self.trie.iter_prefix_with_values(prefix_pattern_bytes) {
+            for (key, _value) in iter {
                 // Extract prefix name from key: \x00__shard_ckpt__:prefix:XX -> XX
-                if let Some(prefix) = key.strip_prefix(&prefix_pattern) {
-                    self.checkpoint_state
-                        .completed_prefixes
-                        .insert(prefix.to_string());
+                if key.starts_with(prefix_pattern_bytes) {
+                    let suffix = &key[prefix_pattern_bytes.len()..];
+                    if let Ok(prefix) = std::str::from_utf8(suffix) {
+                        self.checkpoint_state
+                            .completed_prefixes
+                            .insert(prefix.to_string());
+                    }
                 }
             }
         }
@@ -1052,7 +1140,7 @@ impl ShardHandle {
         // Save n-grams processed count
         let ngrams_key = format!("{}ngrams_processed", Self::CHECKPOINT_PREFIX);
         self.trie
-            .upsert(&ngrams_key, self.checkpoint_state.ngrams_processed)
+            .upsert_bytes(ngrams_key.as_bytes(), self.checkpoint_state.ngrams_processed)
             .map_err(|e| ShardError::Checkpoint {
                 shard_key: self.key.to_string(),
                 message: format!("failed to save ngrams_processed: {}", e),
@@ -1061,8 +1149,8 @@ impl ShardHandle {
         // Save completed prefix count (for backward compatibility)
         let completed_key = format!("{}completed", Self::CHECKPOINT_PREFIX);
         self.trie
-            .upsert(
-                &completed_key,
+            .upsert_bytes(
+                completed_key.as_bytes(),
                 self.checkpoint_state.completed_prefixes.len() as u64,
             )
             .map_err(|e| ShardError::Checkpoint {
@@ -1075,7 +1163,7 @@ impl ShardHandle {
         for prefix in &self.checkpoint_state.completed_prefixes {
             let prefix_key = format!("{}prefix:{}", Self::CHECKPOINT_PREFIX, prefix);
             self.trie
-                .upsert(&prefix_key, 1) // Value 1 = completed marker
+                .upsert_bytes(prefix_key.as_bytes(), 1) // Value 1 = completed marker
                 .map_err(|e| ShardError::Checkpoint {
                     shard_key: self.key.to_string(),
                     message: format!("failed to save prefix {}: {}", prefix, e),
@@ -1137,10 +1225,10 @@ impl ShardHandle {
     /// # Arguments
     ///
     /// * `tx` - The active transaction from `begin_prefix()`
-    /// * `ngram` - The n-gram key to insert
+    /// * `ngram` - The n-gram key (raw varint-encoded bytes)
     /// * `count` - The n-gram count
-    pub fn tx_insert(&self, tx: &mut PrefixTransaction<u64>, ngram: &str, count: u64) {
-        self.trie.tx_insert(&mut tx.tx, ngram, Some(count));
+    pub fn tx_insert(&self, tx: &mut PrefixTransaction<u64>, ngram: &[u8], count: u64) {
+        self.trie.tx_insert_bytes(&mut tx.tx, ngram, Some(count));
         tx.ngram_count += 1;
     }
 
@@ -1223,7 +1311,7 @@ impl ShardHandle {
 
 /// A pending prefix transaction for atomic n-gram imports.
 ///
-/// This wraps a `CharDocumentTransaction` with prefix-specific metadata
+/// This wraps a `DocumentTransaction` with prefix-specific metadata
 /// and provides idempotent import semantics:
 ///
 /// - **Atomicity**: All n-grams are committed together or none are
@@ -1244,7 +1332,7 @@ pub struct PrefixTransaction<V: liblevenshtein::dictionary::DictionaryValue> {
     pub prefix: String,
 
     /// The underlying document transaction.
-    tx: CharDocumentTransaction<V>,
+    tx: DocumentTransaction<V>,
 
     /// Number of n-grams buffered in this transaction.
     pub ngram_count: usize,
@@ -1268,17 +1356,17 @@ mod tests {
 
         // Write some data
         let was_new = shard
-            .increment("the|quick", 5, &token)
+            .increment(b"the|quick", 5, &token)
             .expect("Failed to increment");
         assert!(was_new);
 
         let was_new = shard
-            .increment("the|quick", 3, &token)
+            .increment(b"the|quick", 3, &token)
             .expect("Failed to increment");
         assert!(!was_new);
 
         // Read back
-        assert_eq!(shard.get("the|quick"), Some(8));
+        assert_eq!(shard.get(b"the|quick"), Some(8));
         assert_eq!(shard.len(), 1);
 
         // Release token
@@ -1322,7 +1410,7 @@ mod tests {
             let mut shard =
                 ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
             let token = shard.try_acquire_write(0).unwrap();
-            shard.increment("the|quick", 10, &token).unwrap();
+            shard.increment(b"the|quick", 10, &token).unwrap();
             shard.sync().unwrap();
             shard.release_write(token);
         }
@@ -1330,7 +1418,7 @@ mod tests {
         // Reopen and verify
         {
             let shard = ShardHandle::open(key, &path).expect("Failed to open shard");
-            assert_eq!(shard.get("the|quick"), Some(10));
+            assert_eq!(shard.get(b"the|quick"), Some(10));
         }
     }
 
@@ -1348,11 +1436,11 @@ mod tests {
 
         // Write data
         let token = shard.try_acquire_write(0).unwrap();
-        shard.increment("apple|pie", 5, &token).unwrap();
+        shard.increment(b"apple|pie", 5, &token).unwrap();
         shard.sync().unwrap();
         shard.release_write(token);
 
-        assert_eq!(shard.get("apple|pie"), Some(5));
+        assert_eq!(shard.get(b"apple|pie"), Some(5));
     }
 
     #[test]
@@ -1366,7 +1454,7 @@ mod tests {
             let mut shard = ShardHandle::create(key.clone(), &path)
                 .expect("Failed to create shard");
             let token = shard.try_acquire_write(0).unwrap();
-            shard.increment("cat|dog", 7, &token).unwrap();
+            shard.increment(b"cat|dog", 7, &token).unwrap();
             shard.sync().unwrap();
             shard.release_write(token);
         }
@@ -1376,7 +1464,7 @@ mod tests {
             .expect("Failed to open_or_create existing shard");
 
         // Verify data is preserved
-        assert_eq!(shard.get("cat|dog"), Some(7));
+        assert_eq!(shard.get(b"cat|dog"), Some(7));
     }
 
     // ========== Sync Coordinator Tests ==========
@@ -1456,7 +1544,7 @@ mod tests {
 
         // Write marks dirty
         let token = shard.try_acquire_write(0).expect("Failed to acquire write");
-        shard.increment("the|quick", 5, &token).expect("Failed to increment");
+        shard.increment(b"the|quick", 5, &token).expect("Failed to increment");
         assert_eq!(shard.sync_state(), ShardSyncState::Dirty);
         shard.release_write(token);
 
@@ -1526,8 +1614,8 @@ mod tests {
             let mut tx = shard.begin_prefix("th").expect("Failed to begin prefix");
 
             // Insert some n-grams
-            shard.tx_insert(&mut tx, "the|quick", 10);
-            shard.tx_insert(&mut tx, "the|brown", 5);
+            shard.tx_insert(&mut tx, b"the|quick", 10);
+            shard.tx_insert(&mut tx, b"the|brown", 5);
 
             // Verify checkpoint state is empty before commit
             assert!(
@@ -1561,8 +1649,8 @@ mod tests {
             );
 
             // Data should also be present
-            assert_eq!(shard.get("the|quick"), Some(10));
-            assert_eq!(shard.get("the|brown"), Some(5));
+            assert_eq!(shard.get(b"the|quick"), Some(10));
+            assert_eq!(shard.get(b"the|brown"), Some(5));
         }
     }
 
@@ -1578,12 +1666,12 @@ mod tests {
 
             // Commit first prefix
             let mut tx1 = shard.begin_prefix("th").expect("Failed to begin prefix");
-            shard.tx_insert(&mut tx1, "the|quick", 10);
+            shard.tx_insert(&mut tx1, b"the|quick", 10);
             shard.commit_prefix(tx1).expect("Failed to commit prefix");
 
             // Commit second prefix (different one routed to same shard)
             let mut tx2 = shard.begin_prefix("ti").expect("Failed to begin prefix");
-            shard.tx_insert(&mut tx2, "time|flies", 3);
+            shard.tx_insert(&mut tx2, b"time|flies", 3);
             shard.commit_prefix(tx2).expect("Failed to commit prefix");
 
             // Both prefixes should be in checkpoint state
@@ -1612,7 +1700,7 @@ mod tests {
 
             // Begin and abort a transaction
             let mut tx = shard.begin_prefix("th").expect("Failed to begin prefix");
-            shard.tx_insert(&mut tx, "the|quick", 10);
+            shard.tx_insert(&mut tx, b"the|quick", 10);
             shard.abort_prefix(tx).expect("Failed to abort prefix");
 
             // Checkpoint state should not be updated
@@ -1622,7 +1710,7 @@ mod tests {
             );
 
             // Data should not be present
-            assert_eq!(shard.get("the|quick"), None);
+            assert_eq!(shard.get(b"the|quick"), None);
         }
     }
 }

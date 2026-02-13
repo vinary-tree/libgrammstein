@@ -92,6 +92,15 @@ pub struct GoogleBooksConfig {
     /// thread contention among parallel workers, regardless of dataset size.
     #[serde(default)]
     pub sharding: ShardingMode,
+
+    /// Optional single prefix to import (for debugging/optimization).
+    ///
+    /// When set, only this prefix will be imported. Valid prefixes depend on
+    /// the n-gram order:
+    /// - 1-grams: a-z, other
+    /// - 2-5 grams: aa-zz, other, punctuation
+    #[serde(default)]
+    pub prefix: Option<String>,
 }
 
 /// Sharding mode for Google Books import.
@@ -233,6 +242,7 @@ impl Default for GoogleBooksConfig {
             progress_interval: 100_000,
             skip_pos_tags: true,
             sharding: ShardingMode::default(),
+            prefix: None,
         }
     }
 }
@@ -451,6 +461,14 @@ impl GoogleBooksConfigBuilder {
     /// Force enable sharding with custom options.
     pub fn sharding_enabled_with(mut self, options: ShardingOptions) -> Self {
         self.config.sharding = ShardingMode::Enabled(options);
+        self
+    }
+
+    /// Set a single prefix to import (for debugging/optimization).
+    ///
+    /// When set, only this prefix will be imported instead of all prefixes.
+    pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.config.prefix = Some(prefix.into());
         self
     }
 

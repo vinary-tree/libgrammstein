@@ -12,7 +12,7 @@
 //! │   VocabularyIndexedDictionary<D>                    │
 //! │   (this module)                                     │
 //! ├─────────────────────────────────────────────────────┤
-//! │  - vocabulary: Arc<SharedVocabulary>  ← word → u64  │
+//! │  - vocabulary: Arc<SharedVocabARTrie>  ← word → u64  │
 //! │  - backend: D                 ← underlying trie     │
 //! │  - delimiter: char                                  │
 //! └─────────────────────────────────────────────────────┘
@@ -20,7 +20,7 @@
 //!     ┌───────────────┴───────────────┐
 //!     ▼                               ▼
 //! ┌──────────────────┐    ┌───────────────────────────┐
-//! │ SharedVocabulary │    │  Any MutableMappedDictionary │
+//! │ SharedVocabARTrie │    │  Any MutableMappedDictionary │
 //! │ (word → u64)     │    │  (DynamicDawgChar, etc.)     │
 //! └──────────────────┘    └───────────────────────────────┘
 //! ```
@@ -37,11 +37,11 @@
 //!
 //! ```ignore
 //! use libgrammstein::ngram::vocabulary_indexed::VocabularyIndexedDictionary;
-//! use libgrammstein::ngram::SharedVocabulary;
+//! use libgrammstein::ngram::SharedVocabARTrie;
 //! use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 //!
 //! // Create or open vocabulary
-//! let vocab = Arc::new(SharedVocabulary::open_or_create(&vocab_path)?);
+//! let vocab = Arc::new(SharedVocabARTrie::open_or_create(&vocab_path)?);
 //!
 //! // Create underlying trie
 //! let backend = DynamicDawgChar::new();
@@ -61,12 +61,11 @@
 //! - **Read operations**: Return `None`/`false` for OOV words without modifying vocabulary
 //! - **Write operations**: Acquire new vocabulary indices for unknown words
 
-use super::vocabulary::{decode_varint, encode_varint, SharedVocabulary};
+use super::vocabulary::{decode_varint, encode_varint, SharedVocabARTrie};
 use liblevenshtein::dictionary::{
     Dictionary, DictionaryNode, MappedDictionary, MappedDictionaryNode, MutableMappedDictionary,
     SyncStrategy,
 };
-use std::sync::Arc;
 
 // ============================================================================
 // Helper Functions
@@ -125,10 +124,10 @@ pub fn decode_key_to_indices(key: &str) -> Vec<u64> {
 ///
 /// ```ignore
 /// use libgrammstein::ngram::vocabulary_indexed::VocabularyIndexedDictionary;
-/// use libgrammstein::ngram::SharedVocabulary;
+/// use libgrammstein::ngram::SharedVocabARTrie;
 /// use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 ///
-/// let vocab = Arc::new(SharedVocabulary::open_or_create(&path)?);
+/// let vocab = Arc::new(SharedVocabARTrie::open_or_create(&path)?);
 /// let backend: DynamicDawgChar<u64> = DynamicDawgChar::new();
 /// let dict = VocabularyIndexedDictionary::new(backend, vocab);
 ///
@@ -144,7 +143,7 @@ pub struct VocabularyIndexedDictionary<D> {
     /// The underlying dictionary backend.
     backend: D,
     /// The shared vocabulary for word-to-index mapping.
-    vocabulary: Arc<SharedVocabulary>,
+    vocabulary: SharedVocabARTrie,
     /// Delimiter for splitting terms into words.
     delimiter: char,
 }
@@ -168,7 +167,7 @@ impl<D> VocabularyIndexedDictionary<D> {
     ///
     /// * `backend` - The underlying dictionary backend
     /// * `vocabulary` - The shared vocabulary for word-to-index mapping
-    pub fn new(backend: D, vocabulary: Arc<SharedVocabulary>) -> Self {
+    pub fn new(backend: D, vocabulary: SharedVocabARTrie) -> Self {
         Self {
             backend,
             vocabulary,
@@ -183,7 +182,7 @@ impl<D> VocabularyIndexedDictionary<D> {
     /// * `backend` - The underlying dictionary backend
     /// * `vocabulary` - The shared vocabulary for word-to-index mapping
     /// * `delimiter` - The character used to split terms into words
-    pub fn with_delimiter(backend: D, vocabulary: Arc<SharedVocabulary>, delimiter: char) -> Self {
+    pub fn with_delimiter(backend: D, vocabulary: SharedVocabARTrie, delimiter: char) -> Self {
         Self {
             backend,
             vocabulary,
@@ -197,7 +196,7 @@ impl<D> VocabularyIndexedDictionary<D> {
     }
 
     /// Get a reference to the vocabulary.
-    pub fn vocabulary(&self) -> &Arc<SharedVocabulary> {
+    pub fn vocabulary(&self) -> &SharedVocabARTrie {
         &self.vocabulary
     }
 
@@ -216,8 +215,9 @@ impl<D> VocabularyIndexedDictionary<D> {
     /// Returns `None` if any word is OOV (out of vocabulary).
     fn encode_key_existing(&self, words: &[&str]) -> Option<String> {
         let mut buf = Vec::with_capacity(words.len() * 2);
+        let guard = self.vocabulary.read();
         for word in words {
-            let index = self.vocabulary.get(word)?;
+            let index = guard.get_index(word)?;
             encode_varint(index, &mut buf);
         }
         Some(bytes_to_latin1(&buf))
@@ -226,8 +226,9 @@ impl<D> VocabularyIndexedDictionary<D> {
     /// Encode words to a varint key, acquiring new indices as needed.
     fn encode_key_inserting(&self, words: &[&str]) -> String {
         let mut buf = Vec::with_capacity(words.len() * 2);
+        let mut guard = self.vocabulary.write();
         for word in words {
-            let index = self.vocabulary.get_or_insert(word);
+            let index = guard.insert(word);
             encode_varint(index, &mut buf);
         }
         bytes_to_latin1(&buf)
@@ -517,6 +518,7 @@ impl<V: DictionaryValue> VocabularyIndexedDictionary<DynamicDawgChar<V>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ngram::vocabulary::create_vocabulary;
     use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
     use tempfile::TempDir;
 
@@ -524,9 +526,7 @@ mod tests {
     ) -> (TempDir, VocabularyIndexedDictionary<DynamicDawgChar<u64>>) {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let vocab_path = dir.path().join("vocab.artrie");
-        let vocab = Arc::new(
-            SharedVocabulary::create(&vocab_path).expect("Failed to create vocabulary"),
-        );
+        let vocab = create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
         let backend: DynamicDawgChar<u64> = DynamicDawgChar::new();
         let dict = VocabularyIndexedDictionary::new(backend, vocab);
         (dir, dict)
@@ -561,7 +561,7 @@ mod tests {
         assert!(dict.get_ngram(&["unknown", "word"]).is_none());
 
         // Vocabulary should still be empty (no side effects)
-        assert_eq!(dict.vocabulary().len(), 0);
+        assert_eq!(dict.vocabulary().read().len(), 0);
     }
 
     #[test]
@@ -621,9 +621,7 @@ mod tests {
     fn test_custom_delimiter() {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let vocab_path = dir.path().join("vocab.artrie");
-        let vocab = Arc::new(
-            SharedVocabulary::create(&vocab_path).expect("Failed to create vocabulary"),
-        );
+        let vocab = create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
         let backend: DynamicDawgChar<u64> = DynamicDawgChar::new();
         let dict = VocabularyIndexedDictionary::with_delimiter(backend, vocab, '|');
 
@@ -633,13 +631,12 @@ mod tests {
 
     #[test]
     fn test_concurrent_access() {
+        use std::sync::Arc;
         use std::thread;
 
         let dir = TempDir::new().expect("Failed to create temp dir");
         let vocab_path = dir.path().join("vocab.artrie");
-        let vocab = Arc::new(
-            SharedVocabulary::create(&vocab_path).expect("Failed to create vocabulary"),
-        );
+        let vocab = create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
         let backend: DynamicDawgChar<u64> = DynamicDawgChar::new();
         let dict = Arc::new(VocabularyIndexedDictionary::new(backend, vocab));
         let mut handles = vec![];
@@ -678,15 +675,16 @@ mod tests {
     fn test_large_vocabulary_indices() {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let vocab_path = dir.path().join("vocab.artrie");
-        let vocab = Arc::new(
-            SharedVocabulary::create(&vocab_path).expect("Failed to create vocabulary"),
-        );
+        let vocab = create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
         let backend: DynamicDawgChar<u64> = DynamicDawgChar::new();
-        let dict = VocabularyIndexedDictionary::new(backend, Arc::clone(&vocab));
+        let dict = VocabularyIndexedDictionary::new(backend, vocab.clone());
 
         // Insert enough words to require multi-byte varints
-        for i in 0..200 {
-            vocab.get_or_insert(&format!("word{}", i));
+        {
+            let mut guard = vocab.write();
+            for i in 0..200 {
+                guard.insert(&format!("word{}", i));
+            }
         }
 
         // Insert n-gram with high-index words

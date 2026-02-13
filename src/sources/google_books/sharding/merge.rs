@@ -46,7 +46,7 @@
 
 use super::coordinator::ShardCoordinator;
 use super::routing::ShardKey;
-use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
+use libdictenstein::persistent_artrie::PersistentARTrie;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -210,7 +210,7 @@ impl<'a> MergeCoordinator<'a> {
         log::info!("Starting merge of {} shards to {:?}", total_shards, output_path);
 
         // Create output trie
-        let mut output_trie = PersistentARTrieChar::<u64>::create(output_path)
+        let mut output_trie = PersistentARTrie::<u64>::create(output_path)
             .map_err(|e| MergeError::Trie(format!("Failed to create output trie: {}", e)))?;
 
         let mut ngrams_merged = 0u64;
@@ -241,7 +241,10 @@ impl<'a> MergeCoordinator<'a> {
                     shard_key: key.to_string(),
                     message: e.to_string(),
                 })?;
-            let guard = shard.read();
+            let mut guard = shard.write();
+            guard.flush_lockfree().map_err(|e| {
+                MergeError::Trie(format!("Shard {} flush failed: {}", key, e))
+            })?;
 
             let iter = guard.iter_with_counts().map_err(|e| {
                 MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
@@ -249,7 +252,7 @@ impl<'a> MergeCoordinator<'a> {
 
             for (ngram, count) in iter {
                 output_trie
-                    .increment(&ngram, count as i64)
+                    .increment_bytes(&ngram, count as i64)
                     .map_err(|e| MergeError::Trie(format!("Increment failed: {}", e)))?;
                 ngrams_merged += 1;
             }
@@ -290,7 +293,7 @@ impl<'a> MergeCoordinator<'a> {
     ///
     /// This is useful for smaller datasets where all n-grams fit in memory.
     /// Returns a HashMap of (ngram, count) pairs.
-    pub fn merge_to_memory(&self) -> MergeResult<HashMap<String, u64>> {
+    pub fn merge_to_memory(&self) -> MergeResult<HashMap<Vec<u8>, u64>> {
         // Discover all shard files on disk (not just cached ones)
         let shard_files = self.coordinator.discover_shard_files()
             .map_err(|e| MergeError::Trie(format!("Failed to discover shard files: {}", e)))?;
@@ -304,7 +307,7 @@ impl<'a> MergeCoordinator<'a> {
 
         // Collect all n-grams from all shards
         // Use try_fold pattern to propagate errors from shard iteration
-        let results: Result<Vec<HashMap<String, u64>>, MergeError> = shard_keys
+        let results: Result<Vec<HashMap<Vec<u8>, u64>>, MergeError> = shard_keys
             .par_iter()
             .map(|key| {
                 log::trace!("Merging shard '{}' to memory", key);
@@ -316,18 +319,21 @@ impl<'a> MergeCoordinator<'a> {
                         shard_key: key.to_string(),
                         message: e.to_string(),
                     })?;
-                let guard = shard.read();
+                let mut guard = shard.write();
+                guard.flush_lockfree().map_err(|e| {
+                    MergeError::Trie(format!("Shard {} flush failed: {}", key, e))
+                })?;
                 let iter = guard.iter_with_counts().map_err(|e| {
                     MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
                 })?;
-                Ok(iter.collect::<HashMap<_, _>>())
+                Ok(iter.into_iter().collect::<HashMap<_, _>>())
             })
             .collect();
 
         let results = results?;
 
         // Merge all results
-        let mut merged: HashMap<String, u64> = HashMap::new();
+        let mut merged: HashMap<Vec<u8>, u64> = HashMap::new();
         for partial in results {
             for (ngram, count) in partial {
                 *merged.entry(ngram).or_default() += count;
@@ -346,7 +352,7 @@ impl<'a> MergeCoordinator<'a> {
     /// # Errors
     ///
     /// Returns an error if shard discovery fails or any shard iteration fails.
-    pub fn iter_all(&self) -> MergeResult<impl Iterator<Item = (String, u64)>> {
+    pub fn iter_all(&self) -> MergeResult<impl Iterator<Item = (Vec<u8>, u64)>> {
         // Discover all shard files on disk (not just cached ones)
         let shard_keys: Vec<ShardKey> = self
             .coordinator
@@ -368,7 +374,10 @@ impl<'a> MergeCoordinator<'a> {
                     shard_key: key.to_string(),
                     message: e.to_string(),
                 })?;
-            let guard = shard.read();
+            let mut guard = shard.write();
+            guard.flush_lockfree().map_err(|e| {
+                MergeError::Trie(format!("Shard {} flush failed: {}", key, e))
+            })?;
             let iter = guard.iter_with_counts().map_err(|e| {
                 MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
             })?;
@@ -469,9 +478,9 @@ mod tests {
         let merged = merger.merge_to_memory().expect("merge");
 
         assert_eq!(merged.len(), 7);
-        assert_eq!(merged.get("the|quick"), Some(&100));
-        assert_eq!(merged.get("apple|pie"), Some(&30));
-        assert_eq!(merged.get("zebra|crossing"), Some(&5));
+        assert_eq!(merged.get(b"the|quick".as_slice()), Some(&100));
+        assert_eq!(merged.get(b"apple|pie".as_slice()), Some(&30));
+        assert_eq!(merged.get(b"zebra|crossing".as_slice()), Some(&5));
     }
 
     #[test]
@@ -509,9 +518,9 @@ mod tests {
         assert!(stats.total_ngrams > 0);
 
         // Verify merged trie contents
-        let merged_trie = PersistentARTrieChar::<u64>::open(&output_path).expect("open");
-        assert_eq!(merged_trie.get("the|quick").map(|v| *v), Some(100));
-        assert_eq!(merged_trie.get("apple|pie").map(|v| *v), Some(30));
+        let merged_trie = PersistentARTrie::<u64>::open(&output_path).expect("open");
+        assert_eq!(merged_trie.get_value_bytes(b"the|quick"), Some(100));
+        assert_eq!(merged_trie.get_value_bytes(b"apple|pie"), Some(30));
     }
 
     #[test]

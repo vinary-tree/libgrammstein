@@ -5,24 +5,29 @@
 //!
 //! # Backends
 //!
-//! - **SingleTrie**: Original behavior using a single `PersistentARTrieChar<u64>`
-//!   protected by `Arc<RwLock>`. Simple but has write contention with multiple workers.
+//! - **SingleTrie**: A single `PersistentARTrie<u64>` (byte-keyed) protected by
+//!   `Arc<RwLock>`. Simple but has write contention with multiple workers.
 //!
-//! - **Sharded**: Distributes n-grams across multiple tries based on prefix routing.
-//!   Eliminates write contention for parallel imports.
+//! - **Sharded**: Distributes n-grams across multiple byte-keyed tries based on
+//!   prefix routing. Eliminates write contention for parallel imports.
 //!
 //! # Vocabulary-Indexed Encoding
 //!
-//! When a `SharedVocabulary` is provided, n-gram keys are encoded using varint-encoded
-//! u64 indices stored as Latin-1 strings instead of pipe-separated tokens. This:
+//! When a `SharedVocabulary` is provided, n-gram keys are encoded as raw LEB128
+//! varint byte sequences stored directly in the byte-keyed trie. This:
 //! - Fixes the delimiter bug when tokens contain `|`
 //! - Provides compact storage (1-2 bytes per word for common words)
 //! - Supports unlimited vocabulary size
+//! - Eliminates Latin-1 char conversion overhead
 
 use super::config::GoogleBooksConfig;
 use super::sharding::{CheckpointHandle, ShardCoordinator, ShardKey};
-use crate::ngram::vocabulary::{try_encode_ngram_key, SharedVocabulary, VocabularyError};
-use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
+use crate::ngram::vocabulary::{
+    encode_ngram_key_lockfree_bytes, try_encode_ngram_key_lockfree_bytes,
+    with_encoded_ngram_key_lockfree, SharedConcurrentVocab, VocabularyError,
+};
+use libdictenstein::persistent_artrie::PersistentARTrie;
+use liblevenshtein::dictionary::Dictionary;
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -82,12 +87,12 @@ impl StorageStats {
 /// When a `SharedVocabulary` is attached, n-gram keys are encoded using
 /// vocabulary-indexed (PUA character) encoding instead of pipe-separated tokens.
 pub enum NgramStorage {
-    /// Single trie storage (original behavior).
+    /// Single trie storage (byte-keyed).
     SingleTrie {
-        /// The trie instance.
-        trie: Arc<RwLock<PersistentARTrieChar<u64>>>,
-        /// Optional shared vocabulary for PUA encoding.
-        vocabulary: Option<Arc<SharedVocabulary>>,
+        /// The trie instance (byte-keyed).
+        trie: Arc<RwLock<PersistentARTrie<u64>>>,
+        /// Optional lock-free concurrent vocabulary for encoding.
+        vocabulary: Option<SharedConcurrentVocab>,
         /// Storage statistics.
         stats: Arc<StorageStats>,
     },
@@ -96,8 +101,8 @@ pub enum NgramStorage {
     Sharded {
         /// The shard coordinator.
         coordinator: ShardCoordinator,
-        /// Optional shared vocabulary for PUA encoding.
-        vocabulary: Option<Arc<SharedVocabulary>>,
+        /// Optional lock-free concurrent vocabulary for encoding.
+        vocabulary: Option<SharedConcurrentVocab>,
         /// Storage statistics.
         stats: Arc<StorageStats>,
     },
@@ -124,19 +129,24 @@ impl NgramStorage {
     }
 
     /// Create single-trie storage with optional vocabulary.
+    ///
+    /// Enables slot-level dirty tracking for optimized checkpoints (90%+ I/O reduction).
     pub fn create_single_trie_with_vocabulary(
         output_path: &Path,
-        vocabulary: Option<Arc<SharedVocabulary>>,
+        vocabulary: Option<SharedConcurrentVocab>,
     ) -> StorageResult<Self> {
-        let trie = if output_path.exists() {
+        let mut trie = if output_path.exists() {
             log::info!("Opening existing trie at {:?}", output_path);
-            PersistentARTrieChar::open(output_path)
+            PersistentARTrie::open_with_slot_tracking(output_path)
                 .map_err(|e| StorageError::Trie(format!("Failed to open trie: {}", e)))?
         } else {
             log::info!("Creating new trie at {:?}", output_path);
-            PersistentARTrieChar::create(output_path)
+            PersistentARTrie::create_with_slot_tracking(output_path)
                 .map_err(|e| StorageError::Trie(format!("Failed to create trie: {}", e)))?
         };
+
+        // Enable lock-free overlay for concurrent increment_cas access
+        trie.enable_lockfree();
 
         Ok(Self::SingleTrie {
             trie: Arc::new(RwLock::new(trie)),
@@ -153,7 +163,7 @@ impl NgramStorage {
     /// Create sharded storage with optional vocabulary.
     pub fn create_sharded_with_vocabulary(
         config: &GoogleBooksConfig,
-        vocabulary: Option<Arc<SharedVocabulary>>,
+        vocabulary: Option<SharedConcurrentVocab>,
     ) -> StorageResult<Self> {
         let shard_config = config.to_shard_config();
 
@@ -185,7 +195,7 @@ impl NgramStorage {
     pub fn resume_or_start_with_vocabulary(
         config: &GoogleBooksConfig,
         estimated_ngrams: u64,
-        vocabulary: Option<Arc<SharedVocabulary>>,
+        vocabulary: Option<SharedConcurrentVocab>,
     ) -> StorageResult<Self> {
         let use_sharding = config.should_use_sharding(estimated_ngrams);
 
@@ -223,7 +233,7 @@ impl NgramStorage {
     }
 
     /// Get the vocabulary reference, if any.
-    pub fn vocabulary(&self) -> Option<&Arc<SharedVocabulary>> {
+    pub fn vocabulary(&self) -> Option<&SharedConcurrentVocab> {
         match self {
             Self::SingleTrie { vocabulary, .. } => vocabulary.as_ref(),
             Self::Sharded { vocabulary, .. } => vocabulary.as_ref(),
@@ -235,18 +245,20 @@ impl NgramStorage {
     /// This replaces `vocabulary_current_lsn()` and `vocabulary_synced_lsn()`.
     /// Returns `false` if no vocabulary is configured or vocabulary is clean.
     pub fn vocabulary_is_dirty(&self) -> bool {
-        self.vocabulary().is_some_and(|v| v.is_dirty())
+        self.vocabulary().is_some_and(|v| v.inner().read().is_dirty())
     }
 
-    /// Encode tokens to an n-gram key using vocabulary.
+    /// Encode tokens to a raw byte n-gram key using vocabulary.
     ///
-    /// Returns a Latin-1 encoded string of varint bytes if vocabulary is set.
-    /// If vocabulary is not set, returns the tokens joined with spaces.
-    pub fn encode_tokens(&self, tokens: &[&str]) -> StorageResult<String> {
-        match self.vocabulary() {
-            Some(vocab) => try_encode_ngram_key(tokens, vocab).map_err(StorageError::from),
-            None => Ok(tokens.join(" ")),
-        }
+    /// Uses lock-free CAS for concurrent vocabulary access and returns
+    /// the raw LEB128 varint-encoded byte key directly.
+    ///
+    /// Vocabulary is required. Returns an error if no vocabulary is configured.
+    pub fn encode_tokens(&self, tokens: &[&str]) -> StorageResult<Vec<u8>> {
+        let vocab = self.vocabulary().ok_or_else(|| {
+            StorageError::Config("Vocabulary required for token encoding".into())
+        })?;
+        try_encode_ngram_key_lockfree_bytes(tokens, vocab).map_err(StorageError::from)
     }
 
     /// Store tokens as an n-gram with count, using vocabulary encoding if available.
@@ -254,6 +266,10 @@ impl NgramStorage {
     /// This is the recommended method for storing n-grams when you have tokens.
     /// If vocabulary is enabled, the tokens are encoded to a varint key and routed
     /// based on the original tokens (not the encoded key).
+    ///
+    /// For single-trie mode, uses lock-free `increment_cas()` — workers only acquire
+    /// a shared read lock, eliminating the write contention that previously serialized
+    /// all 12+ parallel workers.
     ///
     /// # Arguments
     ///
@@ -264,23 +280,31 @@ impl NgramStorage {
     ///
     /// `true` if this was a new n-gram.
     pub fn store_tokens(&self, tokens: &[&str], count: u64) -> StorageResult<bool> {
-        let encoded_key = self.encode_tokens(tokens)?;
+        let vocab = self.vocabulary().ok_or_else(|| {
+            StorageError::Config("Vocabulary required for token encoding".into())
+        })?;
 
         match self {
             Self::SingleTrie { trie, stats, .. } => {
-                let mut guard = trie.write();
-                let is_new = guard.get(&encoded_key).is_none();
-                guard.increment(&encoded_key, count as i64).map_err(|e| {
-                    StorageError::Trie(format!("Failed to store n-gram: {}", e))
-                })?;
+                let guard = trie.read();
+                // Zero-alloc path via thread-local buffer
+                let is_new = with_encoded_ngram_key_lockfree(tokens, vocab, |encoded_key| {
+                    let lockfree_exists = guard.get_lockfree(encoded_key).is_some();
+                    let persistent_exists = guard.get_value_bytes(encoded_key).is_some();
+                    let is_new = !lockfree_exists && !persistent_exists;
+                    guard.increment_cas(encoded_key, count);
+                    is_new
+                });
 
                 stats.record(count, if is_new { 1 } else { 0 });
                 Ok(is_new)
             }
             Self::Sharded { coordinator, stats, .. } => {
-                // Route based on original tokens, store encoded key
+                // Route based on original tokens, store encoded byte key
                 let shard_key = coordinator.route_tokens(tokens);
-                let is_new = coordinator.store_in_shard(&shard_key, &encoded_key, count)?;
+                let is_new = with_encoded_ngram_key_lockfree(tokens, vocab, |encoded_key| {
+                    coordinator.store_in_shard(&shard_key, encoded_key, count)
+                })?;
                 stats.record(count, if is_new { 1 } else { 0 });
                 Ok(is_new)
             }
@@ -307,15 +331,19 @@ impl NgramStorage {
 
     /// Store an n-gram with count.
     ///
+    /// For single-trie mode, uses lock-free `increment_cas()` — workers only acquire
+    /// a shared read lock, eliminating write contention.
+    ///
     /// Returns `true` if this was a new n-gram.
     pub fn store(&self, ngram: &str, count: u64) -> StorageResult<bool> {
+        let ngram_bytes = ngram.as_bytes();
         match self {
             Self::SingleTrie { trie, stats, .. } => {
-                let mut guard = trie.write();
-                let is_new = guard.get(ngram).is_none();
-                guard.increment(ngram, count as i64).map_err(|e| {
-                    StorageError::Trie(format!("Failed to store n-gram: {}", e))
-                })?;
+                let guard = trie.read();
+                let lockfree_exists = guard.get_lockfree(ngram_bytes).is_some();
+                let persistent_exists = guard.get_value_bytes(ngram_bytes).is_some();
+                let is_new = !lockfree_exists && !persistent_exists;
+                guard.increment_cas(ngram_bytes, count);
 
                 stats.record(count, if is_new { 1 } else { 0 });
                 Ok(is_new)
@@ -343,19 +371,19 @@ impl NgramStorage {
     /// Number of new (unique) n-grams stored.
     pub fn store_batch<'a, I>(&self, shard_key: Option<&ShardKey>, ngrams: I) -> StorageResult<u64>
     where
-        I: Iterator<Item = (&'a str, u64)>,
+        I: Iterator<Item = (&'a [u8], u64)>,
     {
         match self {
             Self::SingleTrie { trie, stats, .. } => {
-                let mut guard = trie.write();
+                let guard = trie.read();
                 let mut new_count = 0u64;
                 let mut total_count = 0u64;
 
                 for (ngram, count) in ngrams {
-                    let is_new = guard.get(ngram).is_none();
-                    guard.increment(ngram, count as i64).map_err(|e| {
-                        StorageError::Trie(format!("Failed to store n-gram: {}", e))
-                    })?;
+                    let lockfree_exists = guard.get_lockfree(ngram).is_some();
+                    let persistent_exists = guard.get_value_bytes(ngram).is_some();
+                    let is_new = !lockfree_exists && !persistent_exists;
+                    guard.increment_cas(ngram, count);
 
                     if is_new {
                         new_count += 1;
@@ -384,13 +412,21 @@ impl NgramStorage {
 
     /// Get the count for an n-gram.
     ///
+    /// For single-trie mode, checks both the lock-free and persistent layers and
+    /// sums their values (the lock-free layer accumulates counts that haven't been
+    /// merged to persistent yet).
+    ///
     /// For vocabulary-indexed encoding with sharded storage, use `get_tokens` instead
     /// to ensure correct routing based on original tokens.
     pub fn get(&self, ngram: &str) -> Option<u64> {
+        let ngram_bytes = ngram.as_bytes();
         match self {
             Self::SingleTrie { trie, .. } => {
                 let guard = trie.read();
-                guard.get(ngram).map(|v| *v as u64)
+                let lockfree_val = guard.get_lockfree(ngram_bytes).unwrap_or(0);
+                let persistent_val = guard.get_value_bytes(ngram_bytes).unwrap_or(0);
+                let total = lockfree_val + persistent_val;
+                if total > 0 { Some(total) } else { None }
             }
             Self::Sharded { coordinator, .. } => coordinator.get(ngram),
         }
@@ -401,6 +437,8 @@ impl NgramStorage {
     /// This encodes the tokens to a varint key and routes based on the original tokens,
     /// ensuring correct shard routing for vocabulary-indexed storage.
     ///
+    /// For single-trie mode, checks both lock-free and persistent layers and sums.
+    ///
     /// # Arguments
     ///
     /// * `tokens` - The n-gram tokens (e.g., ["the", "quick", "brown"])
@@ -410,7 +448,10 @@ impl NgramStorage {
         match self {
             Self::SingleTrie { trie, .. } => {
                 let guard = trie.read();
-                guard.get(&encoded_key).map(|v| *v as u64)
+                let lockfree_val = guard.get_lockfree(&encoded_key).unwrap_or(0);
+                let persistent_val = guard.get_value_bytes(&encoded_key).unwrap_or(0);
+                let total = lockfree_val + persistent_val;
+                if total > 0 { Some(total) } else { None }
             }
             Self::Sharded { coordinator, .. } => {
                 let shard_key = coordinator.route_tokens(tokens);
@@ -430,10 +471,18 @@ impl NgramStorage {
     }
 
     /// Checkpoint the storage.
+    ///
+    /// For single-trie mode, first merges accumulated lock-free values into
+    /// the persistent layer, then checkpoints to disk. This requires an
+    /// exclusive write lock, which briefly blocks workers during checkpoint.
     pub fn checkpoint(&self) -> StorageResult<()> {
         match self {
             Self::SingleTrie { trie, .. } => {
                 let mut guard = trie.write();
+                // Merge lock-free accumulated values into persistent layer
+                guard.merge_lockfree_values_to_persistent().map_err(|e| {
+                    StorageError::Trie(format!("Lock-free merge failed: {}", e))
+                })?;
                 guard.checkpoint().map_err(|e| {
                     StorageError::Trie(format!("Checkpoint failed: {}", e))
                 })
@@ -446,10 +495,15 @@ impl NgramStorage {
     }
 
     /// Sync to disk (WAL flush).
+    ///
+    /// For single-trie mode, merges lock-free values then checkpoints.
     pub fn sync(&self) -> StorageResult<()> {
         match self {
             Self::SingleTrie { trie, .. } => {
                 let mut guard = trie.write();
+                guard.merge_lockfree_values_to_persistent().map_err(|e| {
+                    StorageError::Trie(format!("Lock-free merge failed: {}", e))
+                })?;
                 guard.checkpoint().map_err(|e| {
                     StorageError::Trie(format!("Sync failed: {}", e))
                 })
@@ -462,13 +516,15 @@ impl NgramStorage {
     }
 
     /// Sync the vocabulary WAL (if present).
+    ///
+    /// First merges lock-free entries into the persistent layer, then syncs WAL.
     pub fn sync_vocabulary(&self) -> StorageResult<()> {
         let vocab = match self {
             Self::SingleTrie { vocabulary, .. } => vocabulary,
             Self::Sharded { vocabulary, .. } => vocabulary,
         };
         if let Some(v) = vocab {
-            v.sync().map_err(|e| {
+            v.flush().map_err(|e| {
                 StorageError::Trie(format!("Vocabulary sync failed: {}", e))
             })?;
         }
@@ -476,14 +532,60 @@ impl NgramStorage {
     }
 
     /// Checkpoint the vocabulary (if present).
+    ///
+    /// Merges lock-free entries into the persistent layer, then checkpoints
+    /// the persistent trie to disk.
     pub fn checkpoint_vocabulary(&self) -> StorageResult<()> {
         let vocab = match self {
             Self::SingleTrie { vocabulary, .. } => vocabulary,
             Self::Sharded { vocabulary, .. } => vocabulary,
         };
         if let Some(v) = vocab {
+            // Merge lock-free layer into persistent
             v.checkpoint().map_err(|e| {
+                StorageError::Trie(format!("Vocabulary lock-free merge failed: {}", e))
+            })?;
+            // Checkpoint persistent trie to disk
+            v.inner().write().checkpoint().map_err(|e| {
                 StorageError::Trie(format!("Vocabulary checkpoint failed: {}", e))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Rotate vocabulary WAL without full checkpoint serialization.
+    ///
+    /// Unlike [`checkpoint_vocabulary()`], which re-serializes the entire trie
+    /// (causing file bloat), this method:
+    /// 1. Flushes the reverse index and bloom filter
+    /// 2. Flushes only dirty slots (not the entire trie)
+    /// 3. Syncs the WAL for durability
+    ///
+    /// This prevents vocabulary file bloat during bulk imports while still
+    /// providing crash recovery via WAL replay.
+    ///
+    /// # When to Use
+    ///
+    /// Use `rotate_vocabulary_wal()` during bulk imports:
+    /// - Periodic durability without file bloat
+    /// - WAL ensures crash recovery
+    ///
+    /// Use `checkpoint_vocabulary()` for final compaction:
+    /// - After import completes successfully
+    /// - Reduces recovery time by avoiding WAL replay
+    pub fn rotate_vocabulary_wal(&self) -> StorageResult<()> {
+        let vocab = match self {
+            Self::SingleTrie { vocabulary, .. } => vocabulary,
+            Self::Sharded { vocabulary, .. } => vocabulary,
+        };
+        if let Some(v) = vocab {
+            // Merge lock-free layer into persistent first
+            v.checkpoint().map_err(|e| {
+                StorageError::Trie(format!("Vocabulary lock-free merge failed: {}", e))
+            })?;
+            // Rotate WAL on persistent trie
+            v.inner().write().rotate_wal().map_err(|e| {
+                StorageError::Trie(format!("Vocabulary WAL rotation failed: {}", e))
             })?;
         }
         Ok(())
@@ -570,6 +672,9 @@ impl NgramStorage {
         match self {
             Self::SingleTrie { trie, .. } => {
                 let mut guard = trie.write();
+                guard.merge_lockfree_values_to_persistent().map_err(|e| {
+                    StorageError::Trie(format!("Lock-free merge failed: {}", e))
+                })?;
                 guard.checkpoint().map_err(|e| {
                     StorageError::Trie(format!("Sync failed: {}", e))
                 })?;
@@ -602,6 +707,9 @@ impl NgramStorage {
         match self {
             Self::SingleTrie { trie, .. } => {
                 let mut guard = trie.write();
+                guard.merge_lockfree_values_to_persistent().map_err(|e| {
+                    StorageError::Trie(format!("Lock-free merge failed: {}", e))
+                })?;
                 guard.checkpoint().map_err(|e| {
                     StorageError::Trie(format!("Checkpoint failed: {}", e))
                 })
@@ -636,8 +744,11 @@ impl NgramStorage {
     pub fn checkpoint_async(&self) -> StorageResult<CheckpointHandle> {
         match self {
             Self::SingleTrie { trie, .. } => {
-                // Single trie: checkpoint synchronously, return empty handle
+                // Single trie: merge lock-free values then checkpoint synchronously
                 let mut guard = trie.write();
+                guard.merge_lockfree_values_to_persistent().map_err(|e| {
+                    StorageError::Trie(format!("Lock-free merge failed: {}", e))
+                })?;
                 guard.checkpoint().map_err(|e| {
                     StorageError::Trie(format!("Checkpoint failed: {}", e))
                 })?;
@@ -694,11 +805,14 @@ impl NgramStorage {
         }
     }
 
-    /// Close the storage (checkpoint and release resources).
+    /// Close the storage (merge lock-free values, checkpoint, and release resources).
     pub fn close(&self) -> StorageResult<()> {
         match self {
             Self::SingleTrie { trie, .. } => {
                 let mut guard = trie.write();
+                guard.merge_lockfree_values_to_persistent().map_err(|e| {
+                    StorageError::Trie(format!("Lock-free merge on close failed: {}", e))
+                })?;
                 guard.checkpoint().map_err(|e| {
                     StorageError::Trie(format!("Close checkpoint failed: {}", e))
                 })
@@ -715,7 +829,7 @@ impl NgramStorage {
         match self {
             Self::SingleTrie { trie, .. } => {
                 let guard = trie.read();
-                guard.len() as u64
+                guard.len().unwrap_or(0) as u64
             }
             Self::Sharded { coordinator, .. } => coordinator.total_entry_count(),
         }
@@ -739,7 +853,7 @@ impl NgramStorage {
     /// Get the underlying trie (for single-trie mode only).
     ///
     /// Returns `None` for sharded mode.
-    pub fn as_single_trie(&self) -> Option<&Arc<RwLock<PersistentARTrieChar<u64>>>> {
+    pub fn as_single_trie(&self) -> Option<&Arc<RwLock<PersistentARTrie<u64>>>> {
         match self {
             Self::SingleTrie { trie, .. } => Some(trie),
             Self::Sharded { .. } => None,
@@ -840,7 +954,7 @@ impl NgramStorage {
         tokens: &[&str],
         count: u64,
     ) -> StorageResult<()> {
-        // Encode tokens using vocabulary
+        // Encode tokens to raw byte key using vocabulary
         let encoded_key = self.encode_tokens(tokens)?;
 
         match self {
@@ -903,6 +1017,203 @@ impl NgramStorage {
             )),
         }
     }
+
+    // ========================================================================
+    // File Transaction API (for single-trie mode with INCREMENT semantics)
+    // ========================================================================
+
+    /// Begin a file transaction for single-trie mode with INCREMENT semantics.
+    ///
+    /// Unlike `begin_prefix_tx()` which uses SET semantics (for sharded mode
+    /// where each prefix file is complete), this uses INCREMENT semantics
+    /// for cross-file count accumulation.
+    ///
+    /// **Only supported for single-trie storage.** Returns `Err` for sharded mode.
+    ///
+    /// # Key Properties
+    ///
+    /// - **Atomicity**: Either all n-gram increments are committed or none are
+    /// - **Accumulation**: Counts add to existing values (not replace)
+    /// - **Crash Safety**: Uncommitted transactions are discarded on WAL recovery
+    ///
+    /// # Arguments
+    ///
+    /// * `file_id` - Identifier for the file being imported (used as document ID)
+    ///
+    /// # Returns
+    ///
+    /// A `StorageFileTx` that must be passed to `tx_increment_tokens()` and
+    /// eventually to `commit_file_tx()`.
+    pub fn begin_file_tx(&self, file_id: &str) -> StorageResult<StorageFileTx> {
+        match self {
+            Self::SingleTrie { trie, vocabulary, .. } => {
+                let tx = trie.write().begin_document(file_id)
+                    .map_err(|e| StorageError::Trie(format!("Failed to begin file tx: {}", e)))?;
+                Ok(StorageFileTx {
+                    inner: tx,
+                    vocabulary: vocabulary.clone(),
+                    ngram_count: 0,
+                })
+            }
+            Self::Sharded { .. } => {
+                Err(StorageError::Config(
+                    "File transactions not supported in sharded mode; use begin_prefix_tx()".into()
+                ))
+            }
+        }
+    }
+
+    /// Add an n-gram increment to a file transaction (tokens version).
+    ///
+    /// The n-gram is encoded using the vocabulary (if present) and buffered
+    /// in memory. It will be applied atomically when the transaction is committed.
+    /// Uses INCREMENT semantics (counts accumulate across files).
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The active transaction from `begin_file_tx()`
+    /// * `tokens` - The n-gram tokens (e.g., ["the", "quick"])
+    /// * `count` - The count to add
+    pub fn tx_increment_tokens(
+        &self,
+        tx: &mut StorageFileTx,
+        tokens: &[&str],
+        count: u64,
+    ) -> StorageResult<()> {
+        match self {
+            Self::SingleTrie { trie, .. } => {
+                // Encode tokens to raw byte key using vocabulary
+                let encoded_key = tx.encode_tokens(tokens)?;
+
+                // Buffer the increment in the transaction
+                trie.read().tx_increment_bytes(&mut tx.inner, &encoded_key, count as i64);
+                tx.ngram_count += 1;
+                Ok(())
+            }
+            Self::Sharded { .. } => Err(StorageError::Config(
+                "Cannot use file transaction with sharded storage".to_string(),
+            )),
+        }
+    }
+
+    /// Add an n-gram increment to a file transaction (raw ngram string version).
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The active transaction from `begin_file_tx()`
+    /// * `ngram` - The n-gram string (tokens joined with spaces or encoded)
+    /// * `count` - The count to add
+    pub fn tx_increment_ngram(
+        &self,
+        tx: &mut StorageFileTx,
+        ngram: &str,
+        count: u64,
+    ) -> StorageResult<()> {
+        match self {
+            Self::SingleTrie { trie, .. } => {
+                // Buffer the increment in the transaction
+                trie.read().tx_increment_bytes(&mut tx.inner, ngram.as_bytes(), count as i64);
+                tx.ngram_count += 1;
+                Ok(())
+            }
+            Self::Sharded { .. } => Err(StorageError::Config(
+                "Cannot use file transaction with sharded storage".to_string(),
+            )),
+        }
+    }
+
+    /// Commit a file transaction atomically.
+    ///
+    /// This writes all buffered increments to the WAL as a single batch
+    /// and applies them to the trie atomically.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The transaction to commit (consumed)
+    ///
+    /// # Returns
+    ///
+    /// The number of n-gram operations that were committed.
+    pub fn commit_file_tx(&self, tx: StorageFileTx) -> StorageResult<usize> {
+        match self {
+            Self::SingleTrie { trie, stats, .. } => {
+                let ngram_count = tx.ngram_count;
+                let committed = trie.write().commit_document(tx.inner)
+                    .map_err(|e| StorageError::Trie(format!("Failed to commit file tx: {}", e)))?;
+
+                stats.record(ngram_count as u64, committed as u64);
+                Ok(committed)
+            }
+            Self::Sharded { .. } => Err(StorageError::Config(
+                "Cannot use file transaction with sharded storage".to_string(),
+            )),
+        }
+    }
+
+    /// Abort a file transaction, discarding all buffered increments.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The transaction to abort (consumed)
+    pub fn abort_file_tx(&self, tx: StorageFileTx) -> StorageResult<()> {
+        match self {
+            Self::SingleTrie { trie, .. } => {
+                trie.read().abort_document(tx.inner)
+                    .map_err(|e| StorageError::Trie(format!("Failed to abort file tx: {}", e)))
+            }
+            Self::Sharded { .. } => Err(StorageError::Config(
+                "Cannot use file transaction with sharded storage".to_string(),
+            )),
+        }
+    }
+}
+
+/// A file transaction for atomic n-gram imports with INCREMENT semantics.
+///
+/// This is used for single-trie mode where n-gram counts need to accumulate
+/// across multiple files. Unlike `StoragePrefixTx` which uses SET semantics
+/// (for sharded mode), this uses INCREMENT semantics.
+///
+/// # Usage
+///
+/// ```ignore
+/// let mut tx = storage.begin_file_tx("file_001.txt")?;
+/// for (tokens, count) in ngrams {
+///     storage.tx_increment_tokens(&mut tx, &tokens, count)?;
+/// }
+/// storage.commit_file_tx(tx)?;
+/// ```
+pub struct StorageFileTx {
+    inner: libdictenstein::persistent_artrie::DocumentTransaction<u64>,
+    vocabulary: Option<SharedConcurrentVocab>,
+    ngram_count: usize,
+}
+
+impl StorageFileTx {
+    /// Get the document ID (file identifier).
+    pub fn file_id(&self) -> &str {
+        self.inner.document_id()
+    }
+
+    /// Get the number of n-grams buffered so far.
+    pub fn ngram_count(&self) -> usize {
+        self.ngram_count
+    }
+
+    /// Check if the transaction is still active.
+    pub fn is_active(&self) -> bool {
+        self.inner.is_active()
+    }
+
+    /// Encode tokens to a raw byte key using the vocabulary.
+    ///
+    /// Vocabulary is required. Returns an error if no vocabulary is configured.
+    fn encode_tokens(&self, tokens: &[&str]) -> StorageResult<Vec<u8>> {
+        let vocab = self.vocabulary.as_ref().ok_or_else(|| {
+            StorageError::Config("Vocabulary required for token encoding".into())
+        })?;
+        try_encode_ngram_key_lockfree_bytes(tokens, vocab).map_err(StorageError::from)
+    }
 }
 
 /// A prefix transaction for atomic n-gram imports via NgramStorage.
@@ -939,7 +1250,9 @@ impl StoragePrefixTx {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ngram::vocabulary::decode_ngram_key;
+    use crate::ngram::vocabulary::{
+        create_concurrent_vocabulary_lockfree, decode_ngram_key_bytes, open_or_create_vocabulary,
+    };
     use crate::sources::google_books::config::ShardingMode;
     use tempfile::TempDir;
 
@@ -999,7 +1312,11 @@ mod tests {
 
         let storage = NgramStorage::create_single_trie(&path).expect("Failed to create storage");
 
-        let ngrams = vec![("the|quick", 10u64), ("the|slow", 5), ("this|is", 3)];
+        let ngrams: Vec<(&[u8], u64)> = vec![
+            (b"the|quick" as &[u8], 10u64),
+            (b"the|slow" as &[u8], 5),
+            (b"this|is" as &[u8], 3),
+        ];
 
         let new_count = storage
             .store_batch(None, ngrams.into_iter())
@@ -1017,10 +1334,9 @@ mod tests {
         let trie_path = dir.path().join("test.artrie");
         let vocab_path = dir.path().join("vocab.artrie");
 
-        // Create vocabulary
-        let vocabulary = Arc::new(
-            SharedVocabulary::open_or_create(&vocab_path).expect("Failed to create vocabulary"),
-        );
+        // Create lock-free concurrent vocabulary
+        let vocabulary = open_or_create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
+        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
 
         // Create storage with vocabulary
         let storage = NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(vocabulary))
@@ -1042,16 +1358,13 @@ mod tests {
         let encoded1 = storage.encode_tokens(&tokens1).unwrap();
         let encoded3 = storage.encode_tokens(&tokens3).unwrap();
 
-        assert_eq!(decode_ngram_key(&encoded1).len(), 2); // 2 word indices
-        assert_eq!(decode_ngram_key(&encoded3).len(), 2); // 2 word indices
+        assert_eq!(decode_ngram_key_bytes(&encoded1).len(), 2); // 2 word indices
+        assert_eq!(decode_ngram_key_bytes(&encoded3).len(), 2); // 2 word indices
 
-        // Query using encoded keys
-        assert_eq!(storage.get(&encoded1), Some(15)); // 10 + 5
-        assert_eq!(
-            storage.get(&storage.encode_tokens(&tokens2).unwrap()),
-            Some(3)
-        );
-        assert_eq!(storage.get(&encoded3), Some(7));
+        // Query using tokens (routes through encode_tokens internally)
+        assert_eq!(storage.get_tokens(&tokens1), Some(15)); // 10 + 5
+        assert_eq!(storage.get_tokens(&tokens2), Some(3));
+        assert_eq!(storage.get_tokens(&tokens3), Some(7));
 
         // Stats
         assert_eq!(storage.stats().total_ngrams.load(Ordering::Relaxed), 25);
@@ -1063,10 +1376,9 @@ mod tests {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let vocab_path = dir.path().join("vocab.artrie");
 
-        // Create vocabulary
-        let vocabulary = Arc::new(
-            SharedVocabulary::open_or_create(&vocab_path).expect("Failed to create vocabulary"),
-        );
+        // Create lock-free concurrent vocabulary
+        let vocabulary = open_or_create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
+        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
 
         // Create sharded storage with vocabulary using Adaptive granularity
         // to test prefix-based routing behavior
@@ -1117,7 +1429,7 @@ mod tests {
 
         // Verify encoded keys decode to correct number of indices
         let encoded_th = storage.encode_tokens(&tokens_th).unwrap();
-        assert_eq!(decode_ngram_key(&encoded_th).len(), 3); // 3 word indices for trigram
+        assert_eq!(decode_ngram_key_bytes(&encoded_th).len(), 3); // 3 word indices for trigram
     }
 
     #[test]
@@ -1127,9 +1439,8 @@ mod tests {
         let trie_path = dir.path().join("test.artrie");
         let vocab_path = dir.path().join("vocab.artrie");
 
-        let vocabulary = Arc::new(
-            SharedVocabulary::open_or_create(&vocab_path).expect("Failed to create vocabulary"),
-        );
+        let vocabulary = open_or_create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
+        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
 
         let storage = NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(vocabulary))
             .expect("Failed to create storage");
@@ -1141,17 +1452,17 @@ mod tests {
 
         // Verify we can retrieve it
         let encoded = storage.encode_tokens(&tokens).unwrap();
-        assert_eq!(storage.get(&encoded), Some(10));
+        assert_eq!(storage.get_tokens(&tokens), Some(10));
 
         // The encoded key should decode to 2 indices, not affected by the | in the token
-        assert_eq!(decode_ngram_key(&encoded).len(), 2);
+        assert_eq!(decode_ngram_key_bytes(&encoded).len(), 2);
 
         // Store different tokens - should NOT conflict
         let tokens2 = ["foo", "bar", "baz"]; // 3 separate tokens
         assert!(storage.store_tokens(&tokens2, 5).expect("Failed to store"));
 
         let encoded2 = storage.encode_tokens(&tokens2).unwrap();
-        assert_eq!(decode_ngram_key(&encoded2).len(), 3); // 3 word indices
+        assert_eq!(decode_ngram_key_bytes(&encoded2).len(), 3); // 3 word indices
         assert_ne!(encoded, encoded2); // Different keys
     }
 }

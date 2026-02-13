@@ -86,7 +86,7 @@ pub use importer::{
 pub use importer::{
     run_import_with_periodic_checkpoints, CheckpointState, DEFAULT_CHECKPOINT_INTERVAL_MS,
 };
-pub use languages::{LanguageInfo, LanguageMetadata, SUPPORTED_LANGUAGES};
+pub use languages::{is_valid_prefix, LanguageInfo, LanguageMetadata, SUPPORTED_LANGUAGES};
 pub use parser::{NgramRecord, parse_ngram_line};
 pub use reader::{FileNgramReader, HttpNgramReader, NgramReader, ReaderError};
 pub use storage::{NgramStorage, StorageError, StorageResult, StorageStats};

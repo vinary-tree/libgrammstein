@@ -853,6 +853,28 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
         );
     }
 
+    // Validate prefix if specified
+    if let Some(ref prefix) = args.prefix {
+        use crate::sources::google_books::is_valid_prefix;
+
+        // Check that the prefix is valid for at least one order in the range
+        let valid_for_any_order = (args.min_order..=args.max_order)
+            .any(|order| is_valid_prefix(order, prefix));
+
+        if !valid_for_any_order {
+            return Err(CliError::unsupported(format!(
+                "Prefix '{}' is not valid for n-gram orders {}-{}. \
+                 Valid prefixes for 1-grams: a-z, other. \
+                 Valid prefixes for 2-5 grams: aa-zz, other, punctuation.",
+                prefix, args.min_order, args.max_order
+            )));
+        }
+
+        if !quiet {
+            eprintln!("  Prefix filter: {}", prefix);
+        }
+    }
+
     // Build configuration
     let year_range = match (args.min_year, args.max_year) {
         (Some(min), Some(max)) => Some((min, max)),
@@ -876,6 +898,7 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
             ShardingModeArg::Enabled => ShardingMode::Enabled(ShardingOptions::default()),
             ShardingModeArg::Disabled => ShardingMode::Disabled,
         },
+        prefix: args.prefix.clone(),
     };
 
     // Create importer (resume from checkpoint if one exists)

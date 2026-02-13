@@ -9,7 +9,9 @@
 use crate::corpus::{CorpusReader, PrefetchConfig, PrefetchingReader, Tokenizer};
 use crate::ngram::smoothing::KneserNeySmoothing;
 use crate::ngram::trie::{IterableDictionary, LEGACY_NGRAM_SEPARATOR};
-use crate::ngram::vocabulary::{encode_ngram_key, SharedVocabulary};
+use crate::ngram::vocabulary::{
+    create_vocabulary, encode_ngram_key, open_or_create_vocabulary, SharedVocabARTrie,
+};
 use crate::ngram::{NgramEntry, NgramModel, NgramTrie};
 use crate::Result;
 
@@ -19,7 +21,6 @@ use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 /// Training progress information.
 #[derive(Debug, Clone)]
@@ -57,7 +58,7 @@ pub enum VocabularyMode {
     ///
     /// Useful when training multiple models with a consistent vocabulary,
     /// or when integrating with the Google Books import pipeline.
-    Shared(Arc<SharedVocabulary>),
+    Shared(SharedVocabARTrie),
 }
 
 /// Training configuration.
@@ -146,7 +147,7 @@ where
     /// Optional vocabulary for vocabulary-indexed encoding.
     ///
     /// When `Some`, n-gram keys use PUA characters instead of pipe-separated strings.
-    vocabulary: Option<Arc<SharedVocabulary>>,
+    vocabulary: Option<SharedVocabARTrie>,
 }
 
 /// Training statistics with atomic counters for thread safety.
@@ -206,11 +207,10 @@ where
         let vocabulary = match &config.vocabulary_mode {
             VocabularyMode::Legacy => None,
             VocabularyMode::Create(path) => {
-                let vocab = SharedVocabulary::open_or_create(path)
-                    .expect("Failed to create vocabulary");
-                Some(Arc::new(vocab))
+                Some(open_or_create_vocabulary(path)
+                    .expect("Failed to create vocabulary"))
             }
-            VocabularyMode::Shared(vocab) => Some(Arc::clone(vocab)),
+            VocabularyMode::Shared(vocab) => Some(vocab.clone()),
         };
 
         Self {
@@ -223,7 +223,7 @@ where
     }
 
     /// Get a reference to the vocabulary, if using vocabulary-indexed encoding.
-    pub fn vocabulary(&self) -> Option<&Arc<SharedVocabulary>> {
+    pub fn vocabulary(&self) -> Option<&SharedVocabARTrie> {
         self.vocabulary.as_ref()
     }
 
@@ -791,13 +791,13 @@ where
     /// # Example
     ///
     /// ```ignore
-    /// let vocab = Arc::new(SharedVocabulary::open(&vocab_path)?);
+    /// let vocab = open_vocabulary(&vocab_path)?;
     /// let model = TrainerBuilder::new(dictionary)
     ///     .order(5)
     ///     .with_vocabulary(vocab)
     ///     .train(reader)?;
     /// ```
-    pub fn with_vocabulary(mut self, vocab: Arc<SharedVocabulary>) -> Self {
+    pub fn with_vocabulary(mut self, vocab: SharedVocabARTrie) -> Self {
         self.config.vocabulary_mode = VocabularyMode::Shared(vocab);
         self
     }
@@ -872,23 +872,19 @@ mod tests {
 
     #[test]
     fn test_vocabulary_trainer_basic() {
-        use std::sync::Arc;
-
         let dir = TempDir::new().expect("Failed to create temp dir");
         let vocab_path = dir.path().join("vocab.artrie");
         let corpus_path = create_test_corpus(dir.path(), "the quick brown fox the quick brown dog");
 
         // Create vocabulary first so we can inspect it after training
-        let vocab = Arc::new(
-            SharedVocabulary::create(&vocab_path).expect("Failed to create vocabulary"),
-        );
+        let vocab = create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
 
         let reader = PlaintextReader::from_file(&corpus_path).expect("Failed to create reader");
         let dictionary = PathMapDictionary::<NgramEntry>::new();
 
         let model = TrainerBuilder::new(dictionary)
             .order(3)
-            .with_vocabulary(Arc::clone(&vocab))
+            .with_vocabulary(vocab.clone())
             .train(reader)
             .expect("Training with vocabulary failed");
 
@@ -896,11 +892,11 @@ mod tests {
         assert!(model.vocab_size() > 0, "Vocabulary should contain entries");
         assert!(model.ngram_count() > 0, "Model should contain n-grams");
 
-        // Verify words are in the SharedVocabulary (not model.in_vocabulary, which uses legacy encoding)
-        assert!(vocab.contains("the"), "Expected 'the' in vocabulary");
-        assert!(vocab.contains("quick"), "Expected 'quick' in vocabulary");
-        assert!(vocab.contains("brown"), "Expected 'brown' in vocabulary");
-        assert!(vocab.contains("fox"), "Expected 'fox' in vocabulary");
+        // Verify words are in the SharedVocabARTrie (not model.in_vocabulary, which uses legacy encoding)
+        assert!(vocab.read().contains("the"), "Expected 'the' in vocabulary");
+        assert!(vocab.read().contains("quick"), "Expected 'quick' in vocabulary");
+        assert!(vocab.read().contains("brown"), "Expected 'brown' in vocabulary");
+        assert!(vocab.read().contains("fox"), "Expected 'fox' in vocabulary");
 
         // Verify we can look up n-grams using the vocabulary for encoding
         let bigram_key = encode_ngram_key(&["the", "quick"], &vocab);
@@ -911,15 +907,11 @@ mod tests {
     fn test_pipe_in_token_no_corruption_vocabulary_mode() {
         // This test verifies the key benefit of vocabulary encoding:
         // tokens containing pipe characters are handled correctly.
-        use std::sync::Arc;
-
         let dir = TempDir::new().expect("Failed to create temp dir");
         let vocab_path = dir.path().join("vocab.artrie");
 
         // Create vocabulary first so we can inspect it after training
-        let vocab = Arc::new(
-            SharedVocabulary::create(&vocab_path).expect("Failed to create vocabulary"),
-        );
+        let vocab = create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
 
         let corpus_path = create_test_corpus(dir.path(), "foo|bar baz foo|bar baz foo|bar baz");
 
@@ -928,15 +920,15 @@ mod tests {
 
         let model = TrainerBuilder::new(dictionary)
             .order(2)
-            .with_vocabulary(Arc::clone(&vocab))
+            .with_vocabulary(vocab.clone())
             .train(reader)
             .expect("Training failed");
 
         // In vocabulary mode, "foo|bar" is stored as a single PUA character,
         // so it won't be corrupted by the pipe separator.
         // Verify through the vocabulary, not the model's legacy query methods
-        assert!(vocab.contains("foo|bar"), "Expected 'foo|bar' as single token in vocabulary");
-        assert!(vocab.contains("baz"), "Expected 'baz' in vocabulary");
+        assert!(vocab.read().contains("foo|bar"), "Expected 'foo|bar' as single token in vocabulary");
+        assert!(vocab.read().contains("baz"), "Expected 'baz' in vocabulary");
 
         // vocab_size should be 2 (the two unique words)
         assert_eq!(model.vocab_size(), 2, "Should have exactly 2 unique words");
@@ -975,20 +967,16 @@ mod tests {
 
     #[test]
     fn test_vocabulary_mode_shared() {
-        use std::sync::Arc;
-
         let dir = TempDir::new().expect("Failed to create temp dir");
         let vocab_path = dir.path().join("shared_vocab.artrie");
 
         // Create a shared vocabulary
-        let vocab = Arc::new(
-            SharedVocabulary::create(&vocab_path).expect("Failed to create vocabulary"),
-        );
+        let vocab = create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
 
         // Pre-populate the vocabulary
-        vocab.get_or_insert("pre");
-        vocab.get_or_insert("populated");
-        vocab.get_or_insert("words");
+        vocab.write().insert("pre");
+        vocab.write().insert("populated");
+        vocab.write().insert("words");
 
         let corpus_path = create_test_corpus(dir.path(), "pre populated words are here");
         let reader = PlaintextReader::from_file(&corpus_path).expect("Failed to create reader");
@@ -996,12 +984,12 @@ mod tests {
 
         let model = TrainerBuilder::new(dictionary)
             .order(2)
-            .with_vocabulary(Arc::clone(&vocab))
+            .with_vocabulary(vocab.clone())
             .train(reader)
             .expect("Training with shared vocabulary failed");
 
         // The vocabulary should have grown
-        assert!(vocab.len() > 3, "Vocabulary should have grown with new words");
+        assert!(vocab.read().len() > 3, "Vocabulary should have grown with new words");
         assert!(model.vocab_size() > 0);
     }
 

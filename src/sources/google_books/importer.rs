@@ -8,12 +8,15 @@ use std::sync::atomic::{AtomicU64, AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
+use libdictenstein::persistent_artrie::PersistentARTrie;
 use parking_lot::RwLock;
 
 use super::sharding::{MergeCoordinator, MergeStats, MknAggregator};
 use super::storage::{NgramStorage, StoragePrefixTx};
-use crate::ngram::vocabulary::{decode_ngram_key, encode_indices_to_key, SharedVocabulary};
+use crate::ngram::vocabulary::{
+    decode_ngram_key_bytes, encode_indices_to_key_bytes,
+    open_or_create_concurrent_vocabulary_lockfree,
+};
 
 
 use super::aggregator::YearAggregator;
@@ -217,11 +220,11 @@ fn store_ngram_shared(
 fn store_ngram_shared_legacy(
     ngram: &str,
     count: u64,
-    trie: &Arc<RwLock<PersistentARTrieChar<u64>>>,
+    trie: &Arc<RwLock<PersistentARTrie<u64>>>,
 ) -> Result<NgramStorageResult, ImportError> {
     let mut trie_guard = trie.write();
-    let is_new = trie_guard.get(ngram).is_none();
-    trie_guard.increment(ngram, count as i64).map_err(|e| {
+    let is_new = trie_guard.get_value_bytes(ngram.as_bytes()).is_none();
+    trie_guard.increment_bytes(ngram.as_bytes(), count as i64).map_err(|e| {
         ImportError::Trie(format!("Failed to store ngram '{}': {}", ngram, e))
     })?;
     Ok(NgramStorageResult { is_new })
@@ -239,39 +242,33 @@ pub enum TrieCheckpointError {
     TrieError(String),
 }
 
-impl TrieCheckpointStorage for PersistentARTrieChar<u64> {
+impl TrieCheckpointStorage for PersistentARTrie<u64> {
     type Error = TrieCheckpointError;
 
     fn store_checkpoint_u64(&mut self, key: &str, value: u64) -> Result<(), Self::Error> {
-        // Use upsert to store or update the value
-        self.upsert(key, value)
+        self.upsert_bytes(key.as_bytes(), value)
             .map_err(|e| TrieCheckpointError::TrieError(e.to_string()))?;
         Ok(())
     }
 
     fn load_checkpoint_u64(&self, key: &str) -> Result<Option<u64>, Self::Error> {
-        // Use get to retrieve the value
-        Ok(self.get(key).copied())
+        Ok(self.get_value_bytes(key.as_bytes()))
     }
 
     fn delete_checkpoint_key(&mut self, key: &str) -> Result<bool, Self::Error> {
-        // Use remove to delete the key
-        self.remove(key)
-            .map_err(|e| TrieCheckpointError::TrieError(e.to_string()))
+        Ok(self.remove(key))
     }
 
     fn delete_checkpoint_prefix(&mut self, prefix: &str) -> Result<usize, Self::Error> {
-        // Use remove_prefix to delete all keys with the given prefix
-        self.remove_prefix(prefix)
-            .map_err(|e| TrieCheckpointError::TrieError(e.to_string()))
+        Ok(self.remove_prefix(prefix.as_bytes()))
     }
 
     fn iter_checkpoint_prefix(&self, prefix: &str) -> Result<Vec<(String, u64)>, Self::Error> {
-        // Use iter_prefix_with_values to get all keys and values with the given prefix
-        match self.iter_prefix_with_values(prefix) {
-            Ok(Some(entries)) => Ok(entries),
-            Ok(None) => Ok(Vec::new()),
-            Err(e) => Err(TrieCheckpointError::TrieError(e.to_string())),
+        match self.iter_prefix_with_values(prefix.as_bytes()) {
+            Some(iter) => Ok(iter
+                .map(|(k, v)| (String::from_utf8_lossy(&k).into_owned(), v))
+                .collect()),
+            None => Ok(Vec::new()),
         }
     }
 }
@@ -1568,7 +1565,7 @@ pub struct GoogleBooksImporter {
     /// Legacy trie field for checkpoint compatibility.
     /// Only used when storage is single-trie mode.
     /// TODO: Remove once checkpoint migration to storage is complete.
-    trie: Arc<RwLock<PersistentARTrieChar<u64>>>,
+    trie: Arc<RwLock<PersistentARTrie<u64>>>,
 }
 
 impl GoogleBooksImporter {
@@ -1587,14 +1584,12 @@ impl GoogleBooksImporter {
         let estimated_ngrams = estimate_ngram_count(&config);
         log::info!("Estimated n-gram count: {}", estimated_ngrams);
 
-        // Create or open shared vocabulary for compact PUA encoding
+        // Create or open lock-free concurrent vocabulary for compact encoding
         let vocabulary_path = config.vocabulary_path();
         log::info!("Using vocabulary at {:?}", vocabulary_path);
-        let vocabulary = Arc::new(
-            SharedVocabulary::open_or_create(&vocabulary_path).map_err(|e| {
-                ImportError::Trie(format!("Failed to create/open vocabulary: {}", e))
-            })?
-        );
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocabulary_path).map_err(|e| {
+            ImportError::Trie(format!("Failed to create/open vocabulary: {}", e))
+        })?;
 
         // Create storage backend with vocabulary for compact encoding
         let storage = NgramStorage::resume_or_start_with_vocabulary(
@@ -1620,11 +1615,11 @@ impl GoogleBooksImporter {
             // Sharded mode: create a checkpoint-only trie at output path
             let checkpoint_trie_path = config.output_path.with_extension("checkpoint.artrie");
             let trie = if checkpoint_trie_path.exists() {
-                PersistentARTrieChar::open(&checkpoint_trie_path).map_err(|e| {
+                PersistentARTrie::open(&checkpoint_trie_path).map_err(|e| {
                     ImportError::Trie(format!("Failed to open checkpoint trie: {}", e))
                 })?
             } else {
-                PersistentARTrieChar::create(&checkpoint_trie_path).map_err(|e| {
+                PersistentARTrie::create(&checkpoint_trie_path).map_err(|e| {
                     ImportError::Trie(format!("Failed to create checkpoint trie: {}", e))
                 })?
             };
@@ -1920,6 +1915,24 @@ impl GoogleBooksImporter {
         self.interrupted.load(Ordering::Acquire)
     }
 
+    /// Get filtered prefixes for a given order, respecting the config's prefix filter.
+    ///
+    /// If `config.prefix` is set, returns only that prefix (if valid for this order).
+    /// Otherwise returns all prefixes for the order.
+    fn get_filtered_prefixes(&self, order: u8) -> Vec<String> {
+        let all_prefixes = get_prefixes(order);
+        match &self.config.prefix {
+            Some(p) => {
+                if all_prefixes.contains(p) {
+                    vec![p.clone()]
+                } else {
+                    vec![] // Invalid prefix for this order - skip silently
+                }
+            }
+            None => all_prefixes,
+        }
+    }
+
     /// Save current checkpoint.
     ///
     /// This persists both the trie data (via WAL checkpoint) and the import
@@ -1986,15 +1999,19 @@ impl GoogleBooksImporter {
         self.unique_ngrams.store(self.checkpoint.stats.unique_ngrams, Ordering::Relaxed);
         self.checkpoint.stats.elapsed_seconds = self.start_time.elapsed().as_secs();
 
-        // CRITICAL: Checkpoint vocabulary FIRST to ensure vocabulary indices are
-        // persisted before the checkpoint marks prefixes as completed. This prevents
+        // CRITICAL: Rotate vocabulary WAL FIRST to ensure vocabulary indices are
+        // durable before the checkpoint marks prefixes as completed. This prevents
         // the bug where vocabulary entries are in the WAL (not persisted) when the
         // checkpoint claims prefixes are done, leading to index inconsistency on resume.
+        //
+        // Note: We use rotate_vocabulary_wal() instead of checkpoint_vocabulary() to
+        // avoid file bloat from repeated full trie serialization. WAL replay provides
+        // crash recovery. sync_vocabulary() is called first for additional safety.
         self.storage.sync_vocabulary().map_err(|e| {
             ImportError::Trie(format!("Failed to sync vocabulary: {}", e))
         })?;
-        self.storage.checkpoint_vocabulary().map_err(|e| {
-            ImportError::Trie(format!("Failed to checkpoint vocabulary: {}", e))
+        self.storage.rotate_vocabulary_wal().map_err(|e| {
+            ImportError::Trie(format!("Failed to rotate vocabulary WAL: {}", e))
         })?;
 
         // CRITICAL: Sync and checkpoint n-gram shards to prevent WAL replay on resume.
@@ -2065,12 +2082,14 @@ impl GoogleBooksImporter {
         self.unique_ngrams.store(self.checkpoint.stats.unique_ngrams, Ordering::Relaxed);
         self.checkpoint.stats.elapsed_seconds = self.start_time.elapsed().as_secs();
 
-        // CRITICAL: Checkpoint vocabulary FIRST to ensure vocabulary indices are
-        // persisted before the checkpoint marks prefixes as completed.
-        // Note: checkpoint_vocabulary() already syncs the WAL internally, so a separate
-        // sync_vocabulary() call is redundant and was removed to improve performance.
-        self.storage.checkpoint_vocabulary().map_err(|e| {
-            ImportError::Trie(format!("Failed to checkpoint vocabulary: {}", e))
+        // CRITICAL: Rotate vocabulary WAL FIRST to ensure vocabulary indices are
+        // durable before the checkpoint marks prefixes as completed.
+        //
+        // Note: We use rotate_vocabulary_wal() instead of checkpoint_vocabulary() to
+        // avoid file bloat from repeated full trie serialization. WAL replay provides
+        // crash recovery.
+        self.storage.rotate_vocabulary_wal().map_err(|e| {
+            ImportError::Trie(format!("Failed to rotate vocabulary WAL: {}", e))
         })?;
 
         // Start async checkpoint - this rotates WALs and returns immediately
@@ -2168,7 +2187,16 @@ impl GoogleBooksImporter {
                 continue;
             }
 
-            let prefixes = get_prefixes(order);
+            let prefixes = self.get_filtered_prefixes(order);
+            if prefixes.is_empty() {
+                // Prefix filter didn't match any valid prefix for this order
+                log::debug!(
+                    "Prefix filter {:?} not valid for order {}, skipping",
+                    self.config.prefix,
+                    order
+                );
+                continue;
+            }
             let total_files = prefixes.len() as u32;
 
             // Get the corpus ID for filename construction
@@ -2224,9 +2252,9 @@ impl GoogleBooksImporter {
                     phase: ImportPhase::Importing,
                 });
 
-                // Save checkpoint periodically
+                // Save checkpoint periodically (async for better throughput)
                 if (idx + 1) % 10 == 0 {
-                    self.save_checkpoint()?;
+                    self.save_checkpoint_async()?;
                 }
             }
 
@@ -2319,7 +2347,16 @@ impl GoogleBooksImporter {
                 continue;
             }
 
-            let prefixes = get_prefixes(order);
+            let prefixes = self.get_filtered_prefixes(order);
+            if prefixes.is_empty() {
+                // Prefix filter didn't match any valid prefix for this order
+                log::debug!(
+                    "Prefix filter {:?} not valid for order {}, skipping",
+                    self.config.prefix,
+                    order
+                );
+                continue;
+            }
             let total_files = prefixes.len() as u32;
 
             // Filter to only prefixes that need processing
@@ -2455,9 +2492,9 @@ impl GoogleBooksImporter {
                     }
                 }
 
-                // Save checkpoint periodically
+                // Save checkpoint periodically (async for better throughput)
                 if completed_in_order % 10 == 0 {
-                    self.save_checkpoint()?;
+                    self.save_checkpoint_async()?;
                 }
             }
 
@@ -2708,7 +2745,16 @@ impl GoogleBooksImporter {
                 continue;
             }
 
-            let prefixes = get_prefixes(order);
+            let prefixes = self.get_filtered_prefixes(order);
+            if prefixes.is_empty() {
+                // Prefix filter didn't match any valid prefix for this order
+                log::debug!(
+                    "Prefix filter {:?} not valid for order {}, skipping",
+                    self.config.prefix,
+                    order
+                );
+                continue;
+            }
             let total_files = prefixes.len() as u64;
             order_total_files.insert(order, total_files);
 
@@ -2916,7 +2962,7 @@ impl GoogleBooksImporter {
                 continue; // Already complete or no pending jobs
             }
 
-            let prefixes = get_prefixes(order);
+            let prefixes = self.get_filtered_prefixes(order);
             for prefix in prefixes.iter() {
                 if self.checkpoint.needs_prefix(order, prefix) {
                     if let Some(url) = get_file_url(&language, order, prefix) {
@@ -3516,9 +3562,9 @@ impl GoogleBooksImporter {
                         }
                     }
 
-                    // Save checkpoint periodically
+                    // Save checkpoint periodically (async for better throughput)
                     if files_completed.load(Ordering::Relaxed) % 10 == 0 {
-                        if let Err(e) = self.save_checkpoint() {
+                        if let Err(e) = self.save_checkpoint_async_with_events(Some(&event_tx)) {
                             log::error!("Checkpoint failed: {}", e);
                             let _ = event_tx.send(ImportEvent::Error {
                                 message: format!("Checkpoint failed: {}", e),
@@ -3623,7 +3669,18 @@ impl GoogleBooksImporter {
     }
 
     /// Process a single local file.
+    ///
+    /// For single-trie mode, uses file transactions with INCREMENT semantics
+    /// to ensure atomic per-file processing and correct cross-file count
+    /// accumulation. For sharded mode, uses direct storage calls (each prefix
+    /// file is complete, so SET semantics are appropriate).
     fn process_file(&mut self, path: &Path) -> Result<u64, ImportError> {
+        // Use transactions for single-trie mode, direct calls for sharded
+        if !self.storage.is_sharded() {
+            return self.process_file_with_transaction(path);
+        }
+
+        // Sharded mode: use direct storage calls (existing behavior)
         let reader = FileNgramReader::open_with_options(
             path,
             self.config.skip_pos_tags,
@@ -3649,6 +3706,74 @@ impl GoogleBooksImporter {
         }
 
         self.total_ngrams.fetch_add(ngrams_in_file, Ordering::Relaxed);
+        Ok(ngrams_in_file)
+    }
+
+    /// Process a single local file using file transactions (single-trie mode).
+    ///
+    /// Uses INCREMENT semantics for cross-file count accumulation with
+    /// atomic per-file commit/rollback.
+    fn process_file_with_transaction(&self, path: &Path) -> Result<u64, ImportError> {
+        let file_id = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+
+        // Begin file transaction
+        let mut tx = self.storage.begin_file_tx(file_id)
+            .map_err(|e| ImportError::Trie(format!("Failed to begin file tx: {}", e)))?;
+
+        let result = self.process_file_inner(&mut tx, path);
+
+        match result {
+            Ok(ngrams_in_file) => {
+                // Commit atomically
+                self.storage.commit_file_tx(tx)
+                    .map_err(|e| ImportError::Trie(format!("Failed to commit file tx: {}", e)))?;
+
+                self.total_ngrams.fetch_add(ngrams_in_file, Ordering::Relaxed);
+                Ok(ngrams_in_file)
+            }
+            Err(e) => {
+                // Abort on error - discard partial work
+                let _ = self.storage.abort_file_tx(tx);
+                Err(e)
+            }
+        }
+    }
+
+    /// Inner file processing that operates on a transaction.
+    fn process_file_inner(
+        &self,
+        tx: &mut super::storage::StorageFileTx,
+        path: &Path,
+    ) -> Result<u64, ImportError> {
+        let reader = FileNgramReader::open_with_options(
+            path,
+            self.config.skip_pos_tags,
+            self.config.min_count,
+        )?;
+
+        let mut aggregator = YearAggregator::new(self.config.year_range);
+        let mut ngrams_in_file = 0u64;
+
+        for result in reader {
+            let record = result?;
+
+            if let Some(aggregated) = aggregator.push(record) {
+                // Use tx_increment for INCREMENT semantics
+                self.storage.tx_increment_ngram(tx, &aggregated.ngram, aggregated.total_count)
+                    .map_err(|e| ImportError::Trie(format!("Failed to increment ngram: {}", e)))?;
+                ngrams_in_file += 1;
+            }
+        }
+
+        // Flush final n-gram
+        if let Some(aggregated) = aggregator.flush() {
+            self.storage.tx_increment_ngram(tx, &aggregated.ngram, aggregated.total_count)
+                .map_err(|e| ImportError::Trie(format!("Failed to increment ngram: {}", e)))?;
+            ngrams_in_file += 1;
+        }
+
         Ok(ngrams_in_file)
     }
 
@@ -4047,7 +4172,7 @@ impl GoogleBooksImporter {
         let mkn_path = self.config.output_path.with_extension("mkn.artrie");
         log::info!("Saving MKN statistics to {:?}...", mkn_path);
 
-        let mkn_trie = PersistentARTrieChar::create(&mkn_path).map_err(|e| {
+        let mkn_trie = PersistentARTrie::create(&mkn_path).map_err(|e| {
             ImportError::Trie(format!("Failed to create MKN trie: {}", e))
         })?;
         let mkn_trie = Arc::new(RwLock::new(mkn_trie));
@@ -4061,22 +4186,22 @@ impl GoogleBooksImporter {
             // Store frequency counts for each order
             for (order, counts) in mkn_stats.frequency_counts.iter().enumerate() {
                 let prefix = format!("\x00order{}\x00", order);
-                trie.upsert(&format!("{}n1", prefix), counts.n1).map_err(|e| {
+                trie.upsert_bytes(format!("{}n1", prefix).as_bytes(), counts.n1).map_err(|e| {
                     ImportError::Trie(format!("Failed to write n1: {}", e))
                 })?;
-                trie.upsert(&format!("{}n2", prefix), counts.n2).map_err(|e| {
+                trie.upsert_bytes(format!("{}n2", prefix).as_bytes(), counts.n2).map_err(|e| {
                     ImportError::Trie(format!("Failed to write n2: {}", e))
                 })?;
-                trie.upsert(&format!("{}n3", prefix), counts.n3).map_err(|e| {
+                trie.upsert_bytes(format!("{}n3", prefix).as_bytes(), counts.n3).map_err(|e| {
                     ImportError::Trie(format!("Failed to write n3: {}", e))
                 })?;
-                trie.upsert(&format!("{}n4", prefix), counts.n4).map_err(|e| {
+                trie.upsert_bytes(format!("{}n4", prefix).as_bytes(), counts.n4).map_err(|e| {
                     ImportError::Trie(format!("Failed to write n4: {}", e))
                 })?;
-                trie.upsert(&format!("{}total_unique", prefix), counts.total_unique).map_err(|e| {
+                trie.upsert_bytes(format!("{}total_unique", prefix).as_bytes(), counts.total_unique).map_err(|e| {
                     ImportError::Trie(format!("Failed to write total_unique: {}", e))
                 })?;
-                trie.upsert(&format!("{}total_count", prefix), counts.total_count).map_err(|e| {
+                trie.upsert_bytes(format!("{}total_count", prefix).as_bytes(), counts.total_count).map_err(|e| {
                     ImportError::Trie(format!("Failed to write total_count: {}", e))
                 })?;
                 frequency_entries += 6;
@@ -4086,8 +4211,9 @@ impl GoogleBooksImporter {
             for (order, conts) in mkn_stats.continuation_counts.iter().enumerate() {
                 // Store predecessor counts (N1+(•w) - unique predecessors for each context)
                 for (context, count) in &conts.predecessor_counts {
-                    let key = format!("\x00N1+predecessor\x00{}\x00{}", order, context);
-                    trie.upsert(&key, *count).map_err(|e| {
+                    let mut key = format!("\x00N1+predecessor\x00{}\x00", order).into_bytes();
+                    key.extend_from_slice(context);
+                    trie.upsert_bytes(&key, *count).map_err(|e| {
                         ImportError::Trie(format!("Failed to write predecessor count: {}", e))
                     })?;
                     continuation_entries += 1;
@@ -4095,8 +4221,9 @@ impl GoogleBooksImporter {
 
                 // Store successor counts (N1+(w•) - unique successors for each context)
                 for (context, count) in &conts.successor_counts {
-                    let key = format!("\x00N1+successor\x00{}\x00{}", order, context);
-                    trie.upsert(&key, *count).map_err(|e| {
+                    let mut key = format!("\x00N1+successor\x00{}\x00", order).into_bytes();
+                    key.extend_from_slice(context);
+                    trie.upsert_bytes(&key, *count).map_err(|e| {
                         ImportError::Trie(format!("Failed to write successor count: {}", e))
                     })?;
                     continuation_entries += 1;
@@ -4136,8 +4263,8 @@ impl GoogleBooksImporter {
     ///
     /// Returns (continuation_entries, frequency_entries) counts on success.
     ///
-    /// N-grams are stored as varint-encoded Latin-1 strings (LEB128 encoding).
-    /// This function properly decodes them to extract word indices for
+    /// N-grams are stored as varint-encoded byte keys (LEB128 encoding).
+    /// This function decodes them to extract word indices for
     /// computing predecessor and successor contexts.
     fn compute_mkn_stats_single_trie_with_events(
         &self,
@@ -4149,8 +4276,8 @@ impl GoogleBooksImporter {
         // We store contexts as varint-encoded keys (same format as n-gram keys)
         // and use u64 indices for efficient comparison.
         use std::collections::HashSet;
-        let mut continuation_pairs: HashSet<(String, u64)> = HashSet::new();
-        let mut unique_cont_pairs: HashSet<(String, u64)> = HashSet::new();
+        let mut continuation_pairs: HashSet<(Vec<u8>, u64)> = HashSet::new();
+        let mut unique_cont_pairs: HashSet<(Vec<u8>, u64)> = HashSet::new();
 
         // Frequency count accumulators
         let mut n1 = 0u64;
@@ -4176,13 +4303,15 @@ impl GoogleBooksImporter {
 
         {
             let trie = self.trie.read();
-            // Use iter_prefix_with_values("") to iterate all entries
-            if let Some(entries) = trie.iter_prefix_with_values("").map_err(|e| {
-                ImportError::Trie(format!("Failed to iterate trie: {}", e))
-            })? {
-                for (ngram, count) in entries {
+            // Collect all entries first to avoid lifetime issues with borrowed iterator
+            let entries: Vec<(Vec<u8>, u64)> = trie
+                .iter_prefix_with_values(b"")
+                .map(|iter| iter.collect())
+                .unwrap_or_default();
+            drop(trie);
+            for (ngram, count) in entries {
                     // Skip metadata keys (they start with \x00)
-                    if ngram.starts_with('\x00') {
+                    if ngram.starts_with(&[0x00]) {
                         continue;
                     }
 
@@ -4198,22 +4327,21 @@ impl GoogleBooksImporter {
                     }
 
                     // Decode varint-encoded key to word indices
-                    let indices = decode_ngram_key(&ngram);
+                    let indices = decode_ngram_key_bytes(&ngram);
                     if indices.len() >= 2 {
                         // MKN Pass 1: continuation counts (suffix → unique prefixes)
                         // e.g., indices [0, 1, 2] → prefix=0, suffix=encode([1, 2])
                         let prefix = indices[0];
-                        let suffix = encode_indices_to_key(&indices[1..]);
+                        let suffix = encode_indices_to_key_bytes(&indices[1..]);
                         continuation_pairs.insert((suffix, prefix));
 
                         // MKN Pass 2: unique continuations (context → unique following)
                         // e.g., indices [0, 1, 2] → context=encode([0, 1]), following=2
-                        let context = encode_indices_to_key(&indices[..indices.len() - 1]);
+                        let context = encode_indices_to_key_bytes(&indices[..indices.len() - 1]);
                         let following = indices[indices.len() - 1];
                         unique_cont_pairs.insert((context, following));
                     }
                 }
-            }
         }
 
         if let Some(tx) = event_tx {
@@ -4253,7 +4381,7 @@ impl GoogleBooksImporter {
             let mut trie = self.trie.write();
 
             // Count unique prefixes per suffix (N1+(suffix))
-            let mut suffix_counts: std::collections::HashMap<String, u64> =
+            let mut suffix_counts: std::collections::HashMap<Vec<u8>, u64> =
                 std::collections::HashMap::new();
             for (suffix, _prefix) in &continuation_pairs {
                 *suffix_counts.entry(suffix.clone()).or_insert(0) += 1;
@@ -4261,8 +4389,9 @@ impl GoogleBooksImporter {
 
             // Write continuation counts
             for (suffix, count) in &suffix_counts {
-                let count_key = format!("\x00N1+\x00{}", suffix);
-                trie.upsert(&count_key, *count).map_err(|e| {
+                let mut count_key = b"\x00N1+\x00".to_vec();
+                count_key.extend_from_slice(suffix);
+                trie.upsert_bytes(&count_key, *count).map_err(|e| {
                     ImportError::Trie(format!(
                         "Failed to write MKN continuation count: {}",
                         e
@@ -4272,7 +4401,7 @@ impl GoogleBooksImporter {
             }
 
             // Count unique following words per context (N1+prefix(context))
-            let mut context_counts: std::collections::HashMap<String, u64> =
+            let mut context_counts: std::collections::HashMap<Vec<u8>, u64> =
                 std::collections::HashMap::new();
             for (context, _following) in &unique_cont_pairs {
                 *context_counts.entry(context.clone()).or_insert(0) += 1;
@@ -4280,8 +4409,9 @@ impl GoogleBooksImporter {
 
             // Write unique continuation counts
             for (context, count) in &context_counts {
-                let count_key = format!("\x00N1+prefix\x00{}", context);
-                trie.upsert(&count_key, *count).map_err(|e| {
+                let mut count_key = b"\x00N1+prefix\x00".to_vec();
+                count_key.extend_from_slice(context);
+                trie.upsert_bytes(&count_key, *count).map_err(|e| {
                     ImportError::Trie(format!(
                         "Failed to write MKN unique continuation count: {}",
                         e
@@ -4317,32 +4447,32 @@ impl GoogleBooksImporter {
         {
             let mut trie = self.trie.write();
 
-            trie.upsert("\x00mkn\x00n1", n1).map_err(|e| {
+            trie.upsert_bytes(b"\x00mkn\x00n1", n1).map_err(|e| {
                 ImportError::Trie(format!("Failed to write MKN n1: {}", e))
             })?;
             frequency_entries += 1;
 
-            trie.upsert("\x00mkn\x00n2", n2).map_err(|e| {
+            trie.upsert_bytes(b"\x00mkn\x00n2", n2).map_err(|e| {
                 ImportError::Trie(format!("Failed to write MKN n2: {}", e))
             })?;
             frequency_entries += 1;
 
-            trie.upsert("\x00mkn\x00n3", n3).map_err(|e| {
+            trie.upsert_bytes(b"\x00mkn\x00n3", n3).map_err(|e| {
                 ImportError::Trie(format!("Failed to write MKN n3: {}", e))
             })?;
             frequency_entries += 1;
 
-            trie.upsert("\x00mkn\x00n4", n4).map_err(|e| {
+            trie.upsert_bytes(b"\x00mkn\x00n4", n4).map_err(|e| {
                 ImportError::Trie(format!("Failed to write MKN n4: {}", e))
             })?;
             frequency_entries += 1;
 
-            trie.upsert("\x00mkn\x00total_unique", total_unique).map_err(|e| {
+            trie.upsert_bytes(b"\x00mkn\x00total_unique", total_unique).map_err(|e| {
                 ImportError::Trie(format!("Failed to write MKN total_unique: {}", e))
             })?;
             frequency_entries += 1;
 
-            trie.upsert("\x00mkn\x00total_count", total_count).map_err(|e| {
+            trie.upsert_bytes(b"\x00mkn\x00total_count", total_count).map_err(|e| {
                 ImportError::Trie(format!("Failed to write MKN total_count: {}", e))
             })?;
             frequency_entries += 1;
@@ -4393,14 +4523,15 @@ impl GoogleBooksImporter {
 }
 
 impl Drop for GoogleBooksImporter {
-    /// Best-effort checkpoint of vocabulary on drop.
+    /// Best-effort WAL rotation on drop.
     ///
-    /// This is a safety net to ensure vocabulary data is persisted even if the
+    /// This is a safety net to ensure vocabulary data is durable even if the
     /// normal checkpoint path is bypassed (e.g., panic, unexpected exit).
-    /// Uses checkpoint() instead of sync() to ensure the WAL is truncated.
+    /// Uses rotate_vocabulary_wal() to avoid file bloat; WAL replay provides
+    /// crash recovery on restart.
     fn drop(&mut self) {
-        if let Err(e) = self.storage.checkpoint_vocabulary() {
-            log::error!("Failed to checkpoint vocabulary on drop: {}", e);
+        if let Err(e) = self.storage.rotate_vocabulary_wal() {
+            log::error!("Failed to rotate vocabulary WAL on drop: {}", e);
         }
     }
 }
@@ -4486,7 +4617,7 @@ pub struct CheckpointState {
     /// Storage handle (Arc - read-only from cron thread).
     pub storage: Arc<NgramStorage>,
     /// Main trie (Arc<RwLock> - uses RwLock only during checkpoint).
-    pub trie: Arc<RwLock<PersistentARTrieChar<u64>>>,
+    pub trie: Arc<RwLock<PersistentARTrie<u64>>>,
     /// Checkpoint data (swapped atomically via ArcSwap).
     pub checkpoint: arc_swap::ArcSwap<ImportCheckpoint>,
     /// Flag indicating checkpoint in progress (atomic).
@@ -4520,14 +4651,17 @@ impl CheckpointState {
         checkpoint.stats.elapsed_seconds = self.start_time.elapsed().as_secs();
 
         // Perform I/O (this is where we need locks)
-        log::debug!("Periodic checkpoint: syncing vocabulary...");
+        // Note: We use rotate_vocabulary_wal() instead of checkpoint_vocabulary() to
+        // avoid file bloat from repeated full trie serialization. WAL replay provides
+        // crash recovery.
+        log::debug!("Periodic checkpoint: rotating vocabulary WAL...");
         self.storage.sync_vocabulary().map_err(|e| {
             self.checkpoint_in_progress.store(false, Ordering::Release);
             ImportError::Trie(format!("Failed to sync vocabulary: {}", e))
         })?;
-        self.storage.checkpoint_vocabulary().map_err(|e| {
+        self.storage.rotate_vocabulary_wal().map_err(|e| {
             self.checkpoint_in_progress.store(false, Ordering::Release);
-            ImportError::Trie(format!("Failed to checkpoint vocabulary: {}", e))
+            ImportError::Trie(format!("Failed to rotate vocabulary WAL: {}", e))
         })?;
 
         log::debug!("Periodic checkpoint: syncing shards...");

@@ -67,8 +67,12 @@ pub use trainer::{
 #[allow(deprecated)]
 pub use trie::{IterableDictionary, NgramTrie, NGRAM_SEPARATOR};
 pub use vocabulary::{
-    decode_ngram_key, decode_varint, encode_ngram_key, encode_ngram_key_existing, encode_varint,
-    ngram_order, try_encode_ngram_key, SharedVocabulary, VocabularyError, VocabularyResult,
+    create_vocabulary, create_vocabulary_with_bloom, decode_ngram_key, decode_varint,
+    encode_ngram_key, encode_ngram_key_batch, encode_ngram_key_existing, encode_varint, ngram_order,
+    open_or_create_vocabulary, open_or_create_vocabulary_with_bloom, open_vocabulary,
+    open_vocabulary_with_recovery, try_encode_ngram_key, try_encode_ngram_key_batch,
+    DurabilityPolicy, PersistentVocabARTrie, RecoveryReport, SharedVocabARTrie, VocabSyncHandle,
+    VocabularyError, VocabularyResult, FIRST_VALID_INDEX,
 };
 pub use metadata_filtering_zipper::{MetadataFilteringZipper, METADATA_PREFIX};
 pub use vocabulary_indexed::{

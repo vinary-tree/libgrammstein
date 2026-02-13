@@ -14,7 +14,7 @@ use libgrammstein::sources::google_books::sharding::{
     MergeCoordinator, MknAggregator, ShardConfig, ShardCoordinator, ShardGranularity,
     ShardedTrieView,
 };
-use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
+use libdictenstein::persistent_artrie::PersistentARTrie;
 use tempfile::TempDir;
 
 /// Create a test coordinator with sample data.
@@ -97,13 +97,13 @@ fn test_full_workflow() {
     assert!(view.len() > 0);
 
     // 4. Prefix search
-    let the_bigrams = view.prefix_search("the|");
+    let the_bigrams = view.prefix_search(b"the|");
     assert!(the_bigrams.len() >= 3); // "the|quick", "the|slow", "the|big"
 
     // 5. Top N
     let top = view.top_n(3);
     assert_eq!(top.len(), 3);
-    assert_eq!(top[0].0, "the"); // Most frequent
+    assert_eq!(top[0].0, b"the".to_vec()); // Most frequent
 
     // 6. Compute MKN statistics
     let aggregator = MknAggregator::new(&coordinator);
@@ -126,9 +126,9 @@ fn test_full_workflow() {
 
     // 8. Verify merged trie
     let (merged, _) =
-        PersistentARTrieChar::<u64>::open_with_recovery(&output_path).expect("Failed to open");
-    assert_eq!(merged.get("the").map(|v| *v), Some(1_000_000));
-    assert_eq!(merged.get("the|quick").map(|v| *v), Some(50_000));
+        PersistentARTrie::<u64>::open_with_recovery(&output_path).expect("Failed to open");
+    assert_eq!(merged.get_value_bytes(b"the"), Some(1_000_000));
+    assert_eq!(merged.get_value_bytes(b"the|quick"), Some(50_000));
 }
 
 // =============================================================================
@@ -247,7 +247,7 @@ fn test_mkn_continuation_counts() {
     let cont = &stats.continuation_counts[2];
 
     // "the" should have multiple successors ("quick", "slow", "big")
-    if let Some(count) = cont.successor_counts.get("the") {
+    if let Some(count) = cont.successor_counts.get(&b"the"[..]) {
         assert!(*count >= 3, "Expected at least 3 successors for 'the'");
     }
 }
@@ -267,8 +267,8 @@ fn test_merge_to_memory() {
     assert!(merged.len() >= 20); // 8 + 8 + 4 n-grams
 
     // Verify some entries
-    assert_eq!(merged.get("the"), Some(&1_000_000));
-    assert_eq!(merged.get("the|quick"), Some(&50_000));
+    assert_eq!(merged.get(&b"the"[..]), Some(&1_000_000));
+    assert_eq!(merged.get(&b"the|quick"[..]), Some(&50_000));
 }
 
 #[test]
@@ -282,13 +282,13 @@ fn test_merge_preserves_counts() {
         .expect("Failed to merge");
 
     let (merged, _) =
-        PersistentARTrieChar::<u64>::open_with_recovery(&output_path).expect("Failed to open");
+        PersistentARTrie::<u64>::open_with_recovery(&output_path).expect("Failed to open");
 
     // Verify all counts are preserved
-    assert_eq!(merged.get("the").map(|v| *v), Some(1_000_000));
-    assert_eq!(merged.get("a").map(|v| *v), Some(500_000));
-    assert_eq!(merged.get("the|quick").map(|v| *v), Some(50_000));
-    assert_eq!(merged.get("the|quick|brown").map(|v| *v), Some(10_000));
+    assert_eq!(merged.get_value_bytes(b"the"), Some(1_000_000));
+    assert_eq!(merged.get_value_bytes(b"a"), Some(500_000));
+    assert_eq!(merged.get_value_bytes(b"the|quick"), Some(50_000));
+    assert_eq!(merged.get_value_bytes(b"the|quick|brown"), Some(10_000));
 }
 
 // =============================================================================

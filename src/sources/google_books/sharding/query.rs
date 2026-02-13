@@ -62,13 +62,16 @@ impl<'a> ShardedTrieView<'a> {
     /// # Returns
     ///
     /// A vector of (n-gram, count) pairs sorted by n-gram.
-    pub fn prefix_search(&self, prefix: &str) -> Vec<(String, u64)> {
+    pub fn prefix_search(&self, prefix: &[u8]) -> Vec<(Vec<u8>, u64)> {
         // Determine which shard(s) to query based on prefix
         let config = self.coordinator.config();
         let granularity = &config.granularity;
 
+        // Convert prefix to str for routing (routing operates on text)
+        let prefix_str = std::str::from_utf8(prefix).unwrap_or("");
+
         // If prefix is long enough, we can route to a specific shard
-        let first_word = prefix.split('|').next().unwrap_or("");
+        let first_word = prefix_str.split('|').next().unwrap_or("");
         let prefix_chars: String = first_word
             .chars()
             .filter(|c| c.is_alphabetic())
@@ -76,12 +79,12 @@ impl<'a> ShardedTrieView<'a> {
             .collect();
 
         // Estimate order from prefix
-        let order = ngram_order(prefix).max(1);
+        let order = ngram_order(prefix_str).max(1);
         let required_len = granularity.prefix_len_for_order(order);
 
         if prefix_chars.len() >= required_len {
             // We can route to a specific shard
-            let shard_key = compute_shard_key(prefix, order, granularity);
+            let shard_key = compute_shard_key(prefix_str, order, granularity);
             self.prefix_search_shard(&shard_key, prefix)
         } else {
             // Need to search multiple shards
@@ -90,11 +93,15 @@ impl<'a> ShardedTrieView<'a> {
     }
 
     /// Search for prefix in a specific shard.
-    fn prefix_search_shard(&self, key: &ShardKey, prefix: &str) -> Vec<(String, u64)> {
+    fn prefix_search_shard(&self, key: &ShardKey, prefix: &[u8]) -> Vec<(Vec<u8>, u64)> {
         if let Ok(shard) = self.coordinator.get_or_create_shard(key) {
-            let guard = shard.read();
+            let mut guard = shard.write();
+            if let Err(e) = guard.flush_lockfree() {
+                log::warn!("Failed to flush shard {}: {}", key, e);
+                return Vec::new();
+            }
             match guard.iter_with_counts() {
-                Ok(iter) => iter.filter(|(ngram, _)| ngram.starts_with(prefix)).collect(),
+                Ok(entries) => entries.into_iter().filter(|(ngram, _)| ngram.starts_with(prefix)).collect(),
                 Err(e) => {
                     log::warn!("Failed to iterate shard {}: {}", key, e);
                     Vec::new()
@@ -106,12 +113,16 @@ impl<'a> ShardedTrieView<'a> {
     }
 
     /// Search all open shards for prefix.
-    fn prefix_search_all_shards(&self, prefix: &str) -> Vec<(String, u64)> {
-        let mut results: BTreeMap<String, u64> = BTreeMap::new();
+    fn prefix_search_all_shards(&self, prefix: &[u8]) -> Vec<(Vec<u8>, u64)> {
+        let mut results: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
         for key in self.coordinator.open_shard_keys() {
             if let Ok(shard) = self.coordinator.get_or_create_shard(&key) {
-                let guard = shard.read();
+                let mut guard = shard.write();
+                if let Err(e) = guard.flush_lockfree() {
+                    log::warn!("Failed to flush shard {}: {}", key, e);
+                    continue;
+                }
                 match guard.iter_with_counts() {
                     Ok(iter) => {
                         for (ngram, count) in iter {
@@ -173,14 +184,18 @@ impl<'a> ShardedTrieView<'a> {
     ///
     /// An iterator over (n-gram, count) pairs. Order is not guaranteed.
     /// Shards that fail to iterate are logged and skipped.
-    pub fn iter_all(&self) -> impl Iterator<Item = (String, u64)> + '_ {
+    pub fn iter_all(&self) -> impl Iterator<Item = (Vec<u8>, u64)> + '_ {
         let keys = self.coordinator.open_shard_keys();
 
         keys.into_iter().flat_map(move |key| {
             if let Ok(shard) = self.coordinator.get_or_create_shard(&key) {
-                let guard = shard.read();
+                let mut guard = shard.write();
+                if let Err(e) = guard.flush_lockfree() {
+                    log::warn!("Failed to flush shard {}: {}", key, e);
+                    return Vec::new();
+                }
                 match guard.iter_with_counts() {
-                    Ok(iter) => iter.collect::<Vec<_>>(),
+                    Ok(entries) => entries,
                     Err(e) => {
                         log::warn!("Failed to iterate shard {}: {}", key, e);
                         Vec::new()
@@ -203,12 +218,12 @@ impl<'a> ShardedTrieView<'a> {
     /// # Returns
     ///
     /// A vector of (n-gram, count) pairs sorted by count (descending).
-    pub fn top_n(&self, n: usize) -> Vec<(String, u64)> {
+    pub fn top_n(&self, n: usize) -> Vec<(Vec<u8>, u64)> {
         use std::collections::BinaryHeap;
         use std::cmp::Reverse;
 
         // Use a min-heap to efficiently track top N
-        let mut heap: BinaryHeap<Reverse<(u64, String)>> = BinaryHeap::new();
+        let mut heap: BinaryHeap<Reverse<(u64, Vec<u8>)>> = BinaryHeap::new();
 
         for (ngram, count) in self.iter_all() {
             if heap.len() < n {
@@ -288,15 +303,15 @@ mod tests {
         let (_dir, coordinator) = create_test_coordinator();
         let view = ShardedTrieView::new(&coordinator);
 
-        let results = view.prefix_search("the|");
+        let results = view.prefix_search(b"the|");
         assert_eq!(results.len(), 2);
 
         // Should contain both "the|quick" and "the|slow"
-        let ngrams: Vec<_> = results.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(ngrams.contains(&"the|quick"));
-        assert!(ngrams.contains(&"the|slow"));
+        let ngrams: Vec<_> = results.iter().map(|(n, _)| n.as_slice()).collect();
+        assert!(ngrams.contains(&b"the|quick".as_slice()));
+        assert!(ngrams.contains(&b"the|slow".as_slice()));
 
-        let results = view.prefix_search("apple|");
+        let results = view.prefix_search(b"apple|");
         assert_eq!(results.len(), 2);
     }
 
@@ -336,9 +351,9 @@ mod tests {
 
         assert_eq!(top.len(), 3);
         // Highest should be "the|quick" with 100
-        assert_eq!(top[0], ("the|quick".to_string(), 100));
+        assert_eq!(top[0], (b"the|quick".to_vec(), 100));
         // Second should be "the|slow" with 50
-        assert_eq!(top[1], ("the|slow".to_string(), 50));
+        assert_eq!(top[1], (b"the|slow".to_vec(), 50));
     }
 
     #[test]

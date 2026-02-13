@@ -1,15 +1,16 @@
 //! Shared vocabulary for mapping words to varint-encoded u64 indices.
 //!
-//! This module provides a vocabulary that maps each unique word/token to a u64 index,
-//! enabling compact n-gram key encoding using LEB128 varint encoding with Latin-1 strings.
+//! This module provides vocabulary types and utilities for n-gram key encoding
+//! using LEB128 varint encoding with Latin-1 strings.
 //!
 //! # Architecture
 //!
-//! The vocabulary uses [`PersistentVocabARTrie`] from libdictenstein, which provides:
+//! The vocabulary uses [`SharedVocabARTrie`] from libdictenstein, which provides:
 //! - **O(k) forward lookup** (word → index) via adaptive radix trie (k = word length)
 //! - **O(k) reverse lookup** (index → word) via parent pointer backtracking (O(1) cache hit)
 //! - **Thread-safe** atomic index assignment and RwLock-protected access
 //! - **ACID-compliant** with WAL-based crash recovery
+//! - **BloomFilter** for O(1) OOV word rejection (5-10x faster negative lookups)
 //!
 //! N-gram keys are encoded as concatenated LEB128 varints, with each byte stored
 //! as a Latin-1 character (0x00-0xFF → U+0000-U+00FF) for trie compatibility.
@@ -22,6 +23,7 @@
 //! - **Standard encoding**: LEB128 is widely used (protobuf, DWARF, WebAssembly)
 //! - **Thread-safe**: Built-in atomic index assignment + RwLock for concurrent access
 //! - **O(k) reverse lookups**: Use `get_term()` with cached hot lookups
+//! - **BloomFilter**: Fast rejection of out-of-vocabulary words
 //!
 //! # Encoding Format
 //!
@@ -32,33 +34,45 @@
 //! # Example
 //!
 //! ```ignore
-//! use libgrammstein::ngram::vocabulary::{SharedVocabulary, encode_ngram_key};
+//! use libgrammstein::ngram::vocabulary::{
+//!     SharedVocabARTrie, create_vocabulary, encode_ngram_key, FIRST_VALID_INDEX,
+//! };
 //!
-//! let vocab = SharedVocabulary::create(path)?;
+//! let vocab = create_vocabulary(&path)?;
 //!
 //! // Each word maps to a unique u64 index (idempotent insert)
-//! let the_idx = vocab.insert("the");   // Returns 1
-//! let quick_idx = vocab.insert("quick"); // Returns 2
+//! let the_idx = vocab.write().insert("the");   // Returns 1
+//! let quick_idx = vocab.write().insert("quick"); // Returns 2
 //!
 //! // N-gram keys are varint-encoded Latin-1 strings
 //! let bigram_key = encode_ngram_key(&["the", "quick"], &vocab);
 //!
 //! // O(k) reverse lookups (O(1) cache hit)
-//! assert_eq!(vocab.get_term(1), Some("the".to_string()));
-//! assert_eq!(vocab.get_term(2), Some("quick".to_string()));
+//! assert_eq!(vocab.read().get_term(1), Some("the".to_string()));
+//! assert_eq!(vocab.read().get_term(2), Some("quick".to_string()));
 //! ```
 
-use libdictenstein::persistent_vocab_artrie::PersistentVocabARTrie;
-use parking_lot::RwLock;
 use std::path::Path;
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 use thiserror::Error;
+
+// Re-export from libdictenstein
+pub use libdictenstein::persistent_vocab_artrie::{
+    ConcurrentMode, ConcurrentVocabARTrie, ConcurrentVocabStats,
+    LockFreeVocab, LockFreeVocabStats,
+    PersistentVocabARTrie, SharedVocabARTrie, VocabSyncHandle,
+};
+pub use libdictenstein::persistent_artrie::dict_impl::DurabilityPolicy;
+pub use libdictenstein::persistent_artrie::recovery::RecoveryReport;
 
 /// First valid vocabulary index.
 ///
 /// Index 0 is reserved to avoid collision with the \x00 metadata key prefix.
 /// Varint encoding of 0 produces \x00, which would cause n-gram keys to be
 /// mistakenly filtered as metadata entries.
-const FIRST_VALID_INDEX: u64 = 1;
+pub const FIRST_VALID_INDEX: u64 = 1;
 
 /// Error type for vocabulary operations.
 #[derive(Error, Debug)]
@@ -87,6 +101,199 @@ pub enum VocabularyError {
 
 /// Result type for vocabulary operations.
 pub type VocabularyResult<T> = Result<T, VocabularyError>;
+
+// ============================================================================
+// Vocabulary Factory Functions
+// ============================================================================
+
+/// Create a new vocabulary at the given path.
+///
+/// Starts indices at [`FIRST_VALID_INDEX`] (1) to avoid \x00 collision
+/// with metadata key prefixes.
+///
+/// Enables slot-level dirty tracking for optimized WAL rotation (90%+ I/O reduction
+/// compared to full checkpoint serialization).
+pub fn create_vocabulary(path: &Path) -> VocabularyResult<SharedVocabARTrie> {
+    let mut trie = PersistentVocabARTrie::create_with_start_index(path, FIRST_VALID_INDEX)?;
+    trie.enable_slot_tracking();
+    Ok(Arc::new(RwLock::new(trie)))
+}
+
+/// Create a new vocabulary with BloomFilter enabled.
+///
+/// The BloomFilter provides O(1) fast-path for detecting new terms during
+/// bulk insert operations, skipping expensive O(k) trie lookups.
+///
+/// Enables slot-level dirty tracking for optimized WAL rotation (90%+ I/O reduction
+/// compared to full checkpoint serialization).
+///
+/// # Arguments
+///
+/// * `path` - Path to the vocabulary file
+/// * `bloom_capacity` - Expected number of vocabulary entries (for optimal bloom sizing)
+pub fn create_vocabulary_with_bloom(
+    path: &Path,
+    bloom_capacity: usize,
+) -> VocabularyResult<SharedVocabARTrie> {
+    let mut trie = PersistentVocabARTrie::create_with_start_index_and_bloom(
+        path,
+        FIRST_VALID_INDEX,
+        bloom_capacity,
+    )?;
+    trie.enable_slot_tracking();
+    Ok(Arc::new(RwLock::new(trie)))
+}
+
+/// Open an existing vocabulary from the given path.
+///
+/// Uses WAL recovery to restore the vocabulary state after crash.
+/// Also loads or rebuilds the BloomFilter automatically.
+///
+/// Enables slot-level dirty tracking for optimized WAL rotation (90%+ I/O reduction
+/// compared to full checkpoint serialization).
+pub fn open_vocabulary(path: &Path) -> VocabularyResult<SharedVocabARTrie> {
+    let (mut trie, _report) = PersistentVocabARTrie::open_with_recovery(path)?;
+    trie.enable_slot_tracking();
+    Ok(Arc::new(RwLock::new(trie)))
+}
+
+/// Open an existing vocabulary with crash recovery report.
+///
+/// Returns a tuple of (vocabulary, recovery_report).
+///
+/// Enables slot-level dirty tracking for optimized WAL rotation (90%+ I/O reduction
+/// compared to full checkpoint serialization).
+pub fn open_vocabulary_with_recovery(
+    path: &Path,
+) -> VocabularyResult<(SharedVocabARTrie, RecoveryReport)> {
+    let (mut trie, report) = PersistentVocabARTrie::open_with_recovery(path)?;
+    trie.enable_slot_tracking();
+    Ok((Arc::new(RwLock::new(trie)), report))
+}
+
+/// Open or create a vocabulary at the given path.
+///
+/// If the path exists, opens the existing vocabulary with recovery.
+/// Otherwise, creates a new empty vocabulary.
+pub fn open_or_create_vocabulary(path: &Path) -> VocabularyResult<SharedVocabARTrie> {
+    if path.exists() {
+        open_vocabulary(path)
+    } else {
+        create_vocabulary(path)
+    }
+}
+
+/// Open or create a vocabulary with BloomFilter.
+///
+/// If the path exists, opens the existing vocabulary (bloom filter loaded/rebuilt).
+/// Otherwise, creates a new vocabulary with BloomFilter enabled.
+pub fn open_or_create_vocabulary_with_bloom(
+    path: &Path,
+    bloom_capacity: usize,
+) -> VocabularyResult<SharedVocabARTrie> {
+    if path.exists() {
+        // Opening loads/rebuilds bloom filter automatically
+        open_vocabulary(path)
+    } else {
+        create_vocabulary_with_bloom(path, bloom_capacity)
+    }
+}
+
+// ============================================================================
+// Lock-Free Concurrent Vocabulary Factory Functions
+// ============================================================================
+
+/// Create a new lock-free concurrent vocabulary wrapper from shared vocab.
+///
+/// This wraps the given `SharedVocabARTrie` in a `ConcurrentVocabARTrie` with
+/// lock-free mode enabled. Multiple threads can insert vocabulary entries
+/// simultaneously without blocking each other.
+///
+/// Note: This uses `from_shared_lockfree()` which means the underlying
+/// persistent vocabulary is still shared and can be checkpointed separately.
+///
+/// # Usage Pattern
+///
+/// ```ignore
+/// // Create vocabulary with lock-free wrapper
+/// let vocab = open_or_create_vocabulary(&path)?;
+/// let concurrent = create_concurrent_vocabulary_lockfree(vocab);
+///
+/// // Use in parallel workers - no contention!
+/// std::thread::scope(|s| {
+///     for _ in 0..12 {
+///         let c = Arc::clone(&concurrent);
+///         s.spawn(move || {
+///             for ngram in ngrams {
+///                 let key = encode_ngram_key_lockfree(&ngram.words, &c);
+///                 // Store n-gram...
+///             }
+///         });
+///     }
+/// });
+///
+/// // Checkpoint lock-free layer to persistent storage
+/// concurrent.checkpoint()?;
+/// ```
+pub fn create_concurrent_vocabulary_lockfree(
+    vocab: SharedVocabARTrie,
+) -> Arc<ConcurrentVocabARTrie> {
+    Arc::new(ConcurrentVocabARTrie::from_shared_lockfree(vocab))
+}
+
+/// Create a new lock-free concurrent vocabulary from a path.
+///
+/// This is a convenience function that opens/creates a vocabulary and wraps
+/// it in a lock-free `ConcurrentVocabARTrie`.
+///
+/// # Arguments
+///
+/// * `path` - Path to the vocabulary file
+///
+/// # Returns
+///
+/// An `Arc<ConcurrentVocabARTrie>` in lock-free mode.
+pub fn open_or_create_concurrent_vocabulary_lockfree(
+    path: &Path,
+) -> VocabularyResult<Arc<ConcurrentVocabARTrie>> {
+    let trie = if path.exists() {
+        let (trie, _report) = PersistentVocabARTrie::open_with_recovery(path)?;
+        trie
+    } else {
+        PersistentVocabARTrie::create_with_start_index(path, FIRST_VALID_INDEX)?
+    };
+
+    Ok(Arc::new(ConcurrentVocabARTrie::new_lockfree(trie)))
+}
+
+/// Create a new lock-free concurrent vocabulary with BloomFilter.
+///
+/// The BloomFilter provides O(1) fast-path for detecting new terms.
+///
+/// # Arguments
+///
+/// * `path` - Path to the vocabulary file
+/// * `bloom_capacity` - Expected number of vocabulary entries
+pub fn open_or_create_concurrent_vocabulary_lockfree_with_bloom(
+    path: &Path,
+    bloom_capacity: usize,
+) -> VocabularyResult<Arc<ConcurrentVocabARTrie>> {
+    let trie = if path.exists() {
+        let (trie, _report) = PersistentVocabARTrie::open_with_recovery(path)?;
+        trie
+    } else {
+        PersistentVocabARTrie::create_with_start_index_and_bloom(
+            path,
+            FIRST_VALID_INDEX,
+            bloom_capacity,
+        )?
+    };
+
+    Ok(Arc::new(ConcurrentVocabARTrie::new_lockfree(trie)))
+}
+
+/// Type alias for shared lock-free concurrent vocabulary.
+pub type SharedConcurrentVocab = Arc<ConcurrentVocabARTrie>;
 
 // ============================================================================
 // Varint Encoding Utilities
@@ -131,199 +338,8 @@ pub fn decode_varint(bytes: &[u8]) -> Option<(u64, usize)> {
 }
 
 // ============================================================================
-// SharedVocabulary
+// N-gram Key Encoding
 // ============================================================================
-
-/// Shared vocabulary mapping words to u64 indices.
-///
-/// This struct provides thread-safe word-to-index mapping backed by a
-/// disk-persistent trie with O(k) reverse lookups via parent pointers.
-///
-/// # Thread Safety
-///
-/// Thread-safe via internal RwLock protection. Can be safely shared across threads.
-///
-/// # Persistence
-///
-/// The vocabulary uses WAL-based crash recovery. Call `checkpoint()` to persist
-/// state durably.
-///
-/// # Reverse Lookups
-///
-/// Use `get_term(index)` for O(k) reverse lookups (index → word).
-/// Hot lookups are cached for O(1) access.
-#[derive(Debug)]
-pub struct SharedVocabulary {
-    /// The underlying PersistentVocabARTrie with interior mutability.
-    inner: RwLock<PersistentVocabARTrie>,
-}
-
-impl SharedVocabulary {
-    /// Create a new vocabulary at the given path.
-    ///
-    /// If the path already exists, opens the existing vocabulary.
-    /// Otherwise, creates a new empty vocabulary.
-    pub fn open_or_create(path: &Path) -> VocabularyResult<Self> {
-        if path.exists() {
-            Self::open(path)
-        } else {
-            Self::create(path)
-        }
-    }
-
-    /// Create a new empty vocabulary at the given path.
-    ///
-    /// Starts indices at FIRST_VALID_INDEX (1) to avoid \x00 collision
-    /// with metadata key prefixes.
-    pub fn create(path: &Path) -> VocabularyResult<Self> {
-        let inner = PersistentVocabARTrie::create_with_start_index(path, FIRST_VALID_INDEX)?;
-        Ok(Self { inner: RwLock::new(inner) })
-    }
-
-    /// Open an existing vocabulary from the given path.
-    ///
-    /// This method uses WAL recovery to restore the vocabulary state.
-    /// The underlying `PersistentVocabARTrie::open()` only restores metadata,
-    /// so we use `open_with_recovery()` to replay the WAL and restore data.
-    pub fn open(path: &Path) -> VocabularyResult<Self> {
-        // Use open_with_recovery to replay WAL and restore vocabulary state
-        let (inner, _report) = PersistentVocabARTrie::open_with_recovery(path)?;
-        Ok(Self { inner: RwLock::new(inner) })
-    }
-
-    /// Open an existing vocabulary with crash recovery.
-    ///
-    /// Returns a tuple of (vocabulary, recovery_report).
-    pub fn open_with_recovery(
-        path: &Path,
-    ) -> VocabularyResult<(Self, libdictenstein::persistent_artrie::recovery::RecoveryReport)> {
-        let (inner, report) = PersistentVocabARTrie::open_with_recovery(path)?;
-        Ok((Self { inner: RwLock::new(inner) }, report))
-    }
-
-    /// Insert a word and get its index (idempotent).
-    ///
-    /// If the word already exists, returns its existing index.
-    /// Otherwise, assigns the next available index.
-    ///
-    /// This is the primary method for vocabulary insertion. It is idempotent:
-    /// calling `insert("word")` multiple times returns the same index.
-    #[inline]
-    pub fn insert(&self, word: &str) -> u64 {
-        self.inner.write().insert(word)
-    }
-
-    /// Get or assign an index for a word (thread-safe).
-    ///
-    /// This is an alias for `insert()` for backward compatibility.
-    /// Uses idempotent insertion: returns existing index if word exists.
-    #[inline]
-    pub fn get_or_insert(&self, word: &str) -> u64 {
-        self.insert(word)
-    }
-
-    /// Try to get or assign an index for a word (thread-safe, fallible).
-    ///
-    /// This is an alias for `insert()` wrapped in Ok for backward compatibility.
-    /// The underlying operation is infallible.
-    #[inline]
-    pub fn try_get_or_insert(&self, word: &str) -> VocabularyResult<u64> {
-        Ok(self.insert(word))
-    }
-
-    /// Look up index for word (None if not in vocabulary).
-    #[inline]
-    pub fn get(&self, word: &str) -> Option<u64> {
-        self.inner.read().get_index(word)
-    }
-
-    /// Look up index for word (None if not in vocabulary).
-    ///
-    /// This is an alias for `get()` matching the PersistentVocabARTrie API.
-    #[inline]
-    pub fn get_index(&self, word: &str) -> Option<u64> {
-        self.inner.read().get_index(word)
-    }
-
-    /// O(k) reverse lookup: get the word for an index.
-    ///
-    /// Returns `None` if the index is not in the vocabulary.
-    ///
-    /// # Performance
-    ///
-    /// - O(1) for cached (hot) lookups via LRU cache
-    /// - O(k) for cold lookups via parent pointer backtracking (k = word length)
-    #[inline]
-    pub fn get_term(&self, index: u64) -> Option<String> {
-        self.inner.read().get_term(index)
-    }
-
-    /// Check if a word exists in the vocabulary.
-    #[inline]
-    pub fn contains(&self, word: &str) -> bool {
-        self.inner.read().contains(word)
-    }
-
-    /// Check if an index exists in the vocabulary.
-    #[inline]
-    pub fn contains_index(&self, index: u64) -> bool {
-        self.inner.read().contains_index(index)
-    }
-
-    /// Get the number of words in the vocabulary.
-    #[inline]
-    pub fn len(&self) -> u64 {
-        self.inner.read().len() as u64
-    }
-
-    /// Check if the vocabulary is empty.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.inner.read().is_empty()
-    }
-
-    /// Get the starting index for vocabulary entries.
-    #[inline]
-    pub fn start_index(&self) -> u64 {
-        self.inner.read().start_index()
-    }
-
-    /// Check if there are unsaved changes.
-    #[inline]
-    pub fn is_dirty(&self) -> bool {
-        self.inner.read().is_dirty()
-    }
-
-    /// Checkpoint the vocabulary to disk.
-    pub fn checkpoint(&self) -> VocabularyResult<()> {
-        self.inner.write().checkpoint().map_err(VocabularyError::from)
-    }
-
-    /// Sync the vocabulary to disk.
-    ///
-    /// This is an alias for `checkpoint()` for backward compatibility.
-    pub fn sync(&self) -> VocabularyResult<()> {
-        self.checkpoint()
-    }
-
-    /// Iterate over all terms in the vocabulary.
-    ///
-    /// Returns an iterator that yields `(term, index)` pairs.
-    /// Uses the reverse lookup capability to iterate by index.
-    ///
-    /// # Note
-    ///
-    /// This method iterates sequentially from `start_index` to `start_index + len`,
-    /// using `get_term()` for each index. This is O(n * k) where n is the vocabulary
-    /// size and k is the average term length.
-    pub fn iter_terms(&self) -> impl Iterator<Item = (String, u64)> + '_ {
-        let start = self.start_index();
-        let count = self.len();
-        (start..start + count).filter_map(move |idx| {
-            self.get_term(idx).map(|term| (term, idx))
-        })
-    }
-}
 
 /// Encode an n-gram as a varint-encoded Latin-1 string.
 ///
@@ -345,10 +361,11 @@ impl SharedVocabulary {
 /// let key = encode_ngram_key(&["the", "quick", "brown"], &vocab);
 /// // Each word's index is varint-encoded and converted to Latin-1 chars
 /// ```
-pub fn encode_ngram_key(words: &[&str], vocab: &SharedVocabulary) -> String {
+pub fn encode_ngram_key(words: &[&str], vocab: &SharedVocabARTrie) -> String {
     let mut buf = Vec::with_capacity(words.len() * 2); // Estimate 2 bytes/word average
+    let mut guard = vocab.write();
     for word in words {
-        let index = vocab.get_or_insert(word);
+        let index = guard.insert(word);
         encode_varint(index, &mut buf);
     }
     // Convert bytes to Latin-1 string (each byte → char U+00XX)
@@ -358,27 +375,257 @@ pub fn encode_ngram_key(words: &[&str], vocab: &SharedVocabulary) -> String {
 /// Try to encode an n-gram as a varint-encoded Latin-1 string (fallible version).
 pub fn try_encode_ngram_key(
     words: &[&str],
-    vocab: &SharedVocabulary,
+    vocab: &SharedVocabARTrie,
 ) -> VocabularyResult<String> {
-    let mut buf = Vec::with_capacity(words.len() * 2);
-    for word in words {
-        let index = vocab.try_get_or_insert(word)?;
+    Ok(encode_ngram_key(words, vocab))
+}
+
+/// Encode an n-gram using batch insert for vocabulary terms.
+///
+/// Uses `insert_batch()` to insert all tokens in a single WAL record,
+/// reducing I/O overhead from N WAL records to 1 per n-gram.
+///
+/// # Arguments
+///
+/// * `words` - Slice of word strings
+/// * `vocab` - The vocabulary to use for mapping
+///
+/// # Returns
+///
+/// A Latin-1 encoded string where each word's index is varint-encoded.
+///
+/// # Example
+///
+/// ```ignore
+/// // Instead of 5 WAL records for a 5-gram, this writes just 1
+/// let key = encode_ngram_key_batch(&["the", "quick", "brown", "fox", "jumps"], &vocab);
+/// ```
+pub fn encode_ngram_key_batch(words: &[&str], vocab: &SharedVocabARTrie) -> String {
+    if words.is_empty() {
+        return String::new();
+    }
+
+    // Use batch insert for single WAL record
+    let indices = vocab.write().insert_batch(words);
+
+    // Convert indices to varint-encoded Latin-1 string
+    let mut buf = Vec::with_capacity(indices.len() * 2);
+    for index in indices {
         encode_varint(index, &mut buf);
     }
-    Ok(buf.into_iter().map(|b| char::from(b)).collect())
+    buf.into_iter().map(|b| char::from(b)).collect()
+}
+
+/// Try to encode an n-gram using batch insert (fallible version).
+///
+/// Uses `insert_batch()` to insert all tokens in a single WAL record.
+pub fn try_encode_ngram_key_batch(
+    words: &[&str],
+    vocab: &SharedVocabARTrie,
+) -> VocabularyResult<String> {
+    Ok(encode_ngram_key_batch(words, vocab))
+}
+
+// ============================================================================
+// Lock-Free Encoding (for High-Concurrency Imports)
+// ============================================================================
+
+/// Encode an n-gram using lock-free CAS operations.
+///
+/// Unlike [`encode_ngram_key_batch`] which acquires a write lock, this function
+/// uses truly lock-free CAS (compare-and-swap) operations on persistent data
+/// structures. Multiple threads can encode n-grams simultaneously without
+/// blocking each other.
+///
+/// # Performance
+///
+/// This function is optimized for high-concurrency workloads where many workers
+/// insert vocabulary entries simultaneously. The lock-free approach eliminates
+/// the write lock contention that causes slowdowns in parallel import.
+///
+/// # Arguments
+///
+/// * `words` - Slice of word strings
+/// * `vocab` - A `ConcurrentVocabARTrie` in LockFree mode
+///
+/// # Returns
+///
+/// A Latin-1 encoded string where each word's index is varint-encoded.
+///
+/// # Example
+///
+/// ```ignore
+/// use std::sync::Arc;
+///
+/// // Create lock-free vocabulary wrapper
+/// let vocab = PersistentVocabARTrie::create("vocab.vocab")?;
+/// let concurrent = Arc::new(ConcurrentVocabARTrie::new_lockfree(vocab));
+///
+/// // Multiple threads can encode concurrently without blocking
+/// std::thread::scope(|s| {
+///     for i in 0..12 {
+///         let c = Arc::clone(&concurrent);
+///         s.spawn(move || {
+///             for ngram in ngrams_for_worker(i) {
+///                 let key = encode_ngram_key_lockfree(&ngram, &c);
+///                 // Store key...
+///             }
+///         });
+///     }
+/// });
+/// ```
+pub fn encode_ngram_key_lockfree(words: &[&str], vocab: &ConcurrentVocabARTrie) -> String {
+    if words.is_empty() {
+        return String::new();
+    }
+
+    // Use lock-free insert_batch_concurrent
+    let indices = vocab.insert_batch_concurrent(words);
+
+    // Convert indices to varint-encoded Latin-1 string
+    let mut buf = Vec::with_capacity(indices.len() * 2);
+    for index in indices {
+        encode_varint(index, &mut buf);
+    }
+    buf.into_iter().map(|b| char::from(b)).collect()
+}
+
+/// Try to encode an n-gram using lock-free CAS operations (fallible version).
+///
+/// Uses lock-free CAS operations for concurrent vocabulary access.
+pub fn try_encode_ngram_key_lockfree(
+    words: &[&str],
+    vocab: &ConcurrentVocabARTrie,
+) -> VocabularyResult<String> {
+    Ok(encode_ngram_key_lockfree(words, vocab))
+}
+
+/// Encode an n-gram using a shared `LockFreeVocab` directly.
+///
+/// This is the most efficient encoding path when you have direct access
+/// to the `LockFreeVocab` instance (without the `ConcurrentVocabARTrie` wrapper).
+///
+/// # Arguments
+///
+/// * `words` - Slice of word strings
+/// * `vocab` - A `LockFreeVocab` instance
+///
+/// # Returns
+///
+/// A Latin-1 encoded string where each word's index is varint-encoded.
+pub fn encode_ngram_key_with_lockfree_vocab(words: &[&str], vocab: &LockFreeVocab) -> String {
+    if words.is_empty() {
+        return String::new();
+    }
+
+    // Use lock-free batch insert
+    let indices = vocab.insert_batch(words);
+
+    // Convert indices to varint-encoded Latin-1 string
+    let mut buf = Vec::with_capacity(indices.len() * 2);
+    for index in indices {
+        encode_varint(index, &mut buf);
+    }
+    buf.into_iter().map(|b| char::from(b)).collect()
+}
+
+use std::cell::RefCell;
+
+thread_local! {
+    /// Reusable buffer for LEB128 n-gram key encoding.
+    ///
+    /// Avoids per-call heap allocation by `.clear()`-ing and reusing the same
+    /// buffer on each thread. Typical n-gram keys are <64 bytes.
+    static ENCODE_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(64));
+}
+
+/// Encode n-gram tokens into a byte key using a thread-local buffer, then call `f(&[u8])`.
+///
+/// This avoids allocating a `Vec<u8>` per n-gram by reusing a thread-local buffer.
+/// The callback pattern ensures the buffer reference doesn't escape. Uses
+/// `ConcurrentVocabARTrie::insert_batch_concurrent` for lock-free vocabulary access.
+///
+/// # Arguments
+///
+/// * `words` - The n-gram tokens (e.g., `["the", "quick"]`)
+/// * `vocab` - A lock-free concurrent vocabulary
+/// * `f` - Callback receiving the encoded `&[u8]` key
+///
+/// # Returns
+///
+/// The return value of `f`.
+///
+/// # Example
+///
+/// ```ignore
+/// with_encoded_ngram_key_lockfree(&["the", "quick"], &vocab, |key| {
+///     trie.increment_cas(key, 1);
+/// });
+/// ```
+pub fn with_encoded_ngram_key_lockfree<R>(
+    words: &[&str],
+    vocab: &ConcurrentVocabARTrie,
+    f: impl FnOnce(&[u8]) -> R,
+) -> R {
+    ENCODE_BUF.with(|buf| {
+        let mut buf = buf.borrow_mut();
+        buf.clear();
+        let indices = vocab.insert_batch_concurrent(words);
+        for index in indices {
+            encode_varint(index, &mut *buf);
+        }
+        f(&buf)
+    })
+}
+
+/// Encode n-gram tokens into a byte key using a thread-local buffer (bytes version).
+///
+/// Like `with_encoded_ngram_key_lockfree` but returns the key as a `Vec<u8>` for
+/// callers that need ownership. Slightly less efficient than the callback variant
+/// since it clones the buffer, but avoids lifetime issues.
+pub fn encode_ngram_key_lockfree_bytes(
+    words: &[&str],
+    vocab: &ConcurrentVocabARTrie,
+) -> Vec<u8> {
+    with_encoded_ngram_key_lockfree(words, vocab, |key| key.to_vec())
 }
 
 /// Encode an n-gram using existing vocabulary entries only.
 ///
 /// Returns `None` if any word is not in the vocabulary.
 /// This is useful for queries where we don't want to add new words.
-pub fn encode_ngram_key_existing(words: &[&str], vocab: &SharedVocabulary) -> Option<String> {
+pub fn encode_ngram_key_existing(words: &[&str], vocab: &SharedVocabARTrie) -> Option<String> {
     let mut buf = Vec::with_capacity(words.len() * 2);
+    let guard = vocab.read();
     for word in words {
-        let index = vocab.get(word)?;
+        let index = guard.get_index(word)?;
         encode_varint(index, &mut buf);
     }
     Some(buf.into_iter().map(|b| char::from(b)).collect())
+}
+
+/// Encode an n-gram as raw varint bytes, inserting new words into vocab.
+pub fn encode_ngram_key_bytes(words: &[&str], vocab: &SharedVocabARTrie) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(words.len() * 2);
+    let mut guard = vocab.write();
+    for word in words {
+        let index = guard.insert(word);
+        encode_varint(index, &mut buf);
+    }
+    buf
+}
+
+/// Encode an n-gram as raw varint bytes using existing vocabulary entries only.
+///
+/// Returns `None` if any word is not in the vocabulary.
+pub fn encode_ngram_key_existing_bytes(words: &[&str], vocab: &SharedVocabARTrie) -> Option<Vec<u8>> {
+    let mut buf = Vec::with_capacity(words.len() * 2);
+    let guard = vocab.read();
+    for word in words {
+        let index = guard.get_index(word)?;
+        encode_varint(index, &mut buf);
+    }
+    Some(buf)
 }
 
 /// Decode a Latin-1 encoded n-gram key to word indices.
@@ -439,25 +686,89 @@ pub fn encode_indices_to_key(indices: &[u64]) -> String {
     buf.into_iter().map(|b| char::from(b)).collect()
 }
 
+// ============================================================================
+// Byte-Native Key Functions (for PersistentARTrie<u64> / byte-keyed tries)
+// ============================================================================
+
+/// Decode a raw byte n-gram key to word indices.
+///
+/// Unlike `decode_ngram_key(&str)` which first converts Latin-1 chars back to
+/// bytes, this operates directly on the raw varint-encoded byte key.
+#[inline]
+pub fn decode_ngram_key_bytes(key: &[u8]) -> Vec<u64> {
+    let mut indices = Vec::new();
+    let mut offset = 0;
+    while offset < key.len() {
+        if let Some((index, consumed)) = decode_varint(&key[offset..]) {
+            indices.push(index);
+            offset += consumed;
+        } else {
+            break;
+        }
+    }
+    indices
+}
+
+/// Encode a slice of word indices to a varint-encoded byte key.
+///
+/// Like `encode_indices_to_key` but returns `Vec<u8>` without Latin-1
+/// conversion. Used for MKN context keys with byte-keyed tries.
+pub fn encode_indices_to_key_bytes(indices: &[u64]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(indices.len() * 2);
+    for &index in indices {
+        encode_varint(index, &mut buf);
+    }
+    buf
+}
+
+/// Get the n-gram order from a raw byte key.
+///
+/// Counts the number of varints in the encoded byte key.
+#[inline]
+pub fn ngram_order_bytes(key: &[u8]) -> u8 {
+    let mut count: u8 = 0;
+    let mut offset = 0;
+    while offset < key.len() {
+        if let Some((_index, consumed)) = decode_varint(&key[offset..]) {
+            count += 1;
+            offset += consumed;
+        } else {
+            break;
+        }
+    }
+    count
+}
+
+/// Try to encode n-gram tokens into a raw byte key using lock-free vocabulary.
+///
+/// Returns `Err` if any word fails vocabulary insertion.
+/// This is the fallible version of `encode_ngram_key_lockfree_bytes`.
+pub fn try_encode_ngram_key_lockfree_bytes(
+    words: &[&str],
+    vocab: &ConcurrentVocabARTrie,
+) -> VocabularyResult<Vec<u8>> {
+    Ok(encode_ngram_key_lockfree_bytes(words, vocab))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn create_temp_vocab() -> (TempDir, SharedVocabulary) {
+    fn create_temp_vocab() -> (TempDir, SharedVocabARTrie) {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let path = dir.path().join("vocab.artrie");
-        let vocab = SharedVocabulary::create(&path).expect("Failed to create vocab");
+        let vocab = create_vocabulary(&path).expect("Failed to create vocab");
         (dir, vocab)
     }
 
     #[test]
-    fn test_get_or_insert_new_word() {
+    fn test_insert_new_word() {
         let (_dir, vocab) = create_temp_vocab();
 
-        let idx1 = vocab.get_or_insert("the");
-        let idx2 = vocab.get_or_insert("quick");
-        let idx3 = vocab.get_or_insert("brown");
+        let idx1 = vocab.write().insert("the");
+        let idx2 = vocab.write().insert("quick");
+        let idx3 = vocab.write().insert("brown");
 
         // Each word should get a unique index
         assert_ne!(idx1, idx2);
@@ -471,25 +782,25 @@ mod tests {
     }
 
     #[test]
-    fn test_get_or_insert_existing_word() {
+    fn test_insert_existing_word() {
         let (_dir, vocab) = create_temp_vocab();
 
-        let idx1 = vocab.get_or_insert("hello");
-        let idx2 = vocab.get_or_insert("hello");
+        let idx1 = vocab.write().insert("hello");
+        let idx2 = vocab.write().insert("hello");
 
         // Same word should return same index
         assert_eq!(idx1, idx2);
-        assert_eq!(vocab.len(), 1);
+        assert_eq!(vocab.read().len(), 1);
     }
 
     #[test]
     fn test_get_existing() {
         let (_dir, vocab) = create_temp_vocab();
 
-        assert!(vocab.get("nonexistent").is_none());
+        assert!(vocab.read().get_index("nonexistent").is_none());
 
-        let idx1 = vocab.get_or_insert("test");
-        let idx2 = vocab.get("test");
+        let idx1 = vocab.write().insert("test");
+        let idx2 = vocab.read().get_index("test");
 
         assert_eq!(idx2, Some(idx1));
     }
@@ -498,9 +809,9 @@ mod tests {
     fn test_contains() {
         let (_dir, vocab) = create_temp_vocab();
 
-        assert!(!vocab.contains("word"));
-        vocab.get_or_insert("word");
-        assert!(vocab.contains("word"));
+        assert!(!vocab.read().contains("word"));
+        vocab.write().insert("word");
+        assert!(vocab.read().contains("word"));
     }
 
     #[test]
@@ -557,13 +868,62 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_ngram_key_batch() {
+        let (_dir, vocab) = create_temp_vocab();
+
+        // Test that batch encoding produces same result as individual encoding
+        let words = ["the", "quick", "brown"];
+        let key_batch = encode_ngram_key_batch(&words, &vocab);
+
+        // Decode and verify we get 3 indices
+        let indices = decode_ngram_key(&key_batch);
+        assert_eq!(indices.len(), 3);
+        assert_eq!(indices, vec![1, 2, 3]); // Sequential indices starting at 1
+
+        // Verify vocabulary state
+        assert_eq!(vocab.read().len(), 3);
+
+        // Test encoding existing words (should return same indices)
+        let key_batch2 = encode_ngram_key_batch(&words, &vocab);
+        assert_eq!(key_batch, key_batch2);
+        assert_eq!(vocab.read().len(), 3); // No new words added
+    }
+
+    #[test]
+    fn test_encode_ngram_key_batch_empty() {
+        let (_dir, vocab) = create_temp_vocab();
+
+        let key = encode_ngram_key_batch(&[], &vocab);
+        assert!(key.is_empty());
+        assert_eq!(vocab.read().len(), 0);
+    }
+
+    #[test]
+    fn test_encode_ngram_key_batch_mixed() {
+        let (_dir, vocab) = create_temp_vocab();
+
+        // Insert some words first
+        vocab.write().insert("the");
+        vocab.write().insert("quick");
+
+        // Batch encode with mix of existing and new words
+        let words = ["the", "quick", "brown", "fox"];
+        let key = encode_ngram_key_batch(&words, &vocab);
+
+        let indices = decode_ngram_key(&key);
+        // the=1, quick=2, brown=3, fox=4
+        assert_eq!(indices, vec![1, 2, 3, 4]);
+        assert_eq!(vocab.read().len(), 4);
+    }
+
+    #[test]
     fn test_encode_ngram_key_with_large_indices() {
         let (_dir, vocab) = create_temp_vocab();
 
         // Insert enough words to test multi-byte varint
         // Indices start at 1, so word0 gets index 1, word199 gets index 200
         for i in 0..200 {
-            vocab.get_or_insert(&format!("word{}", i));
+            vocab.write().insert(&format!("word{}", i));
         }
 
         // Encode an n-gram with indices that span single and multi-byte varints
@@ -595,7 +955,7 @@ mod tests {
         // Use get_term() for O(1) reverse lookups
         let decoded: Vec<_> = indices
             .iter()
-            .map(|&idx| vocab.get_term(idx).expect("index should exist"))
+            .map(|&idx| vocab.read().get_term(idx).expect("index should exist"))
             .collect();
 
         assert_eq!(decoded, words);
@@ -616,29 +976,29 @@ mod tests {
         // Use get_term() for O(1) reverse lookups
         let decoded: Vec<_> = indices
             .iter()
-            .map(|&idx| vocab.get_term(idx).expect("index should exist"))
+            .map(|&idx| vocab.read().get_term(idx).expect("index should exist"))
             .collect();
 
         assert_eq!(decoded, tokens);
     }
 
     #[test]
-    fn test_get_term_o1_lookup() {
+    fn test_get_term_reverse_lookup() {
         let (_dir, vocab) = create_temp_vocab();
 
         // Insert words
-        let idx1 = vocab.get_or_insert("hello");
-        let idx2 = vocab.get_or_insert("world");
-        let idx3 = vocab.get_or_insert("rust");
+        let idx1 = vocab.write().insert("hello");
+        let idx2 = vocab.write().insert("world");
+        let idx3 = vocab.write().insert("rust");
 
-        // O(1) reverse lookups should work
-        assert_eq!(vocab.get_term(idx1), Some("hello".to_string()));
-        assert_eq!(vocab.get_term(idx2), Some("world".to_string()));
-        assert_eq!(vocab.get_term(idx3), Some("rust".to_string()));
+        // Reverse lookups should work
+        assert_eq!(vocab.read().get_term(idx1), Some("hello".to_string()));
+        assert_eq!(vocab.read().get_term(idx2), Some("world".to_string()));
+        assert_eq!(vocab.read().get_term(idx3), Some("rust".to_string()));
 
         // Invalid indices should return None
-        assert_eq!(vocab.get_term(0), None); // Below FIRST_VALID_INDEX
-        assert_eq!(vocab.get_term(999), None); // Above range
+        assert_eq!(vocab.read().get_term(0), None); // Below FIRST_VALID_INDEX
+        assert_eq!(vocab.read().get_term(999), None); // Above range
     }
 
     #[test]
@@ -660,9 +1020,9 @@ mod tests {
     fn test_case_sensitivity() {
         let (_dir, vocab) = create_temp_vocab();
 
-        let lower = vocab.get_or_insert("the");
-        let upper = vocab.get_or_insert("The");
-        let all_caps = vocab.get_or_insert("THE");
+        let lower = vocab.write().insert("the");
+        let upper = vocab.write().insert("The");
+        let all_caps = vocab.write().insert("THE");
 
         // Case-sensitive: all should be different
         assert_ne!(lower, upper);
@@ -674,9 +1034,9 @@ mod tests {
     fn test_punctuation_as_tokens() {
         let (_dir, vocab) = create_temp_vocab();
 
-        let comma = vocab.get_or_insert(",");
-        let period = vocab.get_or_insert(".");
-        let quote = vocab.get_or_insert("\"");
+        let comma = vocab.write().insert(",");
+        let period = vocab.write().insert(".");
+        let quote = vocab.write().insert("\"");
 
         // Each punctuation should be a unique token
         assert_ne!(comma, period);
@@ -697,22 +1057,22 @@ mod tests {
         let idx1;
         let idx2;
         {
-            let vocab = SharedVocabulary::create(&path).expect("Failed to create vocab");
-            idx1 = vocab.get_or_insert("hello");
-            idx2 = vocab.get_or_insert("world");
-            vocab.checkpoint().expect("Checkpoint failed");
+            let vocab = create_vocabulary(&path).expect("Failed to create vocab");
+            idx1 = vocab.write().insert("hello");
+            idx2 = vocab.write().insert("world");
+            vocab.write().checkpoint().expect("Checkpoint failed");
         }
 
         // Reopen and verify
         {
-            let vocab = SharedVocabulary::open(&path).expect("Failed to open vocab");
+            let vocab = open_vocabulary(&path).expect("Failed to open vocab");
 
-            assert_eq!(vocab.len(), 2);
-            assert_eq!(vocab.get("hello"), Some(idx1));
-            assert_eq!(vocab.get("world"), Some(idx2));
+            assert_eq!(vocab.read().len(), 2);
+            assert_eq!(vocab.read().get_index("hello"), Some(idx1));
+            assert_eq!(vocab.read().get_index("world"), Some(idx2));
 
             // New word should get next index
-            let idx3 = vocab.get_or_insert("new");
+            let idx3 = vocab.write().insert("new");
             assert_eq!(idx3, 3); // Sequential after idx1=1, idx2=2
         }
     }
@@ -725,8 +1085,8 @@ mod tests {
         assert!(encode_ngram_key_existing(&["unknown"], &vocab).is_none());
 
         // Add some words
-        vocab.get_or_insert("the");
-        vocab.get_or_insert("quick");
+        vocab.write().insert("the");
+        vocab.write().insert("quick");
 
         // Now they should work
         let key = encode_ngram_key_existing(&["the", "quick"], &vocab);
@@ -747,13 +1107,13 @@ mod tests {
 
         let dir = TempDir::new().expect("Failed to create temp dir");
         let path = dir.path().join("vocab.artrie");
-        let vocab = Arc::new(SharedVocabulary::create(&path).expect("Failed to create vocab"));
+        let vocab = Arc::new(create_vocabulary(&path).expect("Failed to create vocab"));
 
         // Spawn multiple threads that all try to insert the same word
         let mut handles = vec![];
         for _ in 0..10 {
             let vocab = Arc::clone(&vocab);
-            handles.push(thread::spawn(move || vocab.get_or_insert("shared_word")));
+            handles.push(thread::spawn(move || vocab.write().insert("shared_word")));
         }
 
         // Collect results
@@ -766,7 +1126,7 @@ mod tests {
         }
 
         // Should only have one entry
-        assert_eq!(vocab.len(), 1);
+        assert_eq!(vocab.read().len(), 1);
     }
 
     #[test]
@@ -786,12 +1146,12 @@ mod tests {
         // Insert more than 131,068 words (old PUA limit)
         // We'll test with a smaller number for speed, but verify indices are correct
         for i in 0..1000 {
-            let idx = vocab.get_or_insert(&format!("word{}", i));
+            let idx = vocab.write().insert(&format!("word{}", i));
             // Indices start at 1, not 0
             assert_eq!(idx, (i + 1) as u64);
         }
 
-        assert_eq!(vocab.len(), 1000);
+        assert_eq!(vocab.read().len(), 1000);
     }
 
     #[test]
@@ -799,7 +1159,7 @@ mod tests {
         let (_dir, vocab) = create_temp_vocab();
 
         // Start index should be 1 (FIRST_VALID_INDEX)
-        assert_eq!(vocab.start_index(), 1);
+        assert_eq!(vocab.read().start_index(), 1);
     }
 
     #[test]
@@ -807,12 +1167,12 @@ mod tests {
         let (_dir, vocab) = create_temp_vocab();
 
         // After inserting, vocabulary should be dirty
-        vocab.get_or_insert("test");
-        assert!(vocab.is_dirty());
+        vocab.write().insert("test");
+        assert!(vocab.read().is_dirty());
 
         // After checkpoint, should no longer be dirty
-        vocab.checkpoint().expect("checkpoint failed");
-        assert!(!vocab.is_dirty());
+        vocab.write().checkpoint().expect("checkpoint failed");
+        assert!(!vocab.read().is_dirty());
     }
 
     #[test]
@@ -820,11 +1180,177 @@ mod tests {
         let (_dir, vocab) = create_temp_vocab();
 
         // Index 0 should never exist (reserved)
-        assert!(!vocab.contains_index(0));
+        assert!(!vocab.read().contains_index(0));
 
         // After insert, index 1 should exist
-        vocab.get_or_insert("test");
-        assert!(vocab.contains_index(1));
-        assert!(!vocab.contains_index(2)); // Not yet inserted
+        vocab.write().insert("test");
+        assert!(vocab.read().contains_index(1));
+        assert!(!vocab.read().contains_index(2)); // Not yet inserted
+    }
+
+    #[test]
+    fn test_bloom_filter() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("vocab.artrie");
+
+        // Create with bloom filter
+        let vocab = create_vocabulary_with_bloom(&path, 1000).expect("Failed to create vocab");
+
+        assert!(vocab.read().has_bloom_filter());
+
+        // Insert some words
+        vocab.write().insert("hello");
+        vocab.write().insert("world");
+
+        // Bloom filter should report these might exist
+        assert!(vocab.read().might_contain("hello"));
+        assert!(vocab.read().might_contain("world"));
+
+        // Unknown word - bloom might return false (true negative) or true (false positive)
+        // We can't assert on this since bloom filters have false positives
+
+        // Checkpoint and reopen
+        vocab.write().checkpoint().expect("checkpoint failed");
+        drop(vocab);
+
+        let vocab = open_vocabulary(&path).expect("Failed to open vocab");
+
+        // Bloom filter should be restored
+        assert!(vocab.read().has_bloom_filter());
+        assert!(vocab.read().might_contain("hello"));
+        assert!(vocab.read().might_contain("world"));
+    }
+
+    // ==================== Lock-Free Mode Tests ====================
+
+    #[test]
+    fn test_encode_ngram_key_lockfree() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("vocab.artrie");
+        let vocab = create_vocabulary(&path).expect("Failed to create vocab");
+        let concurrent = create_concurrent_vocabulary_lockfree(vocab);
+
+        // Encode using lock-free API
+        let key = encode_ngram_key_lockfree(&["the", "quick", "brown"], &concurrent);
+
+        // Decode and verify
+        let indices = decode_ngram_key(&key);
+        assert_eq!(indices.len(), 3);
+
+        // Verify we can look up the terms
+        assert_eq!(concurrent.get_index("the"), Some(1));
+        assert_eq!(concurrent.get_index("quick"), Some(2));
+        assert_eq!(concurrent.get_index("brown"), Some(3));
+    }
+
+    #[test]
+    fn test_encode_ngram_key_lockfree_concurrent() {
+        use std::thread;
+
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("vocab.artrie");
+        let vocab = create_vocabulary(&path).expect("Failed to create vocab");
+        let concurrent = create_concurrent_vocabulary_lockfree(vocab);
+
+        let num_threads = 8;
+        let terms_per_thread = 100;
+
+        // Spawn multiple threads that encode n-grams concurrently
+        let handles: Vec<_> = (0..num_threads)
+            .map(|t| {
+                let c = Arc::clone(&concurrent);
+                thread::spawn(move || {
+                    let mut keys = Vec::new();
+                    for i in 0..terms_per_thread {
+                        let words = [
+                            format!("thread{}_word{}", t, i),
+                            format!("thread{}_word{}", t, i + 1),
+                        ];
+                        let word_refs: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
+                        let key = encode_ngram_key_lockfree(&word_refs, &c);
+                        keys.push(key);
+                    }
+                    keys
+                })
+            })
+            .collect();
+
+        // Collect all keys
+        let all_keys: Vec<Vec<String>> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread complete"))
+            .collect();
+
+        // Verify all keys decode to 2 indices
+        for thread_keys in &all_keys {
+            for key in thread_keys {
+                let indices = decode_ngram_key(key);
+                assert_eq!(indices.len(), 2, "Each n-gram should have 2 indices");
+            }
+        }
+
+        // Verify vocabulary grew correctly
+        // Each thread inserts (terms_per_thread + 1) unique words
+        // Total = num_threads * (terms_per_thread + 1)
+        let expected_vocab_size = num_threads * (terms_per_thread + 1);
+        assert!(concurrent.next_index() >= expected_vocab_size as u64 + 1);
+    }
+
+    #[test]
+    fn test_open_or_create_concurrent_vocabulary_lockfree() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("vocab.artrie");
+
+        // Create new
+        let concurrent1 = open_or_create_concurrent_vocabulary_lockfree(&path)
+            .expect("Failed to create concurrent vocab");
+
+        concurrent1.insert_cas("hello");
+        concurrent1.insert_cas("world");
+
+        // Checkpoint to persistent storage and ensure it's persisted to disk
+        concurrent1.checkpoint().expect("checkpoint failed");
+        {
+            // Explicitly checkpoint the underlying persistent trie
+            let mut guard = concurrent1.inner().write();
+            guard.checkpoint().expect("persistent checkpoint failed");
+        }
+        drop(concurrent1);
+
+        // Reopen - the lock-free layer starts fresh, but the persistent layer
+        // has the terms from before. The get_index method checks both layers.
+        let concurrent2 = open_or_create_concurrent_vocabulary_lockfree(&path)
+            .expect("Failed to open concurrent vocab");
+
+        // Verify existing terms are accessible (from persistent layer)
+        assert_eq!(concurrent2.get_index("hello"), Some(1));
+        assert_eq!(concurrent2.get_index("world"), Some(2));
+
+        // New term should get the next index.
+        // The lock-free layer starts from next_index of the persistent trie (3).
+        let idx3 = concurrent2.insert_cas("new");
+        assert!(idx3 >= 3, "New term index should be at least 3, got {}", idx3);
+    }
+
+    #[test]
+    fn test_lockfree_vocab_stats() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("vocab.artrie");
+        let vocab = create_vocabulary(&path).expect("Failed to create vocab");
+        let concurrent = create_concurrent_vocabulary_lockfree(vocab);
+
+        // Insert some terms
+        concurrent.insert_cas("one");
+        concurrent.insert_cas("two");
+        concurrent.insert_cas("three");
+
+        // Check stats
+        let stats = concurrent.lockfree_stats().expect("should have lockfree stats");
+        assert_eq!(stats.entry_count, 3);
+        assert_eq!(stats.next_index, 4); // 1, 2, 3 inserted, next is 4 (start at 1)
+
+        // General stats
+        let general_stats = concurrent.stats();
+        assert_eq!(general_stats.mode, ConcurrentMode::LockFree);
     }
 }

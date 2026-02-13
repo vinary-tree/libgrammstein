@@ -718,7 +718,7 @@ impl ShardCoordinator {
     /// `true` if this was a new n-gram, `false` if it already existed.
     pub fn store_ngram(&self, ngram: &str, count: u64) -> CoordinatorResult<bool> {
         let key = self.route_ngram(ngram);
-        self.store_in_shard(&key, ngram, count)
+        self.store_in_shard(&key, ngram.as_bytes(), count)
     }
 
     /// Store an encoded n-gram key in a specific shard.
@@ -738,36 +738,14 @@ impl ShardCoordinator {
     pub fn store_in_shard(
         &self,
         shard_key: &ShardKey,
-        encoded_key: &str,
+        encoded_key: &[u8],
         count: u64,
     ) -> CoordinatorResult<bool> {
         let shard = self.get_or_create_shard(shard_key)?;
 
-        // Acquire write lock (blocking)
-        let mut guard = shard.write();
-
-        // Need to acquire write token for the shard
-        let start = Instant::now();
-        let token = loop {
-            if let Some(token) = guard.try_acquire_write(0) {
-                break token;
-            }
-            // Spin with tiny yield (shouldn't happen often since we hold the RwLock)
-            std::thread::yield_now();
-
-            // Timeout after 1 second (something is wrong)
-            if start.elapsed().as_secs() > 1 {
-                return Err(CoordinatorError::WriterTimeout {
-                    shard_key: shard_key.to_string(),
-                });
-            }
-        };
-
-        let wait_us = start.elapsed().as_micros() as u64;
-        self.stats.record_writer_acquisition(wait_us);
-
-        let was_new = guard.increment(encoded_key, count, &token)?;
-        guard.release_write(token);
+        // Lock-free path: shared read guard + CAS increment
+        let guard = shard.read();
+        let was_new = guard.increment_lockfree(encoded_key, count)?;
 
         if was_new {
             self.stats.unique_ngrams.fetch_add(1, Ordering::Relaxed);
@@ -793,51 +771,36 @@ impl ShardCoordinator {
     /// Number of new (unique) n-grams stored.
     pub fn store_ngrams_batch<'a, I>(&self, key: &ShardKey, ngrams: I) -> CoordinatorResult<u64>
     where
-        I: Iterator<Item = (&'a str, u64)>,
+        I: Iterator<Item = (&'a [u8], u64)>,
     {
         let shard = self.get_or_create_shard(key)?;
-        let mut guard = shard.write();
 
-        let start = Instant::now();
-        let token = loop {
-            if let Some(token) = guard.try_acquire_write(0) {
-                break token;
-            }
-            std::thread::yield_now();
-            if start.elapsed().as_secs() > 1 {
-                return Err(CoordinatorError::WriterTimeout {
-                    shard_key: key.to_string(),
-                });
-            }
-        };
-
-        let wait_us = start.elapsed().as_micros() as u64;
-        self.stats.record_writer_acquisition(wait_us);
+        // Lock-free path: shared read guard + CAS increments
+        let guard = shard.read();
 
         let mut new_count = 0u64;
         let mut total_count = 0u64;
 
         for (ngram, count) in ngrams {
-            if guard.increment(ngram, count, &token)? {
+            if guard.increment_lockfree(ngram, count)? {
                 new_count += 1;
             }
             total_count += count;
         }
-
-        guard.release_write(token);
 
         self.stats.record_ngrams(total_count, new_count);
 
         Ok(new_count)
     }
 
-    /// Get the count for an n-gram.
+    /// Get the count for an n-gram (text-based routing, byte-keyed lookup).
     pub fn get(&self, ngram: &str) -> Option<u64> {
         let key = self.route_ngram(ngram);
+        let ngram_bytes = ngram.as_bytes();
 
         if let Some(shard) = self.shards.get(&key) {
             let guard = shard.read();
-            return guard.get(ngram);
+            return guard.get(ngram_bytes);
         }
 
         // Shard not loaded - check if file exists
@@ -846,7 +809,7 @@ impl ShardCoordinator {
             // Load shard and query
             if let Ok(shard) = self.get_or_create_shard(&key) {
                 let guard = shard.read();
-                return guard.get(ngram);
+                return guard.get(ngram_bytes);
             }
         }
 
@@ -867,7 +830,7 @@ impl ShardCoordinator {
     ///
     /// * `shard_key` - The shard key (from `route_tokens` or `route_ngram`)
     /// * `encoded_key` - The encoded n-gram key to look up
-    pub fn get_in_shard(&self, shard_key: &ShardKey, encoded_key: &str) -> Option<u64> {
+    pub fn get_in_shard(&self, shard_key: &ShardKey, encoded_key: &[u8]) -> Option<u64> {
         if let Some(shard) = self.shards.get(shard_key) {
             let guard = shard.read();
             return guard.get(encoded_key);
@@ -887,6 +850,29 @@ impl ShardCoordinator {
     }
 
     /// Checkpoint all open shards.
+    /// Merge lock-free overlays into persistent tries for all open shards.
+    ///
+    /// Call this before operations that iterate shard data (merge, query, MKN)
+    /// to ensure they see values written via the lock-free path.
+    pub fn flush_all_lockfree(&self) -> CoordinatorResult<()> {
+        let mut errors = Vec::new();
+
+        for entry in self.shards.iter() {
+            let key = entry.key().clone();
+            let shard = entry.value();
+            let mut guard = shard.write();
+            if let Err(e) = guard.flush_lockfree() {
+                errors.push(format!("Shard {}: {}", key, e));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(CoordinatorError::Checkpoint(errors.join("; ")))
+        }
+    }
+
     pub fn checkpoint_all(&self) -> CoordinatorResult<()> {
         let mut errors = Vec::new();
 
@@ -1776,7 +1762,7 @@ impl ShardCoordinator {
     /// * `tx` - The active transaction from `begin_prefix_tx()`
     /// * `ngram` - The n-gram key to insert
     /// * `count` - The n-gram count
-    pub fn tx_insert(&self, tx: &mut CoordinatorPrefixTx, ngram: &str, count: u64) {
+    pub fn tx_insert(&self, tx: &mut CoordinatorPrefixTx, ngram: &[u8], count: u64) {
         let guard = tx.shard.read();
         if let Some(ref mut inner) = tx.inner {
             guard.tx_insert(inner, ngram, count);
@@ -2056,7 +2042,11 @@ mod tests {
         let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
 
         let key = ShardKey::new("th");
-        let ngrams = vec![("the|quick", 10u64), ("the|slow", 5), ("this|is", 3)];
+        let ngrams: Vec<(&[u8], u64)> = vec![
+            (b"the|quick" as &[u8], 10u64),
+            (b"the|slow" as &[u8], 5),
+            (b"this|is" as &[u8], 3),
+        ];
 
         let new_count = coordinator
             .store_ngrams_batch(&key, ngrams.into_iter())

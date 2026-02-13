@@ -206,6 +206,46 @@ pub fn get_prefixes(order: u8) -> Vec<String> {
     }
 }
 
+/// Validates that a prefix is valid for the given n-gram order.
+///
+/// # Arguments
+///
+/// * `order` - N-gram order (1-5)
+/// * `prefix` - The prefix to validate (e.g., "j" for 1-grams, "th" for 2-5 grams)
+///
+/// # Returns
+///
+/// `true` if the prefix is valid for the given order, `false` otherwise.
+///
+/// # Examples
+///
+/// ```
+/// use libgrammstein::sources::google_books::is_valid_prefix;
+///
+/// // Valid 1-gram prefixes
+/// assert!(is_valid_prefix(1, "a"));
+/// assert!(is_valid_prefix(1, "z"));
+/// assert!(is_valid_prefix(1, "other"));
+///
+/// // Invalid for 1-grams (two-letter prefixes)
+/// assert!(!is_valid_prefix(1, "th"));
+///
+/// // Valid 2-5 gram prefixes
+/// assert!(is_valid_prefix(2, "th"));
+/// assert!(is_valid_prefix(3, "aa"));
+/// assert!(is_valid_prefix(5, "punctuation"));
+///
+/// // Invalid for 2-5 grams (single-letter prefixes)
+/// assert!(!is_valid_prefix(2, "t"));
+/// ```
+pub fn is_valid_prefix(order: u8, prefix: &str) -> bool {
+    if order == 1 {
+        UNIGRAM_PREFIXES.contains(&prefix)
+    } else {
+        MULTIGRAM_PREFIXES.contains(&prefix.to_string())
+    }
+}
+
 /// Check if a language is supported.
 pub fn is_supported(language: &str) -> bool {
     SUPPORTED_LANGUAGES.contains_key(language)
@@ -302,5 +342,46 @@ mod tests {
     fn test_german_url() {
         let url = get_file_url("de", 3, "abc").unwrap();
         assert!(url.contains("googlebooks-ger-all-3gram"));
+    }
+
+    #[test]
+    fn test_is_valid_prefix_unigrams() {
+        // Valid 1-gram prefixes
+        assert!(is_valid_prefix(1, "a"));
+        assert!(is_valid_prefix(1, "j"));
+        assert!(is_valid_prefix(1, "z"));
+        assert!(is_valid_prefix(1, "other"));
+
+        // Invalid for 1-grams (two-letter prefixes)
+        assert!(!is_valid_prefix(1, "th"));
+        assert!(!is_valid_prefix(1, "aa"));
+        assert!(!is_valid_prefix(1, "punctuation"));
+
+        // Invalid for 1-grams (not a valid prefix at all)
+        assert!(!is_valid_prefix(1, "invalid"));
+        assert!(!is_valid_prefix(1, ""));
+    }
+
+    #[test]
+    fn test_is_valid_prefix_multigrams() {
+        // Valid 2-5 gram prefixes
+        assert!(is_valid_prefix(2, "th"));
+        assert!(is_valid_prefix(2, "aa"));
+        assert!(is_valid_prefix(2, "zz"));
+        assert!(is_valid_prefix(2, "other"));
+        assert!(is_valid_prefix(2, "punctuation"));
+
+        // Valid for higher orders too
+        assert!(is_valid_prefix(3, "th"));
+        assert!(is_valid_prefix(4, "aa"));
+        assert!(is_valid_prefix(5, "punctuation"));
+
+        // Invalid for 2-5 grams (single-letter prefixes)
+        assert!(!is_valid_prefix(2, "t"));
+        assert!(!is_valid_prefix(3, "a"));
+
+        // Invalid for all orders
+        assert!(!is_valid_prefix(2, "invalid"));
+        assert!(!is_valid_prefix(5, ""));
     }
 }
