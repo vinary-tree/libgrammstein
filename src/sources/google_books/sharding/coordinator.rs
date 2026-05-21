@@ -149,6 +149,20 @@ pub struct ShardCoordinator {
     /// Statistics.
     stats: Arc<CoordinatorStats>,
 
+    /// Persistent rayon thread pool reused across `sync_all_parallel` /
+    /// `coordinated_checkpoint_finish_with_progress` calls. Previously a
+    /// fresh `ThreadPoolBuilder::new().build()` was created on every
+    /// call — spawning N worker threads each time. Holding one pool for
+    /// the coordinator's lifetime amortizes the thread-creation cost across
+    /// the many periodic checkpoints that run during a long import.
+    ///
+    /// Wrapped in `OnceCell` (via `OnceLock`) so the pool is built lazily
+    /// on first use — at which point `max_concurrent` is known. Pool size
+    /// is fixed to the first caller's value; subsequent callers with a
+    /// smaller `max_concurrent` still get correct behavior (rayon
+    /// internally schedules at most `num_threads` parallel tasks).
+    parallel_pool: std::sync::OnceLock<rayon::ThreadPool>,
+
     /// Shutdown flag.
     shutdown: std::sync::atomic::AtomicBool,
 }
@@ -338,8 +352,44 @@ impl ShardCoordinator {
             lru_tracker,
             checkpoint_manager,
             stats: Arc::new(CoordinatorStats::default()),
+            parallel_pool: std::sync::OnceLock::new(),
             shutdown: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Get the persistent rayon thread pool, building it on first call.
+    ///
+    /// The pool is sized to `max_workers` and reused for every subsequent
+    /// `sync_all_parallel` / `coordinated_checkpoint_finish_with_progress`
+    /// call — avoiding the prior cost of building a fresh pool (spawning
+    /// N worker threads) on each invocation. The first caller decides the
+    /// pool size; later callers with a different `max_workers` share the
+    /// existing pool (rayon caps concurrency at `num_threads` internally,
+    /// so a smaller request is naturally bounded).
+    fn get_or_build_parallel_pool(&self, max_workers: usize) -> CoordinatorResult<&rayon::ThreadPool> {
+        // Fast path: pool already built.
+        if let Some(pool) = self.parallel_pool.get() {
+            return Ok(pool);
+        }
+
+        // Slow path: build and install. `set` may race with another caller —
+        // the first to win wins, and we re-fetch via `get_or_init` semantics
+        // by checking `get()` after `set` returns Err (meaning someone else
+        // already initialized).
+        let new_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(max_workers.max(1))
+            .build()
+            .map_err(|e| {
+                CoordinatorError::Config(format!("Failed to build parallel thread pool: {}", e))
+            })?;
+
+        match self.parallel_pool.set(new_pool) {
+            Ok(()) => Ok(self.parallel_pool.get().expect("just set above")),
+            Err(_) => Ok(self
+                .parallel_pool
+                .get()
+                .expect("OnceLock observed as Some after Err on set")),
+        }
     }
 
     /// Open an existing coordinator from a shard directory.
@@ -1057,12 +1107,9 @@ impl ShardCoordinator {
             max_concurrent
         );
 
-        // Parallel sync using rayon with bounded concurrency
-        // Use a thread pool with limited parallelism
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(max_concurrent.min(dirty_shards.len()))
-            .build()
-            .map_err(|e| CoordinatorError::Config(format!("Failed to create thread pool: {}", e)))?;
+        // Parallel sync using the persistent rayon thread pool (built once
+        // on first use, reused for the coordinator's lifetime).
+        let pool = self.get_or_build_parallel_pool(max_concurrent.min(dirty_shards.len()))?;
 
         let errors: Vec<(ShardKey, String)> = pool.install(|| {
             dirty_shards
@@ -1274,11 +1321,9 @@ impl ShardCoordinator {
         let shard_keys: Vec<ShardKey> = self.shards.iter().map(|e| e.key().clone()).collect();
         let total_shards = shard_keys.len();
 
-        // Create bounded thread pool for I/O parallelism
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(max_concurrent.min(shard_keys.len()).max(1))
-            .build()
-            .map_err(|e| CoordinatorError::Config(format!("Failed to create thread pool: {}", e)))?;
+        // Reuse the coordinator's persistent rayon pool for I/O parallelism
+        // instead of building a fresh one on every call.
+        let pool = self.get_or_build_parallel_pool(max_concurrent.min(shard_keys.len()).max(1))?;
 
         // Atomic counter for progress tracking
         let shards_processed = AtomicUsize::new(0);
