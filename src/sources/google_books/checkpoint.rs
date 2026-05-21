@@ -883,24 +883,51 @@ fn prefix_to_index(prefix: &str) -> Option<u16> {
     }
 }
 
-/// Convert index back to prefix string.
-///
-/// - `prefix_len=1`: 0 -> "a", 25 -> "z"
-/// - `prefix_len=2`: 0 -> "aa", 1 -> "ab", 675 -> "zz"
-fn index_to_prefix(index: u16, prefix_len: u8) -> String {
+/// Prefix-encoding scheme for n-gram bitmap state — one byte for unigrams,
+/// two bytes for higher orders. Constructed only via `for_order` so the
+/// invariant "PrefixLen ∈ {One, Two}" is enforced at the type level. This
+/// eliminates the previous `panic!("Unsupported prefix length: {}", ...)`
+/// fall-through, since no untyped `u8` ever reaches the conversion path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrefixLen {
+    One,
+    Two,
+}
+
+impl PrefixLen {
+    /// Pick the prefix encoding for a given n-gram order: unigrams use a
+    /// single-letter prefix, higher orders use two letters.
+    #[inline]
+    fn for_order(order: u8) -> Self {
+        if order == 1 { Self::One } else { Self::Two }
+    }
+
+    /// Maximum valid index for this prefix encoding (26 for One, 676 for Two).
+    #[inline]
+    fn max_index(self) -> u16 {
+        match self {
+            Self::One => 26,
+            Self::Two => 676,
+        }
+    }
+}
+
+/// Convert index back to prefix string. Takes a `PrefixLen` rather than a
+/// raw `u8` so the type system enforces the One/Two invariant — no runtime
+/// panic for unsupported lengths can occur.
+fn index_to_prefix(index: u16, prefix_len: PrefixLen) -> String {
     match prefix_len {
-        1 => {
+        PrefixLen::One => {
             debug_assert!(index < 26, "Index {} out of range for single-char prefix", index);
             let c = (b'a' + index as u8) as char;
             c.to_string()
         }
-        2 => {
+        PrefixLen::Two => {
             debug_assert!(index < 676, "Index {} out of range for two-char prefix", index);
             let c1 = (b'a' + (index / 26) as u8) as char;
             let c2 = (b'a' + (index % 26) as u8) as char;
             format!("{}{}", c1, c2)
         }
-        _ => panic!("Unsupported prefix length: {}", prefix_len),
     }
 }
 
@@ -908,17 +935,17 @@ fn index_to_prefix(index: u16, prefix_len: u8) -> String {
 ///
 /// - Order 1: single-char prefixes (26 total)
 /// - Order 2+: two-char prefixes (676 total)
-fn prefix_len_for_order(order: u8) -> u8 {
-    if order == 1 { 1 } else { 2 }
+fn prefix_len_for_order(order: u8) -> PrefixLen {
+    PrefixLen::for_order(order)
 }
 
 /// Get the maximum index for a given prefix length.
-fn max_index_for_prefix_len(prefix_len: u8) -> u16 {
-    if prefix_len == 1 { 26 } else { 676 }
+fn max_index_for_prefix_len(prefix_len: PrefixLen) -> u16 {
+    prefix_len.max_index()
 }
 
 /// Get the number of u64 chunks needed for a given prefix length.
-fn num_chunks_for_prefix_len(prefix_len: u8) -> usize {
+fn num_chunks_for_prefix_len(prefix_len: PrefixLen) -> usize {
     let max_index = max_index_for_prefix_len(prefix_len) as usize;
     (max_index + PREFIXES_PER_CHUNK - 1) / PREFIXES_PER_CHUNK
 }
@@ -927,7 +954,7 @@ fn num_chunks_for_prefix_len(prefix_len: u8) -> usize {
 ///
 /// Each prefix state occupies 2 bits within a u64. States are packed
 /// in index order, with lower indices in lower bits.
-fn pack_states(states: &HashMap<String, PrefixState>, prefix_len: u8) -> Vec<u64> {
+fn pack_states(states: &HashMap<String, PrefixState>, prefix_len: PrefixLen) -> Vec<u64> {
     let num_chunks = num_chunks_for_prefix_len(prefix_len);
     let mut chunks = vec![0u64; num_chunks];
 
@@ -956,7 +983,7 @@ fn pack_states(states: &HashMap<String, PrefixState>, prefix_len: u8) -> Vec<u64
 ///
 /// Returns a HashMap containing only prefixes with non-zero states
 /// (NotStarted prefixes are not included in the map).
-fn unpack_states(chunks: &[u64], prefix_len: u8) -> HashMap<String, PrefixState> {
+fn unpack_states(chunks: &[u64], prefix_len: PrefixLen) -> HashMap<String, PrefixState> {
     let max_index = max_index_for_prefix_len(prefix_len);
     let mut states = HashMap::new();
 
@@ -1796,26 +1823,26 @@ mod tests {
 
     #[test]
     fn test_index_to_prefix_single_char() {
-        assert_eq!(index_to_prefix(0, 1), "a");
-        assert_eq!(index_to_prefix(1, 1), "b");
-        assert_eq!(index_to_prefix(12, 1), "m");
-        assert_eq!(index_to_prefix(25, 1), "z");
+        assert_eq!(index_to_prefix(0, PrefixLen::One), "a");
+        assert_eq!(index_to_prefix(1, PrefixLen::One), "b");
+        assert_eq!(index_to_prefix(12, PrefixLen::One), "m");
+        assert_eq!(index_to_prefix(25, PrefixLen::One), "z");
     }
 
     #[test]
     fn test_index_to_prefix_two_char() {
-        assert_eq!(index_to_prefix(0, 2), "aa");
-        assert_eq!(index_to_prefix(1, 2), "ab");
-        assert_eq!(index_to_prefix(25, 2), "az");
-        assert_eq!(index_to_prefix(26, 2), "ba");
-        assert_eq!(index_to_prefix(501, 2), "th");
-        assert_eq!(index_to_prefix(675, 2), "zz");
+        assert_eq!(index_to_prefix(0, PrefixLen::Two), "aa");
+        assert_eq!(index_to_prefix(1, PrefixLen::Two), "ab");
+        assert_eq!(index_to_prefix(25, PrefixLen::Two), "az");
+        assert_eq!(index_to_prefix(26, PrefixLen::Two), "ba");
+        assert_eq!(index_to_prefix(501, PrefixLen::Two), "th");
+        assert_eq!(index_to_prefix(675, PrefixLen::Two), "zz");
     }
 
     #[test]
     fn test_index_prefix_roundtrip_single_char() {
         for i in 0..26u16 {
-            let prefix = index_to_prefix(i, 1);
+            let prefix = index_to_prefix(i, PrefixLen::One);
             assert_eq!(prefix_to_index(&prefix), Some(i));
         }
     }
@@ -1823,7 +1850,7 @@ mod tests {
     #[test]
     fn test_index_prefix_roundtrip_two_char() {
         for i in 0..676u16 {
-            let prefix = index_to_prefix(i, 2);
+            let prefix = index_to_prefix(i, PrefixLen::Two);
             assert_eq!(prefix_to_index(&prefix), Some(i));
         }
     }
@@ -1833,12 +1860,12 @@ mod tests {
         let states: HashMap<String, PrefixState> = HashMap::new();
 
         // Single-char: 1 chunk (26 prefixes / 32 per chunk = 1)
-        let chunks = pack_states(&states, 1);
+        let chunks = pack_states(&states, PrefixLen::One);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0], 0);
 
         // Two-char: 22 chunks (676 prefixes / 32 per chunk = 22)
-        let chunks = pack_states(&states, 2);
+        let chunks = pack_states(&states, PrefixLen::Two);
         assert_eq!(chunks.len(), 22);
         assert!(chunks.iter().all(|&c| c == 0));
     }
@@ -1848,7 +1875,7 @@ mod tests {
         let mut states = HashMap::new();
         states.insert("aa".to_string(), PrefixState::Completed);
 
-        let chunks = pack_states(&states, 2);
+        let chunks = pack_states(&states, PrefixLen::Two);
 
         // "aa" = index 0, chunk 0, bit position 0
         // Completed = 0b10
@@ -1862,7 +1889,7 @@ mod tests {
         states.insert("ab".to_string(), PrefixState::Completed);  // index 1
         states.insert("ac".to_string(), PrefixState::Failed);     // index 2
 
-        let chunks = pack_states(&states, 2);
+        let chunks = pack_states(&states, PrefixLen::Two);
 
         // Bit layout: [ac][ab][aa] = [11][10][01] = 0b110100 + 01 = 0b110101
         // Actually: bit positions are index * 2
@@ -1880,8 +1907,8 @@ mod tests {
         states.insert("th".to_string(), PrefixState::InProgress);
         states.insert("zz".to_string(), PrefixState::Failed);
 
-        let chunks = pack_states(&states, 2);
-        let unpacked = unpack_states(&chunks, 2);
+        let chunks = pack_states(&states, PrefixLen::Two);
+        let unpacked = unpack_states(&chunks, PrefixLen::Two);
 
         assert_eq!(unpacked.len(), 3);
         assert_eq!(unpacked.get("aa"), Some(&PrefixState::Completed));
@@ -1899,8 +1926,8 @@ mod tests {
             }
         }
 
-        let chunks = pack_states(&states, 2);
-        let unpacked = unpack_states(&chunks, 2);
+        let chunks = pack_states(&states, PrefixLen::Two);
+        let unpacked = unpack_states(&chunks, PrefixLen::Two);
 
         assert_eq!(unpacked.len(), 676);
         for (prefix, state) in &unpacked {
@@ -1919,7 +1946,7 @@ mod tests {
 
         // Assign different states based on index
         for i in 0..676u16 {
-            let prefix = index_to_prefix(i, 2);
+            let prefix = index_to_prefix(i, PrefixLen::Two);
             let state = match i % 3 {
                 0 => PrefixState::Completed,
                 1 => PrefixState::InProgress,
@@ -1929,12 +1956,12 @@ mod tests {
             states.insert(prefix, state);
         }
 
-        let chunks = pack_states(&states, 2);
-        let unpacked = unpack_states(&chunks, 2);
+        let chunks = pack_states(&states, PrefixLen::Two);
+        let unpacked = unpack_states(&chunks, PrefixLen::Two);
 
         assert_eq!(unpacked.len(), 676);
         for i in 0..676u16 {
-            let prefix = index_to_prefix(i, 2);
+            let prefix = index_to_prefix(i, PrefixLen::Two);
             let expected = match i % 3 {
                 0 => PrefixState::Completed,
                 1 => PrefixState::InProgress,
@@ -1955,7 +1982,7 @@ mod tests {
     fn test_unpack_states_not_started_excluded() {
         // Empty chunks = all NotStarted = empty HashMap
         let chunks = vec![0u64; 22];
-        let unpacked = unpack_states(&chunks, 2);
+        let unpacked = unpack_states(&chunks, PrefixLen::Two);
         assert!(unpacked.is_empty());
     }
 
@@ -1968,16 +1995,16 @@ mod tests {
         let boundary_indices = [0u16, 31, 32, 63, 64, 95, 96, 671, 672, 675];
 
         for &idx in &boundary_indices {
-            let prefix = index_to_prefix(idx, 2);
+            let prefix = index_to_prefix(idx, PrefixLen::Two);
             states.insert(prefix, PrefixState::Completed);
         }
 
-        let chunks = pack_states(&states, 2);
-        let unpacked = unpack_states(&chunks, 2);
+        let chunks = pack_states(&states, PrefixLen::Two);
+        let unpacked = unpack_states(&chunks, PrefixLen::Two);
 
         assert_eq!(unpacked.len(), boundary_indices.len());
         for &idx in &boundary_indices {
-            let prefix = index_to_prefix(idx, 2);
+            let prefix = index_to_prefix(idx, PrefixLen::Two);
             assert_eq!(
                 unpacked.get(&prefix),
                 Some(&PrefixState::Completed),
@@ -1990,20 +2017,20 @@ mod tests {
 
     #[test]
     fn test_prefix_len_for_order() {
-        assert_eq!(prefix_len_for_order(1), 1);
-        assert_eq!(prefix_len_for_order(2), 2);
-        assert_eq!(prefix_len_for_order(3), 2);
-        assert_eq!(prefix_len_for_order(4), 2);
-        assert_eq!(prefix_len_for_order(5), 2);
+        assert_eq!(prefix_len_for_order(1), PrefixLen::One);
+        assert_eq!(prefix_len_for_order(2), PrefixLen::Two);
+        assert_eq!(prefix_len_for_order(3), PrefixLen::Two);
+        assert_eq!(prefix_len_for_order(4), PrefixLen::Two);
+        assert_eq!(prefix_len_for_order(5), PrefixLen::Two);
     }
 
     #[test]
     fn test_num_chunks_for_prefix_len() {
         // Single char: 26 prefixes / 32 = 1 chunk
-        assert_eq!(num_chunks_for_prefix_len(1), 1);
+        assert_eq!(num_chunks_for_prefix_len(PrefixLen::One), 1);
 
         // Two char: 676 prefixes / 32 = 21.125 = 22 chunks
-        assert_eq!(num_chunks_for_prefix_len(2), 22);
+        assert_eq!(num_chunks_for_prefix_len(PrefixLen::Two), 22);
     }
 
     #[test]
@@ -2012,7 +2039,7 @@ mod tests {
         // v2: 676 keys * ~33 bytes = ~22KB per order
         // v3: 22 chunks * 8 bytes = 176 bytes per order
 
-        let num_chunks = num_chunks_for_prefix_len(2);
+        let num_chunks = num_chunks_for_prefix_len(PrefixLen::Two);
         let v3_bytes = num_chunks * 8;
 
         assert_eq!(num_chunks, 22);
