@@ -17,6 +17,12 @@ perf.data.old
 perf-*.txt
 perf-*.data
 
+# Valgrind / massif profiling artifacts
+massif.out.*
+massif-*.txt
+callgrind.out.*
+cachegrind.out.*
+
 # Criterion benchmark artifacts
 target/criterion/
 
