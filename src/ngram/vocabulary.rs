@@ -266,6 +266,31 @@ pub fn open_or_create_concurrent_vocabulary_lockfree(
     Ok(Arc::new(ConcurrentVocabARTrie::new_lockfree(trie)))
 }
 
+/// Create or open a lock-free concurrent vocabulary with pre-allocated capacity.
+///
+/// Pre-sizing the lock-free layer avoids geometric doubling resize spikes
+/// in the DashMap term cache and the reverse-lookup Vec. This is critical
+/// for large-vocabulary imports where resize doubling can spike peak memory
+/// by several GB.
+///
+/// # Arguments
+///
+/// * `path` - Path to the vocabulary file
+/// * `estimated_terms` - Expected number of unique vocabulary terms
+pub fn open_or_create_concurrent_vocabulary_lockfree_with_capacity(
+    path: &Path,
+    estimated_terms: usize,
+) -> VocabularyResult<Arc<ConcurrentVocabARTrie>> {
+    let trie = if path.exists() {
+        let (trie, _report) = PersistentVocabARTrie::open_with_recovery(path)?;
+        trie
+    } else {
+        PersistentVocabARTrie::create_with_start_index(path, FIRST_VALID_INDEX)?
+    };
+
+    Ok(Arc::new(ConcurrentVocabARTrie::new_lockfree_with_capacity(trie, estimated_terms)))
+}
+
 /// Create a new lock-free concurrent vocabulary with BloomFilter.
 ///
 /// The BloomFilter provides O(1) fast-path for detecting new terms.
