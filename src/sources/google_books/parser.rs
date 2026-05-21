@@ -79,6 +79,92 @@ pub enum ParseError {
     EmptyNgram,
 }
 
+/// A borrowed n-gram record parsed without heap allocation.
+///
+/// All string fields are borrowed from the input line. Use this in hot loops
+/// where the line buffer outlives the record (e.g., streaming aggregation).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NgramRecordRef<'a> {
+    /// The n-gram text (borrowed from input line).
+    pub ngram: &'a str,
+
+    /// Publication year.
+    pub year: u16,
+
+    /// Number of occurrences in that year.
+    pub match_count: u64,
+
+    /// Number of distinct volumes containing this n-gram.
+    pub volume_count: u32,
+}
+
+/// Find the next occurrence of `needle` in `haystack` starting at `start`.
+#[inline(always)]
+fn find_byte(haystack: &[u8], start: usize, needle: u8) -> Option<usize> {
+    haystack[start..].iter().position(|&b| b == needle).map(|i| start + i)
+}
+
+/// Parse a single line from a Google Books n-gram file into a borrowed record.
+///
+/// This is a zero-allocation parser that finds tab positions via byte scanning
+/// instead of `split().collect()`. The returned `NgramRecordRef` borrows the
+/// ngram text directly from the input line.
+///
+/// # Format
+///
+/// Tab-separated: `ngram\tyear\tmatch_count\tvolume_count`
+///
+/// # Example
+///
+/// ```ignore
+/// let rec = parse_ngram_line_ref("the cat\t2000\t12345\t678")?;
+/// assert_eq!(rec.ngram, "the cat");
+/// assert_eq!(rec.year, 2000);
+/// assert_eq!(rec.match_count, 12345);
+/// assert_eq!(rec.volume_count, 678);
+/// ```
+pub fn parse_ngram_line_ref(line: &str) -> Result<NgramRecordRef<'_>, ParseError> {
+    let bytes = line.as_bytes();
+
+    // Find exactly 3 tabs (4 fields)
+    let tab1 = find_byte(bytes, 0, b'\t').ok_or(ParseError::WrongFieldCount(1))?;
+    let tab2 = find_byte(bytes, tab1 + 1, b'\t').ok_or(ParseError::WrongFieldCount(2))?;
+    let tab3 = find_byte(bytes, tab2 + 1, b'\t').ok_or(ParseError::WrongFieldCount(3))?;
+
+    // Reject if there's a 4th tab (5+ fields)
+    if find_byte(bytes, tab3 + 1, b'\t').is_some() {
+        return Err(ParseError::WrongFieldCount(5));
+    }
+
+    // Extract fields as &str slices (safe: tab positions are within the UTF-8 string)
+    let ngram = &line[..tab1];
+    if ngram.is_empty() {
+        return Err(ParseError::EmptyNgram);
+    }
+
+    let year_str = &line[tab1 + 1..tab2];
+    let year = year_str
+        .parse::<u16>()
+        .map_err(|_| ParseError::InvalidYear(year_str.to_string()))?;
+
+    let match_str = &line[tab2 + 1..tab3];
+    let match_count = match_str
+        .parse::<u64>()
+        .map_err(|_| ParseError::InvalidMatchCount(match_str.to_string()))?;
+
+    let vol_str = &line[tab3 + 1..];
+    let volume_count = vol_str
+        .parse::<u32>()
+        .map_err(|_| ParseError::InvalidVolumeCount(vol_str.to_string()))?;
+
+    Ok(NgramRecordRef {
+        ngram,
+        year,
+        match_count,
+        volume_count,
+    })
+}
+
 /// Parse a single line from a Google Books n-gram file.
 ///
 /// # Format
@@ -95,34 +181,12 @@ pub enum ParseError {
 /// assert_eq!(record.volume_count, 678);
 /// ```
 pub fn parse_ngram_line(line: &str) -> Result<NgramRecord, ParseError> {
-    let parts: Vec<&str> = line.split('\t').collect();
-
-    if parts.len() != 4 {
-        return Err(ParseError::WrongFieldCount(parts.len()));
-    }
-
-    let ngram = parts[0];
-    if ngram.is_empty() {
-        return Err(ParseError::EmptyNgram);
-    }
-
-    let year = parts[1]
-        .parse::<u16>()
-        .map_err(|_| ParseError::InvalidYear(parts[1].to_string()))?;
-
-    let match_count = parts[2]
-        .parse::<u64>()
-        .map_err(|_| ParseError::InvalidMatchCount(parts[2].to_string()))?;
-
-    let volume_count = parts[3]
-        .parse::<u32>()
-        .map_err(|_| ParseError::InvalidVolumeCount(parts[3].to_string()))?;
-
+    let rec = parse_ngram_line_ref(line)?;
     Ok(NgramRecord {
-        ngram: ngram.to_string(),
-        year,
-        match_count,
-        volume_count,
+        ngram: rec.ngram.to_string(),
+        year: rec.year,
+        match_count: rec.match_count,
+        volume_count: rec.volume_count,
     })
 }
 
@@ -247,5 +311,83 @@ mod tests {
         assert!(contains_pos_tag("cat_NOUN_"));
         assert!(!contains_pos_tag("the"));
         assert!(!contains_pos_tag("the cat"));
+    }
+
+    // ---- Zero-alloc parse_ngram_line_ref tests ----
+
+    #[test]
+    fn test_parse_ref_unigram() {
+        let rec = parse_ngram_line_ref("the\t2000\t5000000000\t1000000").unwrap();
+        assert_eq!(rec.ngram, "the");
+        assert_eq!(rec.year, 2000);
+        assert_eq!(rec.match_count, 5_000_000_000);
+        assert_eq!(rec.volume_count, 1_000_000);
+    }
+
+    #[test]
+    fn test_parse_ref_bigram() {
+        let rec = parse_ngram_line_ref("the cat\t1950\t12345\t678").unwrap();
+        assert_eq!(rec.ngram, "the cat");
+        assert_eq!(rec.year, 1950);
+        assert_eq!(rec.match_count, 12345);
+        assert_eq!(rec.volume_count, 678);
+    }
+
+    #[test]
+    fn test_parse_ref_unicode() {
+        let rec = parse_ngram_line_ref("Müller\t2000\t100\t10").unwrap();
+        assert_eq!(rec.ngram, "Müller");
+    }
+
+    #[test]
+    fn test_parse_ref_wrong_field_count() {
+        // Too few fields (1 field, 0 tabs)
+        let result = parse_ngram_line_ref("the");
+        assert!(matches!(result, Err(ParseError::WrongFieldCount(1))));
+
+        // Too few fields (3 fields, 2 tabs)
+        let result = parse_ngram_line_ref("the\t2000\t100");
+        assert!(matches!(result, Err(ParseError::WrongFieldCount(3))));
+
+        // Too many fields (5 fields, 4 tabs)
+        let result = parse_ngram_line_ref("the\t2000\t100\t10\textra");
+        assert!(matches!(result, Err(ParseError::WrongFieldCount(5))));
+    }
+
+    #[test]
+    fn test_parse_ref_empty_ngram() {
+        let result = parse_ngram_line_ref("\t2000\t100\t10");
+        assert!(matches!(result, Err(ParseError::EmptyNgram)));
+    }
+
+    #[test]
+    fn test_parse_ref_invalid_fields() {
+        let result = parse_ngram_line_ref("the\tabc\t100\t10");
+        assert!(matches!(result, Err(ParseError::InvalidYear(_))));
+
+        let result = parse_ngram_line_ref("the\t2000\tabc\t10");
+        assert!(matches!(result, Err(ParseError::InvalidMatchCount(_))));
+
+        let result = parse_ngram_line_ref("the\t2000\t100\tabc");
+        assert!(matches!(result, Err(ParseError::InvalidVolumeCount(_))));
+    }
+
+    #[test]
+    fn test_parse_ref_matches_owned() {
+        // Verify ref and owned parsers produce identical results
+        let lines = [
+            "the\t2000\t5000000000\t1000000",
+            "the cat\t1950\t12345\t678",
+            "the quick brown fox jumps\t2010\t999\t88",
+            "Müller\t2000\t100\t10",
+        ];
+        for line in lines {
+            let owned = parse_ngram_line(line).unwrap();
+            let borrowed = parse_ngram_line_ref(line).unwrap();
+            assert_eq!(owned.ngram, borrowed.ngram);
+            assert_eq!(owned.year, borrowed.year);
+            assert_eq!(owned.match_count, borrowed.match_count);
+            assert_eq!(owned.volume_count, borrowed.volume_count);
+        }
     }
 }

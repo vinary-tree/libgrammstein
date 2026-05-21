@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use flate2::read::GzDecoder;
 
 use super::aggregator::AggregatedNgram;
-use super::parser::{parse_ngram_line, NgramRecord, ParseError};
+use super::parser::{parse_ngram_line, parse_ngram_line_ref, NgramRecord, ParseError};
 #[cfg(feature = "google-books")]
 use super::task_manager::RetryAfter;
 
@@ -894,16 +894,18 @@ impl HttpNgramReader {
                         continue;
                     }
 
-                    match super::parser::parse_ngram_line(&line) {
+                    // Zero-alloc parse: borrows ngram from `line`, no Vec allocation
+                    match super::parser::parse_ngram_line_ref(&line) {
                         Ok(record) => {
                         // Apply filters
                         if record.match_count < min_count {
                             continue;
                         }
-                        if skip_pos && super::parser::contains_pos_tag(&record.ngram) {
+                        if skip_pos && super::parser::contains_pos_tag(record.ngram) {
                             continue;
                         }
-                        if let Some(aggregated) = aggregator.push(record) {
+                        // push_ref avoids String alloc when ngram matches current
+                        if let Some(aggregated) = aggregator.push_ref(&record) {
                             yield aggregated;
                         }
                     }
@@ -1051,6 +1053,82 @@ where
                     return None;
                 }
             }
+        }
+    }
+}
+
+/// Stream aggregated n-gram records from a locally cached `.gz` file.
+///
+/// This reuses the same `GzipDecoder → BufReader → LinesStream → YearAggregator`
+/// pipeline as `HttpNgramReader::stream_aggregated_with_client`, but reads from
+/// a local file via `tokio::fs::File` instead of an HTTP response body.
+///
+/// Used by the `--cache-files` mode: workers download the raw `.gz` to disk first,
+/// then import from the local copy. This decouples download from import so a
+/// failed HTTP stream doesn't waste the CPU time already spent parsing.
+#[cfg(feature = "google-books")]
+pub fn stream_aggregated_from_cached_file(
+    path: &std::path::Path,
+    year_range: Option<(u16, u16)>,
+    skip_pos_tags: bool,
+    min_count: u64,
+) -> impl tokio_stream::Stream<Item = Result<AggregatedNgram, ReaderError>> + '_ {
+    use super::aggregator::YearAggregator;
+
+    async_stream::try_stream! {
+        use async_compression::tokio::bufread::GzipDecoder;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio_stream::StreamExt;
+
+        // Open local file
+        let file = tokio::fs::File::open(path).await.map_err(|e| {
+            ReaderError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to open cached file {}: {}", path.display(), e),
+            ))
+        })?;
+
+        // Build the same decompression pipeline as the HTTP path:
+        // File → BufReader → GzipDecoder → BufReader → LinesStream
+        let decoder = GzipDecoder::new(BufReader::new(file));
+        let buf_reader = BufReader::new(decoder);
+        let lines = tokio_stream::wrappers::LinesStream::new(buf_reader.lines());
+        tokio::pin!(lines);
+
+        let mut aggregator = YearAggregator::new(year_range);
+        let mut line_num = 0u64;
+
+        while let Some(line_result) = lines.next().await {
+            line_num += 1;
+            let line = line_result?;
+
+            if line.is_empty() {
+                continue;
+            }
+
+            // Zero-alloc parse: borrows ngram from `line`, no Vec allocation
+            match super::parser::parse_ngram_line_ref(&line) {
+                Ok(record) => {
+                    if record.match_count < min_count {
+                        continue;
+                    }
+                    if skip_pos_tags && super::parser::contains_pos_tag(record.ngram) {
+                        continue;
+                    }
+                    // push_ref avoids String alloc when ngram matches current
+                    if let Some(aggregated) = aggregator.push_ref(&record) {
+                        yield aggregated;
+                    }
+                }
+                Err(e) => {
+                    Err(ReaderError::Parse { line: line_num, error: e })?;
+                }
+            }
+        }
+
+        // Flush final n-gram
+        if let Some(aggregated) = aggregator.flush() {
+            yield aggregated;
         }
     }
 }

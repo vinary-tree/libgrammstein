@@ -6,7 +6,7 @@
 //! This module provides streaming aggregation that is memory-efficient:
 //! it only buffers records for one n-gram at a time.
 
-use super::parser::NgramRecord;
+use super::parser::{NgramRecord, NgramRecordRef};
 
 /// Aggregated n-gram statistics across years.
 #[derive(Clone, Debug, Default)]
@@ -111,6 +111,60 @@ impl YearAggregator {
                 // First record
                 self.current = Some(AggregatedNgram {
                     ngram: record.ngram,
+                    total_count: record.match_count,
+                    max_volume_count: record.volume_count,
+                    year_span: 1,
+                    first_year: record.year,
+                    last_year: record.year,
+                });
+                None
+            }
+        }
+    }
+
+    /// Push a borrowed record, avoiding String allocation when the ngram matches.
+    ///
+    /// This is the zero-alloc hot path: when the ngram is the same as the current
+    /// buffered ngram, no heap allocation occurs. A String is only allocated when
+    /// a new ngram is first encountered.
+    ///
+    /// Returns `Some(aggregated)` when we encounter a new n-gram,
+    /// indicating the previous one is complete.
+    pub fn push_ref(&mut self, record: &NgramRecordRef<'_>) -> Option<AggregatedNgram> {
+        // Check year filter
+        if let Some((start, end)) = self.year_range {
+            if record.year < start || record.year > end {
+                return None;
+            }
+        }
+
+        match &mut self.current {
+            Some(current) if current.ngram == record.ngram => {
+                // Same n-gram, accumulate — no String allocation
+                current.total_count += record.match_count;
+                current.max_volume_count = current.max_volume_count.max(record.volume_count);
+                current.year_span += 1;
+                current.first_year = current.first_year.min(record.year);
+                current.last_year = current.last_year.max(record.year);
+                None
+            }
+            Some(_) => {
+                // New n-gram — allocate String only here
+                let previous = self.current.take();
+                self.current = Some(AggregatedNgram {
+                    ngram: record.ngram.to_string(),
+                    total_count: record.match_count,
+                    max_volume_count: record.volume_count,
+                    year_span: 1,
+                    first_year: record.year,
+                    last_year: record.year,
+                });
+                previous
+            }
+            None => {
+                // First record — allocate String
+                self.current = Some(AggregatedNgram {
+                    ngram: record.ngram.to_string(),
                     total_count: record.match_count,
                     max_volume_count: record.volume_count,
                     year_span: 1,
