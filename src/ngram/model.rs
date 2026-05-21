@@ -3,8 +3,9 @@
 //! This module provides the main `NgramModel` struct that combines the n-gram
 //! trie with smoothing algorithms for probability estimation.
 
-use crate::ngram::smoothing::KneserNeySmoothing;
-use crate::ngram::{NgramEntry, NgramTrie};
+use super::entry::NgramEntry;
+use super::smoothing::KneserNeySmoothing;
+use super::trie::NgramTrie;
 use liblevenshtein::dictionary::MutableMappedDictionary;
 
 #[cfg(feature = "serde-extras")]

@@ -2,7 +2,7 @@
 //!
 //! Reads plain text files or directories of text files.
 
-use crate::corpus::{CorpusReader, Document, Normalizer, Tokenizer};
+use super::{CorpusReader, Document, Normalizer, Tokenizer};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};

@@ -7,12 +7,11 @@
 //! - Progress reporting
 
 use crate::corpus::{CorpusReader, PrefetchConfig, PrefetchingReader, Tokenizer};
-use crate::ngram::smoothing::KneserNeySmoothing;
-use crate::ngram::trie::{IterableDictionary, LEGACY_NGRAM_SEPARATOR};
-use crate::ngram::vocabulary::{
-    create_vocabulary, encode_ngram_key, open_or_create_vocabulary, SharedVocabARTrie,
-};
-use crate::ngram::{NgramEntry, NgramModel, NgramTrie};
+use super::entry::NgramEntry;
+use super::model::NgramModel;
+use super::smoothing::KneserNeySmoothing;
+use super::trie::{IterableDictionary, NgramTrie, LEGACY_NGRAM_SEPARATOR};
+use super::vocabulary::{encode_ngram_key, open_or_create_vocabulary, SharedVocabARTrie};
 use crate::Result;
 
 use crossbeam_channel::Sender;
@@ -820,6 +819,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::vocabulary::create_vocabulary;
     use crate::corpus::PlaintextReader;
     use liblevenshtein::dictionary::pathmap::PathMapDictionary;
     use std::io::Write;

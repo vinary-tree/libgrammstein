@@ -12,7 +12,8 @@
 //! - Chen, S. F., & Goodman, J. (1999). An empirical study of smoothing
 //!   techniques for language modeling. Computer Speech & Language.
 
-use crate::ngram::{NgramEntry, NgramTrie};
+use super::super::entry::NgramEntry;
+use super::super::trie::NgramTrie;
 use liblevenshtein::dictionary::MutableMappedDictionary;
 
 /// Modified Kneser-Ney smoothing parameters and algorithm.

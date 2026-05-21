@@ -16,7 +16,7 @@
 //!
 //! New code should use vocabulary-indexed encoding via [`crate::ngram::vocabulary`].
 
-use crate::ngram::NgramEntry;
+use super::entry::NgramEntry;
 use liblevenshtein::dictionary::MutableMappedDictionary;
 use std::marker::PhantomData;
 use std::sync::Arc;
