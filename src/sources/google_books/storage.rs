@@ -1782,4 +1782,143 @@ mod tests {
             "single-trie mode should always flush (returns 1) regardless of threshold"
         );
     }
+
+    // ---- Checkpoint-resume regression (docs/debugging/checkpoint-resume-bug.md) ----
+
+    #[test]
+    fn test_checkpoint_resume_no_count_doubling() {
+        // Regression test for the documented checkpoint-resume bug. The
+        // original failure mode: the vocabulary was NOT checkpointed
+        // alongside the n-gram trie/shards, so on reopen the vocab restarted
+        // from a stale index point, causing orphaned n-grams and doubled
+        // counts. The fix wires merge_and_rotate_vocabulary_wal into both
+        // periodic and save checkpoints — this test guards that invariant.
+        let dir = TempDir::new().expect("tempdir");
+        let vocab_path = dir.path().join("vocab.artrie");
+
+        // Known n-grams spanning multiple shards (different first-token
+        // 2-char prefixes) so we exercise the cross-shard durability path.
+        let ngrams: Vec<(Vec<&str>, u64)> = vec![
+            (vec!["the", "quick"], 1000),
+            (vec!["the", "brown"], 500),
+            (vec!["the", "fox"], 250),
+            (vec!["apple", "pie"], 100),
+            (vec!["apple", "tart"], 50),
+            (vec!["zebra", "crossing"], 25),
+            (vec!["zebra", "stripes"], 12),
+        ];
+
+        // ---- Phase 1: import, checkpoint, drop ----
+        {
+            let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab create");
+            let vocab = create_concurrent_vocabulary_lockfree(vocab);
+
+            let config = GoogleBooksConfig {
+                output_path: dir.path().join("english.artrie"),
+                sharding: ShardingMode::Enabled(super::super::config::ShardingOptions {
+                    granularity: super::super::config::ShardingGranularity::TwoChar,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let storage = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocab))
+                .expect("create_sharded_with_vocabulary");
+
+            for (tokens, count) in &ngrams {
+                storage.store_tokens(tokens, *count).expect("store_tokens");
+            }
+
+            // Mirror the importer's periodic-checkpoint flow:
+            // merge vocab + rotate WAL, then sync + checkpoint shards.
+            storage
+                .merge_and_rotate_vocabulary_wal()
+                .expect("merge_and_rotate_vocabulary_wal");
+            storage.sync().expect("storage sync");
+            storage.checkpoint().expect("storage checkpoint");
+
+            // storage drops here, releasing all file handles
+        }
+
+        // ---- Phase 2: reopen and verify ----
+        {
+            let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab reopen");
+            let vocab = create_concurrent_vocabulary_lockfree(vocab);
+
+            let config = GoogleBooksConfig {
+                output_path: dir.path().join("english.artrie"),
+                sharding: ShardingMode::Enabled(super::super::config::ShardingOptions {
+                    granularity: super::super::config::ShardingGranularity::TwoChar,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let storage = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocab))
+                .expect("reopen storage");
+
+            // Every n-gram must be queryable with its EXACT original count.
+            // Any count doubling, missing entry, or vocab-index drift would
+            // fail this loop.
+            for (tokens, expected_count) in &ngrams {
+                let got = storage.get_tokens(tokens);
+                let token_slice: Vec<&str> = tokens.iter().copied().collect();
+                assert_eq!(
+                    got,
+                    Some(*expected_count),
+                    "n-gram {:?} expected count {} but got {:?} after \
+                     checkpoint+drop+reopen — indicates vocab or shard data \
+                     was lost (the documented checkpoint-resume bug class)",
+                    token_slice,
+                    expected_count,
+                    got
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_vocabulary_indices_stable_across_reopen() {
+        // Independently of count doubling, the vocab's term→index mapping
+        // must be STABLE across reopen. Re-inserting a known term should
+        // return the same index it had originally — not a fresh sequential
+        // one. The original bug had the vocab restart numbering after a
+        // crash, orphaning all n-grams that had been encoded with the
+        // pre-crash indices.
+        let dir = TempDir::new().expect("tempdir");
+        let vocab_path = dir.path().join("vocab.artrie");
+
+        let terms = ["the", "quick", "brown", "fox"];
+        let original_indices: Vec<u64>;
+
+        // Phase 1: insert + checkpoint
+        {
+            let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab create");
+            let mut indices = Vec::new();
+            {
+                let mut guard = vocab.write();
+                for term in &terms {
+                    indices.push(guard.insert(term));
+                }
+            }
+            original_indices = indices;
+
+            vocab.write().checkpoint().expect("vocab checkpoint");
+        }
+
+        // Phase 2: reopen + re-insert
+        let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab reopen");
+        let mut reopened_indices = Vec::new();
+        {
+            let mut guard = vocab.write();
+            for term in &terms {
+                reopened_indices.push(guard.insert(term));
+            }
+        }
+
+        assert_eq!(
+            original_indices, reopened_indices,
+            "vocabulary indices must be stable across reopen — the documented \
+             checkpoint-resume bug arose when re-insertion assigned new \
+             indices, orphaning previously-encoded n-grams"
+        );
+    }
 }
