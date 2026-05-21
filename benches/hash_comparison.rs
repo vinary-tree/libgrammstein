@@ -8,7 +8,7 @@
 //! Uses n-gram words from `bak/english.vocab.artrie` for realistic benchmarking.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use libgrammstein::ngram::vocabulary::SharedVocabulary;
+use libgrammstein::ngram::vocabulary::open_vocabulary;
 use libgrammstein::util::hash::{fnv1a, safe_hash, safe_hash_with_seed, GXHASH_MIN_SIZE};
 use std::path::Path;
 use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
@@ -27,12 +27,14 @@ fn load_vocabulary_words() -> Vec<String> {
         return generate_synthetic_words(10000);
     }
 
-    let vocab = SharedVocabulary::open(vocab_path).expect("Failed to open vocabulary");
+    let vocab = open_vocabulary(vocab_path).expect("Failed to open vocabulary");
 
-    // Use O(1) get_term() lookups to collect all words
-    let count = vocab.len();
+    // Use O(1) get_term() lookups to collect all words. Hold the read guard
+    // for the duration of the iteration to amortize lock-acquisition cost.
+    let guard = vocab.read();
+    let count = guard.len() as u64;
     (1..=count)
-        .filter_map(|i| vocab.get_term(i))
+        .filter_map(|i| guard.get_term(i))
         .collect()
 }
 

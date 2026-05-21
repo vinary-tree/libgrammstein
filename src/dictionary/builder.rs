@@ -554,9 +554,9 @@ mod tests {
             .unwrap();
 
         // Total = 200, each word has probability 0.5
-        // ln(0.5) = -0.693...
+        // ln(0.5) = -ln(2) ≈ -0.693147
         let log_prob = dict.log_prob("a").unwrap();
-        assert!((log_prob - (-0.693147)).abs() < 0.001);
+        assert!((log_prob - (-std::f64::consts::LN_2)).abs() < 0.001);
     }
 
     #[test]
