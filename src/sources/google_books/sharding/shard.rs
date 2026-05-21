@@ -1956,6 +1956,55 @@ mod tests {
     }
 
     #[test]
+    fn test_commit_chunk_handles_large_batch_and_varint_boundary() {
+        // Diagnostic: insert 200 keys that mimic vocab-encoded n-gram keys,
+        // including the LEB128 1-byte → 2-byte boundary at index 128. The
+        // shard's persistent ART must handle arbitrary byte sequences and
+        // arbitrary commit-batch sizes.
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("test_shard.artrie");
+        let mut shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
+
+        // Keys: [0x01, idx_varint] mimicking ["the" → 1, word_N → N+2]
+        fn encode_varint(mut v: u64, out: &mut Vec<u8>) {
+            loop {
+                let b = (v & 0x7f) as u8;
+                v >>= 7;
+                if v == 0 {
+                    out.push(b);
+                    break;
+                } else {
+                    out.push(b | 0x80);
+                }
+            }
+        }
+
+        let mut tx = shard.begin_prefix("th").expect("begin_prefix");
+        let mut keys = Vec::new();
+        for i in 0..200u64 {
+            let mut key = vec![0x01u8];
+            encode_varint(i + 2, &mut key); // start at index 2 (1 is "the")
+            shard.tx_insert(&mut tx, &key, 1000 + i);
+            keys.push(key);
+        }
+        let inserted = shard.commit_prefix(tx).expect("commit_prefix");
+        assert_eq!(inserted, 200);
+
+        let mut missing = Vec::new();
+        for (i, key) in keys.iter().enumerate() {
+            if shard.get(key) != Some(1000 + i as u64) {
+                missing.push((i, key.clone(), shard.get(key)));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "shard-level: missing {} keys: first: {:?}",
+            missing.len(),
+            &missing[..missing.len().min(3)]
+        );
+    }
+
+    #[test]
     fn test_commit_chunk_set_semantics_idempotent() {
         // The crash-recovery contract: SET semantics make re-inserting the
         // same (key, value) idempotent. After two identical commit_chunk

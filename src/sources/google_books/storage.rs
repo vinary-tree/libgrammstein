@@ -1024,7 +1024,27 @@ impl NgramStorage {
     /// # Returns
     ///
     /// A `StoragePrefixTx` that must be passed to `tx_insert()` and
-    /// eventually to `commit_prefix_tx()`, or `None` for single-trie mode.
+    /// eventually to `commit_prefix_tx()`, or `None` for single-trie mode
+    /// OR for hash-based sharding granularities (see safety note below).
+    ///
+    /// # Safety constraint: only prefix-based granularities support chunked tx
+    ///
+    /// Chunked transactions bind to a single shard at `begin_prefix_tx` time,
+    /// then route every subsequent `tx_insert_ngram` to that shard. This is
+    /// correct under prefix-based granularities (`TwoChar`, `Adaptive` for
+    /// the orders that resolve to prefix routing): all n-grams in a Google
+    /// Books file share a 2-char prefix, so they all route to the same shard,
+    /// and `route_tokens(first_token)` agrees with
+    /// `shard_key_for_file_prefix(file_prefix)`.
+    ///
+    /// Under `CpuProportional` (hash-based), file prefix and first-token
+    /// routing diverge — `hash("th")` and `hash("the")` produce different
+    /// shard indices. If we bound the tx to `hash("th")` but n-grams write
+    /// based on the first token's hash, get-by-tokens would later read from
+    /// the wrong shard. Returning `None` here forces the caller to fall back
+    /// to per-record `store_ngram`/`store_tokens`, which routes each n-gram
+    /// individually via `route_tokens(tokens)` — correct for all
+    /// granularities at the cost of losing the chunked-tx memory bound.
     pub fn begin_prefix_tx(&self, prefix: &str, order: u8) -> StorageResult<Option<StoragePrefixTx>> {
         match self {
             Self::SingleTrie { .. } => {
@@ -1033,6 +1053,11 @@ impl NgramStorage {
                 Ok(None)
             }
             Self::Sharded { coordinator, .. } => {
+                // Hash-based granularities can't use chunked-tx safely
+                // (see doc comment above). Fall through to per-record path.
+                if coordinator.config().granularity.is_hash_based() {
+                    return Ok(None);
+                }
                 let shard_key = super::sharding::shard_key_for_file_prefix(
                     prefix,
                     order,
@@ -1622,15 +1647,67 @@ mod tests {
 
     // ---- Chunked transactions ----
 
+    /// Diagnostic: same volume of inserts but single commit (no renewal).
+    /// If this passes but the renew variant fails, the bug is in the renew
+    /// path. If both fail, the bug is in some other part of the pipeline.
+    #[test]
+    fn test_single_commit_at_150_entries() {
+        let dir = TempDir::new().expect("tempdir");
+        let vocab_path = dir.path().join("vocab.artrie");
+        let vocabulary = open_or_create_vocabulary(&vocab_path).expect("vocab");
+        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+
+        let config = GoogleBooksConfig {
+            output_path: dir.path().join("output.artrie"),
+            sharding: ShardingMode::Enabled(super::super::config::ShardingOptions {
+                granularity: super::super::config::ShardingGranularity::TwoChar,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let storage = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocabulary))
+            .expect("create_sharded_with_vocabulary");
+
+        let mut tx = storage
+            .begin_prefix_tx("th", 2)
+            .expect("begin_prefix_tx")
+            .expect("Some for prefix-based");
+
+        for i in 0..150 {
+            let ngram = format!("the w{:04}", i);
+            storage
+                .tx_insert_ngram(&mut tx, &ngram, 100 + i as u64)
+                .expect("tx_insert_ngram");
+        }
+
+        let committed = storage.commit_prefix_tx(tx).expect("commit_prefix_tx");
+        assert_eq!(committed, 150);
+
+        let mut missing = Vec::new();
+        for i in 0..150 {
+            let suffix = format!("w{:04}", i);
+            let tokens = ["the", suffix.as_str()];
+            if storage.get_tokens(&tokens) != Some(100 + i as u64) {
+                missing.push((i, format!("the {}", suffix), storage.get_tokens(&tokens)));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "single-commit variant: missing {} of 150: first: {:?}",
+            missing.len(),
+            &missing[..missing.len().min(3)]
+        );
+    }
+
     #[test]
     fn test_commit_and_renew_prefix_tx_continues_inserts() {
         // Multi-chunk workflow at the storage layer: chunked commits via
         // commit_and_renew_prefix_tx, then a final commit_prefix_tx.
         //
-        // Uses TwoChar (prefix-based) granularity so that both the chunked-tx
-        // routing (by file prefix "th") and the get_tokens routing (by first
-        // token "the") agree on the same shard. The default CpuProportional
-        // granularity hashes — those would diverge for "th" vs "the".
+        // Uses TwoChar (prefix-based) granularity. Under hash-based
+        // CpuProportional, `begin_prefix_tx` returns None and this code
+        // path is bypassed at the storage layer (per the safety constraint
+        // documented on NgramStorage::begin_prefix_tx).
         let dir = TempDir::new().expect("tempdir");
         let vocab_path = dir.path().join("vocab.artrie");
         let vocabulary = open_or_create_vocabulary(&vocab_path).expect("vocab");
@@ -1653,10 +1730,10 @@ mod tests {
         let mut tx = storage
             .begin_prefix_tx("th", 2)
             .expect("begin_prefix_tx")
-            .expect("sharded mode should return Some");
+            .expect("sharded mode with prefix-based granularity should return Some");
 
-        // Chunk 1: 5 entries, then chunk-commit
-        for i in 0..5 {
+        // Insert 100 n-grams, then chunk-commit
+        for i in 0..100 {
             let ngram = format!("the w{:04}", i);
             storage
                 .tx_insert_ngram(&mut tx, &ngram, 100 + i as u64)
@@ -1665,10 +1742,10 @@ mod tests {
         let committed_chunk = storage
             .commit_and_renew_prefix_tx(&mut tx, "th", 2)
             .expect("commit_and_renew_prefix_tx");
-        assert_eq!(committed_chunk, 5, "first chunk should commit 5 n-grams");
+        assert_eq!(committed_chunk, 100, "first chunk should commit 100 n-grams");
 
-        // Chunk 2: 3 more entries
-        for i in 5..8 {
+        // Insert 50 more
+        for i in 100..150 {
             let ngram = format!("the w{:04}", i);
             storage
                 .tx_insert_ngram(&mut tx, &ngram, 100 + i as u64)
@@ -1677,19 +1754,73 @@ mod tests {
 
         // Final commit marks the prefix complete
         let committed_final = storage.commit_prefix_tx(tx).expect("commit_prefix_tx");
-        assert_eq!(committed_final, 3, "final chunk should commit 3 n-grams");
+        assert_eq!(committed_final, 50, "final chunk should commit 50 n-grams");
 
-        // All 8 n-grams should be queryable via get_tokens
-        for i in 0..8 {
+        // All 150 n-grams should be queryable via get_tokens — the prefix-based
+        // routing means both the chunked-tx target shard (hash of "th") and
+        // the read-time routing (first 2 chars of "the") resolve to the same
+        // ShardKey("th"), so the data is findable end-to-end.
+        let mut missing = Vec::new();
+        for i in 0..150 {
             let suffix = format!("w{:04}", i);
             let tokens = ["the", suffix.as_str()];
-            assert_eq!(
-                storage.get_tokens(&tokens),
-                Some(100 + i as u64),
-                "ngram 'the {}' missing or wrong value after multi-chunk commit",
-                suffix
-            );
+            if storage.get_tokens(&tokens) != Some(100 + i as u64) {
+                missing.push((i, format!("the {}", suffix), storage.get_tokens(&tokens)));
+            }
         }
+        assert!(
+            missing.is_empty(),
+            "missing or wrong n-grams after multi-chunk commit ({} total): first few: {:?}",
+            missing.len(),
+            &missing[..missing.len().min(5)]
+        );
+    }
+
+    #[test]
+    fn test_begin_prefix_tx_returns_none_for_hash_based_sharding() {
+        // Safety constraint: chunked transactions can't be used under
+        // hash-based granularities because file prefix and first-token
+        // hashes diverge (e.g., hash("th") ≠ hash("the")). begin_prefix_tx
+        // must return None for these, forcing the caller to fall back to
+        // per-record store_ngram which routes correctly per-token.
+        //
+        // Without this guard, the importer's chunked-tx path would bind
+        // to one shard per file but the data would belong on many — and
+        // get_tokens reads would later miss the data entirely.
+        let dir = TempDir::new().expect("tempdir");
+        let vocab_path = dir.path().join("vocab.artrie");
+        let vocabulary = open_or_create_vocabulary(&vocab_path).expect("vocab");
+        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+
+        let config = GoogleBooksConfig {
+            output_path: dir.path().join("output.artrie"),
+            sharding: ShardingMode::Enabled(super::super::config::ShardingOptions {
+                granularity: super::super::config::ShardingGranularity::CpuProportional {
+                    multiplier: 2,
+                    minimum: 8,
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let storage = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocabulary))
+            .expect("create_sharded_with_vocabulary");
+
+        let result = storage
+            .begin_prefix_tx("th", 2)
+            .expect("begin_prefix_tx should not error on hash-based granularity");
+        assert!(
+            result.is_none(),
+            "hash-based granularity must return None from begin_prefix_tx to \
+             prevent the file-prefix-vs-first-token routing divergence bug"
+        );
+
+        // The per-record path (store_tokens) still works correctly: it routes
+        // by first-token hash both at write time and at read time.
+        storage
+            .store_tokens(&["the", "quick"], 42)
+            .expect("store_tokens (per-record fallback)");
+        assert_eq!(storage.get_tokens(&["the", "quick"]), Some(42));
     }
 
     #[test]
