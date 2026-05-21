@@ -862,4 +862,54 @@ mod tests {
         assert_eq!(counts.total_unique, 6);
         assert_eq!(counts.total_count, 1 + 1 + 2 + 3 + 4 + 100);
     }
+
+    // ---- Cooperative cancellation ----
+
+    #[test]
+    fn test_mkn_compute_all_cancellable() {
+        // Pre-set the cancellation flag, then call compute_all. The very
+        // first per-shard iteration should observe the flag and return
+        // Err(MknError::Computation("Cancelled")).
+        let (_dir, coordinator, _vocab) = create_test_coordinator();
+        let flag = std::sync::atomic::AtomicBool::new(true); // already cancelled
+
+        let aggregator = MknAggregator::new(&coordinator).with_cancellation_flag(&flag);
+        let result = aggregator.compute_frequency_counts();
+
+        match result {
+            Err(MknError::Computation(msg)) => {
+                assert!(
+                    msg.contains("Cancelled"),
+                    "expected 'Cancelled' in error message, got: {}",
+                    msg
+                );
+            }
+            Ok(_) => panic!("compute_frequency_counts should have been cancelled"),
+            Err(e) => panic!("expected MknError::Computation(\"Cancelled\"), got: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_mkn_continuation_cancellable() {
+        // Same as above but for compute_continuation_counts.
+        let (_dir, coordinator, _vocab) = create_test_coordinator();
+        let flag = std::sync::atomic::AtomicBool::new(true);
+
+        let aggregator = MknAggregator::new(&coordinator)
+            .with_continuations()
+            .with_cancellation_flag(&flag);
+        let result = aggregator.compute_continuation_counts();
+
+        match result {
+            Err(MknError::Computation(msg)) => {
+                assert!(
+                    msg.contains("Cancelled"),
+                    "expected 'Cancelled' in error message, got: {}",
+                    msg
+                );
+            }
+            Ok(_) => panic!("compute_continuation_counts should have been cancelled"),
+            Err(e) => panic!("expected MknError::Computation(\"Cancelled\"), got: {:?}", e),
+        }
+    }
 }

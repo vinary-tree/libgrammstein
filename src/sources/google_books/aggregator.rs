@@ -331,4 +331,85 @@ mod tests {
         assert_eq!(aggregated[1].ngram, "b");
         assert_eq!(aggregated[1].total_count, 110);
     }
+
+    // ---- push_ref (zero-alloc hot path) ----
+
+    fn make_record_ref<'a>(ngram: &'a str, year: u16, count: u64) -> NgramRecordRef<'a> {
+        NgramRecordRef {
+            ngram,
+            year,
+            match_count: count,
+            volume_count: 100,
+        }
+    }
+
+    #[test]
+    fn test_push_ref_no_alloc_on_same_ngram() {
+        // Push 5 records with the same ngram, then 1 with a different ngram.
+        // The first 4 same-ngram pushes return None; the 5th same-ngram push
+        // also returns None; the 6th (different) returns Some(aggregated)
+        // with the summed total_count.
+        let mut agg = YearAggregator::new(None);
+
+        assert!(agg.push_ref(&make_record_ref("the", 2000, 100)).is_none());
+        assert!(agg.push_ref(&make_record_ref("the", 2001, 100)).is_none());
+        assert!(agg.push_ref(&make_record_ref("the", 2002, 100)).is_none());
+        assert!(agg.push_ref(&make_record_ref("the", 2003, 100)).is_none());
+        assert!(agg.push_ref(&make_record_ref("the", 2004, 100)).is_none());
+
+        // Switch to a new ngram — returns the accumulated previous one
+        let previous = agg
+            .push_ref(&make_record_ref("a", 2000, 50))
+            .expect("new ngram should yield previous");
+        assert_eq!(previous.ngram, "the");
+        assert_eq!(previous.total_count, 500);
+        assert_eq!(previous.year_span, 5);
+        assert_eq!(previous.first_year, 2000);
+        assert_eq!(previous.last_year, 2004);
+    }
+
+    #[test]
+    fn test_push_ref_vs_push_equivalent() {
+        // Feed the same record sequence to two aggregators (one via push,
+        // one via push_ref) and assert the flushed results are identical.
+        let inputs = [
+            ("the", 2000u16, 100u64),
+            ("the", 2001, 200),
+            ("the", 2002, 150),
+            ("a", 2000, 50),
+            ("a", 2001, 60),
+            ("a", 2010, 70),
+        ];
+
+        let mut owned_agg = YearAggregator::new(None);
+        let mut owned_results = Vec::new();
+        for &(n, y, c) in &inputs {
+            if let Some(r) = owned_agg.push(make_record(n, y, c)) {
+                owned_results.push(r);
+            }
+        }
+        if let Some(r) = owned_agg.flush() {
+            owned_results.push(r);
+        }
+
+        let mut ref_agg = YearAggregator::new(None);
+        let mut ref_results = Vec::new();
+        for &(n, y, c) in &inputs {
+            if let Some(r) = ref_agg.push_ref(&make_record_ref(n, y, c)) {
+                ref_results.push(r);
+            }
+        }
+        if let Some(r) = ref_agg.flush() {
+            ref_results.push(r);
+        }
+
+        assert_eq!(owned_results.len(), ref_results.len());
+        for (o, r) in owned_results.iter().zip(ref_results.iter()) {
+            assert_eq!(o.ngram, r.ngram);
+            assert_eq!(o.total_count, r.total_count);
+            assert_eq!(o.year_span, r.year_span);
+            assert_eq!(o.first_year, r.first_year);
+            assert_eq!(o.last_year, r.last_year);
+        }
+    }
 }
