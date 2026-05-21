@@ -20,9 +20,12 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::Parser;
-use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
+use libdictenstein::persistent_artrie::PersistentARTrie;
+use libdictenstein::persistent_vocab_artrie::PersistentVocabARTrie;
+use liblevenshtein::dictionary::Dictionary;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 /// Checkpoint state inspector for debugging resume issues.
 #[derive(Parser)]
@@ -48,6 +51,41 @@ struct Args {
     /// Verbose output
     #[arg(long, short = 'v')]
     verbose: bool,
+}
+
+/// On-disk u64 LE magic for `PersistentARTrie<V>` (mirrors
+/// `libdictenstein::persistent_artrie_core::disk_manager::MAGIC_NUMBER`).
+///
+/// Both byte-keyed (`PersistentARTrie`) and the legacy char-keyed
+/// (`PersistentARTrieChar`) tries share this file-header magic because they
+/// use the same `DiskManager` — they differ only in arena layout. So we
+/// cannot distinguish them by file header alone; this binary supports only
+/// the current byte-keyed format (post-Phase-10e). To inspect legacy
+/// pre-migration files, use an earlier binary build.
+const PART_MAGIC_U64: u64 = 0x5041_5254_0001_0000;
+
+/// 4-byte ASCII tag at the start of a `PersistentVocabARTrie` file.
+const VOCB_MAGIC: &[u8; 4] = b"VOCB";
+
+/// Quick sanity check: does the file start with the byte-trie `PART` u64 magic?
+/// Used to fail fast with a clear error if a non-artrie file is given.
+fn looks_like_byte_artrie(path: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut f = std::fs::File::open(path)?;
+    let mut buf = [0u8; 8];
+    if f.read(&mut buf)? < 8 {
+        return Ok(false);
+    }
+    Ok(u64::from_le_bytes(buf) == PART_MAGIC_U64)
+}
+
+/// Quick sanity check: does the file start with the vocab `VOCB` ASCII magic?
+fn looks_like_vocab(path: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut f = std::fs::File::open(path)?;
+    let mut buf = [0u8; 4];
+    if f.read(&mut buf)? < 4 {
+        return Ok(false);
+    }
+    Ok(&buf == VOCB_MAGIC)
 }
 
 /// Checkpoint key constants (duplicated from checkpoint.rs for standalone binary)
@@ -277,42 +315,69 @@ fn inspect_json_checkpoint(path: &PathBuf) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+/// Inspect a trie-format checkpoint file. Expects the current byte-keyed
+/// `PersistentARTrie<u64>` format (post-Phase-10e). Rejects vocab files (which
+/// have `"VOCB"` magic) with a clear message pointing at `inspect_vocabulary`.
 fn inspect_trie_checkpoint(path: &PathBuf, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let trie = PersistentARTrieChar::<u64>::open(path)?;
+    if looks_like_vocab(path)? {
+        return Err(format!(
+            "{} has VOCB (vocab) magic — inspect with the vocabulary path, not the trie path",
+            path.display()
+        )
+        .into());
+    }
+    if !looks_like_byte_artrie(path)? {
+        return Err(format!(
+            "{} does not have the PART byte-trie magic in its first 8 bytes — \
+             not a current-format checkpoint trie",
+            path.display()
+        )
+        .into());
+    }
 
-    println!("  Trie size: {} entries", trie.len());
+    let trie = PersistentARTrie::<u64>::open(path)?;
+    inspect_trie_checkpoint_inner(&trie, args)
+}
+
+/// Read all checkpoint fields from a byte-keyed `PersistentARTrie<u64>` and
+/// print a human-readable summary.
+fn inspect_trie_checkpoint_inner(
+    store: &PersistentARTrie<u64>,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("  Trie size: {} entries", store_len(store));
 
     // Load basic metadata
-    if let Some(version) = get_checkpoint_value(&trie, CHECKPOINT_VERSION_KEY)? {
+    if let Some(version) = get_checkpoint_value(store, CHECKPOINT_VERSION_KEY) {
         println!("  Version: {}", version);
     }
 
-    if let Some(timestamp) = get_checkpoint_value(&trie, CHECKPOINT_TIMESTAMP_KEY)? {
+    if let Some(timestamp) = get_checkpoint_value(store, CHECKPOINT_TIMESTAMP_KEY) {
         let dt = chrono::DateTime::from_timestamp(timestamp as i64, 0);
         if let Some(dt) = dt {
             println!("  Timestamp: {}", dt.format("%Y-%m-%d %H:%M:%S UTC"));
         }
     }
 
-    if let Some(ngrams) = get_checkpoint_value(&trie, CHECKPOINT_NGRAMS_PROCESSED_KEY)? {
+    if let Some(ngrams) = get_checkpoint_value(store, CHECKPOINT_NGRAMS_PROCESSED_KEY) {
         println!("  N-grams processed: {}", ngrams);
     }
 
-    if let Some(unique) = get_checkpoint_value(&trie, CHECKPOINT_UNIQUE_NGRAMS_KEY)? {
+    if let Some(unique) = get_checkpoint_value(store, CHECKPOINT_UNIQUE_NGRAMS_KEY) {
         println!("  Unique n-grams: {}", unique);
     }
 
-    if let Some(files) = get_checkpoint_value(&trie, CHECKPOINT_FILES_PROCESSED_KEY)? {
+    if let Some(files) = get_checkpoint_value(store, CHECKPOINT_FILES_PROCESSED_KEY) {
         println!("  Files processed: {}", files);
     }
 
-    if let Some(mkn_phase) = get_checkpoint_value(&trie, CHECKPOINT_MKN_PHASE_KEY)? {
+    if let Some(mkn_phase) = get_checkpoint_value(store, CHECKPOINT_MKN_PHASE_KEY) {
         let phase_str = match mkn_phase {
             0 => "NotStarted",
             100 => "Pass1Complete",
             200 => "Complete",
-            n if n >= 1 && n < 100 => "Pass1InProgress",
-            n if n >= 101 && n < 200 => "Pass2InProgress",
+            n if (1..100).contains(&n) => "Pass1InProgress",
+            n if (101..200).contains(&n) => "Pass2InProgress",
             _ => "Unknown",
         };
         println!("  MKN Phase: {} ({})", mkn_phase, phase_str);
@@ -322,7 +387,7 @@ fn inspect_trie_checkpoint(path: &PathBuf, args: &Args) -> Result<(), Box<dyn st
     println!("  N-grams by order:");
     for order in 1..=5u8 {
         let key = format!("{}{}", CHECKPOINT_NGRAMS_BY_ORDER_PREFIX, order);
-        if let Some(count) = get_checkpoint_value(&trie, &key)? {
+        if let Some(count) = get_checkpoint_value(store, &key) {
             if count > 0 {
                 println!("    Order {}: {}", order, count);
             }
@@ -335,17 +400,17 @@ fn inspect_trie_checkpoint(path: &PathBuf, args: &Args) -> Result<(), Box<dyn st
     for order in 1..=5u8 {
         // Check if order is complete
         let complete_key = format!("{}{}", CHECKPOINT_ORDER_COMPLETE_PREFIX, order);
-        let is_complete = get_checkpoint_value(&trie, &complete_key)?
+        let is_complete = get_checkpoint_value(store, &complete_key)
             .map(|v| v == 1)
             .unwrap_or(false);
 
         // Try v3 bitmap format first
         let prefix_len = if order == 1 { 1u8 } else { 2u8 };
-        let mut states = load_bitmap_states(&trie, order, prefix_len)?;
+        let mut states = load_bitmap_states(store, order, prefix_len)?;
 
         // If no bitmap states, try v2 key-per-prefix format
         if states.is_empty() {
-            states = load_v2_prefix_states(&trie, order)?;
+            states = load_v2_prefix_states(store, order)?;
         }
 
         if is_complete || !states.is_empty() {
@@ -386,28 +451,40 @@ fn inspect_trie_checkpoint(path: &PathBuf, args: &Args) -> Result<(), Box<dyn st
     // Show raw keys if requested
     if args.raw_keys {
         println!("\n  Raw checkpoint keys:");
-        if let Some(entries) = trie.iter_prefix_with_values(CHECKPOINT_KEY_PREFIX)? {
-            for (key, value) in entries {
-                // Clean up key for display
-                let display_key = key.replace('\x00', "\\0");
-                println!("    {} = {}", display_key, value);
-            }
+        let entries = iter_prefix_pairs(store, CHECKPOINT_KEY_PREFIX);
+        for (key, value) in entries {
+            // Clean up key for display
+            let display_key = key.replace('\x00', "\\0");
+            println!("    {} = {}", display_key, value);
         }
     }
 
     Ok(())
 }
 
-fn get_checkpoint_value(
-    trie: &PersistentARTrieChar<u64>,
-    key: &str,
-) -> Result<Option<u64>, Box<dyn std::error::Error>> {
-    // The trie's get method returns Option<&u64>, dereference with .copied()
-    Ok(trie.get(key).copied())
+/// Total entry count of a byte-keyed checkpoint trie.
+fn store_len(store: &PersistentARTrie<u64>) -> usize {
+    <PersistentARTrie<u64> as Dictionary>::len(store).unwrap_or(0)
+}
+
+/// Look up a `u64` checkpoint value by string key.
+fn get_checkpoint_value(store: &PersistentARTrie<u64>, key: &str) -> Option<u64> {
+    store.get_value_bytes(key.as_bytes())
+}
+
+/// Collect all `(term, value)` pairs whose term begins with `prefix`.
+/// Returns an empty Vec if no such prefix exists in the store.
+fn iter_prefix_pairs(store: &PersistentARTrie<u64>, prefix: &str) -> Vec<(String, u64)> {
+    let iter = match store.iter_prefix_with_values(prefix.as_bytes()) {
+        Some(it) => it,
+        None => return Vec::new(),
+    };
+    iter.map(|(k, v)| (String::from_utf8_lossy(&k).into_owned(), v))
+        .collect()
 }
 
 fn load_bitmap_states(
-    trie: &PersistentARTrieChar<u64>,
+    store: &PersistentARTrie<u64>,
     order: u8,
     prefix_len: u8,
 ) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
@@ -421,7 +498,7 @@ fn load_bitmap_states(
 
     for chunk_idx in 0..num_chunks {
         let key = format!("{}{}:{}", CHECKPOINT_BITMAP_PREFIX, order, chunk_idx);
-        if let Some(value) = get_checkpoint_value(trie, &key)? {
+        if let Some(value) = get_checkpoint_value(store, &key) {
             chunks[chunk_idx] = value;
             if value != 0 {
                 has_any = true;
@@ -456,23 +533,22 @@ fn load_bitmap_states(
 }
 
 fn load_v2_prefix_states(
-    trie: &PersistentARTrieChar<u64>,
+    store: &PersistentARTrie<u64>,
     order: u8,
 ) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
     let prefix_key_prefix = format!("{}{}:", CHECKPOINT_PREFIX_KEY_PREFIX, order);
     let mut states = HashMap::new();
 
-    if let Some(entries) = trie.iter_prefix_with_values(&prefix_key_prefix)? {
-        for (key, status_code) in entries {
-            if let Some(prefix) = key.strip_prefix(&prefix_key_prefix) {
-                let state = match status_code {
-                    STATUS_COMPLETED => "Completed",
-                    STATUS_IN_PROGRESS => "InProgress",
-                    STATUS_FAILED => "Failed",
-                    _ => continue,
-                };
-                states.insert(prefix.to_string(), state.to_string());
-            }
+    let entries = iter_prefix_pairs(store, &prefix_key_prefix);
+    for (key, status_code) in entries {
+        if let Some(prefix) = key.strip_prefix(&prefix_key_prefix) {
+            let state = match status_code {
+                STATUS_COMPLETED => "Completed",
+                STATUS_IN_PROGRESS => "InProgress",
+                STATUS_FAILED => "Failed",
+                _ => continue,
+            };
+            states.insert(prefix.to_string(), state.to_string());
         }
     }
 
@@ -494,18 +570,27 @@ fn index_to_prefix(index: u16, prefix_len: u8) -> String {
     }
 }
 
+/// Inspect a vocabulary file. Expects the current `PersistentVocabARTrie`
+/// format (`"VOCB"` magic) — produced by all imports since Phase 10e.
 fn inspect_vocabulary(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let trie = PersistentARTrieChar::<u64>::open(path)?;
-    println!("  Vocabulary entries: {}", trie.len());
-
-    // Check for metadata entries
-    if let Some(entries) = trie.iter_prefix_with_values("\x00")? {
-        let count = entries.len();
-        if count > 0 {
-            println!("  Metadata entries: {}", count);
-        }
+    if !looks_like_vocab(path)? {
+        return Err(format!(
+            "{} does not have the VOCB vocab magic in its first 4 bytes — \
+             not a current-format vocabulary file",
+            path.display()
+        )
+        .into());
     }
 
+    let vocab = PersistentVocabARTrie::open(path)?;
+    let count = <PersistentVocabARTrie as Dictionary>::len(&vocab).unwrap_or(0);
+    println!("  Vocabulary entries: {}", count);
+
+    // Show first 5 sample terms via iter_terms (uses the reverse index for
+    // O(1) NodeRef → term backtrack).
+    for (idx, term) in vocab.iter_terms().take(5).enumerate() {
+        println!("    [{}] {}", idx, term);
+    }
     Ok(())
 }
 
