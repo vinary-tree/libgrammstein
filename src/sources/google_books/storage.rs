@@ -20,6 +20,7 @@
 //! - Supports unlimited vocabulary size
 //! - Eliminates Latin-1 char conversion overhead
 
+use super::checkpoint::{CheckpointError, ImportCheckpoint};
 use super::config::GoogleBooksConfig;
 use super::sharding::{CheckpointHandle, ShardCoordinator, ShardKey};
 use crate::ngram::vocabulary::{
@@ -90,7 +91,9 @@ impl StorageStats {
 pub enum NgramStorage {
     /// Single trie storage (byte-keyed).
     SingleTrie {
-        /// The trie instance (byte-keyed).
+        /// The trie instance (byte-keyed). Holds both n-gram data and
+        /// `ImportCheckpoint` metadata (metadata keys are prefixed with
+        /// `\x00` per checkpoint.rs convention).
         trie: Arc<RwLock<PersistentARTrie<u64>>>,
         /// Optional lock-free concurrent vocabulary for encoding.
         vocabulary: Option<SharedConcurrentVocab>,
@@ -102,6 +105,10 @@ pub enum NgramStorage {
     Sharded {
         /// The shard coordinator.
         coordinator: ShardCoordinator,
+        /// Auxiliary checkpoint-metadata trie. Stores `ImportCheckpoint`
+        /// progress separately from the n-gram data shards. Created at
+        /// `{output_path}.checkpoint.artrie`.
+        checkpoint_trie: Arc<RwLock<PersistentARTrie<u64>>>,
         /// Optional lock-free concurrent vocabulary for encoding.
         vocabulary: Option<SharedConcurrentVocab>,
         /// Storage statistics.
@@ -176,11 +183,106 @@ impl NgramStorage {
 
         let coordinator = ShardCoordinator::new_with_checkpoints(shard_config)?;
 
+        // Auxiliary checkpoint-metadata trie at {output_path}.checkpoint.artrie.
+        // Holds ImportCheckpoint progress separately from the n-gram data
+        // shards so checkpoint metadata can be atomically persisted on its
+        // own cadence. Created if missing; opened with WAL recovery if present.
+        let checkpoint_trie_path = config.output_path.with_extension("checkpoint.artrie");
+        let checkpoint_trie = if checkpoint_trie_path.exists() {
+            PersistentARTrie::open(&checkpoint_trie_path).map_err(|e| {
+                StorageError::Trie(format!(
+                    "Failed to open checkpoint metadata trie at {}: {}",
+                    checkpoint_trie_path.display(),
+                    e
+                ))
+            })?
+        } else {
+            PersistentARTrie::create(&checkpoint_trie_path).map_err(|e| {
+                StorageError::Trie(format!(
+                    "Failed to create checkpoint metadata trie at {}: {}",
+                    checkpoint_trie_path.display(),
+                    e
+                ))
+            })?
+        };
+
         Ok(Self::Sharded {
             coordinator,
+            checkpoint_trie: Arc::new(RwLock::new(checkpoint_trie)),
             vocabulary,
             stats: Arc::new(StorageStats::default()),
         })
+    }
+
+    /// Access the trie that holds `ImportCheckpoint` metadata.
+    ///
+    /// In single-trie mode this returns the inner data trie (which also holds
+    /// the `\x00`-prefixed checkpoint keys). In sharded mode this returns the
+    /// dedicated auxiliary checkpoint trie.
+    ///
+    /// Callers that just need to save/load/delete the standard
+    /// `ImportCheckpoint` should prefer the high-level methods
+    /// (`save_import_checkpoint` / `load_import_checkpoint` /
+    /// `delete_import_checkpoint`) — direct trie access is reserved for the
+    /// MKN compute path in single-trie mode (which iterates n-gram data
+    /// living in the same trie).
+    pub fn checkpoint_trie(&self) -> &Arc<RwLock<PersistentARTrie<u64>>> {
+        match self {
+            Self::SingleTrie { trie, .. } => trie,
+            Self::Sharded { checkpoint_trie, .. } => checkpoint_trie,
+        }
+    }
+
+    /// Persist an `ImportCheckpoint` to the storage's checkpoint trie and
+    /// flush it to disk (truncating its WAL).
+    pub fn save_import_checkpoint(
+        &self,
+        checkpoint: &ImportCheckpoint,
+    ) -> StorageResult<()> {
+        let trie_arc = self.checkpoint_trie();
+        let mut trie = trie_arc.write();
+        checkpoint.save_to_trie(&mut *trie).map_err(|e| {
+            StorageError::Trie(format!("Failed to save import checkpoint to trie: {}", e))
+        })?;
+        trie.checkpoint().map_err(|e| {
+            StorageError::Trie(format!("Failed to flush checkpoint trie: {}", e))
+        })?;
+        Ok(())
+    }
+
+    /// Save an `ImportCheckpoint` to the checkpoint trie using an async-WAL
+    /// sync (durable but without truncating the WAL). Used by periodic
+    /// checkpoints where WAL replay on next open is acceptable.
+    pub fn save_import_checkpoint_async(
+        &self,
+        checkpoint: &ImportCheckpoint,
+    ) -> StorageResult<()> {
+        let trie_arc = self.checkpoint_trie();
+        let mut trie = trie_arc.write();
+        checkpoint.save_to_trie(&mut *trie).map_err(|e| {
+            StorageError::Trie(format!("Failed to save import checkpoint to trie: {}", e))
+        })?;
+        trie.sync().map_err(|e| {
+            StorageError::Trie(format!("Failed to sync checkpoint trie WAL: {}", e))
+        })?;
+        Ok(())
+    }
+
+    /// Load an `ImportCheckpoint` from the storage's checkpoint trie, if one
+    /// exists. Returns `Ok(None)` when no checkpoint has been saved.
+    pub fn load_import_checkpoint(&self) -> Result<Option<ImportCheckpoint>, CheckpointError> {
+        let trie_arc = self.checkpoint_trie();
+        let trie = trie_arc.read();
+        ImportCheckpoint::load_from_trie(&*trie)
+    }
+
+    /// Delete the persisted `ImportCheckpoint` (call after a successful
+    /// finalize so that the next invocation does not see stale progress).
+    /// Returns the number of checkpoint keys removed.
+    pub fn delete_import_checkpoint(&self) -> Result<usize, CheckpointError> {
+        let trie_arc = self.checkpoint_trie();
+        let mut trie = trie_arc.write();
+        ImportCheckpoint::delete_from_trie(&mut *trie)
     }
 
     /// Resume or start storage based on configuration.
@@ -210,8 +312,31 @@ impl NgramStorage {
 
             let coordinator = ShardCoordinator::resume_or_start(shard_config)?;
 
+            // Open or create the auxiliary checkpoint-metadata trie. See the
+            // doc comment on `Sharded::checkpoint_trie` for why this lives
+            // alongside the coordinator.
+            let checkpoint_trie_path = config.output_path.with_extension("checkpoint.artrie");
+            let checkpoint_trie = if checkpoint_trie_path.exists() {
+                PersistentARTrie::open(&checkpoint_trie_path).map_err(|e| {
+                    StorageError::Trie(format!(
+                        "Failed to open checkpoint metadata trie at {}: {}",
+                        checkpoint_trie_path.display(),
+                        e
+                    ))
+                })?
+            } else {
+                PersistentARTrie::create(&checkpoint_trie_path).map_err(|e| {
+                    StorageError::Trie(format!(
+                        "Failed to create checkpoint metadata trie at {}: {}",
+                        checkpoint_trie_path.display(),
+                        e
+                    ))
+                })?
+            };
+
             Ok(Self::Sharded {
                 coordinator,
+                checkpoint_trie: Arc::new(RwLock::new(checkpoint_trie)),
                 vocabulary,
                 stats: Arc::new(StorageStats::default()),
             })

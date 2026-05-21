@@ -2292,13 +2292,11 @@ pub struct GoogleBooksImporter {
     start_time: Instant,
 
     /// N-gram storage backend.
-    /// Can be single-trie (original behavior) or sharded storage.
+    /// Can be single-trie (original behavior) or sharded storage. The storage
+    /// also owns the checkpoint-metadata trie (see
+    /// `NgramStorage::checkpoint_trie`), so the importer no longer needs a
+    /// separate `trie` field.
     storage: Arc<NgramStorage>,
-
-    /// Legacy trie field for checkpoint compatibility.
-    /// Only used when storage is single-trie mode.
-    /// TODO: Remove once checkpoint migration to storage is complete.
-    trie: Arc<RwLock<PersistentARTrie<u64>>>,
 
     /// Lock-free overlay flush threshold (entries per shard).
     ///
@@ -2359,24 +2357,9 @@ impl GoogleBooksImporter {
             log::info!("Using single-trie storage with vocabulary-indexed encoding");
         }
 
-        // For checkpoint compatibility, we also need a trie reference
-        // In sharded mode, create a separate trie just for checkpoint metadata
-        let trie = if let Some(inner_trie) = storage.as_single_trie() {
-            Arc::clone(inner_trie)
-        } else {
-            // Sharded mode: create a checkpoint-only trie at output path
-            let checkpoint_trie_path = config.output_path.with_extension("checkpoint.artrie");
-            let trie = if checkpoint_trie_path.exists() {
-                PersistentARTrie::open(&checkpoint_trie_path).map_err(|e| {
-                    ImportError::Trie(format!("Failed to open checkpoint trie: {}", e))
-                })?
-            } else {
-                PersistentARTrie::create(&checkpoint_trie_path).map_err(|e| {
-                    ImportError::Trie(format!("Failed to create checkpoint trie: {}", e))
-                })?
-            };
-            Arc::new(RwLock::new(trie))
-        };
+        // (The checkpoint-metadata trie is now owned by NgramStorage; see
+        // NgramStorage::checkpoint_trie. The importer no longer maintains
+        // its own auxiliary trie.)
 
         // Auto-scale flush threshold: lower for high parallelism to bound memory
         let lockfree_flush_threshold = if config.parallel_downloads >= 8 {
@@ -2394,7 +2377,6 @@ impl GoogleBooksImporter {
             interrupted: AtomicBool::new(false),
             start_time: Instant::now(),
             storage: Arc::new(storage),
-            trie,
             lockfree_flush_threshold,
         })
     }
@@ -2444,11 +2426,9 @@ impl GoogleBooksImporter {
         // First, create the importer to get access to the trie
         let mut importer = Self::new(config)?;
 
-        // Try to load checkpoint from trie first (more reliable)
-        let trie_checkpoint = {
-            let trie = importer.trie.read();
-            ImportCheckpoint::load_from_trie(&*trie)?
-        };
+        // Try to load checkpoint from the storage's checkpoint trie first
+        // (more reliable than the JSON fallback).
+        let trie_checkpoint = importer.storage.load_import_checkpoint()?;
 
         if let Some(checkpoint) = trie_checkpoint {
             log::info!(
@@ -2617,12 +2597,12 @@ impl GoogleBooksImporter {
 
             // Migrate JSON checkpoint to trie for future consistency
             log::info!("Migrating JSON checkpoint to trie-based storage...");
-            {
-                let mut trie = importer.trie.write();
-                importer.checkpoint.save_to_trie(&mut *trie).map_err(|e| {
+            importer
+                .storage
+                .save_import_checkpoint_async(&importer.checkpoint)
+                .map_err(|e| {
                     ImportError::Trie(format!("Failed to migrate checkpoint to trie: {}", e))
                 })?;
-            }
 
             return Ok(importer);
         }
@@ -2810,21 +2790,15 @@ impl GoogleBooksImporter {
             ImportError::Trie(format!("Failed to checkpoint storage: {}", e))
         })?;
 
-        // Save checkpoint to trie AFTER syncing all data
-        // This ensures consistency between data and progress tracking.
-        {
-            let mut trie = self.trie.write();
-
-            // Save checkpoint data to trie
-            self.checkpoint.save_to_trie(&mut *trie).map_err(|e| {
+        // Save checkpoint to the storage's metadata trie AFTER syncing all
+        // data. `save_import_checkpoint` writes the checkpoint keys then
+        // flushes the trie (truncating its WAL), keeping data and progress
+        // tracking consistent.
+        self.storage
+            .save_import_checkpoint(&self.checkpoint)
+            .map_err(|e| {
                 ImportError::Trie(format!("Failed to save checkpoint to trie: {}", e))
             })?;
-
-            // Checkpoint the trie (persists data and truncates WAL)
-            trie.checkpoint().map_err(|e| {
-                ImportError::Trie(format!("Failed to checkpoint trie: {}", e))
-            })?;
-        }
 
         log::debug!("Checkpoint saved: {}", self.checkpoint.progress_summary());
         Ok(())
@@ -2914,19 +2888,11 @@ impl GoogleBooksImporter {
 
         // Save checkpoint metadata AFTER syncing all data
         // This ensures consistency between data and progress tracking.
-        {
-            let mut trie = self.trie.write();
-
-            // Save checkpoint data to trie
-            self.checkpoint.save_to_trie(&mut *trie).map_err(|e| {
+        self.storage
+            .save_import_checkpoint(&self.checkpoint)
+            .map_err(|e| {
                 ImportError::Trie(format!("Failed to save checkpoint to trie: {}", e))
             })?;
-
-            // Checkpoint the trie (persists data and truncates WAL)
-            trie.checkpoint().map_err(|e| {
-                ImportError::Trie(format!("Failed to checkpoint trie: {}", e))
-            })?;
-        }
 
         log::debug!("Async checkpoint saved: {}", self.checkpoint.progress_summary());
         Ok(())
@@ -2937,13 +2903,10 @@ impl GoogleBooksImporter {
         // Delete JSON checkpoint
         ImportCheckpoint::delete(&self.checkpoint_path)?;
 
-        // Delete trie-based checkpoint data
-        {
-            let mut trie = self.trie.write();
-            ImportCheckpoint::delete_from_trie(&mut *trie).map_err(|e| {
-                ImportError::Trie(format!("Failed to delete checkpoint from trie: {}", e))
-            })?;
-        }
+        // Delete trie-based checkpoint data via the storage's API
+        self.storage.delete_import_checkpoint().map_err(|e| {
+            ImportError::Trie(format!("Failed to delete checkpoint from trie: {}", e))
+        })?;
 
         Ok(())
     }
@@ -5145,7 +5108,10 @@ impl GoogleBooksImporter {
         }
 
         {
-            let trie = self.trie.read();
+            // Single-trie MKN: iterate the n-gram data living in the
+            // checkpoint trie (which IS the data trie in single-trie mode).
+            let trie_arc = self.storage.checkpoint_trie();
+            let trie = trie_arc.read();
             // Collect all entries first to avoid lifetime issues with borrowed iterator
             let entries: Vec<(Vec<u8>, u64)> = trie
                 .iter_prefix_with_values(b"")
@@ -5221,7 +5187,10 @@ impl GoogleBooksImporter {
 
         let mut continuation_entries = 0u64;
         {
-            let mut trie = self.trie.write();
+            // Single-trie MKN writes to the data trie (same as checkpoint
+            // trie in single-trie mode).
+            let trie_arc = self.storage.checkpoint_trie();
+            let mut trie = trie_arc.write();
 
             // Count unique prefixes per suffix (N1+(suffix))
             let mut suffix_counts: std::collections::HashMap<Vec<u8>, u64> =
@@ -5288,7 +5257,8 @@ impl GoogleBooksImporter {
 
         let mut frequency_entries = 0u64;
         {
-            let mut trie = self.trie.write();
+            let trie_arc = self.storage.checkpoint_trie();
+            let mut trie = trie_arc.write();
 
             trie.upsert_bytes(b"\x00mkn\x00n1", n1).map_err(|e| {
                 ImportError::Trie(format!("Failed to write MKN n1: {}", e))
@@ -5457,10 +5427,11 @@ pub struct CheckpointState {
     pub ngrams_processed: AtomicU64,
     /// Current unique n-gram count (atomic).
     pub unique_ngrams: AtomicU64,
-    /// Storage handle (Arc - read-only from cron thread).
+    /// Storage handle (Arc - read-only from cron thread). The checkpoint
+    /// trie is owned by the storage; access it via
+    /// `storage.checkpoint_trie()` or the high-level
+    /// `save_import_checkpoint` methods.
     pub storage: Arc<NgramStorage>,
-    /// Main trie (Arc<RwLock> - uses RwLock only during checkpoint).
-    pub trie: Arc<RwLock<PersistentARTrie<u64>>>,
     /// Checkpoint data (swapped atomically via ArcSwap).
     pub checkpoint: arc_swap::ArcSwap<ImportCheckpoint>,
     /// Flag indicating checkpoint in progress (atomic).
@@ -5514,16 +5485,12 @@ impl CheckpointState {
         })?;
 
         log::debug!("Periodic checkpoint: saving metadata...");
-        {
-            let mut trie = self.trie.write();
-            checkpoint.save_to_trie(&mut *trie).map_err(|e| {
-                self.checkpoint_in_progress.store(false, Ordering::Release);
-                ImportError::Trie(format!("Failed to save checkpoint to trie: {}", e))
-            })?;
-            trie.checkpoint().map_err(|e| {
-                self.checkpoint_in_progress.store(false, Ordering::Release);
-                ImportError::Trie(format!("Failed to checkpoint trie: {}", e))
-            })?;
+        if let Err(e) = self.storage.save_import_checkpoint(&checkpoint) {
+            self.checkpoint_in_progress.store(false, Ordering::Release);
+            return Err(ImportError::Trie(format!(
+                "Failed to save checkpoint to trie: {}",
+                e
+            )));
         }
 
         // Store updated checkpoint (atomic swap)
@@ -5586,12 +5553,12 @@ where
 
     let terminating = Arc::new(AtomicBool::new(false));
 
-    // Create shared checkpoint state (lock-free reads)
+    // Create shared checkpoint state (lock-free reads). The checkpoint trie
+    // is owned by the storage now — no separate `trie` field to clone here.
     let checkpoint_state = Arc::new(CheckpointState {
         ngrams_processed: AtomicU64::new(importer.total_ngrams.load(Ordering::Relaxed)),
         unique_ngrams: AtomicU64::new(importer.unique_ngrams.load(Ordering::Relaxed)),
         storage: Arc::clone(&importer.storage),
-        trie: Arc::clone(&importer.trie),
         checkpoint: arc_swap::ArcSwap::from_pointee(importer.checkpoint.clone()),
         checkpoint_in_progress: AtomicBool::new(false),
         start_time: importer.start_time,
@@ -5988,13 +5955,13 @@ mod tests {
         // Save checkpoint (now saved to trie, not JSON file)
         importer.save_checkpoint().expect("Failed to save checkpoint");
 
-        // Load checkpoint from trie
-        let loaded = {
-            let trie = importer.trie.read();
-            ImportCheckpoint::load_from_trie(&*trie)
-                .expect("Failed to load checkpoint from trie")
-                .expect("Checkpoint should exist in trie")
-        };
+        // Load checkpoint from the storage's checkpoint trie via its
+        // public API (replaces the previous direct `importer.trie.read()`).
+        let loaded = importer
+            .storage
+            .load_import_checkpoint()
+            .expect("Failed to load checkpoint from trie")
+            .expect("Checkpoint should exist in trie");
 
         // v2 format: order_progress is a HashMap, completed_orders() is a method
         assert!(loaded.order_progress.is_empty());  // Fresh checkpoint has no progress
