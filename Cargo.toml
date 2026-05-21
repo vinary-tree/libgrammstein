@@ -15,6 +15,11 @@ categories = ["text-processing", "science"]
 # Serialization uses portable format (IterableDictionary) that doesn't require D: Serialize.
 liblevenshtein = { path = "../liblevenshtein-rust", features = ["pathmap-backend", "persistent-artrie", "embedded-rules"] }
 
+# Global allocator: mimalloc avoids glibc's mmap/munmap per-allocation __mprotect
+# syscalls that consume ~45% CPU during large imports (thread-local segment heaps
+# with pre-allocated superpage regions satisfy allocations without syscalls).
+mimalloc = { version = "0.1", default-features = false, optional = true }
+
 # Dictionary implementations (needed for IndexedVocabularyART and LSN tracking)
 libdictenstein = { path = "../libdictenstein", features = ["persistent-artrie", "parking_lot"] }
 
@@ -174,6 +179,10 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 [features]
 default = []
 
+# Use mimalloc as the global allocator (eliminates mprotect syscall overhead
+# from glibc malloc's mmap/munmap pattern for large allocations)
+mimalloc-alloc = ["dep:mimalloc"]
+
 # lling-llang integration for LanguageModel trait
 lling-llang-integration = ["dep:lling-llang"]
 
@@ -257,6 +266,7 @@ language-full = ["dep:whatlang", "dep:unic-langid"]
 
 # Google Books N-gram import support
 google-books = [
+    "mimalloc-alloc",
     "dep:reqwest",
     "dep:tokio",
     "dep:tokio-util",

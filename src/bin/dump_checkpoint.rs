@@ -15,6 +15,10 @@
 //!     --dir bak-sharded-interrupted/ --dir bak-sharded-completed/ --dir .
 //! ```
 
+#[cfg(feature = "mimalloc-alloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use clap::Parser;
 use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
 use std::collections::HashMap;

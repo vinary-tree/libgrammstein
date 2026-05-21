@@ -29,6 +29,10 @@
 //!     --max-mismatches 100
 //! ```
 
+#[cfg(feature = "mimalloc-alloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use clap::Parser;
 use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
 use libgrammstein::ngram::vocabulary::{

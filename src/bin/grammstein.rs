@@ -3,6 +3,10 @@
 //! This is the main entry point for the grammstein CLI tool, which provides
 //! a unified interface for working with N-gram, embedding, and hybrid language models.
 
+#[cfg(feature = "mimalloc-alloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use clap::Parser;
 
 use libgrammstein::cli::{commands, Cli};
