@@ -358,8 +358,55 @@ grammstein train ngram \
 | 1B words | 5 | 20 | 50-100 GB |
 | 10B+ words | 3-4 | 50+ | 200+ GB |
 
+## Google Books N-gram Import: Cached-File Mode
+
+For Google Books n-gram imports specifically, the `--cache-files` flag
+decouples the download from the parse pipeline. Each worker downloads the
+raw `.gz` to a local cache directory first, then imports from disk.
+
+```bash
+grammstein train import-google-books \
+    --language en \
+    --orders 1..=5 \
+    --output english.artrie \
+    --parallel 8 \
+    --cache-files
+```
+
+### When to enable
+
+- **Unstable upstream connection.** A failed HTTP stream mid-parse wastes
+  hours of CPU; cached-file mode lets a retry resume from the local copy
+  (or from a partial download via HTTP 206 Range).
+- **Long-running imports.** Network blips ~6 hours into a 30-hour import
+  are recoverable without restarting from scratch.
+- **Debugging.** Reproducing parser/encoder issues against a fixed input
+  is easier when the input lives on disk.
+
+### Mechanics
+
+| Property | Value |
+|---|---|
+| Cache location | `{output_path_parent}/grammstein-cache/` |
+| Filename scheme | `googlebooks-{corpus_id}-all-{order}gram-{VERSION}-{prefix}.gz` |
+| Atomicity | Downloads to `.gz.downloading` and atomically renames on completion |
+| Resume on partial | HTTP Range request from existing byte offset |
+| 416 recovery | Stale partial deleted, full re-download issued |
+| Cleanup | Removed on successful import and on final failure (all retries exhausted) |
+| Retained on retry | Cached file preserved across retryable errors so the retry reuses it |
+
+The cache layer is orthogonal to the chunked-transaction
+(`--tx-chunk-size`) and lock-free-flush-threshold
+(`--lockfree-flush-threshold`) memory bounds — those affect the *write*
+path, while `--cache-files` affects the *download* path.
+
+See `docs/cli/import-google-books.md` for the full flag reference and
+`docs/architecture/memory-optimization.md` for the broader design context.
+
 ## See Also
 
 - [N-gram Training](ngram.md) - Training workflow
 - [Hyperparameters](hyperparameters.md) - Tuning for size/quality
 - [CLI Reference](../cli/README.md) - Command-line options
+- [Google Books Import Flags](../cli/import-google-books.md) - Memory + reliability tuning
+- [Memory Optimization Architecture](../architecture/memory-optimization.md) - Importer internals
