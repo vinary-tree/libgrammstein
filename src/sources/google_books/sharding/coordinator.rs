@@ -980,6 +980,17 @@ impl ShardCoordinator {
             .sum()
     }
 
+    /// Checkpoint all open shards (persist + truncate WAL).
+    ///
+    /// Mirrors `sync_all`'s blocking-write discipline: uses `shard.write()`
+    /// (not `try_write`) so that locked shards are awaited rather than
+    /// silently skipped. The prior `try_write`-and-skip variant could mark
+    /// a checkpoint as complete while leaving some shards' data still in
+    /// their WALs — on resume, the WAL would replay, double-counting any
+    /// uncheckpointed n-grams. This is the same class of bug as the
+    /// documented checkpoint-resume issue
+    /// (`docs/debugging/checkpoint-resume-bug.md`); fixing the asymmetry
+    /// closes that gap for the checkpoint path as well.
     pub fn checkpoint_all(&self) -> CoordinatorResult<()> {
         let mut errors = Vec::new();
 
@@ -987,10 +998,9 @@ impl ShardCoordinator {
             let key = entry.key().clone();
             let shard = entry.value();
 
-            if let Some(mut guard) = shard.try_write() {
-                if let Err(e) = guard.checkpoint() {
-                    errors.push(format!("Shard {}: {}", key, e));
-                }
+            let mut guard = shard.write();
+            if let Err(e) = guard.checkpoint() {
+                errors.push(format!("Shard {}: {}", key, e));
             }
         }
 
