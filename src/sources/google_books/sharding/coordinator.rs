@@ -137,7 +137,7 @@ pub struct ShardCoordinator {
     /// 1. Thread A checks if file exists (false)
     /// 2. Thread B checks if file exists (false)
     /// 3. Both threads try to create the file, causing corruption
-    creation_locks: DashMap<ShardKey, Arc<std::sync::Mutex<()>>>,
+    creation_locks: DashMap<ShardKey, Arc<parking_lot::Mutex<()>>>,
 
     /// LRU cache for tracking shard access order (for eviction).
     /// Only used when max_open_shards > 0.
@@ -603,11 +603,14 @@ impl ShardCoordinator {
         let lock = self
             .creation_locks
             .entry(key.clone())
-            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
             .clone();
 
-        // Acquire the lock - blocks other threads trying to create the same shard
-        let _guard = lock.lock().expect("shard creation lock poisoned");
+        // Acquire the lock - blocks other threads trying to create the same
+        // shard. parking_lot::Mutex doesn't poison on panic, so we never lose
+        // an import to a poisoned creation lock (the prior `std::sync::Mutex`
+        // would have aborted with `expect("shard creation lock poisoned")`).
+        let _guard = lock.lock();
 
         // Double-check pattern: another thread may have created while we waited
         if let Some(shard) = self.shards.get(key) {
