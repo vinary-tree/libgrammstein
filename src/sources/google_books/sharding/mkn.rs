@@ -47,8 +47,13 @@ use super::coordinator::ShardCoordinator;
 use crate::ngram::vocabulary::{decode_ngram_key_bytes, encode_indices_to_key_bytes, ngram_order_bytes};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use thiserror::Error;
+use xxhash_rust::xxh3::Xxh3DefaultBuilder;
+
+/// Type aliases for HashMap/HashSet with xxh3 hasher (non-adversarial data).
+type XxHashMap<K, V> = HashMap<K, V, Xxh3DefaultBuilder>;
+type XxHashSet<T> = HashSet<T, Xxh3DefaultBuilder>;
 
 /// Error type for MKN computation.
 #[derive(Error, Debug)]
@@ -234,11 +239,11 @@ impl DiscountParams {
 pub struct ContinuationCounts {
     /// N1+(•w): unique predecessors for each context.
     /// Key: context as varint-encoded byte key, Value: count of unique predecessors.
-    pub predecessor_counts: HashMap<Vec<u8>, u64>,
+    pub predecessor_counts: XxHashMap<Vec<u8>, u64>,
 
     /// N1+(w•): unique successors for each context.
     /// Key: context as varint-encoded byte key, Value: count of unique successors.
-    pub successor_counts: HashMap<Vec<u8>, u64>,
+    pub successor_counts: XxHashMap<Vec<u8>, u64>,
 
     /// Total unique continuation contexts.
     pub total_contexts: u64,
@@ -301,6 +306,10 @@ pub struct MknAggregator<'a> {
 
     /// Whether to compute continuation counts (more expensive).
     compute_continuations: bool,
+
+    /// Optional cancellation flag. When set to `true`, the parallel computation
+    /// checks this flag and returns early with `MknError::Computation("Cancelled")`.
+    cancellation_flag: Option<&'a AtomicBool>,
 }
 
 impl<'a> MknAggregator<'a> {
@@ -309,12 +318,23 @@ impl<'a> MknAggregator<'a> {
         Self {
             coordinator,
             compute_continuations: false,
+            cancellation_flag: None,
         }
     }
 
     /// Enable continuation count computation.
     pub fn with_continuations(mut self) -> Self {
         self.compute_continuations = true;
+        self
+    }
+
+    /// Set a cancellation flag for cooperative cancellation.
+    ///
+    /// When the flag is set to `true`, parallel computation loops check it
+    /// and return early. This enables graceful shutdown during long-running
+    /// MKN computation (which can take minutes for large datasets).
+    pub fn with_cancellation_flag(mut self, flag: &'a AtomicBool) -> Self {
+        self.cancellation_flag = Some(flag);
         self
     }
 
@@ -335,12 +355,26 @@ impl<'a> MknAggregator<'a> {
             .map(|_| AtomicFrequencyCounts::default())
             .collect();
 
+        // Shared cancellation state: set to true if cancellation is requested
+        let cancelled = AtomicBool::new(false);
+
         // Discover and iterate through all shards on disk (not just in-memory cached ones)
         let shard_files = self.coordinator.discover_shard_files()
             .map_err(|e| MknError::Coordinator(e))?;
         let shard_keys: Vec<_> = shard_files.into_iter().map(|(key, _)| key).collect();
 
         shard_keys.par_iter().for_each(|key| {
+            // Check cancellation flag at the start of each shard
+            if cancelled.load(Ordering::Relaxed) {
+                return;
+            }
+            if let Some(flag) = self.cancellation_flag {
+                if flag.load(Ordering::Relaxed) {
+                    cancelled.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
+
             if let Ok(shard) = self.coordinator.get_or_create_shard(key) {
                 let mut guard = shard.write();
                 if let Err(e) = guard.flush_lockfree() {
@@ -366,6 +400,10 @@ impl<'a> MknAggregator<'a> {
                 }
             }
         });
+
+        if cancelled.load(Ordering::Relaxed) {
+            return Err(MknError::Computation("Cancelled".to_string()));
+        }
 
         Ok(counts.into_iter().map(|c| c.into_counts()).collect())
     }
@@ -409,8 +447,8 @@ impl<'a> MknAggregator<'a> {
         //
         // We store contexts as varint-encoded keys (same format as n-gram keys)
         // and predecessors/successors as u64 indices for efficient comparison.
-        let mut predecessor_sets: HashMap<Vec<u8>, HashSet<u64>> = HashMap::new();
-        let mut successor_sets: HashMap<Vec<u8>, HashSet<u64>> = HashMap::new();
+        let mut predecessor_sets: XxHashMap<Vec<u8>, XxHashSet<u64>> = HashMap::with_hasher(Xxh3DefaultBuilder);
+        let mut successor_sets: XxHashMap<Vec<u8>, XxHashSet<u64>> = HashMap::with_hasher(Xxh3DefaultBuilder);
 
         // Discover all shards on disk (not just in-memory cached ones)
         let shard_files = self.coordinator.discover_shard_files()
@@ -418,6 +456,13 @@ impl<'a> MknAggregator<'a> {
         let shard_keys: Vec<_> = shard_files.into_iter().map(|(key, _)| key).collect();
 
         for key in &shard_keys {
+            // Check cancellation flag between shards
+            if let Some(flag) = self.cancellation_flag {
+                if flag.load(Ordering::Relaxed) {
+                    return Err(MknError::Computation("Cancelled".to_string()));
+                }
+            }
+
             if let Ok(shard) = self.coordinator.get_or_create_shard(key) {
                 let mut guard = shard.write();
                 if let Err(e) = guard.flush_lockfree() {
@@ -449,7 +494,7 @@ impl<'a> MknAggregator<'a> {
                     let pred_context = encode_indices_to_key_bytes(&indices[1..]);
                     predecessor_sets
                         .entry(pred_context)
-                        .or_default()
+                        .or_insert_with(|| HashSet::with_hasher(Xxh3DefaultBuilder))
                         .insert(predecessor);
 
                     // Successor context: all but last index (varint-encoded)
@@ -458,19 +503,19 @@ impl<'a> MknAggregator<'a> {
                     let succ_context = encode_indices_to_key_bytes(&indices[..indices.len() - 1]);
                     successor_sets
                         .entry(succ_context)
-                        .or_default()
+                        .or_insert_with(|| HashSet::with_hasher(Xxh3DefaultBuilder))
                         .insert(successor);
                 }
             }
         }
 
         // Convert sets to counts
-        let predecessor_counts: HashMap<Vec<u8>, u64> = predecessor_sets
+        let predecessor_counts: XxHashMap<Vec<u8>, u64> = predecessor_sets
             .into_iter()
             .map(|(k, v)| (k, v.len() as u64))
             .collect();
 
-        let successor_counts: HashMap<Vec<u8>, u64> = successor_sets
+        let successor_counts: XxHashMap<Vec<u8>, u64> = successor_sets
             .into_iter()
             .map(|(k, v)| (k, v.len() as u64))
             .collect();

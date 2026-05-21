@@ -51,6 +51,10 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use xxhash_rust::xxh3::Xxh3DefaultBuilder;
+
+/// Type alias for HashMap with xxh3 hasher (non-adversarial data).
+type XxHashMap<K, V> = HashMap<K, V, Xxh3DefaultBuilder>;
 
 /// Error type for merge operations.
 #[derive(Error, Debug)]
@@ -293,7 +297,7 @@ impl<'a> MergeCoordinator<'a> {
     ///
     /// This is useful for smaller datasets where all n-grams fit in memory.
     /// Returns a HashMap of (ngram, count) pairs.
-    pub fn merge_to_memory(&self) -> MergeResult<HashMap<Vec<u8>, u64>> {
+    pub fn merge_to_memory(&self) -> MergeResult<XxHashMap<Vec<u8>, u64>> {
         // Discover all shard files on disk (not just cached ones)
         let shard_files = self.coordinator.discover_shard_files()
             .map_err(|e| MergeError::Trie(format!("Failed to discover shard files: {}", e)))?;
@@ -307,7 +311,7 @@ impl<'a> MergeCoordinator<'a> {
 
         // Collect all n-grams from all shards
         // Use try_fold pattern to propagate errors from shard iteration
-        let results: Result<Vec<HashMap<Vec<u8>, u64>>, MergeError> = shard_keys
+        let results: Result<Vec<XxHashMap<Vec<u8>, u64>>, MergeError> = shard_keys
             .par_iter()
             .map(|key| {
                 log::trace!("Merging shard '{}' to memory", key);
@@ -326,14 +330,14 @@ impl<'a> MergeCoordinator<'a> {
                 let iter = guard.iter_with_counts().map_err(|e| {
                     MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
                 })?;
-                Ok(iter.into_iter().collect::<HashMap<_, _>>())
+                Ok(iter.into_iter().collect::<XxHashMap<_, _>>())
             })
             .collect();
 
         let results = results?;
 
         // Merge all results
-        let mut merged: HashMap<Vec<u8>, u64> = HashMap::new();
+        let mut merged: XxHashMap<Vec<u8>, u64> = HashMap::with_hasher(Xxh3DefaultBuilder);
         for partial in results {
             for (ngram, count) in partial {
                 *merged.entry(ngram).or_default() += count;

@@ -561,6 +561,14 @@ pub struct ShardHandle {
     /// Tracks sync state (Clean/Dirty/Syncing/SyncFailed) and provides
     /// synchronization primitives for parallel checkpoint operations.
     sync_coordinator: ShardSyncCoordinator,
+
+    /// Number of entries currently in the lock-free overlay (not yet merged).
+    ///
+    /// Tracked via `Relaxed` ordering since it's an approximate count used
+    /// only for threshold-based flush decisions. Incremented on new entries
+    /// in `increment_lockfree()`, reset to 0 after merge in
+    /// `flush_lockfree()`, `sync()`, and `checkpoint()`.
+    lockfree_entries: AtomicU64,
 }
 
 impl ShardHandle {
@@ -597,6 +605,7 @@ impl ShardHandle {
             write_generation: AtomicU64::new(0),
             stats: ShardStats::default(),
             sync_coordinator: ShardSyncCoordinator::new(),
+            lockfree_entries: AtomicU64::new(0),
         })
     }
 
@@ -641,6 +650,7 @@ impl ShardHandle {
             write_generation: AtomicU64::new(0),
             stats: ShardStats::default(),
             sync_coordinator: ShardSyncCoordinator::new(),
+            lockfree_entries: AtomicU64::new(0),
         };
 
         // Load checkpoint state from trie
@@ -698,6 +708,19 @@ impl ShardHandle {
     /// Check if the shard is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Get the approximate number of entries in the lock-free overlay.
+    ///
+    /// This count is incremented when new entries are added via
+    /// `increment_lockfree()` and reset to 0 when the overlay is merged
+    /// into the persistent trie (via `flush_lockfree()`, `sync()`, or
+    /// `checkpoint()`).
+    ///
+    /// Used by the coordinator to decide when to flush individual shards
+    /// to bound memory usage during high-parallelism imports.
+    pub fn lockfree_entry_count(&self) -> u64 {
+        self.lockfree_entries.load(Ordering::Relaxed)
     }
 
     /// Get the checkpoint state.
@@ -820,6 +843,7 @@ impl ShardHandle {
         self.stats.record_write();
         if was_new {
             self.stats.add_entries(1);
+            self.lockfree_entries.fetch_add(1, Ordering::Relaxed);
         }
 
         self.sync_coordinator.mark_dirty();
@@ -873,6 +897,7 @@ impl ShardHandle {
                 shard_key: self.key.to_string(),
                 message: format!("merge before sync failed: {}", e),
             })?;
+        self.lockfree_entries.store(0, Ordering::Relaxed);
         self.trie.checkpoint().map_err(|e| ShardError::Checkpoint {
             shard_key: self.key.to_string(),
             message: format!("sync failed: {}", e),
@@ -904,6 +929,7 @@ impl ShardHandle {
                 message: error_msg,
             });
         }
+        self.lockfree_entries.store(0, Ordering::Relaxed);
 
         // Perform the actual sync
         match self.trie.sync() {
@@ -1043,6 +1069,7 @@ impl ShardHandle {
                 shard_key: self.key.to_string(),
                 message: format!("flush_lockfree failed: {}", e),
             })?;
+        self.lockfree_entries.store(0, Ordering::Relaxed);
         Ok(())
     }
 
@@ -1057,6 +1084,7 @@ impl ShardHandle {
                 shard_key: self.key.to_string(),
                 message: format!("merge before checkpoint failed: {}", e),
             })?;
+        self.lockfree_entries.store(0, Ordering::Relaxed);
 
         // Save checkpoint state to trie
         self.save_checkpoint_state()?;
@@ -1279,6 +1307,63 @@ impl ShardHandle {
 
         log::trace!(
             "Shard {}: committed prefix '{}' with {} n-grams ({} newly inserted)",
+            self.key, prefix, ngram_count, inserted
+        );
+
+        Ok(ngram_count)
+    }
+
+    /// Commit a prefix transaction chunk WITHOUT marking the prefix as complete.
+    ///
+    /// This writes all buffered n-grams to the WAL as a single batch record,
+    /// then applies them to the trie. Unlike `commit_prefix()`, this does NOT:
+    /// - Update `checkpoint_state.completed_prefixes`
+    /// - Persist checkpoint state to WAL
+    ///
+    /// This is used for chunked imports of large prefix files (e.g., 2-gram
+    /// files with 50-100M entries). The caller commits chunks periodically
+    /// to bound memory usage, then calls `commit_prefix()` on the final chunk
+    /// to mark the prefix as complete.
+    ///
+    /// # Crash Recovery
+    ///
+    /// If the process crashes between chunk commits:
+    /// - Committed chunks are durable in the WAL
+    /// - The prefix is NOT marked as complete
+    /// - On resume, the prefix is re-imported from scratch (SET semantics
+    ///   make this idempotent — already-committed n-grams are overwritten
+    ///   with the same values)
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The transaction to commit (consumed). Caller must begin a
+    ///   new transaction for the next chunk.
+    ///
+    /// # Returns
+    ///
+    /// The number of n-grams that were committed in this chunk.
+    pub fn commit_chunk(&mut self, tx: PrefixTransaction<u64>) -> ShardResult<usize> {
+        let ngram_count = tx.ngram_count;
+        let prefix = tx.prefix.clone();
+
+        let inserted = self.trie.commit_document(tx.tx).map_err(|e| ShardError::Write {
+            shard_key: self.key.to_string(),
+            message: format!("Failed to commit chunk for prefix '{}': {}", prefix, e),
+        })?;
+
+        // Update stats
+        self.stats.add_entries(inserted as u64);
+        self.stats.record_write();
+
+        // NOTE: We intentionally do NOT update checkpoint_state.completed_prefixes
+        // or persist checkpoint state here. The prefix is only marked complete
+        // when the final chunk is committed via commit_prefix().
+
+        // Mark shard as dirty after write
+        self.sync_coordinator.mark_dirty();
+
+        log::trace!(
+            "Shard {}: committed chunk for prefix '{}' with {} n-grams ({} newly inserted)",
             self.key, prefix, ngram_count, inserted
         );
 

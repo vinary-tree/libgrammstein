@@ -873,6 +873,60 @@ impl ShardCoordinator {
         }
     }
 
+    /// Flush lock-free overlays for shards exceeding the entry threshold.
+    ///
+    /// Only acquires write locks on shards that actually need flushing,
+    /// allowing workers to continue on other shards. This bounds per-shard
+    /// lock-free memory usage during high-parallelism imports without
+    /// requiring a full checkpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold` - Maximum lock-free entries per shard before flushing.
+    ///
+    /// # Returns
+    ///
+    /// The number of shards that were flushed.
+    pub fn flush_lockfree_over_threshold(&self, threshold: u64) -> CoordinatorResult<usize> {
+        let mut flushed = 0;
+        let mut errors = Vec::new();
+
+        for entry in self.shards.iter() {
+            let key = entry.key().clone();
+            let shard = entry.value();
+
+            // Fast read-lock check (no contention with workers)
+            let needs_flush = shard.read().lockfree_entry_count() > threshold;
+
+            if needs_flush {
+                // Only acquire write lock for shards over threshold
+                let mut guard = shard.write();
+                if let Err(e) = guard.flush_lockfree() {
+                    errors.push(format!("Shard {}: {}", key, e));
+                } else {
+                    flushed += 1;
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(flushed)
+        } else {
+            Err(CoordinatorError::Checkpoint(errors.join("; ")))
+        }
+    }
+
+    /// Get total lock-free entries across all shards.
+    ///
+    /// This is an approximate count useful for monitoring memory pressure
+    /// from accumulated lock-free overlay data.
+    pub fn total_lockfree_entries(&self) -> u64 {
+        self.shards
+            .iter()
+            .map(|e| e.value().read().lockfree_entry_count())
+            .sum()
+    }
+
     pub fn checkpoint_all(&self) -> CoordinatorResult<()> {
         let mut errors = Vec::new();
 
@@ -1819,6 +1873,36 @@ impl ShardCoordinator {
             mgr.checkpoint_mut().complete_prefix(&tx.shard_key, &prefix);
             mgr.save()?;
         }
+
+        Ok(ngram_count)
+    }
+
+    /// Commit a prefix transaction chunk WITHOUT marking the prefix as complete.
+    ///
+    /// This commits the buffered n-grams to the WAL but does not update the
+    /// global checkpoint or mark the prefix as completed. Used for chunked
+    /// imports of large prefix files to bound per-transaction memory usage.
+    ///
+    /// After committing a chunk, the caller should begin a new transaction
+    /// for the next chunk via `begin_prefix_tx()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The transaction to commit (consumed)
+    ///
+    /// # Returns
+    ///
+    /// The number of n-grams that were committed in this chunk.
+    pub fn commit_chunk_tx(&self, tx: &mut CoordinatorPrefixTx) -> CoordinatorResult<usize> {
+        let inner_tx = tx.inner.take().expect("Transaction already consumed");
+
+        let ngram_count = {
+            let mut guard = tx.shard.write();
+            guard.commit_chunk(inner_tx)?
+        };
+
+        // Update stats (but don't mark prefix as completed)
+        self.stats.unique_ngrams.fetch_add(ngram_count as u64, Ordering::Relaxed);
 
         Ok(ngram_count)
     }
