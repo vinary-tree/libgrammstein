@@ -233,7 +233,9 @@ fn eval_perplexity(args: EvalPerplexityArgs, verbose: bool, quiet: bool) -> CliR
             "per_sentence": result.per_sentence,
         });
 
-        std::fs::write(output_path, serde_json::to_string_pretty(&json_output).unwrap())
+        let serialized = serde_json::to_string_pretty(&json_output)
+            .expect("serde_json::Value built via json!() macro must serialize");
+        std::fs::write(output_path, serialized)
             .map_err(|e| CliError::io(format!("Failed to write output: {}", e)))?;
 
         if !quiet {
@@ -386,7 +388,9 @@ fn eval_compare(args: EvalCompareArgs, verbose: bool, quiet: bool) -> CliResult<
             "models": json_results,
         });
 
-        std::fs::write(output_path, serde_json::to_string_pretty(&json_output).unwrap())
+        let serialized = serde_json::to_string_pretty(&json_output)
+            .expect("serde_json::Value built via json!() macro must serialize");
+        std::fs::write(output_path, serialized)
             .map_err(|e| CliError::io(format!("Failed to write output: {}", e)))?;
 
         if !quiet {
@@ -422,23 +426,23 @@ fn eval_compare(args: EvalCompareArgs, verbose: bool, quiet: bool) -> CliResult<
         println!("{}", table);
     }
 
-    // Find best model
-    if !quiet && !results.is_empty() {
-        let best = results
-            .iter()
-            .min_by(|a, b| {
-                a.2.perplexity
-                    .partial_cmp(&b.2.perplexity)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .unwrap();
-
-        println!();
-        print_success(&format!(
-            "Best model: {} (perplexity: {:.2})",
-            best.0.display(),
-            best.2.perplexity
-        ));
+    // Find best model. The `!results.is_empty()` guard makes the `min_by`
+    // return Some(_), but we still match explicitly to avoid a `.unwrap()`
+    // and to surface any future invariant violation as `None` (skip) rather
+    // than a panic.
+    if !quiet {
+        if let Some(best) = results.iter().min_by(|a, b| {
+            a.2.perplexity
+                .partial_cmp(&b.2.perplexity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            println!();
+            print_success(&format!(
+                "Best model: {} (perplexity: {:.2})",
+                best.0.display(),
+                best.2.perplexity
+            ));
+        }
     }
 
     Ok(())
