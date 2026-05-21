@@ -2367,4 +2367,105 @@ mod tests {
         assert_eq!(coordinator.get("apple|pie"), Some(5));
         assert_eq!(coordinator.get("zebra|crossing"), Some(3));
     }
+
+    // ---- Lock-free overlay flush threshold ----
+
+    #[test]
+    fn test_flush_lockfree_over_threshold_skips_under_threshold() {
+        let dir = TempDir::new().expect("tempdir");
+        let config = ShardConfig::new(dir.path().join("shards"))
+            .with_granularity(ShardGranularity::TwoChar);
+        let coordinator = ShardCoordinator::new(config).expect("create coordinator");
+
+        // Populate two shards, each with 5 entries
+        for i in 0..5 {
+            coordinator.store_ngram(&format!("th|w{}", i), 1).expect("store");
+            coordinator.store_ngram(&format!("ap|w{}", i), 1).expect("store");
+        }
+
+        // Threshold of 10 — neither shard is over
+        let flushed = coordinator.flush_lockfree_over_threshold(10).expect("flush");
+        assert_eq!(flushed, 0, "no shards should be flushed when all are under threshold");
+        assert_eq!(coordinator.total_lockfree_entries(), 10);
+    }
+
+    #[test]
+    fn test_flush_lockfree_over_threshold_flushes_over() {
+        let dir = TempDir::new().expect("tempdir");
+        let config = ShardConfig::new(dir.path().join("shards"))
+            .with_granularity(ShardGranularity::TwoChar);
+        let coordinator = ShardCoordinator::new(config).expect("create coordinator");
+
+        // Populate one shard with 15 entries (over threshold), another with 5
+        for i in 0..15 {
+            coordinator.store_ngram(&format!("th|w{}", i), 1).expect("store");
+        }
+        for i in 0..5 {
+            coordinator.store_ngram(&format!("ap|w{}", i), 1).expect("store");
+        }
+
+        let flushed = coordinator.flush_lockfree_over_threshold(10).expect("flush");
+        assert_eq!(flushed, 1, "only the over-threshold shard should flush");
+
+        // The over-threshold shard's count is reset; the other still has 5
+        assert_eq!(coordinator.total_lockfree_entries(), 5);
+    }
+
+    #[test]
+    fn test_total_lockfree_entries_aggregates() {
+        let dir = TempDir::new().expect("tempdir");
+        let config = ShardConfig::new(dir.path().join("shards"))
+            .with_granularity(ShardGranularity::TwoChar);
+        let coordinator = ShardCoordinator::new(config).expect("create coordinator");
+
+        // Three shards with 5/10/15 entries
+        for i in 0..5 {
+            coordinator.store_ngram(&format!("th|w{}", i), 1).expect("store");
+        }
+        for i in 0..10 {
+            coordinator.store_ngram(&format!("ap|w{}", i), 1).expect("store");
+        }
+        for i in 0..15 {
+            coordinator.store_ngram(&format!("ze|w{}", i), 1).expect("store");
+        }
+
+        assert_eq!(coordinator.total_lockfree_entries(), 30);
+    }
+
+    // ---- commit_chunk_tx ----
+
+    #[test]
+    fn test_commit_chunk_tx_does_not_mark_complete() {
+        // commit_chunk_tx commits the buffered n-grams but must NOT mark the
+        // prefix as complete — that's commit_prefix_tx's job.
+        let dir = TempDir::new().expect("tempdir");
+        let config = ShardConfig::new(dir.path().join("shards"))
+            .with_granularity(ShardGranularity::TwoChar);
+        let coordinator = ShardCoordinator::new(config).expect("create coordinator");
+
+        let shard_key = ShardKey::new("th");
+        let mut tx = coordinator.begin_prefix_tx(&shard_key, "th").expect("begin_prefix_tx");
+
+        // Insert 5 entries
+        for i in 0..5 {
+            let key = format!("the|w{}", i);
+            coordinator.tx_insert(&mut tx, key.as_bytes(), 100 + i as u64);
+        }
+
+        let committed = coordinator.commit_chunk_tx(&mut tx).expect("commit_chunk_tx");
+        assert_eq!(committed, 5);
+
+        // Stats reflect the commit
+        assert!(coordinator.stats().unique_ngrams.load(Ordering::Relaxed) >= 5);
+
+        // But the prefix is NOT yet marked complete on the shard
+        let shard = coordinator.get_or_create_shard(&shard_key).expect("get shard");
+        assert!(
+            !shard.read().checkpoint_state().completed_prefixes.contains("th"),
+            "commit_chunk_tx must NOT mark the prefix as complete"
+        );
+
+        // Abort so the test cleans up cleanly (tx.inner was renewed)
+        coordinator.abort_prefix_tx(tx).expect("abort");
+    }
 }

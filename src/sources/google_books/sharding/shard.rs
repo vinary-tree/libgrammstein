@@ -1798,4 +1798,188 @@ mod tests {
             assert_eq!(shard.get(b"the|quick"), None);
         }
     }
+
+    // ---- Lock-free overlay entry-count tracking ----
+
+    #[test]
+    fn test_lockfree_entry_count_increments_on_increment() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("test_shard.artrie");
+        let shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
+
+        assert_eq!(shard.lockfree_entry_count(), 0);
+
+        shard.increment_lockfree(b"the|quick", 1).unwrap();
+        shard.increment_lockfree(b"the|brown", 1).unwrap();
+        shard.increment_lockfree(b"the|fox", 1).unwrap();
+
+        assert_eq!(shard.lockfree_entry_count(), 3);
+    }
+
+    #[test]
+    fn test_lockfree_entry_count_resets_on_sync() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("test_shard.artrie");
+        let mut shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
+
+        shard.increment_lockfree(b"the|quick", 1).unwrap();
+        shard.increment_lockfree(b"the|brown", 1).unwrap();
+        assert_eq!(shard.lockfree_entry_count(), 2);
+
+        shard.sync().expect("sync");
+        assert_eq!(
+            shard.lockfree_entry_count(),
+            0,
+            "sync() merges lock-free overlay into persistent and should reset the counter"
+        );
+    }
+
+    #[test]
+    fn test_lockfree_entry_count_resets_on_flush_lockfree() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("test_shard.artrie");
+        let mut shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
+
+        shard.increment_lockfree(b"the|quick", 1).unwrap();
+        shard.increment_lockfree(b"the|brown", 1).unwrap();
+        shard.increment_lockfree(b"the|fox", 1).unwrap();
+        assert_eq!(shard.lockfree_entry_count(), 3);
+
+        shard.flush_lockfree().expect("flush_lockfree");
+        assert_eq!(
+            shard.lockfree_entry_count(),
+            0,
+            "flush_lockfree() should reset the counter"
+        );
+    }
+
+    #[test]
+    fn test_lockfree_entry_count_resets_on_checkpoint() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("test_shard.artrie");
+        let mut shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
+
+        shard.increment_lockfree(b"the|quick", 1).unwrap();
+        assert_eq!(shard.lockfree_entry_count(), 1);
+
+        shard.checkpoint().expect("checkpoint");
+        assert_eq!(
+            shard.lockfree_entry_count(),
+            0,
+            "checkpoint() should reset the counter"
+        );
+    }
+
+    // ---- Chunked commit (commit_chunk) ----
+
+    #[test]
+    fn test_commit_chunk_persists_data() {
+        // commit_chunk persists buffered n-grams to the WAL but must NOT mark
+        // the prefix as complete. This is essential for the crash-recovery
+        // contract documented on `ShardHandle::commit_chunk`.
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("test_shard.artrie");
+        let mut shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
+
+        let mut tx = shard.begin_prefix("th").expect("begin_prefix");
+        for n in 0..5 {
+            let key = format!("the|word{}", n);
+            shard.tx_insert(&mut tx, key.as_bytes(), 100 + n as u64);
+        }
+
+        let inserted = shard.commit_chunk(tx).expect("commit_chunk");
+        assert_eq!(inserted, 5, "should commit all 5 buffered n-grams");
+
+        // Data is queryable after chunk commit
+        for n in 0..5 {
+            let key = format!("the|word{}", n);
+            assert_eq!(shard.get(key.as_bytes()), Some(100 + n as u64));
+        }
+
+        // Prefix is NOT yet marked complete
+        assert!(
+            !shard.checkpoint_state().completed_prefixes.contains("th"),
+            "commit_chunk must NOT mark the prefix as complete — that's commit_prefix's job"
+        );
+    }
+
+    #[test]
+    fn test_commit_chunk_then_commit_prefix_marks_complete() {
+        // Multi-chunk workflow: commit_chunk for intermediate chunks, then
+        // commit_prefix on the final chunk to mark the prefix complete.
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("test_shard.artrie");
+        let key = ShardKey::new("th");
+
+        {
+            let mut shard = ShardHandle::create(key.clone(), &path).expect("create");
+
+            // Chunk 1: insert 5 entries, commit_chunk
+            let mut tx1 = shard.begin_prefix("th").expect("begin_prefix");
+            for n in 0..5 {
+                let k = format!("the|word{}", n);
+                shard.tx_insert(&mut tx1, k.as_bytes(), 100 + n as u64);
+            }
+            shard.commit_chunk(tx1).expect("commit_chunk 1");
+
+            // Chunk 2: insert 3 more entries, commit_prefix (final)
+            let mut tx2 = shard.begin_prefix("th").expect("begin_prefix");
+            for n in 5..8 {
+                let k = format!("the|word{}", n);
+                shard.tx_insert(&mut tx2, k.as_bytes(), 100 + n as u64);
+            }
+            let inserted = shard.commit_prefix(tx2).expect("commit_prefix");
+            assert_eq!(inserted, 3);
+
+            // All 8 entries should be present
+            for n in 0..8 {
+                let k = format!("the|word{}", n);
+                assert_eq!(shard.get(k.as_bytes()), Some(100 + n as u64));
+            }
+
+            // Now the prefix IS marked complete
+            assert!(
+                shard.checkpoint_state().completed_prefixes.contains("th"),
+                "commit_prefix on the final chunk should mark the prefix complete"
+            );
+        }
+
+        // Reopen and verify checkpoint state + data persist
+        {
+            let shard = ShardHandle::open(key, &path).expect("open");
+            assert!(shard.checkpoint_state().completed_prefixes.contains("th"));
+            for n in 0..8 {
+                let k = format!("the|word{}", n);
+                assert_eq!(shard.get(k.as_bytes()), Some(100 + n as u64));
+            }
+        }
+    }
+
+    #[test]
+    fn test_commit_chunk_set_semantics_idempotent() {
+        // The crash-recovery contract: SET semantics make re-inserting the
+        // same (key, value) idempotent. After two identical commit_chunk
+        // sequences, get() returns the value (not 2x the value).
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("test_shard.artrie");
+        let mut shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
+
+        // First commit_chunk
+        let mut tx1 = shard.begin_prefix("th").expect("begin_prefix");
+        shard.tx_insert(&mut tx1, b"the|fox", 10);
+        shard.commit_chunk(tx1).expect("commit_chunk 1");
+        assert_eq!(shard.get(b"the|fox"), Some(10));
+
+        // Identical re-commit (simulating a resume after crash)
+        let mut tx2 = shard.begin_prefix("th").expect("begin_prefix");
+        shard.tx_insert(&mut tx2, b"the|fox", 10);
+        shard.commit_chunk(tx2).expect("commit_chunk 2");
+
+        // SET semantics: value remains 10, not 20
+        assert_eq!(
+            shard.get(b"the|fox"),
+            Some(10),
+            "commit_chunk uses SET semantics — re-inserting the same value must not double it"
+        );
+    }
 }

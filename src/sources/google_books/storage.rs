@@ -1619,4 +1619,167 @@ mod tests {
         assert_eq!(decode_ngram_key_bytes(&encoded2).len(), 3); // 3 word indices
         assert_ne!(encoded, encoded2); // Different keys
     }
+
+    // ---- Chunked transactions ----
+
+    #[test]
+    fn test_commit_and_renew_prefix_tx_continues_inserts() {
+        // Multi-chunk workflow at the storage layer: chunked commits via
+        // commit_and_renew_prefix_tx, then a final commit_prefix_tx.
+        //
+        // Uses TwoChar (prefix-based) granularity so that both the chunked-tx
+        // routing (by file prefix "th") and the get_tokens routing (by first
+        // token "the") agree on the same shard. The default CpuProportional
+        // granularity hashes — those would diverge for "th" vs "the".
+        let dir = TempDir::new().expect("tempdir");
+        let vocab_path = dir.path().join("vocab.artrie");
+        let vocabulary = open_or_create_vocabulary(&vocab_path).expect("vocab");
+        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+
+        let config = GoogleBooksConfig {
+            output_path: dir.path().join("output.artrie"),
+            sharding: ShardingMode::Enabled(super::super::config::ShardingOptions {
+                granularity: super::super::config::ShardingGranularity::TwoChar,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let storage = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocabulary))
+            .expect("create_sharded_with_vocabulary");
+
+        // Begin a prefix tx for "th" (2-gram order). tx_insert_ngram splits
+        // on ASCII space, so we use space-delimited strings — matching the
+        // Google Books n-gram format the importer consumes.
+        let mut tx = storage
+            .begin_prefix_tx("th", 2)
+            .expect("begin_prefix_tx")
+            .expect("sharded mode should return Some");
+
+        // Chunk 1: 5 entries, then chunk-commit
+        for i in 0..5 {
+            let ngram = format!("the w{:04}", i);
+            storage
+                .tx_insert_ngram(&mut tx, &ngram, 100 + i as u64)
+                .expect("tx_insert_ngram chunk 1");
+        }
+        let committed_chunk = storage
+            .commit_and_renew_prefix_tx(&mut tx, "th", 2)
+            .expect("commit_and_renew_prefix_tx");
+        assert_eq!(committed_chunk, 5, "first chunk should commit 5 n-grams");
+
+        // Chunk 2: 3 more entries
+        for i in 5..8 {
+            let ngram = format!("the w{:04}", i);
+            storage
+                .tx_insert_ngram(&mut tx, &ngram, 100 + i as u64)
+                .expect("tx_insert_ngram chunk 2");
+        }
+
+        // Final commit marks the prefix complete
+        let committed_final = storage.commit_prefix_tx(tx).expect("commit_prefix_tx");
+        assert_eq!(committed_final, 3, "final chunk should commit 3 n-grams");
+
+        // All 8 n-grams should be queryable via get_tokens
+        for i in 0..8 {
+            let suffix = format!("w{:04}", i);
+            let tokens = ["the", suffix.as_str()];
+            assert_eq!(
+                storage.get_tokens(&tokens),
+                Some(100 + i as u64),
+                "ngram 'the {}' missing or wrong value after multi-chunk commit",
+                suffix
+            );
+        }
+    }
+
+    #[test]
+    fn test_commit_and_renew_prefix_tx_single_trie_errors() {
+        // Single-trie mode doesn't support chunked transactions — should
+        // surface a clear configuration error.
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("test.artrie");
+        let storage = NgramStorage::create_single_trie(&path).expect("create_single_trie");
+
+        // begin_prefix_tx returns None in single-trie mode, so we have to
+        // fabricate a tx-shaped placeholder. Easier: just call the method via
+        // the sharded path's StoragePrefixTx wrapper and verify the error.
+        //
+        // Instead: just check that begin_prefix_tx itself returns None for
+        // single-trie mode, which is the upstream invariant that prevents
+        // anyone from constructing a StoragePrefixTx against single-trie
+        // storage in the first place.
+        let result = storage
+            .begin_prefix_tx("th", 2)
+            .expect("begin_prefix_tx should not error for single-trie");
+        assert!(
+            result.is_none(),
+            "single-trie mode must return None from begin_prefix_tx — \
+             chunked transactions require sharded storage"
+        );
+    }
+
+    #[test]
+    fn test_merge_and_rotate_vocabulary_wal_idempotent() {
+        // Calling merge_and_rotate_vocabulary_wal twice in succession on a
+        // populated vocabulary should not error or lose entries. This is the
+        // core durability contract — periodic checkpoints invoke this method
+        // and it must be safe to call repeatedly.
+        let dir = TempDir::new().expect("tempdir");
+        let vocab_path = dir.path().join("vocab.artrie");
+        let vocabulary = open_or_create_vocabulary(&vocab_path).expect("vocab");
+        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+
+        let config = GoogleBooksConfig {
+            output_path: dir.path().join("output.artrie"),
+            sharding: ShardingMode::Enabled(
+                super::super::config::ShardingOptions::default(),
+            ),
+            ..Default::default()
+        };
+        let storage = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocabulary))
+            .expect("create_sharded_with_vocabulary");
+
+        // Populate the vocabulary by storing a few token-based n-grams
+        storage.store_tokens(&["hello", "world"], 1).expect("store_tokens 1");
+        storage.store_tokens(&["foo", "bar"], 2).expect("store_tokens 2");
+        storage.store_tokens(&["baz", "qux"], 3).expect("store_tokens 3");
+
+        // Two back-to-back calls should both succeed
+        storage
+            .merge_and_rotate_vocabulary_wal()
+            .expect("first merge_and_rotate_vocabulary_wal");
+        storage
+            .merge_and_rotate_vocabulary_wal()
+            .expect("second merge_and_rotate_vocabulary_wal (idempotent)");
+
+        // Tokens still resolvable after the double-rotate
+        assert_eq!(storage.get_tokens(&["hello", "world"]), Some(1));
+        assert_eq!(storage.get_tokens(&["foo", "bar"]), Some(2));
+        assert_eq!(storage.get_tokens(&["baz", "qux"]), Some(3));
+    }
+
+    #[test]
+    fn test_flush_lockfree_over_threshold_single_trie_flushes_unconditionally() {
+        // Per the doc comment on NgramStorage::flush_lockfree_over_threshold:
+        // single-trie mode does not track per-entry lock-free counts, so it
+        // always flushes when the method is called (returning 1).
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("test.artrie");
+        let storage = NgramStorage::create_single_trie(&path).expect("create_single_trie");
+
+        // Store a small number of entries (well under any threshold)
+        for i in 0..5 {
+            let ngram = format!("the|w{}", i);
+            storage.store(&ngram, 1).expect("store");
+        }
+
+        // Even with a high threshold, single-trie mode unconditionally flushes
+        let flushed = storage
+            .flush_lockfree_over_threshold(10_000)
+            .expect("flush_lockfree_over_threshold");
+        assert_eq!(
+            flushed, 1,
+            "single-trie mode should always flush (returns 1) regardless of threshold"
+        );
+    }
 }
