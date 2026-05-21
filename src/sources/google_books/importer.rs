@@ -6000,4 +6000,172 @@ mod tests {
         assert!(loaded.order_progress.is_empty());  // Fresh checkpoint has no progress
         assert!(loaded.completed_orders().is_empty());  // No orders completed yet
     }
+
+    // ---- download_to_cache and cleanup_cache_file ----
+    //
+    // These tests exercise the HTTP download path used by the `--cache-files`
+    // mode. The wiremock-based fixtures simulate the actual Google Books
+    // endpoints' behavior (200 OK, 206 Partial Content, 416 Range Not
+    // Satisfiable, mid-stream errors) without requiring network access.
+
+    #[cfg(feature = "google-books")]
+    mod cache_files {
+        use super::*;
+        use wiremock::matchers::{any, header_exists, method};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+        fn build_client() -> reqwest::Client {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("Failed to build test HTTP client")
+        }
+
+        #[tokio::test]
+        async fn download_to_cache_creates_file() {
+            let server = MockServer::start().await;
+            let body: &[u8] = &[0x1f, 0x8b, 0x08, 0x00, b'h', b'i', 0x00, 0x00];
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+                .mount(&server)
+                .await;
+
+            let tmp = tempdir().expect("tempdir");
+            let cache_path = tmp.path().join("test.gz");
+            let url = format!("{}/test.gz", server.uri());
+            let client = build_client();
+
+            download_to_cache(&url, &cache_path, &client)
+                .await
+                .expect("download should succeed");
+
+            assert!(cache_path.exists(), "cache file should exist after download");
+            let written = std::fs::read(&cache_path).expect("read cache file");
+            assert_eq!(written, body, "cache file should contain server body");
+        }
+
+        #[tokio::test]
+        async fn download_to_cache_skips_if_exists() {
+            // Pre-populate the cache file with sentinel content. Even though
+            // the mock would return different bytes, download_to_cache should
+            // see the file exists and return without contacting the server.
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"server bytes"))
+                .mount(&server)
+                .await;
+
+            let tmp = tempdir().expect("tempdir");
+            let cache_path = tmp.path().join("test.gz");
+            std::fs::write(&cache_path, b"sentinel").expect("pre-populate cache");
+
+            let url = format!("{}/test.gz", server.uri());
+            let client = build_client();
+            download_to_cache(&url, &cache_path, &client)
+                .await
+                .expect("download should succeed (no-op)");
+
+            let written = std::fs::read(&cache_path).expect("read cache file");
+            assert_eq!(written, b"sentinel", "cache should keep its sentinel content");
+        }
+
+        #[tokio::test]
+        async fn download_to_cache_resume_via_range() {
+            // Simulate a partial download from a previous interrupted attempt.
+            // The server should see a Range header on the resume request.
+            let full_body: &[u8] = b"0123456789abcdef";
+            let server = MockServer::start().await;
+
+            // When a Range header is present, return 206 with the latter half
+            Mock::given(method("GET"))
+                .and(header_exists("range"))
+                .respond_with(ResponseTemplate::new(206).set_body_bytes(&full_body[8..]))
+                .mount(&server)
+                .await;
+
+            let tmp = tempdir().expect("tempdir");
+            let cache_path = tmp.path().join("test.gz");
+            let downloading = cache_path.with_extension("gz.downloading");
+            // Pre-create a .downloading remnant with the first half
+            std::fs::write(&downloading, &full_body[..8]).expect("seed partial");
+
+            let url = format!("{}/test.gz", server.uri());
+            let client = build_client();
+            download_to_cache(&url, &cache_path, &client)
+                .await
+                .expect("download should resume");
+
+            assert!(cache_path.exists());
+            assert!(!downloading.exists(), "downloading remnant should be renamed away");
+            let written = std::fs::read(&cache_path).expect("read");
+            assert_eq!(
+                written, full_body,
+                "resumed download should assemble first-half (cached) + second-half (server) = full body"
+            );
+        }
+
+        #[tokio::test]
+        async fn download_to_cache_416_recovery() {
+            // The .downloading remnant is past the full content's EOF. Server
+            // returns 416 on the Range request; download_to_cache should
+            // delete the stale partial and re-request without Range, then
+            // server returns the full body on the retry.
+            let full_body: &[u8] = b"short";
+            let server = MockServer::start().await;
+            // First call (with Range): 416
+            Mock::given(method("GET"))
+                .and(header_exists("range"))
+                .respond_with(ResponseTemplate::new(416))
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            // Second call (no Range): full content
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(full_body))
+                .mount(&server)
+                .await;
+
+            let tmp = tempdir().expect("tempdir");
+            let cache_path = tmp.path().join("test.gz");
+            let downloading = cache_path.with_extension("gz.downloading");
+            // Pre-seed an oversized partial (10 bytes vs 5-byte full content)
+            std::fs::write(&downloading, b"toolongbye").expect("seed oversized partial");
+
+            let url = format!("{}/test.gz", server.uri());
+            let client = build_client();
+            download_to_cache(&url, &cache_path, &client)
+                .await
+                .expect("download should recover from 416");
+
+            assert!(cache_path.exists());
+            let written = std::fs::read(&cache_path).expect("read");
+            assert_eq!(written, full_body, "after 416 recovery, file matches server's full body");
+        }
+
+        #[tokio::test]
+        async fn cleanup_cache_file_removes_both() {
+            // Both the final .gz and an unfinished .gz.downloading should be
+            // removed when cleanup is called.
+            let tmp = tempdir().expect("tempdir");
+            let cache_path = tmp.path().join("test.gz");
+            let downloading = cache_path.with_extension("gz.downloading");
+            std::fs::write(&cache_path, b"final").expect("write final");
+            std::fs::write(&downloading, b"partial").expect("write partial");
+            assert!(cache_path.exists() && downloading.exists());
+
+            cleanup_cache_file(&cache_path).await;
+
+            assert!(!cache_path.exists(), ".gz should be removed");
+            assert!(!downloading.exists(), ".gz.downloading should be removed");
+        }
+
+        #[tokio::test]
+        async fn cleanup_cache_file_is_idempotent() {
+            // Cleaning up a non-existent cache is a no-op (no error).
+            let tmp = tempdir().expect("tempdir");
+            let cache_path = tmp.path().join("nope.gz");
+            cleanup_cache_file(&cache_path).await;
+            assert!(!cache_path.exists());
+        }
+    }
 }

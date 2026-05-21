@@ -169,6 +169,8 @@ criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.4"
 tempfile = "3.14"
 env_logger = "0.11"
+# HTTP mock server for testing download_to_cache and other HTTP-touching paths
+wiremock = "0.6"
 # Varint encoding benchmark candidates
 varint-simd = "0.3"
 vu128 = "1"
