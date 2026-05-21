@@ -836,6 +836,9 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
         if let Some(max_year) = args.max_year {
             eprintln!("  Max year: {}", max_year);
         }
+        if args.cache_files {
+            eprintln!("  Cache files: enabled");
+        }
     }
 
     // Validate language
@@ -898,12 +901,19 @@ fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) 
             ShardingModeArg::Enabled => ShardingMode::Enabled(ShardingOptions::default()),
             ShardingModeArg::Disabled => ShardingMode::Disabled,
         },
+        tx_chunk_size: args.tx_chunk_size,
         prefix: args.prefix.clone(),
+        cache_files: args.cache_files,
     };
 
     // Create importer (resume from checkpoint if one exists)
     let mut importer = GoogleBooksImporter::resume_or_start(config)
         .map_err(|e| CliError::io(format!("Failed to create importer: {}", e)))?;
+
+    // Apply user-specified lock-free flush threshold if provided
+    if let Some(threshold) = args.lockfree_flush_threshold {
+        importer.set_lockfree_flush_threshold(threshold);
+    }
 
     // Check for local files vs HTTP
     if let Some(ref local_dir) = args.local_files {

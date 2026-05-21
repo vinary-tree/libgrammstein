@@ -93,6 +93,19 @@ pub struct GoogleBooksConfig {
     #[serde(default)]
     pub sharding: ShardingMode,
 
+    /// Transaction chunk size for prefix imports.
+    ///
+    /// Controls how many n-grams are buffered in a single transaction before
+    /// committing a chunk. Lower values reduce memory usage (critical for
+    /// 2-gram files with 50-100M entries that would otherwise buffer ~4 GB
+    /// per worker), but increase WAL write frequency.
+    ///
+    /// Set to 0 to disable chunking (buffer entire file in one transaction).
+    ///
+    /// Default: 500,000 entries.
+    #[serde(default = "default_tx_chunk_size")]
+    pub tx_chunk_size: u64,
+
     /// Optional single prefix to import (for debugging/optimization).
     ///
     /// When set, only this prefix will be imported. Valid prefixes depend on
@@ -101,6 +114,17 @@ pub struct GoogleBooksConfig {
     /// - 2-5 grams: aa-zz, other, punctuation
     #[serde(default)]
     pub prefix: Option<String>,
+
+    /// Download n-gram files to local cache before importing.
+    ///
+    /// When enabled, each worker downloads the raw `.gz` file to a local
+    /// temporary file first, then imports from the local file. This decouples
+    /// download from import, improving reliability on unstable connections.
+    ///
+    /// Cached files are stored in `{output_path_parent}/grammstein-cache/`
+    /// and deleted after successful import or when all retries are exhausted.
+    #[serde(default)]
+    pub cache_files: bool,
 }
 
 /// Sharding mode for Google Books import.
@@ -133,6 +157,10 @@ impl Default for ShardingMode {
 
 fn default_auto_threshold() -> u64 {
     10_000_000 // 10M n-grams
+}
+
+fn default_tx_chunk_size() -> u64 {
+    500_000 // 500K entries per chunk
 }
 
 /// Configuration options for sharded import.
@@ -242,7 +270,9 @@ impl Default for GoogleBooksConfig {
             progress_interval: 100_000,
             skip_pos_tags: true,
             sharding: ShardingMode::default(),
+            tx_chunk_size: default_tx_chunk_size(),
             prefix: None,
+            cache_files: false,
         }
     }
 }
@@ -329,6 +359,32 @@ impl GoogleBooksConfig {
             .and_then(|s| s.to_str())
             .unwrap_or("ngrams");
         parent.join(format!("{}_shards", stem))
+    }
+
+    /// Get the cache directory path for downloaded n-gram files.
+    ///
+    /// Returns `{output_path_parent}/grammstein-cache/`.
+    pub fn cache_dir(&self) -> PathBuf {
+        let parent = self.output_path.parent().unwrap_or(std::path::Path::new("."));
+        parent.join("grammstein-cache")
+    }
+
+    /// Get the predictable cache file path for a given order and prefix.
+    ///
+    /// Uses the Google Books filename scheme:
+    /// `googlebooks-{corpus_id}-all-{order}gram-{VERSION}-{prefix}.gz`
+    ///
+    /// Returns `None` if the language metadata is not found.
+    pub fn cache_file_path(&self, order: u8, prefix: &str) -> Option<PathBuf> {
+        let metadata = super::languages::get_metadata(&self.language)?;
+        let filename = format!(
+            "googlebooks-{}-all-{}gram-{}-{}.gz",
+            metadata.corpus_id,
+            order,
+            super::languages::VERSION,
+            prefix,
+        );
+        Some(self.cache_dir().join(filename))
     }
 
     /// Create a ShardConfig from this configuration.
@@ -464,11 +520,29 @@ impl GoogleBooksConfigBuilder {
         self
     }
 
+    /// Set the transaction chunk size for prefix imports.
+    ///
+    /// Controls how many n-grams are buffered per transaction chunk.
+    /// Set to 0 to disable chunking (buffer entire file in one transaction).
+    pub fn tx_chunk_size(mut self, size: u64) -> Self {
+        self.config.tx_chunk_size = size;
+        self
+    }
+
     /// Set a single prefix to import (for debugging/optimization).
     ///
     /// When set, only this prefix will be imported instead of all prefixes.
     pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
         self.config.prefix = Some(prefix.into());
+        self
+    }
+
+    /// Enable or disable local file caching before import.
+    ///
+    /// When enabled, workers download raw `.gz` files to a local cache
+    /// directory before importing, improving reliability on unstable connections.
+    pub fn cache_files(mut self, enabled: bool) -> Self {
+        self.config.cache_files = enabled;
         self
     }
 

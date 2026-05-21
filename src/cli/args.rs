@@ -286,6 +286,15 @@ pub struct ImportGoogleBooksArgs {
     #[arg(long)]
     pub keep_shards: bool,
 
+    /// Download n-gram files to local cache before importing.
+    ///
+    /// Each worker downloads the .gz file to a local temporary file first,
+    /// then imports from the local file. Improves reliability on unstable
+    /// connections. Cached files are stored in `{output_dir}/grammstein-cache/`
+    /// and deleted after successful import or when all retries are exhausted.
+    #[arg(long)]
+    pub cache_files: bool,
+
     /// Sharding mode for storage.
     ///
     /// - enabled: Use sharding to reduce thread contention (default)
@@ -299,6 +308,23 @@ pub struct ImportGoogleBooksArgs {
     /// Valid prefixes for 2-5 grams: aa-zz, other, punctuation
     #[arg(long)]
     pub prefix: Option<String>,
+
+    /// Lock-free overlay flush threshold (entries per shard).
+    ///
+    /// Controls memory usage during parallel imports. Lower values use less
+    /// memory but flush more frequently. Default: auto-scaled based on
+    /// --parallel value (50K for >=8 workers, 100K otherwise).
+    #[arg(long, value_name = "ENTRIES")]
+    pub lockfree_flush_threshold: Option<u64>,
+
+    /// Transaction chunk size for prefix imports (entries per chunk).
+    ///
+    /// Controls how many n-grams are buffered in a single transaction before
+    /// committing a chunk. Lower values reduce memory usage (critical for
+    /// 2-gram files with 50-100M entries), but increase WAL write frequency.
+    /// Set to 0 to disable chunking (buffer entire file in one transaction).
+    #[arg(long, default_value = "500000", value_name = "ENTRIES")]
+    pub tx_chunk_size: u64,
 
     /// Resource management options.
     #[command(flatten)]
