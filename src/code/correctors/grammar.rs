@@ -279,7 +279,11 @@ impl<L: CodeLanguage> GrammarCorrector<L> {
             );
         }
 
-        corrections.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+        corrections.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         corrections.truncate(self.config.max_candidates);
         corrections
     }

@@ -208,10 +208,20 @@ impl<L: CodeLanguage + Clone> EnsembleCorrector<L> {
                 let total_weight: f64 = group.iter().map(|(_, w)| w).sum();
                 let avg_confidence: f64 = group.iter().map(|(c, w)| c.confidence * w).sum::<f64>() / total_weight;
 
-                // Take the best correction as base
-                let mut best = group.into_iter()
-                    .max_by(|a, b| (a.0.confidence * a.1).partial_cmp(&(b.0.confidence * b.1)).unwrap())
-                    .unwrap().0;
+                // Take the best correction as base. NaN confidences are
+                // treated as Equal so a single bad score can't panic the
+                // ensemble. The outer `.unwrap().0` is safe because `group`
+                // was built from a non-empty iterator above; we surface
+                // the invariant via `.expect()` to make it grep-able.
+                let mut best = group
+                    .into_iter()
+                    .max_by(|a, b| {
+                        (a.0.confidence * a.1)
+                            .partial_cmp(&(b.0.confidence * b.1))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .expect("ensemble group is non-empty by construction")
+                    .0;
 
                 // Apply agreement boost
                 let boost = if self.config.agreement_boost && sources.len() > 1 {

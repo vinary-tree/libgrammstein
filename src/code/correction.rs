@@ -212,9 +212,14 @@ impl CorrectionCandidates {
     pub fn add(&mut self, correction: Correction) {
         self.corrections.push(correction);
 
-        // Sort by confidence (descending) and truncate
-        self.corrections
-            .sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+        // Sort by confidence (descending) and truncate. Treat NaN confidences
+        // as equal so a single bogus score from a neural scorer can't panic
+        // the entire correction pipeline.
+        self.corrections.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         if self.corrections.len() > self.max_candidates {
             self.corrections.truncate(self.max_candidates);

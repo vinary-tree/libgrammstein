@@ -400,7 +400,9 @@ impl<L: CodeLanguage + Send + Sync> CodeCorrector for SemanticCorrector<L> {
                     .filter(|(_, sim)| *sim > 0.5)
                     .collect();
 
-                candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                candidates.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                });
 
                 let end_byte = token.byte_offset + token.text.len();
                 for (replacement, score) in candidates.into_iter().take(self.config.max_candidates) {
