@@ -110,41 +110,50 @@ lazy_static! {
         m
     };
 
-    /// Single-letter prefixes for 1-grams.
-    pub static ref UNIGRAM_PREFIXES: Vec<&'static str> = {
-        let mut prefixes: Vec<&str> = ('a'..='z').map(|c| {
-            // This is a workaround to get static str from char
-            match c {
-                'a' => "a", 'b' => "b", 'c' => "c", 'd' => "d", 'e' => "e",
-                'f' => "f", 'g' => "g", 'h' => "h", 'i' => "i", 'j' => "j",
-                'k' => "k", 'l' => "l", 'm' => "m", 'n' => "n", 'o' => "o",
-                'p' => "p", 'q' => "q", 'r' => "r", 's' => "s", 't' => "t",
-                'u' => "u", 'v' => "v", 'w' => "w", 'x' => "x", 'y' => "y",
-                'z' => "z", _ => unreachable!(),
-            }
-        }).collect();
-        prefixes.push("other");
-        prefixes
-    };
-
     /// Two-letter prefixes for 2-5 grams.
-    pub static ref MULTIGRAM_PREFIXES: Vec<String> = {
-        let mut prefixes = Vec::new();
-
-        // aa through zz
+    ///
+    /// Lazily built once: 676 ("aa".."zz") + 2 ("other", "punctuation")
+    /// entries. The previous version stored these as owned `String`s;
+    /// switching to `&'static str` via a `Box::leak` of the concatenated
+    /// buffer means callers that need `&str` borrow directly with no
+    /// allocation per call.
+    pub static ref MULTIGRAM_PREFIXES: Vec<&'static str> = {
+        // Pre-size the joined buffer: 676 prefixes × 2 chars + 2 special
+        // prefixes ("other" 5 + "punctuation" 11) = 1352 + 16 = 1368 bytes.
+        let mut buf = String::with_capacity(1368);
+        let mut offsets: Vec<(usize, usize)> = Vec::with_capacity(678);
         for c1 in 'a'..='z' {
             for c2 in 'a'..='z' {
-                prefixes.push(format!("{}{}", c1, c2));
+                let start = buf.len();
+                buf.push(c1);
+                buf.push(c2);
+                offsets.push((start, buf.len()));
             }
         }
+        let other_start = buf.len();
+        buf.push_str("other");
+        offsets.push((other_start, buf.len()));
+        let punct_start = buf.len();
+        buf.push_str("punctuation");
+        offsets.push((punct_start, buf.len()));
 
-        // Special prefixes
-        prefixes.push("other".to_string());
-        prefixes.push("punctuation".to_string());
-
-        prefixes
+        // Leak once; the resulting &'static str backs every &str slice below.
+        let leaked: &'static str = Box::leak(buf.into_boxed_str());
+        offsets.into_iter().map(|(s, e)| &leaked[s..e]).collect()
     };
 }
+
+/// Single-letter prefixes for 1-grams.
+///
+/// Replaces the lazy_static + match-arm-from-char workaround that
+/// previously required a 26-arm `match c { 'a' => "a", ... }` to coerce
+/// `char` to `&'static str`. A const slice is simpler, allocation-free,
+/// and lets the compiler verify length at compile time.
+pub static UNIGRAM_PREFIXES: &[&str] = &[
+    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+    "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+    "other",
+];
 
 /// Get the URL for a specific n-gram file.
 ///
@@ -174,10 +183,10 @@ pub fn get_file_url(language: &str, order: u8, prefix: &str) -> Option<String> {
 pub fn get_order_urls(language: &str, order: u8) -> Option<Vec<String>> {
     let metadata = SUPPORTED_LANGUAGES.get(language)?;
 
-    let prefixes: Vec<&str> = if order == 1 {
-        UNIGRAM_PREFIXES.iter().map(|s| *s).collect()
+    let prefixes: &[&str] = if order == 1 {
+        UNIGRAM_PREFIXES
     } else {
-        MULTIGRAM_PREFIXES.iter().map(|s| s.as_str()).collect()
+        MULTIGRAM_PREFIXES.as_slice()
     };
 
     let urls: Vec<String> = prefixes
@@ -202,7 +211,7 @@ pub fn get_prefixes(order: u8) -> Vec<String> {
     if order == 1 {
         UNIGRAM_PREFIXES.iter().map(|s| s.to_string()).collect()
     } else {
-        MULTIGRAM_PREFIXES.clone()
+        MULTIGRAM_PREFIXES.iter().map(|s| s.to_string()).collect()
     }
 }
 
@@ -242,7 +251,7 @@ pub fn is_valid_prefix(order: u8, prefix: &str) -> bool {
     if order == 1 {
         UNIGRAM_PREFIXES.contains(&prefix)
     } else {
-        MULTIGRAM_PREFIXES.contains(&prefix.to_string())
+        MULTIGRAM_PREFIXES.contains(&prefix)
     }
 }
 
