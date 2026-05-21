@@ -29,6 +29,7 @@ use crate::ngram::vocabulary::{
 use libdictenstein::persistent_artrie::PersistentARTrie;
 use liblevenshtein::dictionary::Dictionary;
 use parking_lot::RwLock;
+use smallvec::SmallVec;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -311,6 +312,41 @@ impl NgramStorage {
         }
     }
 
+    /// Store an n-gram string with count, splitting on spaces into tokens.
+    ///
+    /// This is a convenience wrapper around `store_tokens` that avoids heap
+    /// allocation by using `SmallVec<[&str; 5]>` for the token split (n-gram
+    /// orders 1-5 fit inline on the stack).
+    ///
+    /// # Arguments
+    ///
+    /// * `ngram` - Space-separated n-gram string (e.g., "the quick brown")
+    /// * `count` - The n-gram count
+    pub fn store_ngram(&self, ngram: &str, count: u64) -> StorageResult<bool> {
+        let tokens: SmallVec<[&str; 5]> = ngram.split(' ').collect();
+        self.store_tokens(&tokens, count)
+    }
+
+    /// Insert an n-gram string into a pending prefix transaction.
+    ///
+    /// This is a convenience wrapper around `tx_insert_tokens` that avoids heap
+    /// allocation by using `SmallVec<[&str; 5]>` for the token split.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The active transaction from `begin_prefix_tx()`
+    /// * `ngram` - Space-separated n-gram string (e.g., "the quick brown")
+    /// * `count` - The n-gram count
+    pub fn tx_insert_ngram(
+        &self,
+        tx: &mut StoragePrefixTx,
+        ngram: &str,
+        count: u64,
+    ) -> StorageResult<()> {
+        let tokens: SmallVec<[&str; 5]> = ngram.split(' ').collect();
+        self.tx_insert_tokens(tx, &tokens, count)
+    }
+
     /// Route tokens to their shard key (for sharded mode with vocabulary encoding).
     ///
     /// Returns `None` for single-trie mode.
@@ -515,6 +551,41 @@ impl NgramStorage {
         }
     }
 
+    /// Flush lock-free overlays for shards exceeding the entry threshold.
+    ///
+    /// This bounds per-shard lock-free memory usage during high-parallelism
+    /// imports. Only acquires write locks on shards that need flushing.
+    ///
+    /// For single-trie mode, flushes the single trie if it has lock-free data.
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold` - Maximum lock-free entries per shard before flushing.
+    ///
+    /// # Returns
+    ///
+    /// The number of shards/tries that were flushed.
+    pub fn flush_lockfree_over_threshold(&self, threshold: u64) -> StorageResult<usize> {
+        match self {
+            Self::SingleTrie { trie, .. } => {
+                // Single trie: flush if it has any lock-free data
+                // (We don't track per-entry counts on the single trie, so
+                //  we always flush when this is called, which is fine since
+                //  single-trie mode is not the OOM-prone path.)
+                let mut guard = trie.write();
+                guard.merge_lockfree_values_to_persistent().map_err(|e| {
+                    StorageError::Trie(format!("Lock-free merge failed: {}", e))
+                })?;
+                Ok(1)
+            }
+            Self::Sharded { coordinator, .. } => {
+                coordinator
+                    .flush_lockfree_over_threshold(threshold)
+                    .map_err(StorageError::from)
+            }
+        }
+    }
+
     /// Sync the vocabulary WAL (if present).
     ///
     /// First merges lock-free entries into the persistent layer, then syncs WAL.
@@ -584,6 +655,42 @@ impl NgramStorage {
                 StorageError::Trie(format!("Vocabulary lock-free merge failed: {}", e))
             })?;
             // Rotate WAL on persistent trie
+            v.inner().write().rotate_wal().map_err(|e| {
+                StorageError::Trie(format!("Vocabulary WAL rotation failed: {}", e))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Merge lock-free vocabulary entries and rotate WAL in a single operation.
+    ///
+    /// This replaces the previous pattern of calling `sync_vocabulary()` then
+    /// `rotate_vocabulary_wal()` separately. Both operations internally call
+    /// `merge_into()` on the lock-free vocabulary, which rebuilds the persistent
+    /// trie's `reverse_index: HashMap<NodeRef, *const VocabTrieNode>`. During
+    /// resize, the HashMap requires both old and new tables in memory
+    /// simultaneously.
+    ///
+    /// By performing a single merge instead of two back-to-back merges, this
+    /// method eliminates the transient memory spike (~1.7 GB saved at peak
+    /// for a 5.8M-word English vocabulary).
+    ///
+    /// # Operations
+    ///
+    /// 1. Merges lock-free vocabulary entries into the persistent trie (single
+    ///    HashMap rebuild)
+    /// 2. Rotates the WAL on the persistent trie (no re-merge needed)
+    pub fn merge_and_rotate_vocabulary_wal(&self) -> StorageResult<()> {
+        let vocab = match self {
+            Self::SingleTrie { vocabulary, .. } => vocabulary,
+            Self::Sharded { vocabulary, .. } => vocabulary,
+        };
+        if let Some(v) = vocab {
+            // Single merge: flush lock-free layer into persistent
+            v.checkpoint().map_err(|e| {
+                StorageError::Trie(format!("Vocabulary lock-free merge failed: {}", e))
+            })?;
+            // Rotate WAL on persistent trie (no re-merge needed since we just flushed)
             v.inner().write().rotate_wal().map_err(|e| {
                 StorageError::Trie(format!("Vocabulary WAL rotation failed: {}", e))
             })?;
@@ -994,6 +1101,53 @@ impl NgramStorage {
             }
             Self::SingleTrie { .. } => Err(StorageError::Config(
                 "Cannot use transaction with single-trie storage".to_string(),
+            )),
+        }
+    }
+
+    /// Commit a prefix transaction chunk and begin a new transaction for
+    /// the same prefix/shard.
+    ///
+    /// This commits the current chunk's buffered n-grams to the WAL WITHOUT
+    /// marking the prefix as complete, then begins a fresh transaction for
+    /// the next chunk. Used for chunked imports of large prefix files to
+    /// bound per-transaction memory usage.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The current transaction (consumed)
+    /// * `prefix` - The prefix being imported (needed to begin a new tx)
+    /// * `order` - The n-gram order (needed for shard routing)
+    ///
+    /// # Returns
+    ///
+    /// The number of n-grams committed in this chunk. On success, `tx` is
+    /// replaced with a fresh transaction for the next chunk. On error, `tx`
+    /// is left in an indeterminate state (inner consumed) and should not be
+    /// used further.
+    pub fn commit_and_renew_prefix_tx(
+        &self,
+        tx: &mut StoragePrefixTx,
+        prefix: &str,
+        order: u8,
+    ) -> StorageResult<usize> {
+        match self {
+            Self::Sharded { coordinator, stats, .. } => {
+                let count = coordinator.commit_chunk_tx(&mut tx.inner)?;
+                stats.record(count as u64, count as u64);
+
+                // Begin a new transaction for the next chunk
+                let shard_key = super::sharding::shard_key_for_file_prefix(
+                    prefix,
+                    order,
+                    &coordinator.config().granularity,
+                );
+                let new_inner = coordinator.begin_prefix_tx(&shard_key, prefix)?;
+                tx.inner = new_inner;
+                Ok(count)
+            }
+            Self::SingleTrie { .. } => Err(StorageError::Config(
+                "Cannot use chunked transactions with single-trie storage".to_string(),
             )),
         }
     }
