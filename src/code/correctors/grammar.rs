@@ -299,10 +299,12 @@ impl<L: CodeLanguage> GrammarCorrector<L> {
             return 0.0;
         }
 
-        // Build bigrams directly from char iterator without Vec allocation
-        // Uses peekable to create pairs without collecting all chars first
+        // Build bigrams directly from char iterator without Vec allocation.
+        // Pre-size the HashSets to the upper bound of bigrams: an N-byte ASCII
+        // string has at most N-1 bigrams; using `a.len()` overestimates for
+        // multi-byte chars but never under-sizes, eliminating mid-loop rehash.
         let bigrams_a: HashSet<(char, char)> = {
-            let mut set = HashSet::new();
+            let mut set = HashSet::with_capacity(a.len().saturating_sub(1).max(1));
             let mut chars = a.chars().peekable();
             while let Some(c1) = chars.next() {
                 if let Some(&c2) = chars.peek() {
@@ -313,7 +315,7 @@ impl<L: CodeLanguage> GrammarCorrector<L> {
         };
 
         let bigrams_b: HashSet<(char, char)> = {
-            let mut set = HashSet::new();
+            let mut set = HashSet::with_capacity(b.len().saturating_sub(1).max(1));
             let mut chars = b.chars().peekable();
             while let Some(c1) = chars.next() {
                 if let Some(&c2) = chars.peek() {

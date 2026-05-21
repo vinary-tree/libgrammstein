@@ -185,15 +185,20 @@ impl<L: CodeLanguage + Clone> EnsembleCorrector<L> {
             return vec![];
         }
 
-        // Group by (replacement, position)
-        let mut groups: HashMap<(String, usize, usize), Vec<(Correction, f64)>> = HashMap::new();
+        // Group by (replacement, position). Pre-size both collections to
+        // `corrections.len()` — the worst case is one group per correction,
+        // and that's the only size knowable up front. Eliminates mid-loop
+        // resize doubling in the grouping pass.
+        let n_in = corrections.len();
+        let mut groups: HashMap<(String, usize, usize), Vec<(Correction, f64)>> =
+            HashMap::with_capacity(n_in);
 
         for (c, weight) in corrections {
             let key = (c.replacement.clone(), c.start_byte, c.end_byte);
             groups.entry(key).or_default().push((c, weight));
         }
 
-        let mut merged = Vec::new();
+        let mut merged = Vec::with_capacity(groups.len());
 
         for ((_replacement, _start_byte, _end_byte), group) in groups {
             if group.len() == 1 {
