@@ -11,11 +11,11 @@ use std::time::{Duration, Instant};
 use libdictenstein::persistent_artrie::PersistentARTrie;
 use parking_lot::RwLock;
 
-use super::sharding::{MergeCoordinator, MergeStats, MknAggregator};
+use super::sharding::{MergeCoordinator, MknAggregator};
 use super::storage::{NgramStorage, StoragePrefixTx};
 use crate::ngram::vocabulary::{
     decode_ngram_key_bytes, encode_indices_to_key_bytes,
-    open_or_create_concurrent_vocabulary_lockfree,
+    open_or_create_concurrent_vocabulary_lockfree_with_capacity,
 };
 
 
@@ -79,6 +79,35 @@ fn estimate_ngram_count(config: &GoogleBooksConfig) -> u64 {
     }
 
     total
+}
+
+/// Estimate the number of unique vocabulary terms for a given configuration.
+///
+/// The vocabulary size approximates the number of unique words in the corpus.
+/// For Google Books, the 1-gram count is a good proxy since each unique 1-gram
+/// is a unique word. Higher-order n-grams share the same vocabulary, so
+/// `config.order` is intentionally not used here — only language and min_count
+/// influence the estimate.
+///
+/// The min_count filter is applied since rare words below the threshold
+/// are never inserted into the vocabulary.
+fn estimate_vocabulary_size(config: &GoogleBooksConfig) -> usize {
+    // Base vocabulary sizes by language (unique 1-gram count)
+    let base_vocab = match config.language.as_str() {
+        "en" | "eng" => 13_000_000usize,
+        _ => 5_000_000usize,
+    };
+
+    // Apply min_count filter: higher thresholds prune rare words
+    let factor = match config.min_count {
+        0..=1 => 1.0,
+        2..=10 => 0.4,
+        11..=40 => 0.2,
+        41..=100 => 0.1,
+        _ => 0.05,
+    };
+
+    (base_vocab as f64 * factor) as usize
 }
 
 // ============================================================================
@@ -206,11 +235,8 @@ fn store_ngram_shared(
     count: u64,
     storage: &Arc<NgramStorage>,
 ) -> Result<NgramStorageResult, ImportError> {
-    // Split n-gram into tokens for vocabulary encoding
-    let tokens: Vec<&str> = ngram.split(' ').collect();
-
-    // Store using token-based API which applies vocabulary encoding
-    let is_new = storage.store_tokens(&tokens, count)?;
+    // Store using ngram-string API (splits to SmallVec internally, avoiding heap alloc)
+    let is_new = storage.store_ngram(ngram, count)?;
 
     Ok(NgramStorageResult { is_new })
 }
@@ -531,6 +557,144 @@ struct WorkerSharedState {
     http_client: reqwest::Client,
 }
 
+/// Shared context for the per-prefix-file processing path.
+///
+/// This struct holds everything that `process_prefix_file` and
+/// `process_prefix_file_cached` need across all concurrent invocations within
+/// a single order's import. It is constructed once per order at the call site
+/// and shared via `Arc` to every spawned future.
+///
+/// Separation of concerns: distinct from `WorkerSharedState` (which serves the
+/// persistent-worker `worker_task` architecture) because the prefix-file
+/// architecture has its own concerns — a worker-ID claim pool and an Optional
+/// progress channel (the worker-task path always has progress; the prefix-file
+/// path may be invoked headless). The two structs share a conceptual core
+/// (config, storage, counters, http_client) which a future refactor may
+/// extract into a common base type.
+#[cfg(feature = "google-books")]
+pub(super) struct PrefixProcessingContext {
+    pub(super) config: GoogleBooksConfig,
+    pub(super) storage: Arc<NgramStorage>,
+    pub(super) total_ngrams: Arc<AtomicU64>,
+    pub(super) unique_ngrams: Arc<AtomicU64>,
+    pub(super) progress_tx: Option<tokio::sync::mpsc::Sender<WorkerUpdate>>,
+    /// Shared HTTP client — created once per order so all spawned futures
+    /// reuse a single connection pool (avoids the concurrency-amplification
+    /// rate-limiting bug previously caused by per-call `Client::builder()`).
+    pub(super) http_client: reqwest::Client,
+    /// Worker-ID claim channel: claimed when a future starts, returned when
+    /// it finishes, ensuring each concurrent worker has a unique ID for
+    /// display purposes.
+    pub(super) worker_id_pool_tx: tokio::sync::mpsc::Sender<usize>,
+    pub(super) worker_id_pool_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<usize>>>,
+}
+
+/// Shared helper: consume a stream of aggregated n-grams into the storage
+/// transaction, with periodic chunked commits to bound per-transaction memory.
+///
+/// Used by both `process_prefix_file` (HTTP-streamed) and
+/// `process_prefix_file_cached` (locally-cached file). The two paths differ only
+/// in how the stream is produced; the per-record processing — SET-semantics
+/// insert, chunk-commit at `ctx.config.tx_chunk_size`, periodic progress
+/// emission, abort-on-error, final commit — is identical.
+///
+/// On success, returns the total n-grams processed and commits the final chunk
+/// (marking the prefix complete + persisting checkpoint state). On error,
+/// aborts the transaction; buffered uncommitted n-grams are discarded.
+///
+/// SET semantics + chunked commits = idempotent crash recovery: re-running the
+/// prefix re-inserts the same values, and unchecked-pointed chunks are lost on
+/// crash, so the prefix is just re-imported from scratch on resume.
+#[cfg(feature = "google-books")]
+async fn process_aggregated_stream<S>(
+    stream: S,
+    mut tx: StoragePrefixTx,
+    ctx: &Arc<PrefixProcessingContext>,
+    prefix: &str,
+    order: u8,
+    worker_id: usize,
+    source_label: &str,
+) -> Result<u64, ImportError>
+where
+    S: tokio_stream::Stream<Item = Result<super::aggregator::AggregatedNgram, ReaderError>>,
+{
+    use tokio_stream::StreamExt;
+
+    tokio::pin!(stream);
+
+    const NGRAM_PROGRESS_INTERVAL: u64 = 50_000;
+    let mut count = 0u64;
+    let mut chunk_count = 0u64;
+    let mut stream_err: Option<ImportError> = None;
+    let tx_chunk_size = ctx.config.tx_chunk_size;
+
+    while let Some(result) = stream.next().await {
+        let agg = match result {
+            Ok(agg) => agg,
+            Err(e) => {
+                stream_err = Some(e.into());
+                break;
+            }
+        };
+
+        // Insert into transaction (SET semantics, not increment)
+        // tx_insert_ngram splits to SmallVec internally, avoiding heap alloc
+        if let Err(e) = ctx.storage.tx_insert_ngram(&mut tx, &agg.ngram, agg.total_count) {
+            stream_err = Some(e.into());
+            break;
+        }
+        count += 1;
+        chunk_count += 1;
+
+        // Chunked commit: bound per-transaction memory for large files
+        if tx_chunk_size > 0 && chunk_count >= tx_chunk_size {
+            match ctx.storage.commit_and_renew_prefix_tx(&mut tx, prefix, order) {
+                Ok(committed) => {
+                    log::trace!(
+                        "Worker {}: committed chunk for {} '{}' ({} n-grams)",
+                        worker_id, source_label, prefix, committed
+                    );
+                    chunk_count = 0;
+                }
+                Err(e) => {
+                    stream_err = Some(e.into());
+                    break;
+                }
+            }
+        }
+
+        // Emit periodic progress for TUI display
+        if count % NGRAM_PROGRESS_INTERVAL == 0 {
+            if let Some(ref ptx) = ctx.progress_tx {
+                let _ = ptx.try_send(WorkerUpdate::NgramProgress {
+                    worker_id,
+                    ngram_count: count,
+                });
+            }
+        }
+    }
+
+    if let Some(e) = stream_err {
+        if let Err(abort_err) = ctx.storage.abort_prefix_tx(tx) {
+            log::warn!(
+                "Worker {}: failed to abort transaction for {} '{}': {}",
+                worker_id, source_label, prefix, abort_err
+            );
+        }
+        return Err(e);
+    }
+
+    // Commit the final chunk and mark prefix as complete
+    let committed = ctx.storage.commit_prefix_tx(tx)?;
+    ctx.total_ngrams.fetch_add(count, Ordering::Relaxed);
+    ctx.unique_ngrams.fetch_add(committed as u64, Ordering::Relaxed);
+    log::trace!(
+        "Worker {}: committed {} '{}' with {} n-grams ({} inserted)",
+        worker_id, source_label, prefix, count, committed
+    );
+    Ok(count)
+}
+
 /// Process a single job attempt (no retry loop - single attempt only).
 ///
 /// This helper extracts the core processing logic from worker_task to enable
@@ -586,41 +750,51 @@ async fn process_single_attempt(
     let maybe_tx = shared.storage.begin_prefix_tx(&job.prefix, job.order)?;
 
     // Process based on whether we have a transaction
+    let tx_chunk_size = shared.config.tx_chunk_size;
     let result = if let Some(mut tx) = maybe_tx {
-        // Sharded mode: use transaction for atomic import
-        let process_result: Result<u64, ImportError> = async {
-            while let Some(result) = stream.next().await {
-                let agg = result?;
+        // Sharded mode: use transaction for atomic import with chunking.
+        // All tx operations are in a single async block for clean ownership.
+        let tx_result: Result<u64, ImportError> = async {
+            let mut chunk_count = 0u64;
+            let mut stream_err: Option<ImportError> = None;
 
-                // Split n-gram into tokens for vocabulary encoding
-                let tokens: Vec<&str> = agg.ngram.split(' ').collect();
+            while let Some(result) = stream.next().await {
+                let agg = match result {
+                    Ok(agg) => agg,
+                    Err(e) => { stream_err = Some(e.into()); break; }
+                };
 
                 // Insert into transaction (SET semantics, not increment)
-                shared.storage.tx_insert_tokens(&mut tx, &tokens, agg.total_count)?;
+                // tx_insert_ngram splits to SmallVec internally, avoiding heap alloc
+                if let Err(e) = shared.storage.tx_insert_ngram(&mut tx, &agg.ngram, agg.total_count) {
+                    stream_err = Some(e.into());
+                    break;
+                }
                 count += 1;
+                chunk_count += 1;
+
+                // Chunked commit: bound per-transaction memory for large files
+                if tx_chunk_size > 0 && chunk_count >= tx_chunk_size {
+                    match shared.storage.commit_and_renew_prefix_tx(&mut tx, &job.prefix, job.order) {
+                        Ok(committed) => {
+                            log::trace!(
+                                "Worker {}: committed chunk for prefix '{}' ({} n-grams)",
+                                worker_id, job.prefix, committed
+                            );
+                            chunk_count = 0;
+                        }
+                        Err(e) => { stream_err = Some(e.into()); break; }
+                    }
+                }
 
                 // Update per-worker atomic with count (for progress display)
                 if worker_id < shared.worker_stats.len() {
-                    // Pack count in upper 32 bits (unique_count not tracked with tx)
                     let packed = (count as u64) << 32;
                     shared.worker_stats[worker_id].store(packed, Ordering::Relaxed);
                 }
             }
-            Ok(count)
-        }
-        .await;
 
-        match process_result {
-            Ok(ngram_count) => {
-                // Commit the transaction atomically
-                let committed = shared.storage.commit_prefix_tx(tx)?;
-                log::trace!(
-                    "Worker {}: committed prefix '{}' with {} n-grams",
-                    worker_id, job.prefix, committed
-                );
-                Ok(ngram_count)
-            }
-            Err(e) => {
+            if let Some(e) = stream_err {
                 // Abort the transaction - buffered n-grams are discarded
                 if let Err(abort_err) = shared.storage.abort_prefix_tx(tx) {
                     log::warn!(
@@ -628,9 +802,20 @@ async fn process_single_attempt(
                         worker_id, job.prefix, abort_err
                     );
                 }
-                Err(e)
+                return Err(e);
             }
+
+            // Commit the final chunk and mark prefix as complete
+            let committed = shared.storage.commit_prefix_tx(tx)?;
+            log::trace!(
+                "Worker {}: committed prefix '{}' with {} n-grams",
+                worker_id, job.prefix, committed
+            );
+            Ok(count)
         }
+        .await;
+
+        tx_result
     } else {
         // Single-trie mode: use original increment-based approach
         // (No transaction support - caller must handle resume correctly)
@@ -669,6 +854,397 @@ async fn process_single_attempt(
     }
 
     // Reset per-worker stats after job completion (so next job starts fresh)
+    if worker_id < shared.worker_stats.len() {
+        shared.worker_stats[worker_id].store(0, Ordering::Relaxed);
+    }
+
+    result
+}
+
+/// Download a raw `.gz` file to local cache for later import.
+///
+/// Downloads to a `.gz.downloading` suffix first, then atomically renames
+/// to the final path. This prevents partial downloads from being treated
+/// as complete cached files.
+///
+/// If the cached file already exists at `cache_path`, the download is skipped.
+///
+/// Handles HTTP 429 (rate limiting) by extracting the Retry-After header and
+/// returning `ImportError::Reader(ReaderError::RateLimited{..})` so existing
+/// `is_retryable_error()` works unchanged.
+#[cfg(feature = "google-books")]
+async fn download_to_cache(
+    url: &str,
+    cache_path: &Path,
+    client: &reqwest::Client,
+) -> Result<(), ImportError> {
+    use tokio::io::AsyncWriteExt;
+
+    // Skip if already cached
+    if cache_path.exists() {
+        log::debug!("Cache hit: {}", cache_path.display());
+        return Ok(());
+    }
+
+    // Create parent directory
+    if let Some(parent) = cache_path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            ImportError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to create cache directory {}: {}", parent.display(), e),
+            ))
+        })?;
+    }
+
+    // Download to temporary suffix
+    let downloading_path = cache_path.with_extension("gz.downloading");
+
+    // Check for a partial download from a previous interrupted attempt
+    let existing_len = tokio::fs::metadata(&downloading_path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    // Send GET with conditional Range header for resume
+    let mut request = client.get(url);
+    if existing_len > 0 {
+        request = request.header(reqwest::header::RANGE, format!("bytes={}-", existing_len));
+        log::debug!(
+            "Requesting resume from byte {} for {}",
+            existing_len,
+            url
+        );
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| ImportError::Reader(ReaderError::Http(format!("GET {}: {}", url, e))))?;
+
+    let status = response.status();
+
+    // Handle rate limiting
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| {
+                if let Ok(secs) = s.parse::<u64>() {
+                    RetryAfter::Seconds(secs)
+                } else {
+                    RetryAfter::Seconds(60) // Default fallback
+                }
+            });
+
+        return Err(ImportError::Reader(ReaderError::RateLimited {
+            url: url.to_string(),
+            retry_after,
+        }));
+    }
+
+    // Handle 416 Range Not Satisfiable: partial file is at or beyond the full content.
+    // Delete the stale partial file and re-request from scratch.
+    let (response, status, existing_len) =
+        if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && existing_len > 0 {
+            log::warn!(
+                "Range not satisfiable (partial file {} bytes) for {} — restarting from scratch",
+                existing_len,
+                url
+            );
+            let _ = tokio::fs::remove_file(&downloading_path).await;
+
+            // Re-request without Range header
+            let retry_resp = client.get(url).send().await.map_err(|e| {
+                ImportError::Reader(ReaderError::Http(format!(
+                    "GET {} (retry): {}",
+                    url, e
+                )))
+            })?;
+            let retry_status = retry_resp.status();
+            (retry_resp, retry_status, 0u64)
+        } else {
+            (response, status, existing_len)
+        };
+
+    if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err(ImportError::Reader(ReaderError::Http(format!(
+            "HTTP {} for {}",
+            status, url
+        ))));
+    }
+
+    // Open file in append mode (206 resume) or create mode (200 fresh download)
+    use tokio::io::BufWriter;
+    use tokio_util::io::StreamReader;
+    use tokio_stream::StreamExt;
+
+    let file = if status == reqwest::StatusCode::PARTIAL_CONTENT && existing_len > 0 {
+        // 206 Partial Content — server confirmed resume; append to existing partial file
+        log::info!(
+            "Resuming download from byte {} for {}",
+            existing_len,
+            url
+        );
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&downloading_path)
+            .await
+            .map_err(|e| {
+                ImportError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "Failed to open partial cache file {}: {}",
+                        downloading_path.display(),
+                        e
+                    ),
+                ))
+            })?
+    } else {
+        // 200 OK — either fresh download or server ignored Range header; start from scratch
+        if existing_len > 0 {
+            log::debug!(
+                "Server returned 200 (not 206) despite Range request — restarting download for {}",
+                url
+            );
+        }
+        tokio::fs::File::create(&downloading_path)
+            .await
+            .map_err(|e| {
+                ImportError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "Failed to create cache file {}: {}",
+                        downloading_path.display(),
+                        e
+                    ),
+                ))
+            })?
+    };
+    let mut writer = BufWriter::with_capacity(256 * 1024, file); // 256 KB buffer
+
+    // Convert reqwest bytes stream to AsyncRead via StreamReader
+    // (same pattern as reader.rs:876)
+    let byte_stream = response.bytes_stream();
+    let url_for_errors = url.to_string();
+    let mapped_stream = byte_stream.map(move |result| {
+        result.map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("HTTP stream error for {}: {}", url_for_errors, e),
+            )
+        })
+    });
+    let mut reader = StreamReader::new(mapped_stream);
+
+    // Single efficient copy with internal buffering
+    tokio::io::copy(&mut reader, &mut writer).await.map_err(|e| {
+        ImportError::Io(std::io::Error::new(
+            e.kind(),
+            format!(
+                "Failed to download {} to {}: {}",
+                url,
+                downloading_path.display(),
+                e
+            ),
+        ))
+    })?;
+
+    writer.flush().await.map_err(|e| {
+        ImportError::Io(std::io::Error::new(
+            e.kind(),
+            format!("Failed to flush cache file {}: {}", downloading_path.display(), e),
+        ))
+    })?;
+    drop(writer);
+
+    // Atomic rename: .gz.downloading → .gz
+    tokio::fs::rename(&downloading_path, cache_path).await.map_err(|e| {
+        ImportError::Io(std::io::Error::new(
+            e.kind(),
+            format!(
+                "Failed to rename {} → {}: {}",
+                downloading_path.display(),
+                cache_path.display(),
+                e
+            ),
+        ))
+    })?;
+
+    log::debug!("Cached {} → {}", url, cache_path.display());
+    Ok(())
+}
+
+/// Clean up cached file and its `.downloading` remnant.
+///
+/// Best-effort: logs warnings on failure but does not return errors.
+#[cfg(feature = "google-books")]
+async fn cleanup_cache_file(cache_path: &Path) {
+    // Remove the cached .gz file
+    if cache_path.exists() {
+        if let Err(e) = tokio::fs::remove_file(cache_path).await {
+            log::warn!("Failed to remove cached file {}: {}", cache_path.display(), e);
+        }
+    }
+    // Remove any partial .downloading remnant
+    let downloading_path = cache_path.with_extension("gz.downloading");
+    if downloading_path.exists() {
+        if let Err(e) = tokio::fs::remove_file(&downloading_path).await {
+            log::warn!(
+                "Failed to remove downloading remnant {}: {}",
+                downloading_path.display(),
+                e
+            );
+        }
+    }
+}
+
+/// Process a single job attempt using cached file mode.
+///
+/// 1. Compute cache path from config
+/// 2. If cached file exists → skip download
+/// 3. Else → download raw .gz to cache
+/// 4. Stream from cached file via `stream_aggregated_from_cached_file`
+/// 5. Process n-grams (same tx/non-tx logic as `process_single_attempt`)
+/// 6. On success: delete cached file
+/// 7. On error: delete cached file + .downloading remnant (will re-download on retry)
+#[cfg(feature = "google-books")]
+async fn process_single_attempt_cached(
+    job: &Job,
+    shared: &WorkerSharedState,
+    worker_id: usize,
+) -> Result<u64, ImportError> {
+    use super::reader::stream_aggregated_from_cached_file;
+    use tokio_stream::StreamExt;
+
+    // Compute cache path
+    let cache_path = shared
+        .config
+        .cache_file_path(job.order, &job.prefix)
+        .ok_or_else(|| {
+            ImportError::Config(format!(
+                "Unknown language '{}' for cache file path",
+                shared.config.language
+            ))
+        })?;
+
+    // Download to cache (skips if already cached)
+    download_to_cache(&job.url, &cache_path, &shared.http_client).await?;
+
+    // Stream from cached file
+    let stream = stream_aggregated_from_cached_file(
+        &cache_path,
+        shared.config.year_range,
+        shared.config.skip_pos_tags,
+        shared.config.min_count,
+    );
+    tokio::pin!(stream);
+
+    // Local counters for this job
+    let mut count = 0u64;
+
+    // Try to begin a transaction for atomic, idempotent import (sharded mode only)
+    let maybe_tx = shared.storage.begin_prefix_tx(&job.prefix, job.order)?;
+
+    // Process based on whether we have a transaction
+    let tx_chunk_size = shared.config.tx_chunk_size;
+    let result = if let Some(mut tx) = maybe_tx {
+        // Sharded mode: use transaction for atomic import with chunking.
+        let tx_result: Result<u64, ImportError> = async {
+            let mut chunk_count = 0u64;
+            let mut stream_err: Option<ImportError> = None;
+
+            while let Some(result) = stream.next().await {
+                let agg = match result {
+                    Ok(agg) => agg,
+                    Err(e) => { stream_err = Some(e.into()); break; }
+                };
+                if let Err(e) = shared.storage.tx_insert_ngram(&mut tx, &agg.ngram, agg.total_count) {
+                    stream_err = Some(e.into());
+                    break;
+                }
+                count += 1;
+                chunk_count += 1;
+
+                // Chunked commit: bound per-transaction memory for large files
+                if tx_chunk_size > 0 && chunk_count >= tx_chunk_size {
+                    match shared.storage.commit_and_renew_prefix_tx(&mut tx, &job.prefix, job.order) {
+                        Ok(committed) => {
+                            log::trace!(
+                                "Worker {}: committed chunk for cached prefix '{}' ({} n-grams)",
+                                worker_id, job.prefix, committed
+                            );
+                            chunk_count = 0;
+                        }
+                        Err(e) => { stream_err = Some(e.into()); break; }
+                    }
+                }
+
+                if worker_id < shared.worker_stats.len() {
+                    let packed = (count as u64) << 32;
+                    shared.worker_stats[worker_id].store(packed, Ordering::Relaxed);
+                }
+            }
+
+            if let Some(e) = stream_err {
+                if let Err(abort_err) = shared.storage.abort_prefix_tx(tx) {
+                    log::warn!(
+                        "Worker {}: failed to abort transaction for prefix '{}': {}",
+                        worker_id, job.prefix, abort_err
+                    );
+                }
+                return Err(e);
+            }
+
+            let committed = shared.storage.commit_prefix_tx(tx)?;
+            log::trace!(
+                "Worker {}: committed cached prefix '{}' with {} n-grams",
+                worker_id, job.prefix, committed
+            );
+            Ok(count)
+        }
+        .await;
+
+        tx_result
+    } else {
+        // Single-trie mode: use original increment-based approach
+        let mut unique_count = 0u64;
+
+        while let Some(result) = stream.next().await {
+            let agg = result?;
+            let storage_result = store_ngram_shared(
+                &agg.ngram,
+                agg.total_count,
+                &shared.storage,
+            )?;
+            count += 1;
+            if storage_result.is_new {
+                unique_count += 1;
+            }
+
+            if worker_id < shared.worker_stats.len() {
+                let packed = ((count as u64) << 32) | (unique_count as u64 & 0xFFFFFFFF);
+                shared.worker_stats[worker_id].store(packed, Ordering::Relaxed);
+            }
+        }
+
+        if unique_count > 0 {
+            shared.unique_ngrams.fetch_add(unique_count, Ordering::Relaxed);
+        }
+
+        Ok(count)
+    };
+
+    // Clean up cached file on both success and error
+    // On success: no longer needed. On error: will re-download on retry.
+    cleanup_cache_file(&cache_path).await;
+
+    // Final flush to global counters
+    if let Ok(ngram_count) = result {
+        shared.total_ngrams.fetch_add(ngram_count, Ordering::Relaxed);
+    }
+
+    // Reset per-worker stats after job completion
     if worker_id < shared.worker_stats.len() {
         shared.worker_stats[worker_id].store(0, Ordering::Relaxed);
     }
@@ -865,7 +1441,11 @@ async fn worker_task(
         // Single attempt - no blocking retry loop
         // On retryable error, requeue with ready_at set and pick up next job
         let start_time = Instant::now();
-        let result = process_single_attempt(&job, &shared, worker_id).await;
+        let result = if shared.config.cache_files {
+            process_single_attempt_cached(&job, &shared, worker_id).await
+        } else {
+            process_single_attempt(&job, &shared, worker_id).await
+        };
         let elapsed = start_time.elapsed();
 
         match result {
@@ -1055,32 +1635,22 @@ async fn worker_task(
 ///
 /// # Arguments
 ///
-/// * `worker_id_pool_tx` - Channel to return worker ID when done (send ID back to pool)
-/// * `worker_id_pool_rx` - Shared receiver to claim worker ID at start
+/// * `ctx` - Shared processing context (config, storage, counters, http client,
+///   progress channel, worker-ID pool). Constructed once per order at the call
+///   site and shared via `Arc` to every spawned future.
 /// * `url` - URL of the prefix file to download
 /// * `prefix` - The prefix being downloaded (e.g., "th", "to")
 /// * `order` - N-gram order (1-5)
 /// * `attempt` - Current retry attempt (0 = first attempt)
 /// * `backoff_ms` - Backoff delay in ms if this attempt fails (for next retry)
-/// * `config` - Import configuration
-/// * `storage` - Storage backend for n-grams (single-trie or sharded)
-/// * `total_ngrams` - Atomic counter for total n-grams
-/// * `unique_ngrams` - Atomic counter for unique n-grams
-/// * `progress_tx` - Optional channel for sending progress updates
 #[cfg(feature = "google-books")]
 async fn process_prefix_file(
-    worker_id_pool_tx: tokio::sync::mpsc::Sender<usize>,
-    worker_id_pool_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<usize>>>,
+    ctx: Arc<PrefixProcessingContext>,
     url: Arc<str>,
     prefix: Arc<str>,
     order: u8,
     attempt: u8,
     backoff_ms: u64,
-    config: GoogleBooksConfig,
-    storage: Arc<NgramStorage>,
-    total_ngrams: Arc<AtomicU64>,
-    unique_ngrams: Arc<AtomicU64>,
-    progress_tx: Option<tokio::sync::mpsc::Sender<WorkerUpdate>>,
 ) -> PrefixOutcome {
     use super::reader::HttpNgramReader;
     use tokio_stream::StreamExt;
@@ -1088,7 +1658,7 @@ async fn process_prefix_file(
     // Claim a worker ID from the pool - this blocks until a slot is available.
     // This ensures each concurrent worker has a unique ID for display purposes.
     let worker_id = {
-        let mut rx = worker_id_pool_rx.lock().await;
+        let mut rx = ctx.worker_id_pool_rx.lock().await;
         rx.recv().await.expect("Worker ID pool closed unexpectedly")
     };
 
@@ -1099,13 +1669,31 @@ async fn process_prefix_file(
 
     // Send "Started" update (always include attempt for retry tracking)
     // Using try_send for backpressure - dropping updates is acceptable for progress
-    if let Some(ref tx) = progress_tx {
+    if let Some(ref tx) = ctx.progress_tx {
         let _ = tx.try_send(WorkerUpdate::Started {
             worker_id,
             order,
             prefix: Arc::clone(&prefix),
             attempt,
         });
+    }
+
+    // Branch to cached processing if enabled
+    if ctx.config.cache_files {
+        let outcome = process_prefix_file_cached(
+            &ctx,
+            worker_id,
+            url,
+            prefix,
+            order,
+            attempt,
+            backoff_ms,
+        )
+        .await;
+
+        // Return worker ID to pool
+        return_worker_id(ctx.worker_id_pool_tx.clone(), worker_id).await;
+        return outcome;
     }
 
     // Add small random delay to stagger connection starts (reduces rate limiting)
@@ -1119,77 +1707,25 @@ async fn process_prefix_file(
     let result: Result<u64, ImportError> = async {
         let mut reader = HttpNgramReader::with_options(
             &url,
-            config.skip_pos_tags,
-            config.min_count,
+            ctx.config.skip_pos_tags,
+            ctx.config.min_count,
         );
 
         // Stream n-grams instead of buffering entire file in memory.
         // This is critical for large 2-gram files (50-100M n-grams, 6-8GB).
-        let stream = reader.stream_aggregated(config.year_range);
-        tokio::pin!(stream);
-
-        // Emit progress every 50,000 n-grams for TUI updates.
-        // Larger interval reduces channel pressure for high-volume files.
-        const NGRAM_PROGRESS_INTERVAL: u64 = 50_000;
+        let stream = reader.stream_aggregated(ctx.config.year_range);
 
         // Try to begin a transaction for atomic, idempotent import (sharded mode only)
-        let maybe_tx = storage.begin_prefix_tx(&prefix, order)?;
+        let maybe_tx = ctx.storage.begin_prefix_tx(&prefix, order)?;
 
-        if let Some(mut tx) = maybe_tx {
-            // Sharded mode: use transaction for atomic import
-            let mut count = 0u64;
-
-            let process_result: Result<u64, ImportError> = async {
-                while let Some(result) = stream.next().await {
-                    let agg = result?;
-
-                    // Split n-gram into tokens for vocabulary encoding
-                    let tokens: Vec<&str> = agg.ngram.split(' ').collect();
-
-                    // Insert into transaction (SET semantics, not increment)
-                    storage.tx_insert_tokens(&mut tx, &tokens, agg.total_count)?;
-                    count += 1;
-
-                    // Emit periodic progress for TUI display
-                    if count % NGRAM_PROGRESS_INTERVAL == 0 {
-                        if let Some(ref tx) = progress_tx {
-                            let _ = tx.try_send(WorkerUpdate::NgramProgress {
-                                worker_id,
-                                ngram_count: count,
-                            });
-                        }
-                    }
-                }
-                Ok(count)
-            }
-            .await;
-
-            match process_result {
-                Ok(ngram_count) => {
-                    // Commit the transaction atomically
-                    let committed = storage.commit_prefix_tx(tx)?;
-                    total_ngrams.fetch_add(ngram_count, Ordering::Relaxed);
-                    unique_ngrams.fetch_add(committed as u64, Ordering::Relaxed);
-                    log::trace!(
-                        "Worker {}: committed prefix '{}' with {} n-grams ({} inserted)",
-                        worker_id, prefix, ngram_count, committed
-                    );
-                    Ok(ngram_count)
-                }
-                Err(e) => {
-                    // Abort the transaction - buffered n-grams are discarded
-                    if let Err(abort_err) = storage.abort_prefix_tx(tx) {
-                        log::warn!(
-                            "Worker {}: failed to abort transaction for prefix '{}': {}",
-                            worker_id, prefix, abort_err
-                        );
-                    }
-                    Err(e)
-                }
-            }
+        if let Some(tx) = maybe_tx {
+            // Sharded mode: delegate chunked-tx body to shared helper
+            process_aggregated_stream(stream, tx, &ctx, &prefix, order, worker_id, "prefix").await
         } else {
             // Single-trie mode: use original increment-based approach
             // Local counters for batched atomic updates (reduces cache-line bouncing)
+            tokio::pin!(stream);
+            const NGRAM_PROGRESS_INTERVAL: u64 = 50_000;
             let mut local_total: u64 = 0;
             let mut local_unique: u64 = 0;
 
@@ -1199,7 +1735,7 @@ async fn process_prefix_file(
                 let storage_result = store_ngram_shared(
                     &agg.ngram,
                     agg.total_count,
-                    &storage,
+                    &ctx.storage,
                 )?;
                 count += 1;
                 local_total += 1;
@@ -1209,9 +1745,9 @@ async fn process_prefix_file(
 
                 // Batch flush atomic counters every COUNTER_BATCH_SIZE n-grams
                 if local_total >= COUNTER_BATCH_SIZE {
-                    total_ngrams.fetch_add(local_total, Ordering::Relaxed);
+                    ctx.total_ngrams.fetch_add(local_total, Ordering::Relaxed);
                     if local_unique > 0 {
-                        unique_ngrams.fetch_add(local_unique, Ordering::Relaxed);
+                        ctx.unique_ngrams.fetch_add(local_unique, Ordering::Relaxed);
                     }
                     local_total = 0;
                     local_unique = 0;
@@ -1219,7 +1755,7 @@ async fn process_prefix_file(
 
                 // Emit periodic progress for TUI display
                 if count % NGRAM_PROGRESS_INTERVAL == 0 {
-                    if let Some(ref tx) = progress_tx {
+                    if let Some(ref tx) = ctx.progress_tx {
                         let _ = tx.try_send(WorkerUpdate::NgramProgress {
                             worker_id,
                             ngram_count: count,
@@ -1230,10 +1766,10 @@ async fn process_prefix_file(
 
             // Flush remaining counts
             if local_total > 0 {
-                total_ngrams.fetch_add(local_total, Ordering::Relaxed);
+                ctx.total_ngrams.fetch_add(local_total, Ordering::Relaxed);
             }
             if local_unique > 0 {
-                unique_ngrams.fetch_add(local_unique, Ordering::Relaxed);
+                ctx.unique_ngrams.fetch_add(local_unique, Ordering::Relaxed);
             }
 
             Ok(count)
@@ -1242,14 +1778,14 @@ async fn process_prefix_file(
     .await;
 
     // Return worker ID to pool before returning result
-    return_worker_id(worker_id_pool_tx, worker_id).await;
+    return_worker_id(ctx.worker_id_pool_tx.clone(), worker_id).await;
 
     let elapsed = start_time.elapsed();
 
     match result {
         Ok(count) => {
             // Send "Finished" update
-            if let Some(ref tx) = progress_tx {
+            if let Some(ref tx) = ctx.progress_tx {
                 let _ = tx.try_send(WorkerUpdate::Finished {
                     worker_id,
                     order,
@@ -1270,7 +1806,7 @@ async fn process_prefix_file(
                 "Prefix '{}' (order {}) failed attempt {} with retryable error, deferring: {}",
                 prefix, order, attempt + 1, e
             );
-            if let Some(ref tx) = progress_tx {
+            if let Some(ref tx) = ctx.progress_tx {
                 let _ = tx.try_send(WorkerUpdate::Deferred {
                     worker_id,
                     order,
@@ -1295,6 +1831,203 @@ async fn process_prefix_file(
                 "Prefix '{}' (order {}) failed permanently after {} attempts: {}",
                 prefix, order, attempt + 1, e
             );
+            PrefixOutcome::Failed {
+                prefix,
+                error: e,
+                attempts: (attempt + 1) as u32,
+            }
+        }
+    }
+}
+
+/// Inner implementation for cached prefix file processing.
+///
+/// Called from `process_prefix_file` when `ctx.config.cache_files` is true.
+/// Downloads the raw `.gz` file to a local cache, then streams from the
+/// cached file. Cleans up the cache on both success and error.
+///
+/// The caller (`process_prefix_file`) is responsible for claiming the
+/// `worker_id` from the pool and returning it after this function returns —
+/// this function only needs the already-claimed `worker_id` for logging and
+/// progress emission. All shared dependencies (storage, config, http_client,
+/// counters, progress channel) come from `ctx`.
+#[cfg(feature = "google-books")]
+async fn process_prefix_file_cached(
+    ctx: &Arc<PrefixProcessingContext>,
+    worker_id: usize,
+    url: Arc<str>,
+    prefix: Arc<str>,
+    order: u8,
+    attempt: u8,
+    backoff_ms: u64,
+) -> PrefixOutcome {
+    use super::reader::stream_aggregated_from_cached_file;
+    use tokio_stream::StreamExt;
+
+    // Compute cache path
+    let cache_path = match ctx.config.cache_file_path(order, &prefix) {
+        Some(p) => p,
+        None => {
+            return PrefixOutcome::Failed {
+                prefix,
+                error: ImportError::Config(format!(
+                    "Unknown language '{}' for cache file path",
+                    ctx.config.language
+                )),
+                attempts: (attempt + 1) as u32,
+            };
+        }
+    };
+
+    // Reuse the shared HTTP client (single connection pool across all spawned
+    // futures for this order's import — avoids the concurrency-amplification
+    // rate-limiting bug previously caused by per-call `Client::builder()`).
+    // Cloning is cheap: `reqwest::Client` is internally an `Arc`.
+    let client = ctx.http_client.clone();
+
+    // Download to cache (skips if already cached)
+    if let Err(e) = download_to_cache(&url, &cache_path, &client).await {
+        // Check if retryable
+        if attempt < MAX_RETRIES && is_retryable_error(&e) {
+            let next_backoff_ms = backoff_ms * 2;
+            if let Some(ref tx) = ctx.progress_tx {
+                let _ = tx.try_send(WorkerUpdate::Deferred {
+                    worker_id,
+                    order,
+                    prefix: Arc::clone(&prefix),
+                    attempt: (attempt + 1) as u32,
+                    delay_seconds: backoff_ms / 1000,
+                    error: Arc::from(e.to_string()),
+                });
+            }
+            return PrefixOutcome::Deferred {
+                url,
+                prefix,
+                order,
+                attempt: attempt + 1,
+                backoff_ms: next_backoff_ms,
+                error: e,
+            };
+        }
+        return PrefixOutcome::Failed {
+            prefix,
+            error: e,
+            attempts: (attempt + 1) as u32,
+        };
+    }
+
+    // Track processing time
+    let start_time = Instant::now();
+
+    // Stream from cached file
+    let result: Result<u64, ImportError> = async {
+        let stream = stream_aggregated_from_cached_file(
+            &cache_path,
+            ctx.config.year_range,
+            ctx.config.skip_pos_tags,
+            ctx.config.min_count,
+        );
+
+        let maybe_tx = ctx.storage.begin_prefix_tx(&prefix, order)?;
+
+        if let Some(tx) = maybe_tx {
+            // Sharded mode: delegate chunked-tx body to shared helper
+            process_aggregated_stream(stream, tx, &ctx, &prefix, order, worker_id, "cached prefix").await
+        } else {
+            // Single-trie mode
+            tokio::pin!(stream);
+            const NGRAM_PROGRESS_INTERVAL: u64 = 50_000;
+            let mut local_total: u64 = 0;
+            let mut local_unique: u64 = 0;
+            let mut count = 0u64;
+
+            while let Some(result) = stream.next().await {
+                let agg = result?;
+                let storage_result = store_ngram_shared(
+                    &agg.ngram,
+                    agg.total_count,
+                    &ctx.storage,
+                )?;
+                count += 1;
+                local_total += 1;
+                if storage_result.is_new {
+                    local_unique += 1;
+                }
+
+                if local_total >= COUNTER_BATCH_SIZE {
+                    ctx.total_ngrams.fetch_add(local_total, Ordering::Relaxed);
+                    if local_unique > 0 {
+                        ctx.unique_ngrams.fetch_add(local_unique, Ordering::Relaxed);
+                    }
+                    local_total = 0;
+                    local_unique = 0;
+                }
+
+                if count % NGRAM_PROGRESS_INTERVAL == 0 {
+                    if let Some(ref ptx) = ctx.progress_tx {
+                        let _ = ptx.try_send(WorkerUpdate::NgramProgress {
+                            worker_id,
+                            ngram_count: count,
+                        });
+                    }
+                }
+            }
+
+            if local_total > 0 {
+                ctx.total_ngrams.fetch_add(local_total, Ordering::Relaxed);
+            }
+            if local_unique > 0 {
+                ctx.unique_ngrams.fetch_add(local_unique, Ordering::Relaxed);
+            }
+
+            Ok(count)
+        }
+    }
+    .await;
+
+    // Clean up cached file on both success and error
+    cleanup_cache_file(&cache_path).await;
+
+    let elapsed = start_time.elapsed();
+
+    match result {
+        Ok(count) => {
+            if let Some(ref tx) = ctx.progress_tx {
+                let _ = tx.try_send(WorkerUpdate::Finished {
+                    worker_id,
+                    order,
+                    prefix: Arc::clone(&prefix),
+                    ngram_count: count,
+                    duration: elapsed,
+                });
+            }
+            PrefixOutcome::Success {
+                prefix,
+                ngram_count: count,
+            }
+        }
+        Err(e) if attempt < MAX_RETRIES && is_retryable_error(&e) => {
+            let next_backoff_ms = backoff_ms * 2;
+            if let Some(ref tx) = ctx.progress_tx {
+                let _ = tx.try_send(WorkerUpdate::Deferred {
+                    worker_id,
+                    order,
+                    prefix: Arc::clone(&prefix),
+                    attempt: (attempt + 1) as u32,
+                    delay_seconds: backoff_ms / 1000,
+                    error: Arc::from(e.to_string()),
+                });
+            }
+            PrefixOutcome::Deferred {
+                url,
+                prefix,
+                order,
+                attempt: attempt + 1,
+                backoff_ms: next_backoff_ms,
+                error: e,
+            }
+        }
+        Err(e) => {
             PrefixOutcome::Failed {
                 prefix,
                 error: e,
@@ -1566,6 +2299,17 @@ pub struct GoogleBooksImporter {
     /// Only used when storage is single-trie mode.
     /// TODO: Remove once checkpoint migration to storage is complete.
     trie: Arc<RwLock<PersistentARTrie<u64>>>,
+
+    /// Lock-free overlay flush threshold (entries per shard).
+    ///
+    /// When a shard's lock-free entry count exceeds this threshold, its
+    /// overlay is flushed to the persistent trie. This bounds memory usage
+    /// during high-parallelism imports where millions of entries can
+    /// accumulate in lock-free overlays between checkpoints.
+    ///
+    /// Default: auto-scaled based on `parallel_downloads` (50K for >=8
+    /// workers, 100K otherwise).
+    lockfree_flush_threshold: u64,
 }
 
 impl GoogleBooksImporter {
@@ -1584,10 +2328,18 @@ impl GoogleBooksImporter {
         let estimated_ngrams = estimate_ngram_count(&config);
         log::info!("Estimated n-gram count: {}", estimated_ngrams);
 
+        // Estimate vocabulary size (unique words) for pre-allocation
+        let estimated_vocab = estimate_vocabulary_size(&config);
+        log::info!("Estimated vocabulary size: {}", estimated_vocab);
+
         // Create or open lock-free concurrent vocabulary for compact encoding
+        // Pre-sizes the lock-free layer to avoid DashMap/Vec resize spikes
         let vocabulary_path = config.vocabulary_path();
         log::info!("Using vocabulary at {:?}", vocabulary_path);
-        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocabulary_path).map_err(|e| {
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree_with_capacity(
+            &vocabulary_path,
+            estimated_vocab,
+        ).map_err(|e| {
             ImportError::Trie(format!("Failed to create/open vocabulary: {}", e))
         })?;
 
@@ -1626,6 +2378,13 @@ impl GoogleBooksImporter {
             Arc::new(RwLock::new(trie))
         };
 
+        // Auto-scale flush threshold: lower for high parallelism to bound memory
+        let lockfree_flush_threshold = if config.parallel_downloads >= 8 {
+            50_000
+        } else {
+            100_000
+        };
+
         Ok(Self {
             config,
             checkpoint: ImportCheckpoint::new(),
@@ -1636,7 +2395,29 @@ impl GoogleBooksImporter {
             start_time: Instant::now(),
             storage: Arc::new(storage),
             trie,
+            lockfree_flush_threshold,
         })
+    }
+
+    /// Set the lock-free overlay flush threshold (entries per shard).
+    ///
+    /// This overrides the auto-scaled default. Lower values use less memory
+    /// but flush more frequently (slightly reducing throughput). Higher values
+    /// use more memory but flush less often.
+    ///
+    /// Typical values:
+    /// - 10_000–25_000: Very memory-constrained environments
+    /// - 50_000: Default for >=8 parallel workers
+    /// - 100_000: Default for <8 parallel workers
+    /// - 200_000+: Large-memory systems with fast storage
+    pub fn set_lockfree_flush_threshold(&mut self, threshold: u64) {
+        self.lockfree_flush_threshold = threshold;
+        log::info!("Lock-free flush threshold set to {} entries per shard", threshold);
+    }
+
+    /// Get the current lock-free overlay flush threshold.
+    pub fn lockfree_flush_threshold(&self) -> u64 {
+        self.lockfree_flush_threshold
     }
 
     /// Resume from checkpoint if it exists, otherwise start fresh.
@@ -1999,19 +2780,19 @@ impl GoogleBooksImporter {
         self.unique_ngrams.store(self.checkpoint.stats.unique_ngrams, Ordering::Relaxed);
         self.checkpoint.stats.elapsed_seconds = self.start_time.elapsed().as_secs();
 
-        // CRITICAL: Rotate vocabulary WAL FIRST to ensure vocabulary indices are
-        // durable before the checkpoint marks prefixes as completed. This prevents
-        // the bug where vocabulary entries are in the WAL (not persisted) when the
-        // checkpoint claims prefixes are done, leading to index inconsistency on resume.
+        // CRITICAL: Merge vocabulary lock-free layer and rotate WAL FIRST to ensure
+        // vocabulary indices are durable before the checkpoint marks prefixes as
+        // completed. This prevents the bug where vocabulary entries are in the WAL
+        // (not persisted) when the checkpoint claims prefixes are done, leading to
+        // index inconsistency on resume.
         //
-        // Note: We use rotate_vocabulary_wal() instead of checkpoint_vocabulary() to
-        // avoid file bloat from repeated full trie serialization. WAL replay provides
-        // crash recovery. sync_vocabulary() is called first for additional safety.
-        self.storage.sync_vocabulary().map_err(|e| {
-            ImportError::Trie(format!("Failed to sync vocabulary: {}", e))
-        })?;
-        self.storage.rotate_vocabulary_wal().map_err(|e| {
-            ImportError::Trie(format!("Failed to rotate vocabulary WAL: {}", e))
+        // Uses merge_and_rotate_vocabulary_wal() instead of the previous
+        // sync_vocabulary() + rotate_vocabulary_wal() pair. Both of those methods
+        // called merge_into() internally, causing two back-to-back HashMap rebuilds
+        // of the vocabulary's reverse_index (~3.42 GB transient spike for 5.8M words).
+        // The combined method does a single merge, halving the peak memory usage.
+        self.storage.merge_and_rotate_vocabulary_wal().map_err(|e| {
+            ImportError::Trie(format!("Failed to merge and rotate vocabulary WAL: {}", e))
         })?;
 
         // CRITICAL: Sync and checkpoint n-gram shards to prevent WAL replay on resume.
@@ -2252,8 +3033,15 @@ impl GoogleBooksImporter {
                     phase: ImportPhase::Importing,
                 });
 
+                // Flush lock-free overlays for shards exceeding threshold
+                // (lightweight: only acquires write locks on over-threshold shards)
+                if let Err(e) = self.storage.flush_lockfree_over_threshold(self.lockfree_flush_threshold) {
+                    log::warn!("Lock-free flush failed: {}", e);
+                }
+
                 // Save checkpoint periodically (async for better throughput)
-                if (idx + 1) % 10 == 0 {
+                let checkpoint_interval: usize = if self.config.parallel_downloads >= 8 { 5 } else { 10 };
+                if (idx + 1) % checkpoint_interval == 0 {
                     self.save_checkpoint_async()?;
                 }
             }
@@ -2404,6 +3192,32 @@ impl GoogleBooksImporter {
             // Wrap receiver in Arc<Mutex> for sharing across futures
             let worker_id_pool_rx = Arc::new(tokio::sync::Mutex::new(worker_id_pool_rx));
 
+            // Build one shared HTTP client for this order's import. All spawned
+            // futures clone it (cheap — internally an Arc) so they share a single
+            // connection pool. This avoids the concurrency-amplification rate-
+            // limiting bug previously caused by per-call `Client::builder()` in
+            // the cached path.
+            let http_client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(300))
+                .connect_timeout(Duration::from_secs(30))
+                .read_timeout(Duration::from_secs(60))
+                .pool_max_idle_per_host(4)
+                .user_agent("Mozilla/5.0 (compatible; libgrammstein/0.1; +https://github.com/vinary-tree/libgrammstein)")
+                .build()
+                .expect("Failed to build shared HTTP client for prefix-file path");
+
+            // Assemble shared context for all spawned prefix-file futures
+            let prefix_ctx = Arc::new(PrefixProcessingContext {
+                config: config.clone(),
+                storage: Arc::clone(&storage),
+                total_ngrams: Arc::clone(&total_ngrams),
+                unique_ngrams: Arc::clone(&unique_ngrams),
+                progress_tx: worker_updates.clone(),
+                http_client,
+                worker_id_pool_tx: worker_id_pool_tx.clone(),
+                worker_id_pool_rx: Arc::clone(&worker_id_pool_rx),
+            });
+
             // Track deferred items for retry after initial pass
             let mut deferred_items: Vec<(Arc<str>, Arc<str>, u8, u8, u64)> = Vec::new();
             let mut failed_prefixes: Vec<(Arc<str>, ImportError, u32)> = Vec::new();
@@ -2417,18 +3231,12 @@ impl GoogleBooksImporter {
                         let url: Arc<str> = Arc::from(url);
                         let prefix: Arc<str> = Arc::from(prefix);
                         process_prefix_file(
-                            worker_id_pool_tx.clone(),
-                            Arc::clone(&worker_id_pool_rx),
+                            Arc::clone(&prefix_ctx),
                             url,
                             prefix,
                             order,
                             0,                    // First attempt
                             INITIAL_BACKOFF_MS,   // Initial backoff
-                            config.clone(),
-                            Arc::clone(&storage),
-                            Arc::clone(&total_ngrams),
-                            Arc::clone(&unique_ngrams),
-                            worker_updates.clone(),
                         )
                     })
                 })
@@ -2492,8 +3300,14 @@ impl GoogleBooksImporter {
                     }
                 }
 
+                // Flush lock-free overlays for shards exceeding threshold
+                if let Err(e) = self.storage.flush_lockfree_over_threshold(self.lockfree_flush_threshold) {
+                    log::warn!("Lock-free flush failed: {}", e);
+                }
+
                 // Save checkpoint periodically (async for better throughput)
-                if completed_in_order % 10 == 0 {
+                let checkpoint_interval: u32 = if self.config.parallel_downloads >= 8 { 5 } else { 10 };
+                if completed_in_order % checkpoint_interval == 0 {
                     self.save_checkpoint_async()?;
                 }
             }
@@ -2513,23 +3327,17 @@ impl GoogleBooksImporter {
                     return Err(ImportError::Interrupted);
                 }
 
-                // Create futures for deferred items
+                // Create futures for deferred items — reuse the same shared context
                 let retry_futures: Vec<_> = deferred_items
                     .drain(..)
                     .map(|(url, prefix, o, attempt, backoff_ms)| {
                         process_prefix_file(
-                            worker_id_pool_tx.clone(),
-                            Arc::clone(&worker_id_pool_rx),
+                            Arc::clone(&prefix_ctx),
                             url,
                             prefix,
                             o,
                             attempt,
                             backoff_ms,
-                            config.clone(),
-                            Arc::clone(&storage),
-                            Arc::clone(&total_ngrams),
-                            Arc::clone(&unique_ngrams),
-                            worker_updates.clone(),
                         )
                     })
                     .collect();
@@ -3341,10 +4149,18 @@ impl GoogleBooksImporter {
                         active_workers
                     );
 
-                    // Save checkpoint when workers exit to preserve progress
-                    if let Err(e) = self.save_checkpoint() {
-                        log::error!("Checkpoint save failed on worker exit: {}", e);
-                    }
+                    // DISABLED: We intentionally do NOT save a checkpoint on each
+                    // worker exit. When all 12 workers exit simultaneously (end of
+                    // import), the original code below caused 12× redundant
+                    // checkpoint saves (each taking ~30s for vocabulary merge +
+                    // shard sync), adding ~6 minutes of blocking I/O. The periodic
+                    // checkpoint (line ~5317) and the "Final checkpoint save"
+                    // (line ~4382) already ensure durability.
+                    //
+                    // // Save checkpoint when workers exit to preserve progress
+                    // if let Err(e) = self.save_checkpoint() {
+                    //     log::error!("Checkpoint save failed on worker exit: {}", e);
+                    // }
                     continue;
                 }
 
@@ -3562,8 +4378,14 @@ impl GoogleBooksImporter {
                         }
                     }
 
+                    // Flush lock-free overlays for shards exceeding threshold
+                    if let Err(e) = self.storage.flush_lockfree_over_threshold(self.lockfree_flush_threshold) {
+                        log::warn!("Lock-free flush failed: {}", e);
+                    }
+
                     // Save checkpoint periodically (async for better throughput)
-                    if files_completed.load(Ordering::Relaxed) % 10 == 0 {
+                    let checkpoint_interval: u64 = if self.config.parallel_downloads >= 8 { 5 } else { 10 };
+                    if files_completed.load(Ordering::Relaxed) % checkpoint_interval == 0 {
                         if let Err(e) = self.save_checkpoint_async_with_events(Some(&event_tx)) {
                             log::error!("Checkpoint failed: {}", e);
                             let _ = event_tx.send(ImportEvent::Error {
@@ -3637,6 +4459,13 @@ impl GoogleBooksImporter {
             total_ngrams: total,
             duration: collection_duration,
         });
+
+        // Yield to the event loop before starting finalization.
+        // This allows pending signals (Ctrl+C) to be processed before we enter
+        // the synchronous finalization phase (MKN computation + merge). Without
+        // this yield, the tokio runtime may not process SIGINT handlers because
+        // the synchronous work monopolizes the runtime thread.
+        tokio::task::yield_now().await;
 
         // Emit phase change: now computing MKN statistics
         log::debug!("[IMPORTER] Sending PhaseChanged: 'Computing MKN Statistics'");
@@ -3836,21 +4665,34 @@ impl GoogleBooksImporter {
     ) -> Result<ImportStats, ImportError> {
         log::info!("Finalizing import...");
 
-        // IMPORTANT: Sync and checkpoint FIRST to ensure all data is persisted
-        // before computing MKN stats. MKN uses discover_shard_files() which reads
-        // from disk, so data must be flushed first.
-        log::info!("Syncing storage to disk...");
-        self.storage.sync().map_err(|e| {
-            ImportError::Trie(format!("Failed to sync storage: {}", e))
-        })?;
-        self.storage.sync_vocabulary().map_err(|e| {
-            ImportError::Trie(format!("Failed to sync vocabulary: {}", e))
-        })?;
-
-        log::info!("Creating storage checkpoint...");
-        self.storage.checkpoint().map_err(|e| {
-            ImportError::Trie(format!("Failed to checkpoint storage: {}", e))
-        })?;
+        // DISABLED: We skip the redundant sync() + sync_vocabulary() + checkpoint()
+        // calls that previously existed here. The "Final checkpoint save"
+        // (save_checkpoint_with_parallelism) has already:
+        // - Merged the vocabulary lock-free layer and rotated WAL
+        // - Synced all n-gram shards in parallel
+        // - Checkpointed all shards
+        // No new data has been written between that checkpoint and this point.
+        //
+        // // IMPORTANT: Sync and checkpoint FIRST to ensure all data is persisted
+        // // before computing MKN stats. MKN uses discover_shard_files() which reads
+        // // from disk, so data must be flushed first.
+        // log::info!("Syncing storage to disk...");
+        // self.storage.sync().map_err(|e| {
+        //     ImportError::Trie(format!("Failed to sync storage: {}", e))
+        // })?;
+        // self.storage.sync_vocabulary().map_err(|e| {
+        //     ImportError::Trie(format!("Failed to sync vocabulary: {}", e))
+        // })?;
+        // log::info!("Creating storage checkpoint...");
+        // self.storage.checkpoint().map_err(|e| {
+        //     ImportError::Trie(format!("Failed to checkpoint storage: {}", e))
+        // })?;
+        //
+        // We do perform a final vocabulary compaction (checkpoint_vocabulary)
+        // which re-serializes the entire vocabulary trie to minimize recovery
+        // time. This is only done once at finalize, not during periodic
+        // checkpoints (which use WAL rotation for bloat-free durability).
+        log::info!("Final vocabulary compaction...");
         self.storage.checkpoint_vocabulary().map_err(|e| {
             ImportError::Trie(format!("Failed to checkpoint vocabulary: {}", e))
         })?;
@@ -4152,7 +4994,8 @@ impl GoogleBooksImporter {
             });
         }
 
-        let aggregator = MknAggregator::new(coordinator);
+        let aggregator = MknAggregator::new(coordinator)
+            .with_cancellation_flag(&self.interrupted);
         let mkn_stats = aggregator.compute_all().map_err(|e| {
             ImportError::Trie(format!("Failed to compute MKN statistics: {}", e))
         })?;
@@ -4651,17 +5494,13 @@ impl CheckpointState {
         checkpoint.stats.elapsed_seconds = self.start_time.elapsed().as_secs();
 
         // Perform I/O (this is where we need locks)
-        // Note: We use rotate_vocabulary_wal() instead of checkpoint_vocabulary() to
-        // avoid file bloat from repeated full trie serialization. WAL replay provides
-        // crash recovery.
-        log::debug!("Periodic checkpoint: rotating vocabulary WAL...");
-        self.storage.sync_vocabulary().map_err(|e| {
+        // Uses merge_and_rotate_vocabulary_wal() for single merge + WAL rotation
+        // instead of the previous sync_vocabulary() + rotate_vocabulary_wal() pair
+        // which caused two back-to-back HashMap rebuilds (~3.42 GB transient spike).
+        log::debug!("Periodic checkpoint: merging vocabulary and rotating WAL...");
+        self.storage.merge_and_rotate_vocabulary_wal().map_err(|e| {
             self.checkpoint_in_progress.store(false, Ordering::Release);
-            ImportError::Trie(format!("Failed to sync vocabulary: {}", e))
-        })?;
-        self.storage.rotate_vocabulary_wal().map_err(|e| {
-            self.checkpoint_in_progress.store(false, Ordering::Release);
-            ImportError::Trie(format!("Failed to rotate vocabulary WAL: {}", e))
+            ImportError::Trie(format!("Failed to merge and rotate vocabulary WAL: {}", e))
         })?;
 
         log::debug!("Periodic checkpoint: syncing shards...");
