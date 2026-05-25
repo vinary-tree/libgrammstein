@@ -185,9 +185,9 @@ impl CodePropertyGraph {
 
     /// Returns all nodes in the graph.
     pub fn nodes(&self) -> impl Iterator<Item = (NodeIndex, &CpgNode)> {
-        self.graph.node_indices().filter_map(move |idx| {
-            self.graph.node_weight(idx).map(|n| (idx, n))
-        })
+        self.graph
+            .node_indices()
+            .filter_map(move |idx| self.graph.node_weight(idx).map(|n| (idx, n)))
     }
 
     /// Returns all edges from a node.
@@ -245,13 +245,15 @@ impl CodePropertyGraph {
     pub fn cfg_successors(&self, idx: NodeIndex) -> Vec<NodeIndex> {
         self.graph
             .edges(idx)
-            .filter(|e| matches!(
-                e.weight().kind,
-                CpgEdgeKind::CfgNext
-                    | CpgEdgeKind::CfgTrue
-                    | CpgEdgeKind::CfgFalse
-                    | CpgEdgeKind::CfgBack
-            ))
+            .filter(|e| {
+                matches!(
+                    e.weight().kind,
+                    CpgEdgeKind::CfgNext
+                        | CpgEdgeKind::CfgTrue
+                        | CpgEdgeKind::CfgFalse
+                        | CpgEdgeKind::CfgBack
+                )
+            })
             .map(|e| e.target())
             .collect()
     }
@@ -260,13 +262,15 @@ impl CodePropertyGraph {
     pub fn cfg_predecessors(&self, idx: NodeIndex) -> Vec<NodeIndex> {
         self.graph
             .edges_directed(idx, petgraph::Direction::Incoming)
-            .filter(|e| matches!(
-                e.weight().kind,
-                CpgEdgeKind::CfgNext
-                    | CpgEdgeKind::CfgTrue
-                    | CpgEdgeKind::CfgFalse
-                    | CpgEdgeKind::CfgBack
-            ))
+            .filter(|e| {
+                matches!(
+                    e.weight().kind,
+                    CpgEdgeKind::CfgNext
+                        | CpgEdgeKind::CfgTrue
+                        | CpgEdgeKind::CfgFalse
+                        | CpgEdgeKind::CfgBack
+                )
+            })
             .map(|e| e.source())
             .collect()
     }
@@ -344,17 +348,25 @@ impl CodePropertyGraph {
     /// Returns an iterator over all edges with source and target indices.
     pub fn all_edges(&self) -> impl Iterator<Item = (usize, usize, &CpgEdge)> + '_ {
         self.graph.edge_references().map(|e| {
-            let source_id = self.graph.node_weight(e.source()).map(|n| n.id).unwrap_or(0);
-            let target_id = self.graph.node_weight(e.target()).map(|n| n.id).unwrap_or(0);
+            let source_id = self
+                .graph
+                .node_weight(e.source())
+                .map(|n| n.id)
+                .unwrap_or(0);
+            let target_id = self
+                .graph
+                .node_weight(e.target())
+                .map(|n| n.id)
+                .unwrap_or(0);
             (source_id, target_id, e.weight())
         })
     }
 
     /// Returns an iterator over all node references.
     pub fn all_nodes(&self) -> impl Iterator<Item = &CpgNode> + '_ {
-        self.graph.node_indices().filter_map(move |idx| {
-            self.graph.node_weight(idx)
-        })
+        self.graph
+            .node_indices()
+            .filter_map(move |idx| self.graph.node_weight(idx))
     }
 
     // Private methods for building the graph

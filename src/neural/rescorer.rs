@@ -132,8 +132,7 @@ impl ModernBertRescorer {
             masked_tokens[i] = mask_id;
 
             // Forward pass to get hidden states
-            let input_ids =
-                Tensor::new(&masked_tokens[..], self.model.device())?.unsqueeze(0)?;
+            let input_ids = Tensor::new(&masked_tokens[..], self.model.device())?.unsqueeze(0)?;
             let hidden_states = self.model.forward(&input_ids, None)?;
 
             // Get logits for masked position

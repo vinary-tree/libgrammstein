@@ -30,10 +30,10 @@ enum SourceModel {
 
 /// Detect what type of model we're dealing with.
 fn detect_source_type(path: &Path) -> Option<SourceModel> {
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
-    use crate::ngram::{NgramEntry, NgramModel};
-    use crate::hybrid::HybridLanguageModel;
     use crate::embedding::SubwordEmbedding;
+    use crate::hybrid::HybridLanguageModel;
+    use crate::ngram::{NgramEntry, NgramModel};
+    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 
     // Try hybrid first
     if HybridLanguageModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new).is_ok() {
@@ -61,10 +61,10 @@ fn detect_source_type(path: &Path) -> Option<SourceModel> {
 /// Note: Full DoubleArrayTrie conversion requires additional library support.
 /// This currently re-exports the model in optimized portable format.
 fn convert_to_static(args: ConvertToStaticArgs, verbose: bool) -> CliResult<()> {
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
-    use crate::ngram::{NgramEntry, NgramModel};
-    use crate::hybrid::HybridLanguageModel;
     use crate::embedding::SubwordEmbedding;
+    use crate::hybrid::HybridLanguageModel;
+    use crate::ngram::{NgramEntry, NgramModel};
+    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 
     if !args.input.exists() {
         return Err(CliError::file_not_found(&args.input));
@@ -88,11 +88,9 @@ fn convert_to_static(args: ConvertToStaticArgs, verbose: bool) -> CliResult<()> 
 
     match source_type {
         SourceModel::Hybrid => {
-            let model = HybridLanguageModel::load_portable(
-                &args.input,
-                DynamicDawgChar::<NgramEntry>::new,
-            )
-            .map_err(|e| CliError::model_load(args.input.clone(), e.to_string()))?;
+            let model =
+                HybridLanguageModel::load_portable(&args.input, DynamicDawgChar::<NgramEntry>::new)
+                    .map_err(|e| CliError::model_load(args.input.clone(), e.to_string()))?;
 
             if verbose {
                 eprintln!("  Type: HybridLanguageModel");
@@ -109,11 +107,8 @@ fn convert_to_static(args: ConvertToStaticArgs, verbose: bool) -> CliResult<()> 
             print_conversion_success(&args.input, &args.output, "hybrid");
         }
         SourceModel::Ngram => {
-            let model = NgramModel::load_portable(
-                &args.input,
-                DynamicDawgChar::<NgramEntry>::new,
-            )
-            .map_err(|e| CliError::model_load(args.input.clone(), e.to_string()))?;
+            let model = NgramModel::load_portable(&args.input, DynamicDawgChar::<NgramEntry>::new)
+                .map_err(|e| CliError::model_load(args.input.clone(), e.to_string()))?;
 
             if verbose {
                 eprintln!("  Type: NgramModel");
@@ -272,10 +267,7 @@ fn convert_to_pathmap(args: ConvertToPathmapArgs, verbose: bool) -> CliResult<()
 
     // Print success
     println!();
-    println!(
-        "{} PathMap translation complete",
-        style("✓").green().bold()
-    );
+    println!("{} PathMap translation complete", style("✓").green().bold());
     println!();
     println!("  Entries translated: {}", stats.entries_translated);
     println!(

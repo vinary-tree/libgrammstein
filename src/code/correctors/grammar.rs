@@ -82,10 +82,7 @@ impl<L: CodeLanguage> GrammarCorrector<L> {
 
     /// Creates a grammar constraint for validation.
     pub fn create_constraint(&self) -> GrammarConstraint {
-        GrammarConstraint::new(
-            self.grammar.clone(),
-            ConstrainedDecodingConfig::default(),
-        )
+        GrammarConstraint::new(self.grammar.clone(), ConstrainedDecodingConfig::default())
     }
 
     /// Returns valid next tokens given current parse state.
@@ -372,21 +369,9 @@ impl<L: CodeLanguage + Send + Sync> CodeCorrector for GrammarCorrector<L> {
         corrections
     }
 
-    fn correct_range(
-        &self,
-        source: &str,
-        start_byte: usize,
-        end_byte: usize,
-    ) -> Vec<Correction> {
+    fn correct_range(&self, source: &str, start_byte: usize, end_byte: usize) -> Vec<Correction> {
         let text = &source[start_byte..end_byte];
-        let token = CodeToken::new(
-            text,
-            start_byte,
-            0,
-            0,
-            TokenType::Unknown,
-            "unknown",
-        );
+        let token = CodeToken::new(text, start_byte, 0, 0, TokenType::Unknown, "unknown");
 
         let context = TokenContext::new(TokenType::Unknown);
         self.correct_token(&token, &context)
@@ -437,7 +422,11 @@ impl SyntaxError {
                     format!(
                         "Invalid token '{}', expected one of: {}",
                         self.token,
-                        expected.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", ")
+                        expected
+                            .iter()
+                            .map(|s| format!("'{}'", s))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     )
                 } else {
                     format!(
@@ -542,24 +531,42 @@ mod tests {
     struct MockLanguage;
 
     impl CodeLanguage for MockLanguage {
-        fn name(&self) -> &str { "mock" }
-        fn display_name(&self) -> &str { "Mock" }
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn display_name(&self) -> &str {
+            "Mock"
+        }
         fn tree_sitter_language(&self) -> tree_sitter::Language {
             panic!("Not implemented for tests")
         }
-        fn keywords(&self) -> &[&str] { &["if", "else", "while", "return"] }
-        fn special_tokens(&self) -> &[&str] { &[] }
-        fn file_extensions(&self) -> &[&str] { &["mock"] }
+        fn keywords(&self) -> &[&str] {
+            &["if", "else", "while", "return"]
+        }
+        fn special_tokens(&self) -> &[&str] {
+            &[]
+        }
+        fn file_extensions(&self) -> &[&str] {
+            &["mock"]
+        }
         fn classify_token(&self, _token: &str, _node_kind: &str) -> TokenType {
             TokenType::Unknown
         }
-        fn is_valid_identifier(&self, s: &str) -> bool { !s.is_empty() }
-        fn builtin_types(&self) -> &[&str] { &[] }
-        fn stdlib_functions(&self) -> &[&str] { &[] }
+        fn is_valid_identifier(&self, s: &str) -> bool {
+            !s.is_empty()
+        }
+        fn builtin_types(&self) -> &[&str] {
+            &[]
+        }
+        fn stdlib_functions(&self) -> &[&str] {
+            &[]
+        }
         fn comment_syntax(&self) -> crate::code::language::CommentSyntax {
             crate::code::language::CommentSyntax::default()
         }
-        fn is_whitespace_significant(&self) -> bool { false }
+        fn is_whitespace_significant(&self) -> bool {
+            false
+        }
     }
 
     #[test]

@@ -488,10 +488,7 @@ mod tests {
     #[test]
     fn test_tokenize() {
         let tokens = CtfIdf::tokenize("Hello, World! This is a test.");
-        assert_eq!(
-            tokens,
-            vec!["hello", "world", "this", "is", "a", "test"]
-        );
+        assert_eq!(tokens, vec!["hello", "world", "this", "is", "a", "test"]);
 
         let tokens = CtfIdf::tokenize("Machine-learning  and  AI!");
         assert_eq!(tokens, vec!["machinelearning", "and", "ai"]);

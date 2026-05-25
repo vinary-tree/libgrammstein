@@ -1,14 +1,14 @@
 //! CLI command implementations.
 
-pub mod corpus;
 pub mod convert;
+pub mod corpus;
 pub mod eval;
 pub mod models;
 pub mod query;
 pub mod repl;
 pub mod train;
 
-use crate::cli::args::{Commands, Cli};
+use crate::cli::args::{Cli, Commands};
 use crate::cli::error::CliResult;
 
 /// Dispatch and run the appropriate command.

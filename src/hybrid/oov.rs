@@ -61,18 +61,10 @@ impl<'a> OovHandler<'a> {
     /// Estimate log probability for an OOV word.
     pub fn estimate_log_prob(&self, word: &str, context: &[&str]) -> f64 {
         match self.strategy {
-            OovStrategy::SubwordEmbedding => {
-                self.estimate_from_subwords(word, context)
-            }
-            OovStrategy::FixedProbability { log_prob } => {
-                log_prob
-            }
-            OovStrategy::Uniform => {
-                -(self.vocab_size as f64).ln()
-            }
-            OovStrategy::SimilarWords { k } => {
-                self.estimate_from_similar(word, context, k)
-            }
+            OovStrategy::SubwordEmbedding => self.estimate_from_subwords(word, context),
+            OovStrategy::FixedProbability { log_prob } => log_prob,
+            OovStrategy::Uniform => -(self.vocab_size as f64).ln(),
+            OovStrategy::SimilarWords { k } => self.estimate_from_similar(word, context, k),
         }
     }
 

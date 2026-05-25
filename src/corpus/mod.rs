@@ -20,37 +20,38 @@
 //! }
 //! ```
 
-mod reader;
-mod tokenizer;
+mod dedup;
+mod gutenberg;
 mod normalizer;
 mod plaintext;
-mod wikipedia;
-mod gutenberg;
-mod quality;
-mod dedup;
-mod preprocessing;
 mod prefetch;
+mod preprocessing;
+mod quality;
+mod reader;
+mod tokenizer;
+mod wikipedia;
 
 #[cfg(feature = "subword")]
 mod subword;
 
-pub use reader::{CorpusReader, Document};
-pub use tokenizer::Tokenizer;
+pub use dedup::{DeduplicationMode, DeduplicationStats, Deduplicator, DeduplicatorBuilder};
+pub use gutenberg::GutenbergReader;
 pub use normalizer::Normalizer;
 pub use plaintext::PlaintextReader;
-pub use wikipedia::{WikipediaReader, WikipediaConfig};
-pub use gutenberg::GutenbergReader;
-pub use quality::{QualityFilter, QualityFilterBuilder, QualityMetrics, QualityStats, RejectionReason};
-pub use dedup::{Deduplicator, DeduplicatorBuilder, DeduplicationMode, DeduplicationStats};
+pub use prefetch::{PrefetchBatchIterator, PrefetchConfig, PrefetchingReader};
 pub use preprocessing::{
-    TextPreprocessor, TextPreprocessorBuilder, UnicodeNorm,
-    PreprocessingPipeline, PreprocessingPipelineBuilder,
-    tokens,
+    tokens, PreprocessingPipeline, PreprocessingPipelineBuilder, TextPreprocessor,
+    TextPreprocessorBuilder, UnicodeNorm,
 };
-pub use prefetch::{PrefetchingReader, PrefetchConfig, PrefetchBatchIterator};
+pub use quality::{
+    QualityFilter, QualityFilterBuilder, QualityMetrics, QualityStats, RejectionReason,
+};
+pub use reader::{CorpusReader, Document};
+pub use tokenizer::Tokenizer;
+pub use wikipedia::{WikipediaConfig, WikipediaReader};
 
 #[cfg(feature = "http-corpus")]
 pub use wikipedia::LoadStrategy;
 
 #[cfg(feature = "subword")]
-pub use subword::{SubwordTokenizer, SubwordError, BpeConfig, special_tokens, TokenizeExt};
+pub use subword::{special_tokens, BpeConfig, SubwordError, SubwordTokenizer, TokenizeExt};

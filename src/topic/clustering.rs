@@ -431,20 +431,26 @@ impl HierarchicalClustering {
             for k in &other_clusters {
                 let k = *k;
                 // Get distances from i and j to k
-                let dist_ik = active_distances.get(i, k).or_else(|| {
-                    if (i as usize) < matrix_n && (k as usize) < matrix_n {
-                        Some(dist_matrix.get(i as usize, k as usize))
-                    } else {
-                        None
-                    }
-                }).unwrap_or(f64::MAX);
-                let dist_jk = active_distances.get(j, k).or_else(|| {
-                    if (j as usize) < matrix_n && (k as usize) < matrix_n {
-                        Some(dist_matrix.get(j as usize, k as usize))
-                    } else {
-                        None
-                    }
-                }).unwrap_or(f64::MAX);
+                let dist_ik = active_distances
+                    .get(i, k)
+                    .or_else(|| {
+                        if (i as usize) < matrix_n && (k as usize) < matrix_n {
+                            Some(dist_matrix.get(i as usize, k as usize))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(f64::MAX);
+                let dist_jk = active_distances
+                    .get(j, k)
+                    .or_else(|| {
+                        if (j as usize) < matrix_n && (k as usize) < matrix_n {
+                            Some(dist_matrix.get(j as usize, k as usize))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(f64::MAX);
 
                 let size_k = state.sizes[k as usize];
 
@@ -589,20 +595,26 @@ impl HierarchicalClustering {
 
             for k in &other_clusters {
                 let k = *k;
-                let dist_ik = active_distances.get(i, k).or_else(|| {
-                    if (i as usize) < matrix_n && (k as usize) < matrix_n {
-                        Some(dist_matrix.get(i as usize, k as usize))
-                    } else {
-                        None
-                    }
-                }).unwrap_or(f64::MAX);
-                let dist_jk = active_distances.get(j, k).or_else(|| {
-                    if (j as usize) < matrix_n && (k as usize) < matrix_n {
-                        Some(dist_matrix.get(j as usize, k as usize))
-                    } else {
-                        None
-                    }
-                }).unwrap_or(f64::MAX);
+                let dist_ik = active_distances
+                    .get(i, k)
+                    .or_else(|| {
+                        if (i as usize) < matrix_n && (k as usize) < matrix_n {
+                            Some(dist_matrix.get(i as usize, k as usize))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(f64::MAX);
+                let dist_jk = active_distances
+                    .get(j, k)
+                    .or_else(|| {
+                        if (j as usize) < matrix_n && (k as usize) < matrix_n {
+                            Some(dist_matrix.get(j as usize, k as usize))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(f64::MAX);
 
                 let size_k = state.sizes[k as usize];
 
@@ -755,15 +767,39 @@ mod tests {
         let dist_ij = 0.5;
 
         // Single linkage: min
-        let single = linkage_distance(LinkageMethod::Single, dist_ik, dist_jk, size_i, size_j, size_k, dist_ij);
+        let single = linkage_distance(
+            LinkageMethod::Single,
+            dist_ik,
+            dist_jk,
+            size_i,
+            size_j,
+            size_k,
+            dist_ij,
+        );
         assert!((single - 1.0).abs() < 1e-6);
 
         // Complete linkage: max
-        let complete = linkage_distance(LinkageMethod::Complete, dist_ik, dist_jk, size_i, size_j, size_k, dist_ij);
+        let complete = linkage_distance(
+            LinkageMethod::Complete,
+            dist_ik,
+            dist_jk,
+            size_i,
+            size_j,
+            size_k,
+            dist_ij,
+        );
         assert!((complete - 2.0).abs() < 1e-6);
 
         // Average linkage: weighted average
-        let average = linkage_distance(LinkageMethod::Average, dist_ik, dist_jk, size_i, size_j, size_k, dist_ij);
+        let average = linkage_distance(
+            LinkageMethod::Average,
+            dist_ik,
+            dist_jk,
+            size_i,
+            size_j,
+            size_k,
+            dist_ij,
+        );
         let expected_avg = (2.0 * 1.0 + 3.0 * 2.0) / 5.0;
         assert!((average - expected_avg).abs() < 1e-6);
     }
@@ -798,11 +834,7 @@ mod tests {
 
     #[test]
     fn test_clustering_single_linkage() {
-        let embeddings = vec![
-            vec![0.0, 0.0],
-            vec![1.0, 0.0],
-            vec![2.0, 0.0],
-        ];
+        let embeddings = vec![vec![0.0, 0.0], vec![1.0, 0.0], vec![2.0, 0.0]];
 
         let config = ClusteringConfig {
             linkage: LinkageMethod::Single,

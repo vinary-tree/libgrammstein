@@ -78,12 +78,11 @@ pub use dendrogram::*;
 pub use extractor::*;
 pub use model::*;
 pub use paradigm::{
-    Paradigm, ParadigmConfig, ParadigmDetector, ParadigmProfile, ParadigmIndicator,
-    IndicatorCategory, DetectionResult, IndicatorMatch, ParadigmWeights, LanguageHints,
-    ApiPatternMiner, ApiPatternConfig, ApiPattern, MiningStats,
-    RholangPatternCatalog, RholangPattern, RholangPatternCategory, RholangPatternMatch,
-    MettaPatternCatalog, MettaPattern, MettaPatternCategory, MettaPatternMatch,
-    DomainPatternDetector,
+    ApiPattern, ApiPatternConfig, ApiPatternMiner, DetectionResult, DomainPatternDetector,
+    IndicatorCategory, IndicatorMatch, LanguageHints, MettaPattern, MettaPatternCatalog,
+    MettaPatternCategory, MettaPatternMatch, MiningStats, Paradigm, ParadigmConfig,
+    ParadigmDetector, ParadigmIndicator, ParadigmProfile, ParadigmWeights, RholangPattern,
+    RholangPatternCatalog, RholangPatternCategory, RholangPatternMatch,
 };
 pub use summarizer::*;
 pub use topic::*;

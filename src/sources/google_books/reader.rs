@@ -75,7 +75,10 @@ fn save_failed_response(
     let dir = std::env::temp_dir().join("grammstein-failed-responses");
 
     if std::fs::create_dir_all(&dir).is_err() {
-        tracing::warn!("Failed to create directory for failed responses: {}", dir.display());
+        tracing::warn!(
+            "Failed to create directory for failed responses: {}",
+            dir.display()
+        );
         return None;
     }
 
@@ -528,7 +531,10 @@ impl HttpNgramReader {
                 } else {
                     std::io::ErrorKind::Other
                 };
-                std::io::Error::new(kind, format!("HTTP stream error for {}: {}", url_for_errors, e))
+                std::io::Error::new(
+                    kind,
+                    format!("HTTP stream error for {}: {}", url_for_errors, e),
+                )
             })
         });
 

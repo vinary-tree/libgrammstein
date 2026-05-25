@@ -11,7 +11,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
 
 use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
-use pathmap::paths_serialization::{serialize_paths_with_auxdata, for_each_deserialized_path};
+use pathmap::paths_serialization::{for_each_deserialized_path, serialize_paths_with_auxdata};
 use pathmap::PathMap;
 
 /// Check if an entry should be included (filters out metadata).
@@ -124,17 +124,13 @@ impl PathMapTranslator {
 
         let artrie_size = std::fs::metadata(artrie_path)?.len();
 
-        log::info!(
-            "Translating {:?} to {:?}",
-            artrie_path,
-            pathmap_path
-        );
+        log::info!("Translating {:?} to {:?}", artrie_path, pathmap_path);
 
         // Open the disk-backed trie
-        let trie: PersistentARTrieChar<u64> = PersistentARTrieChar::open(artrie_path)
-            .map_err(|e| TranslationError::Io(std::io::Error::other(format!(
-                "Failed to open trie: {}", e
-            ))))?;
+        let trie: PersistentARTrieChar<u64> =
+            PersistentARTrieChar::open(artrie_path).map_err(|e| {
+                TranslationError::Io(std::io::Error::other(format!("Failed to open trie: {}", e)))
+            })?;
 
         // Collect all entries using iter_with_values
         let mut entries: Vec<(String, u64)> = Vec::new();
@@ -180,10 +176,13 @@ impl PathMapTranslator {
         let _stats = serialize_paths_with_auxdata(rz, &mut paths_writer, |_idx, _path, value| {
             // Write the value as 8 bytes (u64 little-endian)
             let bytes = value.to_le_bytes();
-            values_writer.write_all(&bytes).expect("Failed to write value");
-        }).map_err(|e| TranslationError::Serialization(format!(
-            "Failed to serialize paths: {}", e
-        )))?;
+            values_writer
+                .write_all(&bytes)
+                .expect("Failed to write value");
+        })
+        .map_err(|e| {
+            TranslationError::Serialization(format!("Failed to serialize paths: {}", e))
+        })?;
 
         paths_writer.flush()?;
         values_writer.flush()?;
@@ -214,8 +213,10 @@ impl PathMapTranslator {
         );
         log::info!(
             "Output files: {:?} ({} bytes), {:?} ({} bytes)",
-            paths_path, paths_size,
-            values_path, values_size
+            paths_path,
+            paths_size,
+            values_path,
+            values_size
         );
 
         Ok(stats)
@@ -268,10 +269,10 @@ impl PathMapTranslator {
         );
 
         // Open the disk-backed trie
-        let trie: PersistentARTrieChar<u64> = PersistentARTrieChar::open(artrie_path)
-            .map_err(|e| TranslationError::Io(std::io::Error::other(format!(
-                "Failed to open trie: {}", e
-            ))))?;
+        let trie: PersistentARTrieChar<u64> =
+            PersistentARTrieChar::open(artrie_path).map_err(|e| {
+                TranslationError::Io(std::io::Error::other(format!("Failed to open trie: {}", e)))
+            })?;
 
         // Phase 2: Iterating - collect all entries with progress
         let mut entries: Vec<(String, u64)> = Vec::new();
@@ -353,10 +354,13 @@ impl PathMapTranslator {
         let rz = pathmap.read_zipper();
         let _stats = serialize_paths_with_auxdata(rz, &mut paths_writer, |_idx, _path, value| {
             let bytes = value.to_le_bytes();
-            values_writer.write_all(&bytes).expect("Failed to write value");
-        }).map_err(|e| TranslationError::Serialization(format!(
-            "Failed to serialize paths: {}", e
-        )))?;
+            values_writer
+                .write_all(&bytes)
+                .expect("Failed to write value");
+        })
+        .map_err(|e| {
+            TranslationError::Serialization(format!("Failed to serialize paths: {}", e))
+        })?;
 
         paths_writer.flush()?;
         values_writer.flush()?;
@@ -434,10 +438,10 @@ impl PathMapTranslator {
         );
 
         // Open the source ARTrie and collect all entries
-        let trie: PersistentARTrieChar<u64> = PersistentARTrieChar::open(artrie_path)
-            .map_err(|e| TranslationError::Io(std::io::Error::other(format!(
-                "Failed to open trie: {}", e
-            ))))?;
+        let trie: PersistentARTrieChar<u64> =
+            PersistentARTrieChar::open(artrie_path).map_err(|e| {
+                TranslationError::Io(std::io::Error::other(format!("Failed to open trie: {}", e)))
+            })?;
 
         // Collect source entries into a HashMap for fast lookup
         let mut source_entries: std::collections::HashMap<String, u64> =
@@ -501,7 +505,8 @@ impl PathMapTranslator {
 
             entries_verified += 1;
             Ok(())
-        }).map_err(|e| TranslationError::Io(e))?;
+        })
+        .map_err(|e| TranslationError::Io(e))?;
 
         // Check for missing entries (in source but not in PathMap)
         if entries_verified != source_count {

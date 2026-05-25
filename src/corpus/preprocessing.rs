@@ -234,12 +234,16 @@ impl TextPreprocessor {
 
         // Username normalization
         if self.normalize_usernames {
-            result = USERNAME_REGEX.replace_all(&result, tokens::USER).to_string();
+            result = USERNAME_REGEX
+                .replace_all(&result, tokens::USER)
+                .to_string();
         }
 
         // Hashtag normalization
         if self.normalize_hashtags {
-            result = HASHTAG_REGEX.replace_all(&result, tokens::HASHTAG).to_string();
+            result = HASHTAG_REGEX
+                .replace_all(&result, tokens::HASHTAG)
+                .to_string();
         }
 
         // Number normalization
@@ -439,10 +443,7 @@ impl PreprocessingPipeline {
     ///
     /// Returns an iterator of processed sentences that pass all filters.
     /// Includes deduplication if configured.
-    pub fn process_batch<'a, I>(
-        &'a self,
-        texts: I,
-    ) -> Box<dyn Iterator<Item = String> + 'a>
+    pub fn process_batch<'a, I>(&'a self, texts: I) -> Box<dyn Iterator<Item = String> + 'a>
     where
         I: Iterator<Item = String> + 'a,
     {
@@ -632,8 +633,16 @@ mod tests {
         assert!(result.contains("<user>"), "Expected <user> in: {}", result);
         assert!(result.contains("<url>"), "Expected <url> in: {}", result);
         assert!(result.contains("<num>"), "Expected <num> in: {}", result);
-        assert!(result.contains("<hashtag>"), "Expected <hashtag> in: {}", result);
-        assert!(result.contains("cannot"), "Expected 'cannot' in: {}", result);
+        assert!(
+            result.contains("<hashtag>"),
+            "Expected <hashtag> in: {}",
+            result
+        );
+        assert!(
+            result.contains("cannot"),
+            "Expected 'cannot' in: {}",
+            result
+        );
         assert_eq!(result, result.to_lowercase());
     }
 

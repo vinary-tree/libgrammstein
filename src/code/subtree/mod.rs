@@ -32,5 +32,5 @@
 mod pattern;
 mod treeminer;
 
-pub use pattern::{FlatTree, FlatNode, SubtreePattern, PatternNode};
-pub use treeminer::{TreeminerD, TreeminerConfig, MiningResult};
+pub use pattern::{FlatNode, FlatTree, PatternNode, SubtreePattern};
+pub use treeminer::{MiningResult, TreeminerConfig, TreeminerD};

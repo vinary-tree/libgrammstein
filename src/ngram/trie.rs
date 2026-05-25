@@ -31,7 +31,9 @@ pub trait IterableDictionary: MutableMappedDictionary<Value = NgramEntry> {
 }
 
 // Implement IterableDictionary for DynamicDawgChar
-impl IterableDictionary for liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<NgramEntry> {
+impl IterableDictionary
+    for liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<NgramEntry>
+{
     fn iter_all(&self) -> Box<dyn Iterator<Item = (String, NgramEntry)> + '_> {
         Box::new(self.iter())
     }
@@ -195,11 +197,8 @@ where
     /// `true` if this was a new n-gram (inserted), `false` if it already existed (incremented).
     pub fn insert(&self, tokens: &[&str]) -> bool {
         let key = Self::encode_key_legacy(tokens);
-        self.dictionary.update_or_insert(
-            &key,
-            NgramEntry::new(1),
-            |entry| entry.increment(),
-        )
+        self.dictionary
+            .update_or_insert(&key, NgramEntry::new(1), |entry| entry.increment())
     }
 
     /// Insert or increment an n-gram using a pre-encoded key.
@@ -210,11 +209,8 @@ where
     ///
     /// `true` if this was a new n-gram (inserted), `false` if it already existed (incremented).
     pub fn insert_with_key(&self, key: &str) -> bool {
-        self.dictionary.update_or_insert(
-            key,
-            NgramEntry::new(1),
-            |entry| entry.increment(),
-        )
+        self.dictionary
+            .update_or_insert(key, NgramEntry::new(1), |entry| entry.increment())
     }
 
     /// Insert an n-gram with a specific count.
@@ -225,12 +221,14 @@ where
     /// encoding, use [`Self::insert_with_key_and_count`].
     pub fn insert_with_count(&self, tokens: &[&str], count: u64) -> bool {
         let key = Self::encode_key_legacy(tokens);
-        self.dictionary.insert_with_value(&key, NgramEntry::new(count))
+        self.dictionary
+            .insert_with_value(&key, NgramEntry::new(count))
     }
 
     /// Insert an n-gram with a specific count using a pre-encoded key.
     pub fn insert_with_key_and_count(&self, key: &str, count: u64) -> bool {
-        self.dictionary.insert_with_value(key, NgramEntry::new(count))
+        self.dictionary
+            .insert_with_value(key, NgramEntry::new(count))
     }
 
     /// Get the entry for an n-gram, if it exists.
@@ -414,14 +412,21 @@ mod tests {
         // When decoded by splitting on pipe, we get the wrong number of tokens!
         let decoded: Vec<_> = encoded.split(LEGACY_NGRAM_SEPARATOR).collect();
         assert_eq!(decoded.len(), 3, "Bug: pipe in token causes wrong split");
-        assert_eq!(decoded, ["foo", "bar", "baz"], "Bug: original tokens corrupted");
+        assert_eq!(
+            decoded,
+            ["foo", "bar", "baz"],
+            "Bug: original tokens corrupted"
+        );
     }
 
     #[test]
     fn test_hash_ngram_key_order_matters() {
         let hash1 = hash_ngram_key(&["a", "b"]);
         let hash2 = hash_ngram_key(&["b", "a"]);
-        assert_ne!(hash1, hash2, "Different orderings should have different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "Different orderings should have different hashes"
+        );
     }
 
     #[test]

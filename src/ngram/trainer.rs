@@ -6,12 +6,12 @@
 //! - Continuation count collection for Modified Kneser-Ney
 //! - Progress reporting
 
-use crate::corpus::{CorpusReader, PrefetchConfig, PrefetchingReader, Tokenizer};
 use super::entry::NgramEntry;
 use super::model::NgramModel;
 use super::smoothing::KneserNeySmoothing;
 use super::trie::{IterableDictionary, NgramTrie, LEGACY_NGRAM_SEPARATOR};
 use super::vocabulary::{encode_ngram_key, open_or_create_vocabulary, SharedVocabARTrie};
+use crate::corpus::{CorpusReader, PrefetchConfig, PrefetchingReader, Tokenizer};
 use crate::Result;
 
 use crossbeam_channel::Sender;
@@ -206,8 +206,7 @@ where
         let vocabulary = match &config.vocabulary_mode {
             VocabularyMode::Legacy => None,
             VocabularyMode::Create(path) => {
-                Some(open_or_create_vocabulary(path)
-                    .expect("Failed to create vocabulary"))
+                Some(open_or_create_vocabulary(path).expect("Failed to create vocabulary"))
             }
             VocabularyMode::Shared(vocab) => Some(vocab.clone()),
         };
@@ -560,13 +559,15 @@ where
             let continuation_count = contexts.len() as u32;
             // Single PUA char = unigram key
             let word_key: String = std::iter::once(word_char).collect();
-            self.trie.update_continuation_count_by_key(&word_key, continuation_count);
+            self.trie
+                .update_continuation_count_by_key(&word_key, continuation_count);
         }
 
         // Update unique continuations in the trie
         for (history_key, words) in history_words {
             let unique_continuations = words.len() as u32;
-            self.trie.update_unique_continuations_by_key(&history_key, unique_continuations);
+            self.trie
+                .update_unique_continuations_by_key(&history_key, unique_continuations);
         }
 
         log::debug!("Continuation count collection (vocabulary mode) complete");
@@ -615,23 +616,22 @@ where
                 .insert(history.clone());
 
             // Record that this history has this word as a continuation
-            history_words
-                .entry(history)
-                .or_default()
-                .insert(word);
+            history_words.entry(history).or_default().insert(word);
         }
 
         // Update continuation counts in the trie
         for (word, contexts) in word_contexts {
             let continuation_count = contexts.len() as u32;
-            self.trie.update_continuation_count(&[&word], continuation_count);
+            self.trie
+                .update_continuation_count(&[&word], continuation_count);
         }
 
         // Update unique continuations in the trie
         for (history, words) in history_words {
             let unique_continuations = words.len() as u32;
             let history_tokens: Vec<&str> = history.split(LEGACY_NGRAM_SEPARATOR).collect();
-            self.trie.update_unique_continuations(&history_tokens, unique_continuations);
+            self.trie
+                .update_unique_continuations(&history_tokens, unique_continuations);
         }
 
         log::debug!("Continuation count collection (legacy mode) complete");
@@ -662,7 +662,10 @@ where
 
         log::debug!(
             "N-gram frequency counts: n1={}, n2={}, n3={}, n4={}",
-            n1, n2, n3, n4
+            n1,
+            n2,
+            n3,
+            n4
         );
 
         (n1, n2, n3, n4)
@@ -818,8 +821,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::vocabulary::create_vocabulary;
+    use super::*;
     use crate::corpus::PlaintextReader;
     use liblevenshtein::dictionary::pathmap::PathMapDictionary;
     use std::io::Write;
@@ -894,13 +897,22 @@ mod tests {
 
         // Verify words are in the SharedVocabARTrie (not model.in_vocabulary, which uses legacy encoding)
         assert!(vocab.read().contains("the"), "Expected 'the' in vocabulary");
-        assert!(vocab.read().contains("quick"), "Expected 'quick' in vocabulary");
-        assert!(vocab.read().contains("brown"), "Expected 'brown' in vocabulary");
+        assert!(
+            vocab.read().contains("quick"),
+            "Expected 'quick' in vocabulary"
+        );
+        assert!(
+            vocab.read().contains("brown"),
+            "Expected 'brown' in vocabulary"
+        );
         assert!(vocab.read().contains("fox"), "Expected 'fox' in vocabulary");
 
         // Verify we can look up n-grams using the vocabulary for encoding
         let bigram_key = encode_ngram_key(&["the", "quick"], &vocab);
-        assert!(model.trie().contains_key(&bigram_key), "Expected 'the quick' bigram in trie");
+        assert!(
+            model.trie().contains_key(&bigram_key),
+            "Expected 'the quick' bigram in trie"
+        );
     }
 
     #[test]
@@ -927,7 +939,10 @@ mod tests {
         // In vocabulary mode, "foo|bar" is stored as a single PUA character,
         // so it won't be corrupted by the pipe separator.
         // Verify through the vocabulary, not the model's legacy query methods
-        assert!(vocab.read().contains("foo|bar"), "Expected 'foo|bar' as single token in vocabulary");
+        assert!(
+            vocab.read().contains("foo|bar"),
+            "Expected 'foo|bar' as single token in vocabulary"
+        );
         assert!(vocab.read().contains("baz"), "Expected 'baz' in vocabulary");
 
         // vocab_size should be 2 (the two unique words)
@@ -936,7 +951,11 @@ mod tests {
         // Verify the bigram "foo|bar baz" is stored correctly
         let bigram_key = encode_ngram_key(&["foo|bar", "baz"], &vocab);
         let count = model.trie().count_by_key(&bigram_key);
-        assert!(count >= 3, "Expected 'foo|bar baz' bigram count >= 3, got {}", count);
+        assert!(
+            count >= 3,
+            "Expected 'foo|bar baz' bigram count >= 3, got {}",
+            count
+        );
     }
 
     #[test]
@@ -989,7 +1008,10 @@ mod tests {
             .expect("Training with shared vocabulary failed");
 
         // The vocabulary should have grown
-        assert!(vocab.read().len() > 3, "Vocabulary should have grown with new words");
+        assert!(
+            vocab.read().len() > 3,
+            "Vocabulary should have grown with new words"
+        );
         assert!(model.vocab_size() > 0);
     }
 
@@ -1001,10 +1023,7 @@ mod tests {
 
         // Create corpus with clear continuation patterns:
         // "the" is followed by "quick", "slow", "big" (3 unique continuations)
-        let corpus_path = create_test_corpus(
-            dir.path(),
-            "the quick fox the slow fox the big fox",
-        );
+        let corpus_path = create_test_corpus(dir.path(), "the quick fox the slow fox the big fox");
 
         let reader = PlaintextReader::from_file(&corpus_path).expect("Failed to create reader");
         let dictionary = PathMapDictionary::<NgramEntry>::new();

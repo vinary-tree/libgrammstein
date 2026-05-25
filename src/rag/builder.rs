@@ -52,10 +52,8 @@ impl IndexBuilder {
     /// Create a new index builder.
     pub fn new(config: IndexBuilderConfig) -> Result<Self> {
         let embedder = ModernBertEmbedder::new(config.embedding_config.clone())?;
-        let summarizer = Summarizer::from_model(
-            embedder.model_arc(),
-            config.summarizer_config.clone(),
-        )?;
+        let summarizer =
+            Summarizer::from_model(embedder.model_arc(), config.summarizer_config.clone())?;
 
         Ok(Self {
             embedder,
@@ -91,16 +89,17 @@ impl IndexBuilder {
 
     /// Process a document builder into a full document.
     fn process_builder(&self, builder: DocumentBuilder, id: DocumentId) -> Result<Document> {
-        let content = builder.get_content().ok_or_else(|| {
-            RagError::IndexError("Document builder missing content".to_string())
-        })?;
+        let content = builder
+            .get_content()
+            .ok_or_else(|| RagError::IndexError("Document builder missing content".to_string()))?;
 
         // Generate embedding
         let embedding = self.embedder.embed_document(builder.get_title(), content)?;
 
         // Generate or use explicit synopsis
         let synopsis = if self.config.generate_summaries {
-            self.summarizer.create_synopsis(builder.get_explicit_synopsis(), content)?
+            self.summarizer
+                .create_synopsis(builder.get_explicit_synopsis(), content)?
         } else {
             match builder.get_explicit_synopsis() {
                 Some(text) => Synopsis::explicit(text),
@@ -231,10 +230,8 @@ impl ParallelIndexBuilder {
     /// Create a new parallel index builder.
     pub fn new(config: IndexBuilderConfig) -> Result<Self> {
         let embedder = ModernBertEmbedder::new(config.embedding_config.clone())?;
-        let summarizer = Summarizer::from_model(
-            embedder.model_arc(),
-            config.summarizer_config.clone(),
-        )?;
+        let summarizer =
+            Summarizer::from_model(embedder.model_arc(), config.summarizer_config.clone())?;
 
         Ok(Self {
             embedder,
@@ -265,10 +262,9 @@ impl ParallelIndexBuilder {
                 })?;
 
                 let embedding = self.embedder.embed_document(builder.get_title(), content)?;
-                let synopsis = self.summarizer.create_synopsis(
-                    builder.get_explicit_synopsis(),
-                    content,
-                )?;
+                let synopsis = self
+                    .summarizer
+                    .create_synopsis(builder.get_explicit_synopsis(), content)?;
 
                 Ok(builder.build(id, synopsis, embedding))
             })

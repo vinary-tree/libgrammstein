@@ -331,11 +331,9 @@ impl BatchDocumentEmbedder {
     ) -> Result<Vec<DocumentEmbedding>> {
         let texts: Vec<String> = documents
             .iter()
-            .map(|(_, title, content)| {
-                match title {
-                    Some(t) => format!("{} {}", t, content),
-                    None => content.clone(),
-                }
+            .map(|(_, title, content)| match title {
+                Some(t) => format!("{} {}", t, content),
+                None => content.clone(),
             })
             .collect();
 

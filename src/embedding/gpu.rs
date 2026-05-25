@@ -122,12 +122,15 @@ impl GpuContext {
         );
 
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("grammstein_gpu"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::Performance,
-            }, None)
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("grammstein_gpu"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    memory_hints: wgpu::MemoryHints::Performance,
+                },
+                None,
+            )
             .await
             .map_err(GpuError::NoDevice)?;
 
@@ -1180,7 +1183,8 @@ impl GpuAccelerator {
         gradients: &[f32],
         learning_rate: f32,
     ) -> Result<Vec<f32>> {
-        self.gradient_accum.apply(embeddings, gradients, learning_rate)
+        self.gradient_accum
+            .apply(embeddings, gradients, learning_rate)
     }
 
     /// Compute similarity scores against a query vector.

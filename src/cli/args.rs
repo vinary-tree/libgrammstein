@@ -14,8 +14,10 @@ use serde::{Deserialize, Serialize};
 #[command(author = "Dylon Edwards")]
 #[command(version)]
 #[command(about = "Language model training and experimentation CLI")]
-#[command(long_about = "A unified CLI for training, evaluating, and querying N-gram and hybrid \
-    language models that integrate with lling-llang WFST text correction.")]
+#[command(
+    long_about = "A unified CLI for training, evaluating, and querying N-gram and hybrid \
+    language models that integrate with lling-llang WFST text correction."
+)]
 #[command(propagate_version = true)]
 pub struct Cli {
     /// Subcommand to run.

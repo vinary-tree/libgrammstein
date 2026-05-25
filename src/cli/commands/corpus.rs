@@ -62,8 +62,7 @@ fn create_corpus_reader(path: &str, format: CorpusFormat) -> CliResult<Box<dyn C
             // Local file
             if path_obj.exists() {
                 Ok(Box::new(
-                    WikipediaReader::new(path_obj)
-                        .map_err(|e| CliError::corpus(e.to_string()))?,
+                    WikipediaReader::new(path_obj).map_err(|e| CliError::corpus(e.to_string()))?,
                 ))
             } else {
                 Err(CliError::file_not_found(path_obj))
@@ -221,7 +220,10 @@ fn corpus_sample(args: CorpusSampleArgs, verbose: bool) -> CliResult<()> {
     }
 
     if reservoir.is_empty() {
-        eprintln!("{}: Corpus contains no sentences", style("warning").yellow());
+        eprintln!(
+            "{}: Corpus contains no sentences",
+            style("warning").yellow()
+        );
         return Ok(());
     }
 
@@ -281,8 +283,10 @@ fn corpus_download(args: CorpusDownloadArgs, verbose: bool) -> CliResult<()> {
     println!("     wget -c \"{}\"", url);
     println!();
     println!("  2. The file is bz2-compressed XML. You can use it directly with:");
-    println!("     grammstein train ngram {} model.bin --format wikipedia",
-             url.split('/').last().unwrap_or("dump.xml.bz2"));
+    println!(
+        "     grammstein train ngram {} model.bin --format wikipedia",
+        url.split('/').last().unwrap_or("dump.xml.bz2")
+    );
     println!();
 
     if args.sample {
@@ -340,7 +344,9 @@ fn corpus_detect(args: CorpusDetectArgs, verbose: bool) -> CliResult<()> {
     }
 
     if sample_text.is_empty() {
-        return Err(CliError::corpus("Corpus contains no text for language detection".to_string()));
+        return Err(CliError::corpus(
+            "Corpus contains no text for language detection".to_string(),
+        ));
     }
 
     // Detect language
@@ -352,13 +358,31 @@ fn corpus_detect(args: CorpusDetectArgs, verbose: bool) -> CliResult<()> {
             let confidence = info.confidence() * 100.0;
             let reliable = info.is_reliable();
 
-            println!("{}", style("Language Detection Results").bold().underlined());
+            println!(
+                "{}",
+                style("Language Detection Results").bold().underlined()
+            );
             println!();
-            println!("Detected language: {} ({})", style(lang_code).cyan().bold(), lang_name(info.lang()));
+            println!(
+                "Detected language: {} ({})",
+                style(lang_code).cyan().bold(),
+                lang_name(info.lang())
+            );
             println!("Confidence:        {:.1}%", confidence);
-            println!("Reliable:          {}", if reliable { style("yes").green() } else { style("no").yellow() });
+            println!(
+                "Reliable:          {}",
+                if reliable {
+                    style("yes").green()
+                } else {
+                    style("no").yellow()
+                }
+            );
             println!();
-            println!("Sample size:       {} sentences ({} characters)", sentence_count, sample_text.len());
+            println!(
+                "Sample size:       {} sentences ({} characters)",
+                sentence_count,
+                sample_text.len()
+            );
 
             if !reliable {
                 println!();
@@ -498,7 +522,12 @@ pub struct CacheEntry {
 
 impl CacheEntry {
     /// Create a new cache entry.
-    pub fn new(source: CorpusSource, path: PathBuf, size_bytes: u64, language: Option<String>) -> Self {
+    pub fn new(
+        source: CorpusSource,
+        path: PathBuf,
+        size_bytes: u64,
+        language: Option<String>,
+    ) -> Self {
         Self {
             source,
             path,
@@ -705,7 +734,11 @@ fn corpus_list(args: CorpusListArgs, verbose: bool) -> CliResult<()> {
                 "Total: {} in {} {}",
                 style(format_bytes(cache.total_size())).cyan().bold(),
                 cache.count(),
-                if cache.count() == 1 { "corpus" } else { "corpora" }
+                if cache.count() == 1 {
+                    "corpus"
+                } else {
+                    "corpora"
+                }
             );
         }
     }
@@ -757,7 +790,12 @@ fn corpus_clean(args: CorpusCleanArgs, verbose: bool) -> CliResult<()> {
     };
 
     // Find entries to remove
-    let to_remove: Vec<_> = cache.entries.iter().filter(|e| filter(e)).cloned().collect();
+    let to_remove: Vec<_> = cache
+        .entries
+        .iter()
+        .filter(|e| filter(e))
+        .cloned()
+        .collect();
 
     if to_remove.is_empty() {
         println!("{}", style("No corpora match the cleanup criteria.").dim());
@@ -778,12 +816,7 @@ fn corpus_clean(args: CorpusCleanArgs, verbose: bool) -> CliResult<()> {
     println!("{}", style("Corpora to clean:").bold());
     for entry in &to_remove {
         let lang = entry.language.as_deref().unwrap_or("-");
-        println!(
-            "  {:?} ({}) - {}",
-            entry.source,
-            lang,
-            entry.format_size()
-        );
+        println!("  {:?} ({}) - {}", entry.source, lang, entry.format_size());
     }
     println!();
     println!(
@@ -803,10 +836,14 @@ fn corpus_clean(args: CorpusCleanArgs, verbose: bool) -> CliResult<()> {
         println!();
         print!("Delete these corpora? [y/N] ");
         use std::io::{self, Write};
-        io::stdout().flush().map_err(|e| CliError::io(format!("stdout: {}", e)))?;
+        io::stdout()
+            .flush()
+            .map_err(|e| CliError::io(format!("stdout: {}", e)))?;
 
         let mut input = String::new();
-        io::stdin().read_line(&mut input).map_err(|e| CliError::io(format!("stdin: {}", e)))?;
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| CliError::io(format!("stdin: {}", e)))?;
 
         if !input.trim().eq_ignore_ascii_case("y") {
             println!("{}", style("Cancelled.").dim());
@@ -849,7 +886,11 @@ fn corpus_clean(args: CorpusCleanArgs, verbose: bool) -> CliResult<()> {
         "{} Deleted {} {}, freed {}",
         style("✓").green().bold(),
         deleted_count,
-        if deleted_count == 1 { "corpus" } else { "corpora" },
+        if deleted_count == 1 {
+            "corpus"
+        } else {
+            "corpora"
+        },
         style(format_bytes(deleted_size)).cyan().bold()
     );
 

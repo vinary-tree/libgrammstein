@@ -78,16 +78,16 @@ pub use checkpoint_decoder::{decode_checkpoint, decode_checkpoint_summary};
 pub use config::{GoogleBooksConfig, ShardingGranularity, ShardingMode, ShardingOptions};
 pub use events::{ImportCommand, ImportEvent, LogLevel};
 pub use extractor::{DictionaryExtractor, ExtractionPhase, ExtractionProgress, ExtractionStats};
-pub use importer::{
-    GoogleBooksImporter, ImportPhase, ImportProgress, ImportStats, WorkerUpdate,
-    run_import_with_shutdown, shutdown_signal,
-};
 #[cfg(feature = "google-books")]
 pub use importer::{
     run_import_with_periodic_checkpoints, CheckpointState, DEFAULT_CHECKPOINT_INTERVAL_MS,
 };
+pub use importer::{
+    run_import_with_shutdown, shutdown_signal, GoogleBooksImporter, ImportPhase, ImportProgress,
+    ImportStats, WorkerUpdate,
+};
 pub use languages::{is_valid_prefix, LanguageInfo, LanguageMetadata, SUPPORTED_LANGUAGES};
-pub use parser::{NgramRecord, parse_ngram_line};
+pub use parser::{parse_ngram_line, NgramRecord};
 pub use reader::{FileNgramReader, HttpNgramReader, NgramReader, ReaderError};
 pub use storage::{NgramStorage, StorageError, StorageResult, StorageStats};
 #[cfg(feature = "google-books")]

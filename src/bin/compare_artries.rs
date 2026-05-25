@@ -273,84 +273,84 @@ fn compare_ngrams_streaming(
     }
 
     if let Some(entries) = trie1.iter_prefix_with_values("")? {
-    for (key1, value1) in entries {
-        // Skip metadata
-        if key1.starts_with('\x00') {
-            continue;
-        }
-        result.trie1_count += 1;
-
-        // Decode to word indices
-        let indices = decode_ngram_key(&key1);
-
-        // Reverse lookup to get words (O(1) per index)
-        let guard = vocab1.read();
-        let words: Vec<String> = indices
-            .iter()
-            .filter_map(|&idx| {
-                if idx == 0 {
-                    return None; // index 0 is reserved
-                }
-                guard.get_term(idx)
-            })
-            .collect();
-        drop(guard);
-
-        if words.len() != indices.len() {
-            result.decode_failures_1 += 1;
-            if verbose && result.decode_failures_1 <= 5 {
-                eprintln!(
-                    "  Warning: Could not decode all indices for key (indices: {:?})",
-                    indices
-                );
+        for (key1, value1) in entries {
+            // Skip metadata
+            if key1.starts_with('\x00') {
+                continue;
             }
-            continue;
-        }
+            result.trie1_count += 1;
 
-        // Re-encode with vocab2's indices
-        let word_refs: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
-        match encode_ngram_key_existing(&word_refs, vocab2) {
-            Some(key2) => {
-                // Lookup in trie2 (on-disk, lazy loaded)
-                match trie2.get(&key2) {
-                    Some(&value2) => {
-                        if value2 != value1 {
-                            if result.count_mismatches.len() < max_to_track {
-                                result.count_mismatches.push(CountMismatch {
+            // Decode to word indices
+            let indices = decode_ngram_key(&key1);
+
+            // Reverse lookup to get words (O(1) per index)
+            let guard = vocab1.read();
+            let words: Vec<String> = indices
+                .iter()
+                .filter_map(|&idx| {
+                    if idx == 0 {
+                        return None; // index 0 is reserved
+                    }
+                    guard.get_term(idx)
+                })
+                .collect();
+            drop(guard);
+
+            if words.len() != indices.len() {
+                result.decode_failures_1 += 1;
+                if verbose && result.decode_failures_1 <= 5 {
+                    eprintln!(
+                        "  Warning: Could not decode all indices for key (indices: {:?})",
+                        indices
+                    );
+                }
+                continue;
+            }
+
+            // Re-encode with vocab2's indices
+            let word_refs: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
+            match encode_ngram_key_existing(&word_refs, vocab2) {
+                Some(key2) => {
+                    // Lookup in trie2 (on-disk, lazy loaded)
+                    match trie2.get(&key2) {
+                        Some(&value2) => {
+                            if value2 != value1 {
+                                if result.count_mismatches.len() < max_to_track {
+                                    result.count_mismatches.push(CountMismatch {
+                                        ngram: words,
+                                        count1: value1,
+                                        count2: value2,
+                                    });
+                                }
+                            }
+                        }
+                        None => {
+                            if result.missing_in_2.len() < max_to_track {
+                                result.missing_in_2.push(MissingEntry {
                                     ngram: words,
-                                    count1: value1,
-                                    count2: value2,
+                                    count: value1,
                                 });
                             }
                         }
                     }
-                    None => {
-                        if result.missing_in_2.len() < max_to_track {
-                            result.missing_in_2.push(MissingEntry {
-                                ngram: words,
-                                count: value1,
-                            });
-                        }
+                }
+                None => {
+                    // Word not in vocab2 - this means a vocab mismatch
+                    if result.missing_in_2.len() < max_to_track {
+                        result.missing_in_2.push(MissingEntry {
+                            ngram: words,
+                            count: value1,
+                        });
                     }
                 }
             }
-            None => {
-                // Word not in vocab2 - this means a vocab mismatch
-                if result.missing_in_2.len() < max_to_track {
-                    result.missing_in_2.push(MissingEntry {
-                        ngram: words,
-                        count: value1,
-                    });
-                }
+
+            // Early exit if max mismatches reached
+            if max_mismatches > 0 && result.total_errors() >= max_mismatches {
+                result.truncated = true;
+                break;
             }
         }
-
-        // Early exit if max mismatches reached
-        if max_mismatches > 0 && result.total_errors() >= max_mismatches {
-            result.truncated = true;
-            break;
-        }
-    }
     }
 
     // Reverse pass: trie2 → trie1 (find entries only in trie2)
@@ -360,35 +360,44 @@ fn compare_ngrams_streaming(
         }
 
         if let Some(entries) = trie2.iter_prefix_with_values("")? {
-        for (key2, value2) in entries {
-            if key2.starts_with('\x00') {
-                continue;
-            }
-            result.trie2_count += 1;
+            for (key2, value2) in entries {
+                if key2.starts_with('\x00') {
+                    continue;
+                }
+                result.trie2_count += 1;
 
-            let indices = decode_ngram_key(&key2);
-            let guard = vocab2.read();
-            let words: Vec<String> = indices
-                .iter()
-                .filter_map(|&idx| {
-                    if idx == 0 {
-                        return None;
+                let indices = decode_ngram_key(&key2);
+                let guard = vocab2.read();
+                let words: Vec<String> = indices
+                    .iter()
+                    .filter_map(|&idx| {
+                        if idx == 0 {
+                            return None;
+                        }
+                        guard.get_term(idx)
+                    })
+                    .collect();
+                drop(guard);
+
+                if words.len() != indices.len() {
+                    result.decode_failures_2 += 1;
+                    continue;
+                }
+
+                let word_refs: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
+                match encode_ngram_key_existing(&word_refs, vocab1) {
+                    Some(key1) => {
+                        // Only check existence (values already compared in forward pass)
+                        if trie1.get(&key1).is_none() {
+                            if result.missing_in_1.len() < max_to_track {
+                                result.missing_in_1.push(MissingEntry {
+                                    ngram: words,
+                                    count: value2,
+                                });
+                            }
+                        }
                     }
-                    guard.get_term(idx)
-                })
-                .collect();
-            drop(guard);
-
-            if words.len() != indices.len() {
-                result.decode_failures_2 += 1;
-                continue;
-            }
-
-            let word_refs: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
-            match encode_ngram_key_existing(&word_refs, vocab1) {
-                Some(key1) => {
-                    // Only check existence (values already compared in forward pass)
-                    if trie1.get(&key1).is_none() {
+                    None => {
                         if result.missing_in_1.len() < max_to_track {
                             result.missing_in_1.push(MissingEntry {
                                 ngram: words,
@@ -397,21 +406,12 @@ fn compare_ngrams_streaming(
                         }
                     }
                 }
-                None => {
-                    if result.missing_in_1.len() < max_to_track {
-                        result.missing_in_1.push(MissingEntry {
-                            ngram: words,
-                            count: value2,
-                        });
-                    }
+
+                if max_mismatches > 0 && result.total_errors() >= max_mismatches {
+                    result.truncated = true;
+                    break;
                 }
             }
-
-            if max_mismatches > 0 && result.total_errors() >= max_mismatches {
-                result.truncated = true;
-                break;
-            }
-        }
         }
     }
 

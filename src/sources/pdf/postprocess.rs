@@ -267,9 +267,7 @@ impl PostProcessor {
         result = new_result;
 
         // Ensure proper spacing around math delimiters
-        result = result
-            .replace("\\[", "\n\\[\n")
-            .replace("\\]", "\n\\]\n");
+        result = result.replace("\\[", "\n\\[\n").replace("\\]", "\n\\]\n");
 
         // Clean up excessive newlines introduced
         while result.contains("\n\n\n") {
@@ -347,14 +345,14 @@ impl PostProcessor {
 
         // Remove common artifacts
         let artifacts = [
-            "\u{FFFD}",  // Replacement character
-            "\u{0000}",  // Null
-            "\u{FEFF}",  // BOM
-            "\u{200B}",  // Zero-width space
-            "\u{200C}",  // Zero-width non-joiner
-            "\u{200D}",  // Zero-width joiner
-            "\u{2060}",  // Word joiner
-            "�",         // Common replacement display
+            "\u{FFFD}", // Replacement character
+            "\u{0000}", // Null
+            "\u{FEFF}", // BOM
+            "\u{200B}", // Zero-width space
+            "\u{200C}", // Zero-width non-joiner
+            "\u{200D}", // Zero-width joiner
+            "\u{2060}", // Word joiner
+            "�",        // Common replacement display
         ];
 
         for artifact in &artifacts {
@@ -427,11 +425,7 @@ impl PostProcessor {
             if let Err(issues) = self.validate_latex(&page.latex) {
                 // Log warnings but don't fail - validation is informational
                 for issue in issues {
-                    eprintln!(
-                        "Warning: Page {}: {}",
-                        page_num + 1,
-                        issue
-                    );
+                    eprintln!("Warning: Page {}: {}", page_num + 1, issue);
                 }
             }
         }

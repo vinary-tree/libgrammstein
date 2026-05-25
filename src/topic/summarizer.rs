@@ -77,11 +77,7 @@ impl TopicSummarizer {
         }
 
         // Use top 3 keywords for label
-        let top_keywords: Vec<_> = keywords
-            .iter()
-            .take(3)
-            .map(|(k, _)| k.as_str())
-            .collect();
+        let top_keywords: Vec<_> = keywords.iter().take(3).map(|(k, _)| k.as_str()).collect();
 
         format!("Topic {}: {}", topic_id.as_u32(), top_keywords.join(", "))
     }
@@ -326,10 +322,7 @@ mod tests {
     #[test]
     fn test_truncate_to_length() {
         assert_eq!(truncate_to_length("short", 100), "short");
-        assert_eq!(
-            truncate_to_length("hello world test", 10),
-            "hello..."
-        );
+        assert_eq!(truncate_to_length("hello world test", 10), "hello...");
         assert_eq!(truncate_to_length("nospaces", 5), "nospa...");
     }
 

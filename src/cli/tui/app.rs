@@ -10,9 +10,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::sources::google_books::{ImportCommand, ImportEvent};
 use super::state::{TuiState, WorkerStatus};
 use super::widgets;
+use crate::sources::google_books::{ImportCommand, ImportEvent};
 
 /// Import TUI application.
 pub struct ImportTui {
@@ -46,10 +46,7 @@ impl ImportTui {
     /// - Terminal rendering at ~60 FPS
     ///
     /// Returns `Ok(true)` if import completed normally, `Ok(false)` if cancelled.
-    pub fn run(
-        mut self,
-        mut event_rx: broadcast::Receiver<ImportEvent>,
-    ) -> io::Result<bool> {
+    pub fn run(mut self, mut event_rx: broadcast::Receiver<ImportEvent>) -> io::Result<bool> {
         // Initialize terminal
         let mut terminal = ratatui::init();
 
@@ -87,7 +84,10 @@ impl ImportTui {
                                 log::debug!("[TUI-APP] Received MknCompleted");
                             }
                             ImportEvent::MergeStarted { shard_count, .. } => {
-                                log::debug!("[TUI-APP] Received MergeStarted: {} shards", shard_count);
+                                log::debug!(
+                                    "[TUI-APP] Received MergeStarted: {} shards",
+                                    shard_count
+                                );
                             }
                             ImportEvent::MergeCompleted { .. } => {
                                 log::debug!("[TUI-APP] Received MergeCompleted");
@@ -187,7 +187,9 @@ impl ImportTui {
 
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 let new_parallelism = self.state.parallel_downloads + 1;
-                let _ = self.command_tx.try_send(ImportCommand::SetParallelism(new_parallelism));
+                let _ = self
+                    .command_tx
+                    .try_send(ImportCommand::SetParallelism(new_parallelism));
                 self.state.parallel_downloads = new_parallelism;
 
                 // Add a new worker slot
@@ -206,7 +208,9 @@ impl ImportTui {
             KeyCode::Char('-') | KeyCode::Char('_') => {
                 if self.state.parallel_downloads > 1 {
                     let new_parallelism = self.state.parallel_downloads - 1;
-                    let _ = self.command_tx.try_send(ImportCommand::SetParallelism(new_parallelism));
+                    let _ = self
+                        .command_tx
+                        .try_send(ImportCommand::SetParallelism(new_parallelism));
                     self.state.parallel_downloads = new_parallelism;
                     // Worker slot is removed when WorkerExited event is received,
                     // not immediately here. This keeps the display in sync with
@@ -257,10 +261,7 @@ impl ImportTui {
         // Main content area (stats on left, workers on right)
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
-            ])
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(chunks[2]);
 
         self.render_stats(frame, main_chunks[0]);
@@ -279,14 +280,15 @@ impl ImportTui {
     fn render_header(&self, frame: &mut Frame, area: Rect) {
         // Check for error first - show prominently
         if let Some(ref error) = self.state.error_message {
-            let title = format!(
-                " ERROR: {} - Press [Q] to quit",
-                error
-            );
+            let title = format!(" ERROR: {} - Press [Q] to quit", error);
 
             let header = Paragraph::new(title)
                 .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
-                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Red)));
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Red)),
+                );
 
             frame.render_widget(header, area);
             return;
@@ -321,9 +323,13 @@ impl ImportTui {
 
         // Use yellow/warning color if there are failed prefixes
         let header_style = if self.state.failed_prefixes_count > 0 {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         };
 
         let header = Paragraph::new(title)
@@ -386,11 +392,15 @@ impl ImportTui {
 
             // Format: "2-grams: ████░░░░░░ 340/676 (50%) ACTIVE"
             // The progress bar now has colored segments: green=success, yellow=skipped
-            let mut spans = vec![
-                Span::styled(format!("{}-grams: ", order), Style::default().fg(Color::Cyan)),
-            ];
+            let mut spans = vec![Span::styled(
+                format!("{}-grams: ", order),
+                Style::default().fg(Color::Cyan),
+            )];
             spans.extend(bar_spans);
-            spans.push(Span::raw(format!(" {}/{} ({:.0}%) ", files_completed, total_files, percent)));
+            spans.push(Span::raw(format!(
+                " {}/{} ({:.0}%) ",
+                files_completed, total_files, percent
+            )));
             spans.push(Span::styled(status, status_style));
 
             let line = Line::from(spans);
@@ -405,9 +415,7 @@ impl ImportTui {
 
     /// Render statistics panel.
     fn render_stats(&self, frame: &mut Frame, area: Rect) {
-        let stats_block = Block::default()
-            .title(" Statistics ")
-            .borders(Borders::ALL);
+        let stats_block = Block::default().title(" Statistics ").borders(Borders::ALL);
 
         let inner = stats_block.inner(area);
         frame.render_widget(stats_block, area);
@@ -415,10 +423,7 @@ impl ImportTui {
         // Split into stats text and sparkline
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(5),
-                Constraint::Length(3),
-            ])
+            .constraints([Constraint::Min(5), Constraint::Length(3)])
             .split(inner);
 
         // Stats table - create bindings for formatted strings to extend lifetimes
@@ -467,7 +472,7 @@ impl ImportTui {
         if self.state.has_prefix_warnings() {
             rows.push(
                 Row::new(vec!["Warnings:", warnings_str.as_str()])
-                    .style(Style::default().fg(Color::Yellow))
+                    .style(Style::default().fg(Color::Yellow)),
             );
         }
 
@@ -482,11 +487,11 @@ impl ImportTui {
                 mkn_progress_str = format!("{:.1}%", mkn.percent_complete);
                 rows.push(
                     Row::new(vec!["MKN Progress:", mkn_phase_str.as_str()])
-                        .style(Style::default().fg(Color::Magenta))
+                        .style(Style::default().fg(Color::Magenta)),
                 );
                 rows.push(
                     Row::new(vec!["  Completion:", mkn_progress_str.as_str()])
-                        .style(Style::default().fg(Color::Magenta))
+                        .style(Style::default().fg(Color::Magenta)),
                 );
             }
         }
@@ -498,24 +503,22 @@ impl ImportTui {
         // Add merge progress if active
         if self.state.merge_in_progress {
             if let Some(ref merge) = self.state.merge_progress {
-                merge_shards_str = format!("{}/{} shards", merge.shards_processed, merge.total_shards);
+                merge_shards_str =
+                    format!("{}/{} shards", merge.shards_processed, merge.total_shards);
                 merge_progress_str = format!("{:.1}%", merge.percent_complete);
                 rows.push(
                     Row::new(vec!["Merge Progress:", merge_shards_str.as_str()])
-                        .style(Style::default().fg(Color::Blue))
+                        .style(Style::default().fg(Color::Blue)),
                 );
                 rows.push(
                     Row::new(vec!["  Completion:", merge_progress_str.as_str()])
-                        .style(Style::default().fg(Color::Blue))
+                        .style(Style::default().fg(Color::Blue)),
                 );
             }
         }
 
-        let table = Table::new(
-            rows,
-            [Constraint::Length(20), Constraint::Fill(1)],
-        )
-        .column_spacing(1);
+        let table =
+            Table::new(rows, [Constraint::Length(20), Constraint::Fill(1)]).column_spacing(1);
 
         frame.render_widget(table, chunks[0]);
 
@@ -532,9 +535,7 @@ impl ImportTui {
 
     /// Render workers panel.
     fn render_workers(&self, frame: &mut Frame, area: Rect) {
-        let workers_block = Block::default()
-            .title(" Workers ")
-            .borders(Borders::ALL);
+        let workers_block = Block::default().title(" Workers ").borders(Borders::ALL);
 
         let inner = workers_block.inner(area);
         frame.render_widget(workers_block, area);
@@ -548,30 +549,55 @@ impl ImportTui {
                 let order_str = worker.order.map(|o| format!("{}g:", o)).unwrap_or_default();
 
                 let (status, style) = match &worker.status {
-                    WorkerStatus::Idle => ("idle".to_string(), Style::default().fg(Color::DarkGray)),
+                    WorkerStatus::Idle => {
+                        ("idle".to_string(), Style::default().fg(Color::DarkGray))
+                    }
                     WorkerStatus::Downloading => {
                         let prefix = worker.prefix.as_deref().unwrap_or("...");
                         let progress_bar = widgets::mini_progress_bar(worker.progress, 10);
                         let status_text = if worker.ngram_count > 0 {
                             // Show n-gram count once processing has started
-                            format!("{}{} {} {} ngrams", order_str, progress_bar, prefix, format_count(worker.ngram_count))
+                            format!(
+                                "{}{} {} {} ngrams",
+                                order_str,
+                                progress_bar,
+                                prefix,
+                                format_count(worker.ngram_count)
+                            )
                         } else {
                             // Still connecting/downloading before processing starts
-                            format!("{}{} {} {}", order_str, progress_bar, prefix, format_bytes(worker.bytes_downloaded))
+                            format!(
+                                "{}{} {} {}",
+                                order_str,
+                                progress_bar,
+                                prefix,
+                                format_bytes(worker.bytes_downloaded)
+                            )
                         };
                         (status_text, Style::default().fg(Color::Yellow))
                     }
                     WorkerStatus::Completed => {
                         let prefix = worker.prefix.as_deref().unwrap_or("...");
                         (
-                            format!("{}done: {} ({} ngrams)", order_str, prefix, format_count(worker.ngram_count)),
+                            format!(
+                                "{}done: {} ({} ngrams)",
+                                order_str,
+                                prefix,
+                                format_count(worker.ngram_count)
+                            ),
                             Style::default().fg(Color::Green),
                         )
                     }
-                    WorkerStatus::Retrying { attempt, max_attempts } => {
+                    WorkerStatus::Retrying {
+                        attempt,
+                        max_attempts,
+                    } => {
                         let prefix = worker.prefix.as_deref().unwrap_or("...");
                         (
-                            format!("{}retry {}/{}: {}", order_str, attempt, max_attempts, prefix),
+                            format!(
+                                "{}retry {}/{}: {}",
+                                order_str, attempt, max_attempts, prefix
+                            ),
                             Style::default().fg(Color::Red),
                         )
                     }
@@ -603,10 +629,18 @@ impl ImportTui {
             .map(|entry| {
                 let style = match entry.level {
                     // Use Gray instead of DarkGray for visibility on dark backgrounds
-                    crate::sources::google_books::LogLevel::Debug => Style::default().fg(Color::Gray),
-                    crate::sources::google_books::LogLevel::Info => Style::default().fg(Color::White),
-                    crate::sources::google_books::LogLevel::Warn => Style::default().fg(Color::Yellow),
-                    crate::sources::google_books::LogLevel::Error => Style::default().fg(Color::Red),
+                    crate::sources::google_books::LogLevel::Debug => {
+                        Style::default().fg(Color::Gray)
+                    }
+                    crate::sources::google_books::LogLevel::Info => {
+                        Style::default().fg(Color::White)
+                    }
+                    crate::sources::google_books::LogLevel::Warn => {
+                        Style::default().fg(Color::Yellow)
+                    }
+                    crate::sources::google_books::LogLevel::Error => {
+                        Style::default().fg(Color::Red)
+                    }
                 };
 
                 ListItem::new(format!("[{}] {}", entry.timestamp, entry.message)).style(style)
@@ -697,12 +731,13 @@ impl ImportTui {
         // Add warnings if there were failures
         if self.state.failed_prefixes_count > 0 {
             lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {} prefixes failed (will retry next run)", self.state.failed_prefixes_count),
-                    Style::default().fg(Color::Yellow),
+            lines.push(Line::from(vec![Span::styled(
+                format!(
+                    "  {} prefixes failed (will retry next run)",
+                    self.state.failed_prefixes_count
                 ),
-            ]));
+                Style::default().fg(Color::Yellow),
+            )]));
         }
 
         lines.push(Line::from(""));

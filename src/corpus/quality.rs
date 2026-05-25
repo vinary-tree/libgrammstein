@@ -108,7 +108,9 @@ impl QualityMetrics {
 
         for c in text.chars() {
             if !c.is_whitespace() {
-                *char_counts.entry(c.to_lowercase().next().unwrap_or(c)).or_insert(0) += 1;
+                *char_counts
+                    .entry(c.to_lowercase().next().unwrap_or(c))
+                    .or_insert(0) += 1;
                 total += 1;
             }
         }
@@ -349,7 +351,9 @@ impl QualityFilter {
                     match reason {
                         RejectionReason::TooFewWords { .. } => stats.too_few_words += 1,
                         RejectionReason::TooManyWords { .. } => stats.too_many_words += 1,
-                        RejectionReason::ExcessiveRepetition { .. } => stats.excessive_repetition += 1,
+                        RejectionReason::ExcessiveRepetition { .. } => {
+                            stats.excessive_repetition += 1
+                        }
                         RejectionReason::MissingTerminalPunct => stats.missing_punct += 1,
                         RejectionReason::LowEntropy { .. } => stats.low_entropy += 1,
                         RejectionReason::LowAlphaRatio { .. } => stats.low_alpha_ratio += 1,
@@ -395,20 +399,42 @@ impl std::fmt::Display for RejectionReason {
                 write!(f, "Too many words: {} (maximum: {})", count, maximum)
             }
             Self::ExcessiveRepetition { ratio, maximum } => {
-                write!(f, "Excessive repetition: {:.2} (maximum: {:.2})", ratio, maximum)
+                write!(
+                    f,
+                    "Excessive repetition: {:.2} (maximum: {:.2})",
+                    ratio, maximum
+                )
             }
             Self::MissingTerminalPunct => write!(f, "Missing terminal punctuation"),
             Self::LowEntropy { entropy, minimum } => {
-                write!(f, "Low entropy: {:.2} bits (minimum: {:.2})", entropy, minimum)
+                write!(
+                    f,
+                    "Low entropy: {:.2} bits (minimum: {:.2})",
+                    entropy, minimum
+                )
             }
             Self::LowAlphaRatio { ratio, minimum } => {
                 write!(f, "Low alpha ratio: {:.2} (minimum: {:.2})", ratio, minimum)
             }
-            Self::ShortWords { avg_length, minimum } => {
-                write!(f, "Words too short: {:.2} avg (minimum: {:.2})", avg_length, minimum)
+            Self::ShortWords {
+                avg_length,
+                minimum,
+            } => {
+                write!(
+                    f,
+                    "Words too short: {:.2} avg (minimum: {:.2})",
+                    avg_length, minimum
+                )
             }
-            Self::LongWords { avg_length, maximum } => {
-                write!(f, "Words too long: {:.2} avg (maximum: {:.2})", avg_length, maximum)
+            Self::LongWords {
+                avg_length,
+                maximum,
+            } => {
+                write!(
+                    f,
+                    "Words too long: {:.2} avg (maximum: {:.2})",
+                    avg_length, maximum
+                )
             }
         }
     }
@@ -576,7 +602,11 @@ mod tests {
         assert!(metrics.has_terminal_punct);
         assert!(metrics.char_entropy > 3.0);
         // Alpha ratio includes spaces in denominator, so ~35/45 = 0.78
-        assert!(metrics.alpha_ratio > 0.7, "alpha_ratio: {}", metrics.alpha_ratio);
+        assert!(
+            metrics.alpha_ratio > 0.7,
+            "alpha_ratio: {}",
+            metrics.alpha_ratio
+        );
     }
 
     #[test]
@@ -584,7 +614,10 @@ mod tests {
         let sentence = "aaaa aaaa aaaa aaaa aaaa";
         let metrics = QualityMetrics::compute(sentence);
 
-        assert!(metrics.char_entropy < 1.0, "Entropy should be very low for repeated chars");
+        assert!(
+            metrics.char_entropy < 1.0,
+            "Entropy should be very low for repeated chars"
+        );
     }
 
     #[test]
@@ -592,7 +625,10 @@ mod tests {
         let sentence = "the the the the the the the quick";
         let metrics = QualityMetrics::compute(sentence);
 
-        assert!(metrics.max_word_repetition > 0.5, "Repetition should be high");
+        assert!(
+            metrics.max_word_repetition > 0.5,
+            "Repetition should be high"
+        );
     }
 
     #[test]

@@ -249,9 +249,13 @@ impl From<ShardingGranularity> for ShardGranularity {
             ShardingGranularity::FirstChar => ShardGranularity::FirstChar,
             ShardingGranularity::TwoChar => ShardGranularity::TwoChar,
             ShardingGranularity::Adaptive => ShardGranularity::Adaptive,
-            ShardingGranularity::CpuProportional { multiplier, minimum } => {
-                ShardGranularity::CpuProportional { multiplier, minimum }
-            }
+            ShardingGranularity::CpuProportional {
+                multiplier,
+                minimum,
+            } => ShardGranularity::CpuProportional {
+                multiplier,
+                minimum,
+            },
         }
     }
 }
@@ -323,7 +327,10 @@ impl GoogleBooksConfig {
         }
 
         // Default: {output_stem}.vocab.artrie in same directory as output
-        let parent = self.output_path.parent().unwrap_or(std::path::Path::new("."));
+        let parent = self
+            .output_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
         let stem = self
             .output_path
             .file_stem()
@@ -352,7 +359,10 @@ impl GoogleBooksConfig {
         }
 
         // Default: {output_stem}_shards/ in same directory as output
-        let parent = self.output_path.parent().unwrap_or(std::path::Path::new("."));
+        let parent = self
+            .output_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
         let stem = self
             .output_path
             .file_stem()
@@ -365,7 +375,10 @@ impl GoogleBooksConfig {
     ///
     /// Returns `{output_path_parent}/grammstein-cache/`.
     pub fn cache_dir(&self) -> PathBuf {
-        let parent = self.output_path.parent().unwrap_or(std::path::Path::new("."));
+        let parent = self
+            .output_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
         parent.join("grammstein-cache")
     }
 
@@ -392,10 +405,7 @@ impl GoogleBooksConfig {
         let shard_dir = self.shard_dir();
 
         let (granularity, max_open_shards) = match &self.sharding {
-            ShardingMode::Enabled(opts) => (
-                opts.granularity.clone().into(),
-                opts.max_open_shards,
-            ),
+            ShardingMode::Enabled(opts) => (opts.granularity.clone().into(), opts.max_open_shards),
             _ => (
                 // Use CPU-proportional sharding: creates num_cpus * 2 shards
                 // Much fewer files than Adaptive (676) while maintaining parallelism
@@ -600,22 +610,16 @@ mod tests {
 
     #[test]
     fn test_invalid_orders() {
-        let result = GoogleBooksConfig::builder()
-            .orders(0..=5)
-            .build();
+        let result = GoogleBooksConfig::builder().orders(0..=5).build();
         assert!(matches!(result, Err(ConfigError::InvalidOrders { .. })));
 
-        let result = GoogleBooksConfig::builder()
-            .orders(1..=6)
-            .build();
+        let result = GoogleBooksConfig::builder().orders(1..=6).build();
         assert!(matches!(result, Err(ConfigError::InvalidOrders { .. })));
     }
 
     #[test]
     fn test_invalid_year_range() {
-        let result = GoogleBooksConfig::builder()
-            .year_range(2020, 2000)
-            .build();
+        let result = GoogleBooksConfig::builder().year_range(2020, 2000).build();
         assert!(matches!(result, Err(ConfigError::InvalidYearRange { .. })));
     }
 }

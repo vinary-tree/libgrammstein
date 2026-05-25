@@ -6,14 +6,12 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 /// Regex for sentence boundary detection.
-static SENTENCE_BOUNDARY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[.!?]+\s+").expect("Invalid sentence boundary regex")
-});
+static SENTENCE_BOUNDARY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[.!?]+\s+").expect("Invalid sentence boundary regex"));
 
 /// Regex for word tokenization.
-static WORD_BOUNDARY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[\s\p{P}]+").expect("Invalid word boundary regex")
-});
+static WORD_BOUNDARY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\s\p{P}]+").expect("Invalid word boundary regex"));
 
 /// Text tokenizer for sentence and word segmentation.
 #[derive(Clone, Debug, Default)]

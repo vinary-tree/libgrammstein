@@ -6,9 +6,7 @@
 use super::routing::ShardKey;
 use libdictenstein::persistent_artrie::wal::SyncHandle;
 use libdictenstein::persistent_artrie::wal_managed::WalManaged;
-use libdictenstein::persistent_artrie::{
-    DocumentTransaction, PersistentARTrie,
-};
+use libdictenstein::persistent_artrie::{DocumentTransaction, PersistentARTrie};
 use liblevenshtein::dictionary::Dictionary;
 use parking_lot::{Condvar, Mutex};
 use std::collections::HashSet;
@@ -509,10 +507,12 @@ impl ShardSyncHandle {
     /// - `Ok(false)` - Timeout elapsed, sync not yet complete
     /// - `Err(...)` - Sync failed or thread crashed
     pub fn wait_timeout(&self, timeout: Duration) -> ShardResult<bool> {
-        self.inner.wait_timeout(timeout).map_err(|e| ShardError::Sync {
-            shard_key: self.shard_key.to_string(),
-            message: format!("Async sync wait_timeout failed: {}", e),
-        })
+        self.inner
+            .wait_timeout(timeout)
+            .map_err(|e| ShardError::Sync {
+                shard_key: self.shard_key.to_string(),
+                message: format!("Async sync wait_timeout failed: {}", e),
+            })
     }
 
     /// Get the shard key this handle belongs to.
@@ -655,7 +655,9 @@ impl ShardHandle {
 
         // Load checkpoint state from trie
         handle.load_checkpoint_state()?;
-        handle.stats.set_entry_count(handle.trie.len().unwrap_or(0) as u64);
+        handle
+            .stats
+            .set_entry_count(handle.trie.len().unwrap_or(0) as u64);
 
         Ok(handle)
     }
@@ -702,7 +704,9 @@ impl ShardHandle {
 
     /// Get the entry count.
     pub fn len(&self) -> usize {
-        self.stats.entry_count.load(std::sync::atomic::Ordering::Relaxed) as usize
+        self.stats
+            .entry_count
+            .load(std::sync::atomic::Ordering::Relaxed) as usize
     }
 
     /// Check if the shard is empty.
@@ -986,11 +990,11 @@ impl ShardHandle {
     ///
     /// Returns `Ok(())` if sync completed, `Err(ShardError::SyncTimeout)` if timeout.
     pub fn wait_for_sync(&self, timeout: Duration) -> ShardResult<()> {
-        self.sync_coordinator.wait_for_sync(timeout).map_err(|()| {
-            ShardError::SyncTimeout {
+        self.sync_coordinator
+            .wait_for_sync(timeout)
+            .map_err(|()| ShardError::SyncTimeout {
                 shard_key: self.key.to_string(),
-            }
-        })
+            })
     }
 
     /// Start async WAL sync - returns immediately, sync happens in background.
@@ -1090,10 +1094,12 @@ impl ShardHandle {
         self.save_checkpoint_state()?;
 
         // Flush dirty arenas in sequential order for optimal I/O
-        self.trie.flush_sequential().map_err(|e| ShardError::Checkpoint {
-            shard_key: self.key.to_string(),
-            message: format!("flush_sequential failed: {}", e),
-        })?;
+        self.trie
+            .flush_sequential()
+            .map_err(|e| ShardError::Checkpoint {
+                shard_key: self.key.to_string(),
+                message: format!("flush_sequential failed: {}", e),
+            })?;
 
         // Checkpoint the trie
         self.trie.checkpoint().map_err(|e| ShardError::Checkpoint {
@@ -1168,7 +1174,10 @@ impl ShardHandle {
         // Save n-grams processed count
         let ngrams_key = format!("{}ngrams_processed", Self::CHECKPOINT_PREFIX);
         self.trie
-            .upsert_bytes(ngrams_key.as_bytes(), self.checkpoint_state.ngrams_processed)
+            .upsert_bytes(
+                ngrams_key.as_bytes(),
+                self.checkpoint_state.ngrams_processed,
+            )
             .map_err(|e| ShardError::Checkpoint {
                 shard_key: self.key.to_string(),
                 message: format!("failed to save ngrams_processed: {}", e),
@@ -1233,10 +1242,13 @@ impl ShardHandle {
     /// eventually to `commit_prefix()`.
     pub fn begin_prefix(&self, prefix: &str) -> ShardResult<PrefixTransaction<u64>> {
         let document_id = format!("prefix:{}", prefix);
-        let tx = self.trie.begin_document(&document_id).map_err(|e| ShardError::Write {
-            shard_key: self.key.to_string(),
-            message: format!("Failed to begin transaction for prefix '{}': {}", prefix, e),
-        })?;
+        let tx = self
+            .trie
+            .begin_document(&document_id)
+            .map_err(|e| ShardError::Write {
+                shard_key: self.key.to_string(),
+                message: format!("Failed to begin transaction for prefix '{}': {}", prefix, e),
+            })?;
         Ok(PrefixTransaction {
             prefix: prefix.to_string(),
             tx,
@@ -1279,10 +1291,16 @@ impl ShardHandle {
         let ngram_count = tx.ngram_count;
         let prefix = tx.prefix.clone();
 
-        let inserted = self.trie.commit_document(tx.tx).map_err(|e| ShardError::Write {
-            shard_key: self.key.to_string(),
-            message: format!("Failed to commit transaction for prefix '{}': {}", prefix, e),
-        })?;
+        let inserted = self
+            .trie
+            .commit_document(tx.tx)
+            .map_err(|e| ShardError::Write {
+                shard_key: self.key.to_string(),
+                message: format!(
+                    "Failed to commit transaction for prefix '{}': {}",
+                    prefix, e
+                ),
+            })?;
 
         // Update stats
         self.stats.add_entries(inserted as u64);
@@ -1307,7 +1325,10 @@ impl ShardHandle {
 
         log::trace!(
             "Shard {}: committed prefix '{}' with {} n-grams ({} newly inserted)",
-            self.key, prefix, ngram_count, inserted
+            self.key,
+            prefix,
+            ngram_count,
+            inserted
         );
 
         Ok(ngram_count)
@@ -1346,10 +1367,13 @@ impl ShardHandle {
         let ngram_count = tx.ngram_count;
         let prefix = tx.prefix.clone();
 
-        let inserted = self.trie.commit_document(tx.tx).map_err(|e| ShardError::Write {
-            shard_key: self.key.to_string(),
-            message: format!("Failed to commit chunk for prefix '{}': {}", prefix, e),
-        })?;
+        let inserted = self
+            .trie
+            .commit_document(tx.tx)
+            .map_err(|e| ShardError::Write {
+                shard_key: self.key.to_string(),
+                message: format!("Failed to commit chunk for prefix '{}': {}", prefix, e),
+            })?;
 
         // Update stats
         self.stats.add_entries(inserted as u64);
@@ -1364,7 +1388,10 @@ impl ShardHandle {
 
         log::trace!(
             "Shard {}: committed chunk for prefix '{}' with {} n-grams ({} newly inserted)",
-            self.key, prefix, ngram_count, inserted
+            self.key,
+            prefix,
+            ngram_count,
+            inserted
         );
 
         Ok(ngram_count)
@@ -1380,14 +1407,18 @@ impl ShardHandle {
     /// * `tx` - The transaction to abort (consumed)
     pub fn abort_prefix(&self, tx: PrefixTransaction<u64>) -> ShardResult<()> {
         let prefix = tx.prefix.clone();
-        self.trie.abort_document(tx.tx).map_err(|e| ShardError::Write {
-            shard_key: self.key.to_string(),
-            message: format!("Failed to abort transaction for prefix '{}': {}", prefix, e),
-        })?;
+        self.trie
+            .abort_document(tx.tx)
+            .map_err(|e| ShardError::Write {
+                shard_key: self.key.to_string(),
+                message: format!("Failed to abort transaction for prefix '{}': {}", prefix, e),
+            })?;
 
         log::trace!(
             "Shard {}: aborted prefix '{}' transaction ({} n-grams discarded)",
-            self.key, prefix, tx.ngram_count
+            self.key,
+            prefix,
+            tx.ngram_count
         );
 
         Ok(())
@@ -1536,8 +1567,8 @@ mod tests {
 
         // Create initial shard with data
         {
-            let mut shard = ShardHandle::create(key.clone(), &path)
-                .expect("Failed to create shard");
+            let mut shard =
+                ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
             let token = shard.try_acquire_write(0).unwrap();
             shard.increment(b"cat|dog", 7, &token).unwrap();
             shard.sync().unwrap();
@@ -1629,7 +1660,9 @@ mod tests {
 
         // Write marks dirty
         let token = shard.try_acquire_write(0).expect("Failed to acquire write");
-        shard.increment(b"the|quick", 5, &token).expect("Failed to increment");
+        shard
+            .increment(b"the|quick", 5, &token)
+            .expect("Failed to increment");
         assert_eq!(shard.sync_state(), ShardSyncState::Dirty);
         shard.release_write(token);
 
@@ -1693,7 +1726,8 @@ mod tests {
 
         // Create shard and commit a prefix via transaction API
         {
-            let mut shard = ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
+            let mut shard =
+                ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
 
             // Begin transaction
             let mut tx = shard.begin_prefix("th").expect("Failed to begin prefix");
@@ -1747,7 +1781,8 @@ mod tests {
         let key = ShardKey::new("th");
 
         {
-            let mut shard = ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
+            let mut shard =
+                ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
 
             // Commit first prefix
             let mut tx1 = shard.begin_prefix("th").expect("Failed to begin prefix");
@@ -1781,7 +1816,8 @@ mod tests {
         let key = ShardKey::new("th");
 
         {
-            let mut shard = ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
+            let mut shard =
+                ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
 
             // Begin and abort a transaction
             let mut tx = shard.begin_prefix("th").expect("Failed to begin prefix");

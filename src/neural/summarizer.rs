@@ -93,10 +93,7 @@ impl Summarizer {
     }
 
     /// Create a summarizer from a model.
-    pub fn from_model(
-        model: Arc<ModernBertModel>,
-        config: SummarizerConfig,
-    ) -> Result<Self> {
+    pub fn from_model(model: Arc<ModernBertModel>, config: SummarizerConfig) -> Result<Self> {
         let embedder = ModernBertEmbedder::from_model(model, EmbeddingConfig::default());
         Ok(Self { embedder, config })
     }
@@ -136,7 +133,11 @@ impl Summarizer {
 
         if valid_sentences.is_empty() {
             // No valid sentences, return first few
-            return Ok(sentences.into_iter().take(num).collect::<Vec<_>>().join(" "));
+            return Ok(sentences
+                .into_iter()
+                .take(num)
+                .collect::<Vec<_>>()
+                .join(" "));
         }
 
         // Embed valid sentences
@@ -318,11 +319,7 @@ impl Summarizer {
     ///
     /// This method takes `&self` instead of `&mut self`, enabling concurrent synopsis
     /// creation by multiple threads without external synchronization.
-    pub fn create_synopsis(
-        &self,
-        explicit: Option<&str>,
-        content: &str,
-    ) -> Result<Synopsis> {
+    pub fn create_synopsis(&self, explicit: Option<&str>, content: &str) -> Result<Synopsis> {
         match explicit {
             Some(text) => Ok(Synopsis::explicit(text)),
             None => {

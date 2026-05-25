@@ -3,8 +3,8 @@
 //! This module provides a unified scoring interface that combines multiple
 //! scoring components for comprehensive LaTeX sequence evaluation.
 
-use crate::latex::tokenizer::{LaTeXToken, LaTeXTokenKind};
 use crate::latex::ngram::{LaTeXMode, ModeDetector};
+use crate::latex::tokenizer::{LaTeXToken, LaTeXTokenKind};
 use std::collections::HashMap;
 
 /// Configuration for the combined scorer.
@@ -175,7 +175,8 @@ impl ScoringResult {
         // Compute standard deviation of normalized scores
         let scores: Vec<f64> = self.components.iter().map(|c| c.normalized_score).collect();
         let mean: f64 = scores.iter().sum::<f64>() / scores.len() as f64;
-        let variance: f64 = scores.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / scores.len() as f64;
+        let variance: f64 =
+            scores.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / scores.len() as f64;
         let std_dev = variance.sqrt();
 
         // Lower std_dev = higher confidence (components agree)
@@ -233,27 +234,23 @@ impl LaTeXScorer {
 
         // Structural score
         let structural = self.compute_structural_score(tokens);
-        components.push(ComponentScore::new(
-            "structural",
-            structural,
-            self.config.structural_weight,
-        ).with_normalized(structural));
+        components.push(
+            ComponentScore::new("structural", structural, self.config.structural_weight)
+                .with_normalized(structural),
+        );
 
         // N-gram score (placeholder - would use actual n-gram model)
         let ngram = self.compute_ngram_placeholder(tokens);
-        components.push(ComponentScore::new(
-            "ngram",
-            ngram,
-            self.config.ngram_weight,
-        ).with_normalized(ngram));
+        components.push(
+            ComponentScore::new("ngram", ngram, self.config.ngram_weight).with_normalized(ngram),
+        );
 
         // Embedding score (placeholder)
         let embedding = self.compute_embedding_placeholder(tokens);
-        components.push(ComponentScore::new(
-            "embedding",
-            embedding,
-            self.config.embedding_weight,
-        ).with_normalized(embedding));
+        components.push(
+            ComponentScore::new("embedding", embedding, self.config.embedding_weight)
+                .with_normalized(embedding),
+        );
 
         // Combine scores
         let combined = self.combine_scores(&components);
@@ -274,13 +271,13 @@ impl LaTeXScorer {
 
     /// Score multiple sequences and return sorted results.
     pub fn score_candidates(&mut self, candidates: &[&[LaTeXToken]]) -> Vec<ScoringResult> {
-        let mut results: Vec<ScoringResult> = candidates
-            .iter()
-            .map(|tokens| self.score(tokens))
-            .collect();
+        let mut results: Vec<ScoringResult> =
+            candidates.iter().map(|tokens| self.score(tokens)).collect();
 
         results.sort_by(|a, b| {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         results
@@ -372,7 +369,8 @@ impl LaTeXScorer {
         }
 
         // Simple heuristic: favor sequences with known command patterns
-        let command_count = tokens.iter()
+        let command_count = tokens
+            .iter()
             .filter(|t| matches!(&t.kind, LaTeXTokenKind::Command(_)))
             .count();
 
@@ -395,7 +393,8 @@ impl LaTeXScorer {
         // Simple heuristic: consistent token types suggest coherent sequence
         let mode = self.mode_detector.sequence_mode(tokens);
 
-        let mode_matches: usize = tokens.iter()
+        let mode_matches: usize = tokens
+            .iter()
             .filter(|t| self.mode_detector.token_mode(t) == mode)
             .count();
 

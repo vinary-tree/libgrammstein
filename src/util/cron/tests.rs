@@ -50,17 +50,13 @@ fn test_concurrent_task_submission() {
             let c = Arc::clone(&counter);
             std::thread::spawn(move || {
                 for _ in 0..100 {
-                    h.schedule_after(
-                        0,
-                        TaskMetadata::OneShot,
-                        {
-                            let c = Arc::clone(&c);
-                            move || {
-                                c.fetch_add(1, Ordering::Relaxed);
-                                true
-                            }
-                        },
-                    );
+                    h.schedule_after(0, TaskMetadata::OneShot, {
+                        let c = Arc::clone(&c);
+                        move || {
+                            c.fetch_add(1, Ordering::Relaxed);
+                            true
+                        }
+                    });
                 }
             })
         })
@@ -167,8 +163,7 @@ fn test_one_shot_task() {
 #[test]
 fn test_panic_safety() {
     let terminating = Arc::new(AtomicBool::new(false));
-    let (handle, thread, stats, ready_rx) =
-        spawn_cron_with_interval(Arc::clone(&terminating), 10);
+    let (handle, thread, stats, ready_rx) = spawn_cron_with_interval(Arc::clone(&terminating), 10);
 
     // Wait for scheduler to be ready (prevents race condition where tasks are
     // scheduled before the cron thread has entered its event loop)

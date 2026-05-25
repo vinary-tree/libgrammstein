@@ -29,11 +29,10 @@ impl CodeLanguage for Python {
 
     fn keywords(&self) -> &[&str] {
         &[
-            "False", "None", "True", "and", "as", "assert", "async", "await",
-            "break", "class", "continue", "def", "del", "elif", "else", "except",
-            "finally", "for", "from", "global", "if", "import", "in", "is",
-            "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
-            "while", "with", "yield",
+            "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
+            "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global",
+            "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
+            "return", "try", "while", "with", "yield",
         ]
     }
 
@@ -68,13 +67,10 @@ impl CodeLanguage for Python {
             "integer" | "float" | "imaginary" => TokenType::NumericLiteral,
 
             // Operators
-            "+" | "-" | "*" | "/" | "//" | "%" | "**"
-            | "==" | "!=" | "<" | ">" | "<=" | ">=" | "is" | "in"
-            | "and" | "or" | "not"
-            | "&" | "|" | "^" | "~" | "<<" | ">>"
-            | "=" | "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "**="
-            | "&=" | "|=" | "^=" | "<<=" | ">>="
-            | "->" => TokenType::Operator,
+            "+" | "-" | "*" | "/" | "//" | "%" | "**" | "==" | "!=" | "<" | ">" | "<=" | ">="
+            | "is" | "in" | "and" | "or" | "not" | "&" | "|" | "^" | "~" | "<<" | ">>" | "="
+            | "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "**=" | "&=" | "|=" | "^=" | "<<="
+            | ">>=" | "->" => TokenType::Operator,
 
             // Punctuation (includes @ for decorators)
             "(" | ")" | "[" | "]" | "{" | "}" | ":" | "," | "." | ";" | "@" => {
@@ -110,30 +106,118 @@ impl CodeLanguage for Python {
 
     fn builtin_types(&self) -> &[&str] {
         &[
-            "int", "float", "complex", "str", "bytes", "bytearray",
-            "list", "tuple", "set", "frozenset", "dict",
-            "bool", "object", "type", "range", "slice",
-            "memoryview", "property", "classmethod", "staticmethod",
-            "Exception", "BaseException", "TypeError", "ValueError",
-            "KeyError", "IndexError", "AttributeError", "NameError",
-            "Optional", "Union", "List", "Dict", "Set", "Tuple",
-            "Callable", "Any", "Type", "Generic", "Protocol",
+            "int",
+            "float",
+            "complex",
+            "str",
+            "bytes",
+            "bytearray",
+            "list",
+            "tuple",
+            "set",
+            "frozenset",
+            "dict",
+            "bool",
+            "object",
+            "type",
+            "range",
+            "slice",
+            "memoryview",
+            "property",
+            "classmethod",
+            "staticmethod",
+            "Exception",
+            "BaseException",
+            "TypeError",
+            "ValueError",
+            "KeyError",
+            "IndexError",
+            "AttributeError",
+            "NameError",
+            "Optional",
+            "Union",
+            "List",
+            "Dict",
+            "Set",
+            "Tuple",
+            "Callable",
+            "Any",
+            "Type",
+            "Generic",
+            "Protocol",
         ]
     }
 
     fn stdlib_functions(&self) -> &[&str] {
         &[
-            "abs", "all", "any", "ascii", "bin", "bool", "breakpoint",
-            "bytearray", "bytes", "callable", "chr", "classmethod",
-            "compile", "complex", "delattr", "dict", "dir", "divmod",
-            "enumerate", "eval", "exec", "filter", "float", "format",
-            "frozenset", "getattr", "globals", "hasattr", "hash", "help",
-            "hex", "id", "input", "int", "isinstance", "issubclass",
-            "iter", "len", "list", "locals", "map", "max", "memoryview",
-            "min", "next", "object", "oct", "open", "ord", "pow", "print",
-            "property", "range", "repr", "reversed", "round", "set",
-            "setattr", "slice", "sorted", "staticmethod", "str", "sum",
-            "super", "tuple", "type", "vars", "zip",
+            "abs",
+            "all",
+            "any",
+            "ascii",
+            "bin",
+            "bool",
+            "breakpoint",
+            "bytearray",
+            "bytes",
+            "callable",
+            "chr",
+            "classmethod",
+            "compile",
+            "complex",
+            "delattr",
+            "dict",
+            "dir",
+            "divmod",
+            "enumerate",
+            "eval",
+            "exec",
+            "filter",
+            "float",
+            "format",
+            "frozenset",
+            "getattr",
+            "globals",
+            "hasattr",
+            "hash",
+            "help",
+            "hex",
+            "id",
+            "input",
+            "int",
+            "isinstance",
+            "issubclass",
+            "iter",
+            "len",
+            "list",
+            "locals",
+            "map",
+            "max",
+            "memoryview",
+            "min",
+            "next",
+            "object",
+            "oct",
+            "open",
+            "ord",
+            "pow",
+            "print",
+            "property",
+            "range",
+            "repr",
+            "reversed",
+            "round",
+            "set",
+            "setattr",
+            "slice",
+            "sorted",
+            "staticmethod",
+            "str",
+            "sum",
+            "super",
+            "tuple",
+            "type",
+            "vars",
+            "zip",
         ]
     }
 
@@ -173,9 +257,18 @@ mod tests {
         let python = Python::new();
 
         assert_eq!(python.classify_token("def", "def"), TokenType::Keyword);
-        assert_eq!(python.classify_token("True", "True"), TokenType::BooleanLiteral);
-        assert_eq!(python.classify_token("foo", "identifier"), TokenType::Identifier);
-        assert_eq!(python.classify_token("42", "integer"), TokenType::NumericLiteral);
+        assert_eq!(
+            python.classify_token("True", "True"),
+            TokenType::BooleanLiteral
+        );
+        assert_eq!(
+            python.classify_token("foo", "identifier"),
+            TokenType::Identifier
+        );
+        assert_eq!(
+            python.classify_token("42", "integer"),
+            TokenType::NumericLiteral
+        );
     }
 
     #[test]

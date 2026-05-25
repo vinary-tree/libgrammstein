@@ -89,9 +89,10 @@ impl ShardGranularity {
             Self::TwoChar => 676,
             Self::Adaptive => 676, // Max across all orders
             Self::Custom { prefix_len } => 26_usize.pow(*prefix_len as u32),
-            Self::CpuProportional { multiplier, minimum } => {
-                Self::compute_cpu_proportional_shards(*multiplier, *minimum)
-            }
+            Self::CpuProportional {
+                multiplier,
+                minimum,
+            } => Self::compute_cpu_proportional_shards(*multiplier, *minimum),
         }
     }
 

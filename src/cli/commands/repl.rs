@@ -83,19 +83,17 @@ impl LoadedModel {
     /// Get vocabulary words for completions.
     fn iter_vocabulary(&self) -> Box<dyn Iterator<Item = String> + '_> {
         match self {
-            LoadedModel::Embedding(m) => {
-                Box::new((0..m.vocab_size()).filter_map(move |i| {
-                    m.index_to_word(i).map(|s| s.to_string())
-                }))
-            }
+            LoadedModel::Embedding(m) => Box::new(
+                (0..m.vocab_size()).filter_map(move |i| m.index_to_word(i).map(|s| s.to_string())),
+            ),
             LoadedModel::Hybrid(m) => {
                 let emb = m.embedding_model();
-                Box::new((0..emb.vocab_size()).filter_map(move |i| {
-                    emb.index_to_word(i).map(|s| s.to_string())
-                }))
+                Box::new(
+                    (0..emb.vocab_size())
+                        .filter_map(move |i| emb.index_to_word(i).map(|s| s.to_string())),
+                )
             }
             LoadedModel::Ngram(m) => {
-                
                 // Extract unigrams (no separator)
                 Box::new(m.trie().iter_entries().filter_map(|(key, _)| {
                     if !key.contains('|') {
@@ -189,7 +187,10 @@ impl ReplSession {
                 LoadedModel::Hybrid(m) => {
                     println!("  N-grams: {}", m.ngram_model().ngram_count());
                     println!("  Total tokens: {}", m.ngram_model().total_count());
-                    println!("  Embedding buckets: {}", m.embedding_model().bucket_count());
+                    println!(
+                        "  Embedding buckets: {}",
+                        m.embedding_model().bucket_count()
+                    );
                 }
             }
         } else {
@@ -317,9 +318,7 @@ impl ReplSession {
         // Collect vocabulary and score
         let mut scored: Vec<(String, f64)> = model
             .iter_vocabulary()
-            .filter_map(|word| {
-                model.log_prob(&word, context).map(|lp| (word, lp))
-            })
+            .filter_map(|word| model.log_prob(&word, context).map(|lp| (word, lp)))
             .collect();
 
         // Sort by log probability (descending)

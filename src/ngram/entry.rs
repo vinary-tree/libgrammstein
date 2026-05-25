@@ -146,8 +146,14 @@ impl Serialize for NgramEntry {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("NgramEntry", 3)?;
         state.serialize_field("count", &self.count.load(Ordering::Relaxed))?;
-        state.serialize_field("continuation_count", &self.continuation_count.load(Ordering::Relaxed))?;
-        state.serialize_field("unique_continuations", &self.unique_continuations.load(Ordering::Relaxed))?;
+        state.serialize_field(
+            "continuation_count",
+            &self.continuation_count.load(Ordering::Relaxed),
+        )?;
+        state.serialize_field(
+            "unique_continuations",
+            &self.unique_continuations.load(Ordering::Relaxed),
+        )?;
         state.end()
     }
 }

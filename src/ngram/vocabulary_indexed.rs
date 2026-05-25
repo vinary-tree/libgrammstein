@@ -228,7 +228,9 @@ impl<D> VocabularyIndexedDictionary<D> {
         let mut buf = Vec::with_capacity(words.len() * 2);
         let mut guard = self.vocabulary.write();
         for word in words {
-            let index = guard.insert(word);
+            let index = guard
+                .insert(word)
+                .expect("vocabulary insert: persistent ARTrie I/O failed");
             encode_varint(index, &mut buf);
         }
         bytes_to_latin1(&buf)
@@ -298,7 +300,8 @@ where
         F: FnOnce(&mut D::Value),
     {
         let key = self.encode_key_inserting(words);
-        self.backend.update_or_insert(&key, default_value, update_fn)
+        self.backend
+            .update_or_insert(&key, default_value, update_fn)
     }
 }
 
@@ -396,7 +399,8 @@ where
     {
         let words: Vec<&str> = self.split_term(term).collect();
         let key = self.encode_key_inserting(&words);
-        self.backend.update_or_insert(&key, default_value, update_fn)
+        self.backend
+            .update_or_insert(&key, default_value, update_fn)
     }
 }
 
@@ -476,8 +480,7 @@ use liblevenshtein::dictionary::value::DictionaryValue;
 /// This zipper wraps the backend's zipper with metadata filtering,
 /// ensuring that `\x00` prefixed metadata entries are not exposed
 /// through iteration or navigation.
-pub type VocabularyIndexedDictionaryZipper<V> =
-    MetadataFilteringZipper<DynamicDawgCharZipper<V>>;
+pub type VocabularyIndexedDictionaryZipper<V> = MetadataFilteringZipper<DynamicDawgCharZipper<V>>;
 
 impl<V: DictionaryValue> VocabularyIndexedDictionary<DynamicDawgChar<V>> {
     /// Create a metadata-filtering zipper for iteration.
@@ -522,8 +525,7 @@ mod tests {
     use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
     use tempfile::TempDir;
 
-    fn create_test_dict(
-    ) -> (TempDir, VocabularyIndexedDictionary<DynamicDawgChar<u64>>) {
+    fn create_test_dict() -> (TempDir, VocabularyIndexedDictionary<DynamicDawgChar<u64>>) {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let vocab_path = dir.path().join("vocab.artrie");
         let vocab = create_vocabulary(&vocab_path).expect("Failed to create vocabulary");

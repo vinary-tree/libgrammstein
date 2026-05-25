@@ -44,7 +44,9 @@
 //! ```
 
 use super::coordinator::ShardCoordinator;
-use crate::ngram::vocabulary::{decode_ngram_key_bytes, encode_indices_to_key_bytes, ngram_order_bytes};
+use crate::ngram::vocabulary::{
+    decode_ngram_key_bytes, encode_indices_to_key_bytes, ngram_order_bytes,
+};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -359,7 +361,9 @@ impl<'a> MknAggregator<'a> {
         let cancelled = AtomicBool::new(false);
 
         // Discover and iterate through all shards on disk (not just in-memory cached ones)
-        let shard_files = self.coordinator.discover_shard_files()
+        let shard_files = self
+            .coordinator
+            .discover_shard_files()
             .map_err(|e| MknError::Coordinator(e))?;
         let shard_keys: Vec<_> = shard_files.into_iter().map(|(key, _)| key).collect();
 
@@ -447,11 +451,15 @@ impl<'a> MknAggregator<'a> {
         //
         // We store contexts as varint-encoded keys (same format as n-gram keys)
         // and predecessors/successors as u64 indices for efficient comparison.
-        let mut predecessor_sets: XxHashMap<Vec<u8>, XxHashSet<u64>> = HashMap::with_hasher(Xxh3DefaultBuilder);
-        let mut successor_sets: XxHashMap<Vec<u8>, XxHashSet<u64>> = HashMap::with_hasher(Xxh3DefaultBuilder);
+        let mut predecessor_sets: XxHashMap<Vec<u8>, XxHashSet<u64>> =
+            HashMap::with_hasher(Xxh3DefaultBuilder);
+        let mut successor_sets: XxHashMap<Vec<u8>, XxHashSet<u64>> =
+            HashMap::with_hasher(Xxh3DefaultBuilder);
 
         // Discover all shards on disk (not just in-memory cached ones)
-        let shard_files = self.coordinator.discover_shard_files()
+        let shard_files = self
+            .coordinator
+            .discover_shard_files()
             .map_err(|e| MknError::Coordinator(e))?;
         let shard_keys: Vec<_> = shard_files.into_iter().map(|(key, _)| key).collect();
 
@@ -635,9 +643,11 @@ impl MknStats {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::config::{ShardConfig, ShardGranularity};
-    use crate::ngram::vocabulary::{create_vocabulary, encode_indices_to_key_bytes, SharedVocabARTrie};
+    use super::*;
+    use crate::ngram::vocabulary::{
+        create_vocabulary, encode_indices_to_key_bytes, SharedVocabARTrie,
+    };
     use tempfile::TempDir;
 
     /// Create a test coordinator with varint-encoded n-grams.
@@ -646,8 +656,8 @@ mod tests {
     /// the production format (LEB128 varint-encoded byte keys).
     fn create_test_coordinator() -> (TempDir, ShardCoordinator, SharedVocabARTrie) {
         let dir = TempDir::new().expect("Failed to create temp dir");
-        let config = ShardConfig::new(dir.path().join("shards"))
-            .with_granularity(ShardGranularity::TwoChar);
+        let config =
+            ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
         let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
 
@@ -662,7 +672,7 @@ mod tests {
             let mut buf = Vec::with_capacity(words.len() * 2);
             let mut guard = vocab.write();
             for word in words {
-                let idx = guard.insert(word);
+                let idx = guard.insert(word).expect("test vocab insert");
                 crate::ngram::vocabulary::encode_varint(idx, &mut buf);
             }
             // Safety: all indices < 128, so all bytes are valid ASCII/UTF-8
@@ -671,7 +681,9 @@ mod tests {
 
         // Add test data with various counts
         // 1-grams (encoded as single varint)
-        coordinator.store_ngram(&encode(&["the"]), 100).expect("store");
+        coordinator
+            .store_ngram(&encode(&["the"]), 100)
+            .expect("store");
         coordinator.store_ngram(&encode(&["a"]), 50).expect("store");
         coordinator.store_ngram(&encode(&["an"]), 1).expect("store"); // count=1
         coordinator.store_ngram(&encode(&["is"]), 2).expect("store"); // count=2
@@ -679,19 +691,35 @@ mod tests {
         coordinator.store_ngram(&encode(&["in"]), 4).expect("store"); // count=4
 
         // 2-grams (encoded as two varints)
-        coordinator.store_ngram(&encode(&["the", "quick"]), 10).expect("store");
-        coordinator.store_ngram(&encode(&["the", "slow"]), 5).expect("store");
-        coordinator.store_ngram(&encode(&["a", "big"]), 1).expect("store"); // count=1
-        coordinator.store_ngram(&encode(&["a", "small"]), 2).expect("store"); // count=2
-        coordinator.store_ngram(&encode(&["is", "very"]), 3).expect("store"); // count=3
-        coordinator.store_ngram(&encode(&["in", "the"]), 4).expect("store"); // count=4
+        coordinator
+            .store_ngram(&encode(&["the", "quick"]), 10)
+            .expect("store");
+        coordinator
+            .store_ngram(&encode(&["the", "slow"]), 5)
+            .expect("store");
+        coordinator
+            .store_ngram(&encode(&["a", "big"]), 1)
+            .expect("store"); // count=1
+        coordinator
+            .store_ngram(&encode(&["a", "small"]), 2)
+            .expect("store"); // count=2
+        coordinator
+            .store_ngram(&encode(&["is", "very"]), 3)
+            .expect("store"); // count=3
+        coordinator
+            .store_ngram(&encode(&["in", "the"]), 4)
+            .expect("store"); // count=4
 
         // 3-grams (encoded as three varints)
         coordinator
             .store_ngram(&encode(&["the", "quick", "brown"]), 5)
             .expect("store");
-        coordinator.store_ngram(&encode(&["the", "quick", "red"]), 1).expect("store"); // count=1
-        coordinator.store_ngram(&encode(&["the", "slow", "green"]), 2).expect("store"); // count=2
+        coordinator
+            .store_ngram(&encode(&["the", "quick", "red"]), 1)
+            .expect("store"); // count=1
+        coordinator
+            .store_ngram(&encode(&["the", "slow", "green"]), 2)
+            .expect("store"); // count=2
 
         (dir, coordinator, vocab)
     }
@@ -775,7 +803,10 @@ mod tests {
         // Note: contexts are varint-encoded byte keys
 
         // Get the index for "quick" to check predecessor counts
-        let quick_idx = vocab.read().get_index("quick").expect("quick should be in vocab");
+        let quick_idx = vocab
+            .read()
+            .get_index("quick")
+            .expect("quick should be in vocab");
         let quick_key = encode_indices_to_key_bytes(&[quick_idx]);
         assert!(
             counts.predecessor_counts.contains_key(&quick_key),
@@ -784,7 +815,10 @@ mod tests {
         );
 
         // Get the index for "the" to check successor counts
-        let the_idx = vocab.read().get_index("the").expect("the should be in vocab");
+        let the_idx = vocab
+            .read()
+            .get_index("the")
+            .expect("the should be in vocab");
         let the_key = encode_indices_to_key_bytes(&[the_idx]);
         assert!(
             counts.successor_counts.contains_key(&the_key),
@@ -885,7 +919,10 @@ mod tests {
                 );
             }
             Ok(_) => panic!("compute_frequency_counts should have been cancelled"),
-            Err(e) => panic!("expected MknError::Computation(\"Cancelled\"), got: {:?}", e),
+            Err(e) => panic!(
+                "expected MknError::Computation(\"Cancelled\"), got: {:?}",
+                e
+            ),
         }
     }
 
@@ -909,7 +946,10 @@ mod tests {
                 );
             }
             Ok(_) => panic!("compute_continuation_counts should have been cancelled"),
-            Err(e) => panic!("expected MknError::Computation(\"Cancelled\"), got: {:?}", e),
+            Err(e) => panic!(
+                "expected MknError::Computation(\"Cancelled\"), got: {:?}",
+                e
+            ),
         }
     }
 }

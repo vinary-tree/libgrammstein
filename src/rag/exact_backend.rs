@@ -111,11 +111,8 @@ impl RetrievalBackend for ExactCosineBackend {
         let scores = self.embeddings.dot(&query);
 
         // Get top-k indices by score
-        let mut scored: Vec<(usize, f32)> = scores
-            .iter()
-            .enumerate()
-            .map(|(i, &s)| (i, s))
-            .collect();
+        let mut scored: Vec<(usize, f32)> =
+            scores.iter().enumerate().map(|(i, &s)| (i, s)).collect();
 
         // Partial sort for efficiency
         let k = top_k.min(scored.len());

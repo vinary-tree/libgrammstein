@@ -150,7 +150,11 @@ impl fmt::Display for ShardKey {
 /// ```
 pub fn compute_shard_key(ngram: &str, order: u8, granularity: &ShardGranularity) -> ShardKey {
     // Handle hash-based routing
-    if let ShardGranularity::CpuProportional { multiplier, minimum } = granularity {
+    if let ShardGranularity::CpuProportional {
+        multiplier,
+        minimum,
+    } = granularity
+    {
         let num_shards = granularity.num_shards();
         let index = hash_to_shard(ngram, num_shards);
         return ShardKey::from_index(index);
@@ -474,21 +478,47 @@ mod tests {
 
         // Hash many n-grams and check distribution
         let test_ngrams = [
-            "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog",
-            "apple", "banana", "cherry", "date", "elderberry", "fig", "grape",
-            "hello|world", "foo|bar", "test|data", "n-gram|model", "machine|learning",
+            "the",
+            "quick",
+            "brown",
+            "fox",
+            "jumps",
+            "over",
+            "lazy",
+            "dog",
+            "apple",
+            "banana",
+            "cherry",
+            "date",
+            "elderberry",
+            "fig",
+            "grape",
+            "hello|world",
+            "foo|bar",
+            "test|data",
+            "n-gram|model",
+            "machine|learning",
         ];
 
         for ngram in &test_ngrams {
             let key = compute_shard_key(ngram, 1, &g);
             let index = key.as_index().expect("Should be index-based");
-            assert!(index < num_shards, "Index {} out of range for {} shards", index, num_shards);
+            assert!(
+                index < num_shards,
+                "Index {} out of range for {} shards",
+                index,
+                num_shards
+            );
             shard_counts[index] += 1;
         }
 
         // At least some shards should have entries (not all in one)
         let non_empty = shard_counts.iter().filter(|&&c| c > 0).count();
-        assert!(non_empty >= 2, "Hash distribution too skewed: only {} non-empty shards", non_empty);
+        assert!(
+            non_empty >= 2,
+            "Hash distribution too skewed: only {} non-empty shards",
+            non_empty
+        );
     }
 
     #[test]

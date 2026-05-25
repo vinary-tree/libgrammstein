@@ -184,8 +184,9 @@ impl PdfRouter {
         let file_size = metadata.len();
 
         // Try to get page count and detect math from PDF
-        let (page_count, math_density, has_tables, has_figures) =
-            self.quick_pdf_analysis(path).unwrap_or((0, 0.0, false, false));
+        let (page_count, math_density, has_tables, has_figures) = self
+            .quick_pdf_analysis(path)
+            .unwrap_or((0, 0.0, false, false));
 
         // Heuristic: academic papers typically have certain patterns
         let is_academic = self.detect_academic_paper(path, &metadata);
@@ -202,10 +203,7 @@ impl PdfRouter {
     }
 
     /// Quick analysis of PDF content.
-    fn quick_pdf_analysis<P: AsRef<Path>>(
-        &self,
-        path: P,
-    ) -> PdfResult<(usize, f32, bool, bool)> {
+    fn quick_pdf_analysis<P: AsRef<Path>>(&self, path: P) -> PdfResult<(usize, f32, bool, bool)> {
         let path = path.as_ref();
 
         // Try to read first few KB of PDF to detect patterns
@@ -273,10 +271,7 @@ impl PdfRouter {
         let path = path.as_ref();
 
         // Check filename patterns common in academic papers
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         let academic_patterns = [
             "arxiv",

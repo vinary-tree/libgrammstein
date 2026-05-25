@@ -40,12 +40,14 @@
 //! let score = lm.score_sequence(&["the", "quick", "brown", "fox"]);
 //! ```
 
-mod lling_llang;
 pub mod lazy_ngram;
+mod lling_llang;
 pub mod vocabulary;
 pub mod wfst_export;
 
+pub use self::lazy_ngram::{NgramHistoryKey, NgramLazyWfst, NgramStateRegistry, NgramStateSource};
 pub use self::lling_llang::GrammsteinLanguageModel;
 pub use self::vocabulary::{WordId, WordVocabulary, EOS_WORD_ID, UNK_WORD_ID};
-pub use self::wfst_export::{FromLogProb, NgramWfstExport, NgramWfstBuilder, NgramTransducerBuilder};
-pub use self::lazy_ngram::{NgramStateSource, NgramStateRegistry, NgramHistoryKey, NgramLazyWfst};
+pub use self::wfst_export::{
+    FromLogProb, NgramTransducerBuilder, NgramWfstBuilder, NgramWfstExport,
+};

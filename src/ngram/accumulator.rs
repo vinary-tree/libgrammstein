@@ -200,9 +200,9 @@ impl NgramAccumulator {
     ///
     /// Useful for merging counts from batch processing.
     pub fn increment_by(&mut self, ngram: &str, delta: i64) -> AccumulatorResult<i64> {
-        self.trie.increment(ngram, delta).map_err(|e| {
-            AccumulatorError::Dictionary(format!("Failed to increment n-gram: {}", e))
-        })
+        self.trie
+            .increment(ngram, delta)
+            .map_err(|e| AccumulatorError::Dictionary(format!("Failed to increment n-gram: {}", e)))
     }
 
     /// Get the current count for an n-gram.
@@ -227,9 +227,9 @@ impl NgramAccumulator {
     /// Returns an error if the sync operation fails.
     pub fn sync(&mut self) -> AccumulatorResult<()> {
         // PersistentARTrieChar uses checkpoint() for durability
-        self.trie.checkpoint().map_err(|e| {
-            AccumulatorError::Dictionary(format!("Failed to sync WAL: {}", e))
-        })
+        self.trie
+            .checkpoint()
+            .map_err(|e| AccumulatorError::Dictionary(format!("Failed to sync WAL: {}", e)))
     }
 
     /// Checkpoint to disk and truncate WAL.
@@ -245,9 +245,9 @@ impl NgramAccumulator {
     ///
     /// Returns an error if the checkpoint operation fails.
     pub fn checkpoint(&mut self) -> AccumulatorResult<()> {
-        self.trie.checkpoint().map_err(|e| {
-            AccumulatorError::Dictionary(format!("Failed to checkpoint: {}", e))
-        })
+        self.trie
+            .checkpoint()
+            .map_err(|e| AccumulatorError::Dictionary(format!("Failed to checkpoint: {}", e)))
     }
 
     /// Iterate over all (ngram, count) pairs.
@@ -280,8 +280,7 @@ impl NgramAccumulator {
     /// Note: This is a cached approximate count. For the exact count,
     /// iterate and count.
     pub fn len(&self) -> usize {
-        self.unique_count
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.unique_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Check if the accumulator is empty.

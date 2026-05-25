@@ -28,13 +28,17 @@ fn create_test_coordinator(num_ngrams: usize) -> (TempDir, ShardCoordinator) {
         // 2-grams (every 5th)
         if i % 5 == 0 {
             let bigram = format!("{}|suffix{}", word, i % 100);
-            coordinator.store_ngram(&bigram, count / 2 + 1).expect("store");
+            coordinator
+                .store_ngram(&bigram, count / 2 + 1)
+                .expect("store");
         }
 
         // 3-grams (every 20th)
         if i % 20 == 0 {
             let trigram = format!("prefix{}|{}|end", i % 50, word);
-            coordinator.store_ngram(&trigram, count / 3 + 1).expect("store");
+            coordinator
+                .store_ngram(&trigram, count / 3 + 1)
+                .expect("store");
         }
     }
 
@@ -54,9 +58,7 @@ fn bench_frequency_counts(c: &mut Criterion) {
             |b, coord| {
                 use libgrammstein::sources::google_books::sharding::mkn::MknAggregator;
                 let aggregator = MknAggregator::new(coord);
-                b.iter(|| {
-                    black_box(aggregator.compute_frequency_counts().expect("compute"))
-                });
+                b.iter(|| black_box(aggregator.compute_frequency_counts().expect("compute")));
             },
         );
     }
@@ -82,7 +84,7 @@ fn bench_discount_params(c: &mut Criterion) {
     // Atypical distribution (non-Zipf)
     let non_zipf_counts = FrequencyCounts {
         n1: 1000,
-        n2: 5000,  // n2 > n1
+        n2: 5000, // n2 > n1
         n3: 2500,
         n4: 1250,
         total_unique: 10000,

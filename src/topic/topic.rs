@@ -89,7 +89,10 @@ pub struct Topic {
 }
 
 /// Serialize Option<Arc<[f32]>> as Option<Vec<f32>>.
-fn serialize_arc_slice<S>(value: &Option<Arc<[f32]>>, serializer: S) -> std::result::Result<S::Ok, S::Error>
+fn serialize_arc_slice<S>(
+    value: &Option<Arc<[f32]>>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
@@ -103,7 +106,9 @@ where
 }
 
 /// Deserialize Option<Arc<[f32]>> from Option<Vec<f32>>.
-fn deserialize_arc_slice<'de, D>(deserializer: D) -> std::result::Result<Option<Arc<[f32]>>, D::Error>
+fn deserialize_arc_slice<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Arc<[f32]>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -276,10 +281,7 @@ mod tests {
 
     #[test]
     fn test_topic_merged() {
-        let keywords = vec![
-            ("data".to_string(), 0.85),
-            ("science".to_string(), 0.75),
-        ];
+        let keywords = vec![("data".to_string(), 0.85), ("science".to_string(), 0.75)];
         let centroid = vec![0.15, 0.25, 0.35];
         let topic = Topic::new_merged(
             TopicId::new(10),

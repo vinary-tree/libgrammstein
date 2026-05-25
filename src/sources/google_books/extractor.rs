@@ -137,10 +137,10 @@ impl DictionaryExtractor {
         );
 
         // Open the disk-backed trie
-        let trie: PersistentARTrieChar<u64> = PersistentARTrieChar::open(model_path)
-            .map_err(|e| ExtractionError::Io(std::io::Error::other(format!(
-                "Failed to open trie: {}", e
-            ))))?;
+        let trie: PersistentARTrieChar<u64> =
+            PersistentARTrieChar::open(model_path).map_err(|e| {
+                ExtractionError::Io(std::io::Error::other(format!("Failed to open trie: {}", e)))
+            })?;
 
         // Collect unigrams using the public iteration API
         let mut words = Vec::new();
@@ -220,10 +220,9 @@ impl DictionaryExtractor {
         log::info!("Serializing dictionary to {:?}", output_path);
 
         // Serialize to bytes using bincode
-        let bytes = bincode::serialize(&dict)
-            .map_err(|e| ExtractionError::Serialization(format!(
-                "Failed to serialize dictionary: {}", e
-            )))?;
+        let bytes = bincode::serialize(&dict).map_err(|e| {
+            ExtractionError::Serialization(format!("Failed to serialize dictionary: {}", e))
+        })?;
 
         // Write to file
         let mut file = std::fs::File::create(output_path)?;
@@ -290,10 +289,10 @@ impl DictionaryExtractor {
         });
 
         // Open the disk-backed trie
-        let trie: PersistentARTrieChar<u64> = PersistentARTrieChar::open(model_path)
-            .map_err(|e| ExtractionError::Io(std::io::Error::other(format!(
-                "Failed to open trie: {}", e
-            ))))?;
+        let trie: PersistentARTrieChar<u64> =
+            PersistentARTrieChar::open(model_path).map_err(|e| {
+                ExtractionError::Io(std::io::Error::other(format!("Failed to open trie: {}", e)))
+            })?;
 
         // Phase 2: Filtering - iterate trie and collect unigrams with progress
         let mut words = Vec::new();
@@ -359,10 +358,9 @@ impl DictionaryExtractor {
         });
 
         // Serialize and write to file
-        let bytes = bincode::serialize(&dict)
-            .map_err(|e| ExtractionError::Serialization(format!(
-                "Failed to serialize dictionary: {}", e
-            )))?;
+        let bytes = bincode::serialize(&dict).map_err(|e| {
+            ExtractionError::Serialization(format!("Failed to serialize dictionary: {}", e))
+        })?;
 
         let mut file = std::fs::File::create(output_path)?;
         file.write_all(&bytes)?;

@@ -316,17 +316,13 @@ print(json.dumps(result))
 
         // Parse output
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| {
-            PdfError::InvalidOutput {
+        let result: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|e| PdfError::InvalidOutput {
                 backend: "marker".into(),
                 reason: format!("Failed to parse JSON output: {}", e),
-            }
-        })?;
+            })?;
 
-        let markdown = result["markdown"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let markdown = result["markdown"].as_str().unwrap_or("").to_string();
 
         // Convert markdown to LaTeX (basic conversion)
         let latex = markdown_to_latex(&markdown);

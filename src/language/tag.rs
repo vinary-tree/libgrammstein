@@ -92,9 +92,7 @@ impl LanguageTag {
         let script_normalized = if !script_str.is_empty() {
             let mut chars = script_str.chars();
             match chars.next() {
-                Some(first) => {
-                    first.to_uppercase().to_string() + &chars.as_str().to_lowercase()
-                }
+                Some(first) => first.to_uppercase().to_string() + &chars.as_str().to_lowercase(),
                 None => String::new(),
             }
         } else {
@@ -116,11 +114,11 @@ impl LanguageTag {
         }
 
         // Use unic-langid for parsing
-        let langid: unic_langid::LanguageIdentifier = tag
-            .parse()
-            .map_err(|e: unic_langid::LanguageIdentifierError| {
-                LanguageTagError::Parse(e.to_string())
-            })?;
+        let langid: unic_langid::LanguageIdentifier =
+            tag.parse()
+                .map_err(|e: unic_langid::LanguageIdentifierError| {
+                    LanguageTagError::Parse(e.to_string())
+                })?;
 
         Ok(Self {
             language: langid.language.to_string(),

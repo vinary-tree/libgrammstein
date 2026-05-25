@@ -273,9 +273,10 @@ impl CorpusReader for WikipediaReader {
 
     fn sentences(&self) -> Box<dyn Iterator<Item = String> + Send + '_> {
         let tokenizer = self.tokenizer.clone();
-        Box::new(self.documents().flat_map(move |doc| {
-            tokenizer.sentences(&doc.content).collect::<Vec<_>>()
-        }))
+        Box::new(
+            self.documents()
+                .flat_map(move |doc| tokenizer.sentences(&doc.content).collect::<Vec<_>>()),
+        )
     }
 }
 
@@ -413,7 +414,11 @@ impl<R: BufRead + Send> Iterator for WikipediaIterator<R> {
                 }
                 Ok(Event::Eof) => return None,
                 Err(e) => {
-                    log::warn!("XML parse error at position {}: {}", self.reader.buffer_position(), e);
+                    log::warn!(
+                        "XML parse error at position {}: {}",
+                        self.reader.buffer_position(),
+                        e
+                    );
                     continue;
                 }
                 _ => {}

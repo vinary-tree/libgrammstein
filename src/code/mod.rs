@@ -56,18 +56,18 @@
 //! let pcfg = trainer.to_weighted_cfg();
 //! ```
 
-pub mod language;
-pub mod tokenizer;
 pub mod ast;
-pub mod cpg;
-pub mod pcfg;
+pub mod constrained_decoding;
 pub mod corpus;
 pub mod correction;
 pub mod correctors;
+pub mod cpg;
 pub mod gnn;
-pub mod constrained_decoding;
+pub mod language;
+pub mod pcfg;
 pub mod pipeline;
 pub mod subtree;
+pub mod tokenizer;
 
 #[cfg(feature = "code-neural")]
 pub mod embeddings;
@@ -78,21 +78,28 @@ pub mod wfst_export;
 pub mod languages;
 
 // Re-export core types
-pub use language::{CodeLanguage, TokenType, TokenContext};
-pub use tokenizer::{CodeTokenizer, CodeToken};
-pub use ast::{ParsedCode, AstNode, AstError, byte_offset_to_position};
-pub use cpg::{CodePropertyGraph, CpgNode, CpgNodeKind, CpgEdge, CpgEdgeKind};
-pub use pcfg::{WeightedCFG, Production, PcfgTrainer};
-pub use corpus::{CodeCorpusReader, CodeSnippet};
-pub use correction::{CodeCorrector, Correction, CorrectionKind, CorrectionSource, CorrectionCandidates};
-pub use correctors::{LexicalCorrector, GrammarCorrector, SemanticCorrector, EnsembleCorrector};
-pub use gnn::{GnnSemanticScorer, GnnConfig, GnnFeatures, SemanticIssue, IssueType};
-pub use pipeline::{CorrectionPipeline, PipelineConfig, PipelineError, AnalysisResult, Diagnostic, DiagnosticSeverity};
+pub use ast::{byte_offset_to_position, AstError, AstNode, ParsedCode};
 pub use constrained_decoding::{
-    GrammarConstraint, ConstrainedDecodingConfig, TokenMask, DecodingVocabulary,
-    EarleyParser, EarleyState, EarleyChart,
+    ConstrainedDecodingConfig, DecodingVocabulary, EarleyChart, EarleyParser, EarleyState,
+    GrammarConstraint, TokenMask,
 };
-pub use subtree::{TreeminerD, TreeminerConfig, MiningResult, FlatTree, FlatNode, SubtreePattern, PatternNode};
+pub use corpus::{CodeCorpusReader, CodeSnippet};
+pub use correction::{
+    CodeCorrector, Correction, CorrectionCandidates, CorrectionKind, CorrectionSource,
+};
+pub use correctors::{EnsembleCorrector, GrammarCorrector, LexicalCorrector, SemanticCorrector};
+pub use cpg::{CodePropertyGraph, CpgEdge, CpgEdgeKind, CpgNode, CpgNodeKind};
+pub use gnn::{GnnConfig, GnnFeatures, GnnSemanticScorer, IssueType, SemanticIssue};
+pub use language::{CodeLanguage, TokenContext, TokenType};
+pub use pcfg::{PcfgTrainer, Production, WeightedCFG};
+pub use pipeline::{
+    AnalysisResult, CorrectionPipeline, Diagnostic, DiagnosticSeverity, PipelineConfig,
+    PipelineError,
+};
+pub use subtree::{
+    FlatNode, FlatTree, MiningResult, PatternNode, SubtreePattern, TreeminerConfig, TreeminerD,
+};
+pub use tokenizer::{CodeToken, CodeTokenizer};
 
 #[cfg(feature = "code-neural")]
 pub use embeddings::{CodeEmbedder, EmbeddingModel};
@@ -118,7 +125,7 @@ pub use languages::MeTTa;
 
 // Re-export WFST types when integration is enabled
 #[cfg(feature = "lling-llang-integration")]
-pub use wfst_export::{PcfgWfstConfig, SymbolVocabulary, PcfgScorer};
+pub use wfst_export::{PcfgScorer, PcfgWfstConfig, SymbolVocabulary};
 
 #[cfg(feature = "lling-llang-integration")]
 pub use wfst_export::PcfgWfstExport;

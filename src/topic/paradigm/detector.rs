@@ -6,9 +6,7 @@
 use std::collections::HashMap;
 
 use super::config::ParadigmConfig;
-use super::indicators::{
-    IndicatorCategory, Paradigm, ParadigmIndicator, ParadigmProfile,
-};
+use super::indicators::{IndicatorCategory, Paradigm, ParadigmIndicator, ParadigmProfile};
 
 /// A matched indicator with context.
 #[derive(Clone, Debug)]
@@ -183,7 +181,8 @@ impl ParadigmDetector {
                         });
 
                         // Update scores
-                        let score_delta = pattern.weight * confidence * self.multiplier_for(paradigm);
+                        let score_delta =
+                            pattern.weight * confidence * self.multiplier_for(paradigm);
                         self.update_score(&mut profile, paradigm, score_delta);
 
                         profile.indicators.push(indicator);
@@ -308,7 +307,8 @@ impl ParadigmDetector {
                 .map(|t| t.to_lowercase())
                 .collect();
 
-            let context_matches = required.iter()
+            let context_matches = required
+                .iter()
                 .filter(|&req| context.iter().any(|t| t == *req))
                 .count();
 
@@ -365,41 +365,34 @@ impl ParadigmDetector {
             PatternDef::strong(&["interface"], IndicatorCategory::OopPolymorphism),
             PatternDef::strong(&["trait"], IndicatorCategory::OopPolymorphism),
             PatternDef::medium(&["protocol"], IndicatorCategory::OopPolymorphism),
-
             // Inheritance
             PatternDef::strong(&["extends"], IndicatorCategory::OopInheritance),
             PatternDef::strong(&["implements"], IndicatorCategory::OopInheritance),
             PatternDef::strong(&["inherits"], IndicatorCategory::OopInheritance),
             PatternDef::medium(&["super"], IndicatorCategory::OopInheritance),
             PatternDef::medium(&["parent"], IndicatorCategory::OopInheritance),
-
             // Encapsulation
             PatternDef::medium(&["private"], IndicatorCategory::OopEncapsulation),
             PatternDef::medium(&["protected"], IndicatorCategory::OopEncapsulation),
             PatternDef::weak(&["public"], IndicatorCategory::OopEncapsulation),
             PatternDef::medium(&["internal"], IndicatorCategory::OopEncapsulation),
-
             // Polymorphism
             PatternDef::strong(&["virtual"], IndicatorCategory::OopPolymorphism),
             PatternDef::strong(&["override"], IndicatorCategory::OopPolymorphism),
             PatternDef::strong(&["abstract"], IndicatorCategory::OopPolymorphism),
-
             // Instance references
             PatternDef::medium(&["this"], IndicatorCategory::OopInstantiation),
             PatternDef::medium(&["self"], IndicatorCategory::OopInstantiation),
             PatternDef::strong(&["new"], IndicatorCategory::OopInstantiation),
-
             // Methods (context-dependent)
             PatternDef::medium(&["constructor"], IndicatorCategory::OopInstantiation),
             PatternDef::medium(&["destructor"], IndicatorCategory::OopInstantiation),
             PatternDef::weak(&["__init__"], IndicatorCategory::OopInstantiation),
             PatternDef::weak(&["__new__"], IndicatorCategory::OopInstantiation),
-
             // Getters/setters
             PatternDef::weak(&["get"], IndicatorCategory::OopEncapsulation),
             PatternDef::weak(&["set"], IndicatorCategory::OopEncapsulation),
             PatternDef::medium(&["@property"], IndicatorCategory::OopEncapsulation),
-
             // Rust/Kotlin-specific
             PatternDef::strong(&["impl"], IndicatorCategory::OopClass),
             PatternDef::medium(&["dyn"], IndicatorCategory::OopPolymorphism),
@@ -425,33 +418,28 @@ impl ParadigmDetector {
             PatternDef::medium(&["drop"], IndicatorCategory::FpHigherOrder),
             PatternDef::medium(&["zip"], IndicatorCategory::FpHigherOrder),
             PatternDef::medium(&["concat"], IndicatorCategory::FpHigherOrder),
-
             // Lambda expressions
             PatternDef::strong(&["lambda"], IndicatorCategory::FpHigherOrder),
             PatternDef::strong(&["=>"], IndicatorCategory::FpHigherOrder),
             PatternDef::strong(&["->"], IndicatorCategory::FpHigherOrder),
             PatternDef::medium(&["|"], IndicatorCategory::FpHigherOrder), // Rust closure
             PatternDef::medium(&["fn"], IndicatorCategory::FpHigherOrder),
-
             // Composition
             PatternDef::strong(&["compose"], IndicatorCategory::FpPurity),
             PatternDef::strong(&["pipe"], IndicatorCategory::FpPurity),
             PatternDef::medium(&["andthen"], IndicatorCategory::FpPurity),
             PatternDef::medium(&["and_then"], IndicatorCategory::FpPurity),
-
             // Immutability
             PatternDef::medium(&["const"], IndicatorCategory::FpImmutability),
             PatternDef::medium(&["val"], IndicatorCategory::FpImmutability),
             PatternDef::weak(&["let"], IndicatorCategory::FpImmutability),
             PatternDef::strong(&["immutable"], IndicatorCategory::FpImmutability),
             PatternDef::strong(&["readonly"], IndicatorCategory::FpImmutability),
-
             // Pattern matching
             PatternDef::strong(&["match"], IndicatorCategory::FpPatternMatch),
             PatternDef::medium(&["case"], IndicatorCategory::FpPatternMatch),
             PatternDef::medium(&["when"], IndicatorCategory::FpPatternMatch),
             PatternDef::weak(&["if", "let"], IndicatorCategory::FpPatternMatch),
-
             // Algebraic types
             PatternDef::strong(&["option"], IndicatorCategory::FpAlgebraic),
             PatternDef::strong(&["some"], IndicatorCategory::FpAlgebraic),
@@ -463,11 +451,9 @@ impl ParadigmDetector {
             PatternDef::strong(&["maybe"], IndicatorCategory::FpAlgebraic),
             PatternDef::strong(&["just"], IndicatorCategory::FpAlgebraic),
             PatternDef::strong(&["nothing"], IndicatorCategory::FpAlgebraic),
-
             // Recursion
             PatternDef::medium(&["rec"], IndicatorCategory::FpRecursion),
             PatternDef::medium(&["tailrec"], IndicatorCategory::FpRecursion),
-
             // Monads
             PatternDef::strong(&[">>="], IndicatorCategory::FpAlgebraic),
             PatternDef::strong(&[">>"], IndicatorCategory::FpAlgebraic),
@@ -490,13 +476,11 @@ impl ParadigmDetector {
             PatternDef::strong(&["flux"], IndicatorCategory::ReactiveObservable),
             PatternDef::strong(&["mono"], IndicatorCategory::ReactiveObservable),
             PatternDef::medium(&["channel"], IndicatorCategory::ReactiveObservable),
-
             // Subscription
             PatternDef::strong(&["subscribe"], IndicatorCategory::ReactiveObservable),
             PatternDef::strong(&["unsubscribe"], IndicatorCategory::ReactiveObservable),
             PatternDef::medium(&["subscription"], IndicatorCategory::ReactiveObservable),
             PatternDef::medium(&["observer"], IndicatorCategory::ReactiveObservable),
-
             // Event handling
             PatternDef::strong(&["emit"], IndicatorCategory::ReactiveEvent),
             PatternDef::strong(&["on"], IndicatorCategory::ReactiveEvent),
@@ -508,7 +492,6 @@ impl ParadigmDetector {
             PatternDef::medium(&["addeventlistener"], IndicatorCategory::ReactiveEvent),
             PatternDef::medium(&["removeeventlistener"], IndicatorCategory::ReactiveEvent),
             PatternDef::medium(&["dispatch"], IndicatorCategory::ReactiveEvent),
-
             // RxJS/reactive operators
             PatternDef::strong(&["switchmap"], IndicatorCategory::ReactiveObservable),
             PatternDef::strong(&["mergemap"], IndicatorCategory::ReactiveObservable),
@@ -516,12 +499,14 @@ impl ParadigmDetector {
             PatternDef::strong(&["exhaustmap"], IndicatorCategory::ReactiveObservable),
             PatternDef::strong(&["debounce"], IndicatorCategory::ReactiveObservable),
             PatternDef::strong(&["throttle"], IndicatorCategory::ReactiveObservable),
-            PatternDef::strong(&["distinctuntilchanged"], IndicatorCategory::ReactiveObservable),
+            PatternDef::strong(
+                &["distinctuntilchanged"],
+                IndicatorCategory::ReactiveObservable,
+            ),
             PatternDef::strong(&["combinelatest"], IndicatorCategory::ReactiveObservable),
             PatternDef::medium(&["merge"], IndicatorCategory::ReactiveObservable),
             PatternDef::medium(&["share"], IndicatorCategory::ReactiveObservable),
             PatternDef::medium(&["tap"], IndicatorCategory::ReactiveObservable),
-
             // Signals (SolidJS, Preact Signals)
             PatternDef::strong(&["signal"], IndicatorCategory::ReactiveObservable),
             PatternDef::strong(&["computed"], IndicatorCategory::ReactiveObservable),
@@ -530,24 +515,22 @@ impl ParadigmDetector {
             PatternDef::strong(&["usestate"], IndicatorCategory::ReactiveObservable),
             PatternDef::medium(&["createsignal"], IndicatorCategory::ReactiveObservable),
             PatternDef::medium(&["createeffect"], IndicatorCategory::ReactiveEvent),
-
             // Async/flow control
             PatternDef::medium(&["async"], IndicatorCategory::ReactiveAsync),
             PatternDef::medium(&["await"], IndicatorCategory::ReactiveAsync),
             PatternDef::medium(&["promise"], IndicatorCategory::ReactiveAsync),
             PatternDef::medium(&["future"], IndicatorCategory::ReactiveAsync),
             PatternDef::medium(&["scheduler"], IndicatorCategory::ReactiveAsync),
-
             // Backpressure
             PatternDef::strong(&["backpressure"], IndicatorCategory::ReactiveBackpressure),
             PatternDef::medium(&["buffer"], IndicatorCategory::ReactiveBackpressure),
             PatternDef::medium(&["window"], IndicatorCategory::ReactiveBackpressure),
-
             // Process calculus (Rholang-specific)
             PatternDef::strong(&["!"], IndicatorCategory::ReactiveObservable), // Send
             PatternDef::strong(&["*"], IndicatorCategory::ReactiveObservable), // Dereference
             PatternDef::strong(&["@"], IndicatorCategory::ReactiveObservable), // Quote
-            PatternDef::strong(&["for"], IndicatorCategory::ReactiveObservable).with_context(&["<-"]), // Receive
+            PatternDef::strong(&["for"], IndicatorCategory::ReactiveObservable)
+                .with_context(&["<-"]), // Receive
         ]
     }
 
@@ -560,13 +543,11 @@ impl ParadigmDetector {
             PatternDef::medium(&["goto"], IndicatorCategory::ProceduralControlFlow),
             PatternDef::weak(&["break"], IndicatorCategory::ProceduralControlFlow),
             PatternDef::weak(&["continue"], IndicatorCategory::ProceduralControlFlow),
-
             // Loops
             PatternDef::medium(&["for"], IndicatorCategory::ProceduralControlFlow),
             PatternDef::medium(&["while"], IndicatorCategory::ProceduralControlFlow),
             PatternDef::medium(&["loop"], IndicatorCategory::ProceduralControlFlow),
             PatternDef::medium(&["do"], IndicatorCategory::ProceduralControlFlow),
-
             // Mutable state
             PatternDef::strong(&["var"], IndicatorCategory::ProceduralMutable),
             PatternDef::strong(&["mut"], IndicatorCategory::ProceduralMutable),
@@ -578,7 +559,6 @@ impl ParadigmDetector {
             PatternDef::medium(&["/="], IndicatorCategory::ProceduralMutable),
             PatternDef::medium(&["++"], IndicatorCategory::ProceduralMutable),
             PatternDef::medium(&["--"], IndicatorCategory::ProceduralMutable),
-
             // Side effects
             PatternDef::weak(&["print"], IndicatorCategory::ProceduralSideEffect),
             PatternDef::weak(&["println"], IndicatorCategory::ProceduralSideEffect),
@@ -586,7 +566,6 @@ impl ParadigmDetector {
             PatternDef::weak(&["console"], IndicatorCategory::ProceduralSideEffect),
             PatternDef::medium(&["write"], IndicatorCategory::ProceduralSideEffect),
             PatternDef::medium(&["read"], IndicatorCategory::ProceduralSideEffect),
-
             // Pointers/references
             PatternDef::medium(&["*"], IndicatorCategory::ProceduralMutable), // Pointer deref (context-dependent)
             PatternDef::medium(&["&"], IndicatorCategory::ProceduralMutable), // Reference
@@ -594,11 +573,9 @@ impl ParadigmDetector {
             PatternDef::strong(&["free"], IndicatorCategory::ProceduralMutable),
             PatternDef::strong(&["alloc"], IndicatorCategory::ProceduralMutable),
             PatternDef::strong(&["dealloc"], IndicatorCategory::ProceduralMutable),
-
             // Sequential
             PatternDef::weak(&[";"], IndicatorCategory::ProceduralSequential),
             PatternDef::weak(&["return"], IndicatorCategory::ProceduralSequential),
-
             // Global state
             PatternDef::strong(&["global"], IndicatorCategory::ProceduralMutable),
             PatternDef::strong(&["static"], IndicatorCategory::ProceduralMutable),
@@ -651,7 +628,8 @@ mod tests {
     fn test_fp_detection() {
         let detector = ParadigmDetector::with_defaults();
 
-        let code = "const result = list.map(x => x * 2).filter(x => x > 10).reduce((a, b) => a + b, 0);";
+        let code =
+            "const result = list.map(x => x * 2).filter(x => x > 10).reduce((a, b) => a + b, 0);";
         let profile = detector.analyze(code);
 
         assert!(profile.fp_score > profile.oop_score);

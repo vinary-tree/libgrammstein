@@ -129,7 +129,8 @@ where
     /// let log_prob_unigram = model.log_prob("the", &[]);
     /// ```
     pub fn log_prob(&self, word: &str, context: &[&str]) -> f64 {
-        self.smoothing.log_prob(word, context, &self.trie, self.vocab_size, self.total_count)
+        self.smoothing
+            .log_prob(word, context, &self.trie, self.vocab_size, self.total_count)
     }
 
     /// Compute log probability of a complete sentence.

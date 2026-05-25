@@ -24,9 +24,9 @@ impl ShardCoordinator {
 
     /// Get the current import state.
     pub fn import_state(&self) -> Option<ImportState> {
-        self.checkpoint_manager.as_ref().map(|mgr| {
-            mgr.lock().checkpoint().import_state.clone()
-        })
+        self.checkpoint_manager
+            .as_ref()
+            .map(|mgr| mgr.lock().checkpoint().import_state.clone())
     }
 
     /// Start a new import (sets checkpoint state to InProgress).
@@ -119,7 +119,10 @@ impl ShardCoordinator {
     /// associated with the given order.
     pub fn completed_prefixes_for_order(&self, order: u8) -> HashSet<String> {
         if let Some(ref manager) = self.checkpoint_manager {
-            manager.lock().checkpoint().completed_prefixes_for_order(order)
+            manager
+                .lock()
+                .checkpoint()
+                .completed_prefixes_for_order(order)
         } else {
             // Fall back to querying shards directly
             self.shards
@@ -142,7 +145,11 @@ impl ShardCoordinator {
     }
 
     /// Mark a prefix as currently being processed.
-    pub fn set_current_prefix(&self, shard_key: &ShardKey, prefix: Option<&str>) -> CoordinatorResult<()> {
+    pub fn set_current_prefix(
+        &self,
+        shard_key: &ShardKey,
+        prefix: Option<&str>,
+    ) -> CoordinatorResult<()> {
         // Update shard's checkpoint state
         if let Some(shard) = self.shards.get(shard_key) {
             let mut guard = shard.write();
@@ -160,7 +167,11 @@ impl ShardCoordinator {
     }
 
     /// Mark a prefix as completed in a shard and update global checkpoint.
-    pub fn mark_prefix_completed(&self, shard_key: &ShardKey, prefix: &str) -> CoordinatorResult<()> {
+    pub fn mark_prefix_completed(
+        &self,
+        shard_key: &ShardKey,
+        prefix: &str,
+    ) -> CoordinatorResult<()> {
         // Update shard's checkpoint state
         if let Some(shard) = self.shards.get(shard_key) {
             let mut guard = shard.write();
@@ -176,7 +187,6 @@ impl ShardCoordinator {
 
         Ok(())
     }
-
 
     /// Perform a coordinated checkpoint of all shards and the global state.
     ///
@@ -249,7 +259,11 @@ impl ShardCoordinator {
     }
 
     /// Set metadata in the global checkpoint.
-    pub fn set_checkpoint_metadata(&self, key: impl Into<String>, value: impl Into<String>) -> CoordinatorResult<()> {
+    pub fn set_checkpoint_metadata(
+        &self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> CoordinatorResult<()> {
         if let Some(ref manager) = self.checkpoint_manager {
             let mut mgr = manager.lock();
             mgr.checkpoint_mut().set_metadata(key, value);
@@ -260,18 +274,15 @@ impl ShardCoordinator {
 
     /// Get metadata from the global checkpoint.
     pub fn get_checkpoint_metadata(&self, key: &str) -> Option<String> {
-        self.checkpoint_manager.as_ref().and_then(|mgr| {
-            mgr.lock()
-                .checkpoint()
-                .get_metadata(key)
-                .cloned()
-        })
+        self.checkpoint_manager
+            .as_ref()
+            .and_then(|mgr| mgr.lock().checkpoint().get_metadata(key).cloned())
     }
 
     /// Get a summary of the checkpoint state for logging.
     pub fn checkpoint_summary(&self) -> Option<super::super::checkpoint::CheckpointSummary> {
-        self.checkpoint_manager.as_ref().map(|mgr| {
-            mgr.lock().checkpoint().summary()
-        })
+        self.checkpoint_manager
+            .as_ref()
+            .map(|mgr| mgr.lock().checkpoint().summary())
     }
 }

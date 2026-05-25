@@ -738,10 +738,7 @@ mod tests {
     fn test_retry_after_parse_seconds() {
         assert_eq!(RetryAfter::parse("120"), Some(RetryAfter::Seconds(120)));
         assert_eq!(RetryAfter::parse("0"), Some(RetryAfter::Seconds(0)));
-        assert_eq!(
-            RetryAfter::parse("3600"),
-            Some(RetryAfter::Seconds(3600))
-        );
+        assert_eq!(RetryAfter::parse("3600"), Some(RetryAfter::Seconds(3600)));
         assert_eq!(RetryAfter::parse("  60  "), Some(RetryAfter::Seconds(60)));
     }
 
@@ -900,10 +897,7 @@ mod tests {
         assert_eq!(queue.len(), 3);
 
         // Earliest should be first
-        assert_eq!(
-            queue.peek_ready_at(),
-            Some(now + Duration::from_secs(10))
-        );
+        assert_eq!(queue.peek_ready_at(), Some(now + Duration::from_secs(10)));
     }
 
     #[test]

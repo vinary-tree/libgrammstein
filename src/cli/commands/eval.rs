@@ -3,8 +3,8 @@
 use std::path::Path;
 use std::time::Instant;
 
+use comfy_table::{presets::UTF8_FULL, Table};
 use console::style;
-use comfy_table::{Table, presets::UTF8_FULL};
 
 use crate::cli::args::{CorpusFormat, EvalCommands, EvalCompareArgs, EvalPerplexityArgs};
 use crate::cli::error::{print_success, CliError, CliResult};
@@ -51,7 +51,9 @@ trait PerplexityModel {
 
 /// N-gram model wrapper for perplexity computation.
 struct NgramPerplexityModel {
-    model: crate::ngram::NgramModel<liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>>,
+    model: crate::ngram::NgramModel<
+        liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>,
+    >,
 }
 
 impl PerplexityModel for NgramPerplexityModel {
@@ -74,7 +76,9 @@ impl PerplexityModel for NgramPerplexityModel {
 
 /// Hybrid model wrapper for perplexity computation.
 struct HybridPerplexityModel {
-    model: crate::hybrid::HybridLanguageModel<liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>>,
+    model: crate::hybrid::HybridLanguageModel<
+        liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>,
+    >,
 }
 
 impl PerplexityModel for HybridPerplexityModel {
@@ -98,9 +102,9 @@ impl PerplexityModel for HybridPerplexityModel {
 
 /// Load a model for perplexity evaluation.
 fn load_model_for_perplexity(path: &Path) -> CliResult<Box<dyn PerplexityModel>> {
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
-    use crate::ngram::NgramModel;
     use crate::hybrid::HybridLanguageModel;
+    use crate::ngram::NgramModel;
+    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 
     // Try to load as hybrid model first (more complex)
     if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::new) {
@@ -246,10 +250,7 @@ fn eval_perplexity(args: EvalPerplexityArgs, verbose: bool, quiet: bool) -> CliR
     // Print results
     if !quiet {
         println!();
-        println!(
-            "Model: {}",
-            style(args.model.display()).cyan()
-        );
+        println!("Model: {}", style(args.model.display()).cyan());
         println!(
             "Test corpus: {} ({} sentences, {} tokens)",
             args.test_corpus, result.sentences, result.tokens
@@ -269,7 +270,10 @@ fn eval_perplexity(args: EvalPerplexityArgs, verbose: bool, quiet: bool) -> CliR
             },
             result.oov_tokens
         );
-        println!("Avg tokens/sent: {:.2}", result.tokens as f64 / result.sentences.max(1) as f64);
+        println!(
+            "Avg tokens/sent: {:.2}",
+            result.tokens as f64 / result.sentences.max(1) as f64
+        );
         println!("Evaluation time: {:.2}s", result.elapsed_secs);
 
         // Per-sentence breakdown if requested
@@ -332,7 +336,11 @@ fn eval_compare(args: EvalCompareArgs, verbose: bool, quiet: bool) -> CliResult<
     impl CorpusReader for MemoryReader {
         fn documents(&self) -> Box<dyn Iterator<Item = crate::corpus::Document> + Send + '_> {
             // Each sentence as a document
-            Box::new(self.sentences.iter().map(|s| crate::corpus::Document::new(s.clone())))
+            Box::new(
+                self.sentences
+                    .iter()
+                    .map(|s| crate::corpus::Document::new(s.clone())),
+            )
         }
 
         fn sentences(&self) -> Box<dyn Iterator<Item = String> + Send + '_> {
@@ -340,7 +348,12 @@ fn eval_compare(args: EvalCompareArgs, verbose: bool, quiet: bool) -> CliResult<
         }
 
         fn estimated_tokens(&self) -> Option<usize> {
-            Some(self.sentences.iter().map(|s| s.split_whitespace().count()).sum())
+            Some(
+                self.sentences
+                    .iter()
+                    .map(|s| s.split_whitespace().count())
+                    .sum(),
+            )
         }
     }
 
@@ -408,7 +421,10 @@ fn eval_compare(args: EvalCompareArgs, verbose: bool, quiet: bool) -> CliResult<
 
         for (path, _desc, result) in &results {
             let oov_rate = if result.tokens > 0 {
-                format!("{:.2}%", result.oov_tokens as f64 / result.tokens as f64 * 100.0)
+                format!(
+                    "{:.2}%",
+                    result.oov_tokens as f64 / result.tokens as f64 * 100.0
+                )
             } else {
                 "N/A".to_string()
             };

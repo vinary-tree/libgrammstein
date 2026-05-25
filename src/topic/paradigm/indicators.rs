@@ -96,7 +96,7 @@ impl ParadigmProfile {
     /// or if the top two paradigms are within 0.1 of each other (Mixed).
     pub fn dominant_paradigm(&self) -> Option<Paradigm> {
         let threshold = 0.2; // Minimum score to be considered present
-        let margin = 0.1;    // Required lead over second-highest
+        let margin = 0.1; // Required lead over second-highest
 
         let scores = [
             (Paradigm::ObjectOriented, self.oop_score),
@@ -150,9 +150,15 @@ impl ParadigmProfile {
             Paradigm::Procedural => self.procedural_score,
             Paradigm::Mixed => {
                 // Mixed score is the variance of other scores (higher variance = less mixed)
-                let scores = [self.oop_score, self.fp_score, self.reactive_score, self.procedural_score];
+                let scores = [
+                    self.oop_score,
+                    self.fp_score,
+                    self.reactive_score,
+                    self.procedural_score,
+                ];
                 let mean = scores.iter().sum::<f64>() / scores.len() as f64;
-                let variance: f64 = scores.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / scores.len() as f64;
+                let variance: f64 =
+                    scores.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / scores.len() as f64;
                 1.0 - variance.sqrt() // Lower variance = more mixed
             }
         }
@@ -182,7 +188,8 @@ impl ParadigmProfile {
         self.oop_score = self.oop_score * self_weight + other.oop_score * weight;
         self.fp_score = self.fp_score * self_weight + other.fp_score * weight;
         self.reactive_score = self.reactive_score * self_weight + other.reactive_score * weight;
-        self.procedural_score = self.procedural_score * self_weight + other.procedural_score * weight;
+        self.procedural_score =
+            self.procedural_score * self_weight + other.procedural_score * weight;
         self.indicators.extend(other.indicators.iter().cloned());
         self.total_tokens += other.total_tokens;
         self.match_count += other.match_count;
@@ -573,10 +580,22 @@ mod tests {
 
     #[test]
     fn test_indicator_category_paradigm() {
-        assert_eq!(IndicatorCategory::OopClass.paradigm(), Paradigm::ObjectOriented);
-        assert_eq!(IndicatorCategory::FpHigherOrder.paradigm(), Paradigm::Functional);
-        assert_eq!(IndicatorCategory::ReactiveObservable.paradigm(), Paradigm::Reactive);
-        assert_eq!(IndicatorCategory::ProceduralControlFlow.paradigm(), Paradigm::Procedural);
+        assert_eq!(
+            IndicatorCategory::OopClass.paradigm(),
+            Paradigm::ObjectOriented
+        );
+        assert_eq!(
+            IndicatorCategory::FpHigherOrder.paradigm(),
+            Paradigm::Functional
+        );
+        assert_eq!(
+            IndicatorCategory::ReactiveObservable.paradigm(),
+            Paradigm::Reactive
+        );
+        assert_eq!(
+            IndicatorCategory::ProceduralControlFlow.paradigm(),
+            Paradigm::Procedural
+        );
     }
 
     #[test]
@@ -586,7 +605,9 @@ mod tests {
             IndicatorCategory::FpHigherOrder,
             "map",
             0.8,
-        ).with_position(10).with_length(3);
+        )
+        .with_position(10)
+        .with_length(3);
 
         assert_eq!(indicator.paradigm, Paradigm::Functional);
         assert_eq!(indicator.pattern, "map");

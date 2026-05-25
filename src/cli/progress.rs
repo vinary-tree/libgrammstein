@@ -163,10 +163,7 @@ impl TrainingProgress {
                 if sentences > 0 {
                     let remaining = total.saturating_sub(sentences);
                     let eta_secs = remaining as f64 / sentences_per_sec;
-                    format!(
-                        " ETA: {}",
-                        HumanDuration(Duration::from_secs_f64(eta_secs))
-                    )
+                    format!(" ETA: {}", HumanDuration(Duration::from_secs_f64(eta_secs)))
                 } else {
                     String::new()
                 }
@@ -298,7 +295,10 @@ impl ProgressReporter {
             Self::progress_loop(rx, pb);
         });
 
-        Self { tx, _handle: handle }
+        Self {
+            tx,
+            _handle: handle,
+        }
     }
 
     /// Progress update loop (runs in dedicated thread).

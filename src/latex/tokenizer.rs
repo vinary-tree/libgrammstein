@@ -120,7 +120,12 @@ pub struct LaTeXToken {
 impl LaTeXToken {
     /// Create a new token.
     pub fn new(kind: LaTeXTokenKind, start: usize, end: usize, in_math: bool) -> Self {
-        Self { kind, start, end, in_math }
+        Self {
+            kind,
+            start,
+            end,
+            in_math,
+        }
     }
 
     /// Get the token text representation.
@@ -181,13 +186,14 @@ impl LaTeXToken {
 
     /// Check if this is a math-related token.
     pub fn is_math(&self) -> bool {
-        self.in_math || matches!(
-            self.kind,
-            LaTeXTokenKind::MathOpen(_)
-                | LaTeXTokenKind::MathClose(_)
-                | LaTeXTokenKind::Subscript
-                | LaTeXTokenKind::Superscript
-        )
+        self.in_math
+            || matches!(
+                self.kind,
+                LaTeXTokenKind::MathOpen(_)
+                    | LaTeXTokenKind::MathClose(_)
+                    | LaTeXTokenKind::Subscript
+                    | LaTeXTokenKind::Superscript
+            )
     }
 }
 
@@ -239,13 +245,17 @@ impl LaTeXTokenizer {
             // Note: This is a simplified version; full implementation would use
             // an actual streaming lexer
             None
-        }).take(0).chain(self.tokenize(input).into_iter().filter(move |token| {
-            match &token.kind {
-                LaTeXTokenKind::Whitespace(_) => preserve_whitespace,
-                LaTeXTokenKind::Comment(_) => preserve_comments,
-                _ => true,
-            }
-        }))
+        })
+        .take(0)
+        .chain(
+            self.tokenize(input)
+                .into_iter()
+                .filter(move |token| match &token.kind {
+                    LaTeXTokenKind::Whitespace(_) => preserve_whitespace,
+                    LaTeXTokenKind::Comment(_) => preserve_comments,
+                    _ => true,
+                }),
+        )
     }
 
     /// Get the configuration.
@@ -394,14 +404,12 @@ impl<'a> Lexer<'a> {
             c if c.is_ascii_digit() => self.lex_number(start, c, in_math),
 
             // Operators (in math mode)
-            c if in_math && is_math_operator(c) => {
-                Some(LaTeXToken::new(
-                    LaTeXTokenKind::Operator(c.to_string()),
-                    start,
-                    self.pos,
-                    true,
-                ))
-            }
+            c if in_math && is_math_operator(c) => Some(LaTeXToken::new(
+                LaTeXTokenKind::Operator(c.to_string()),
+                start,
+                self.pos,
+                true,
+            )),
 
             // Identifiers (letters in math mode are variables)
             c if c.is_alphabetic() => {
@@ -796,12 +804,18 @@ mod tests {
 
         // Tokens: $, x, ^, 2, $
         assert_eq!(tokens.len(), 5);
-        assert!(matches!(tokens[0].kind, LaTeXTokenKind::MathOpen(MathMode::InlineDollar)));
+        assert!(matches!(
+            tokens[0].kind,
+            LaTeXTokenKind::MathOpen(MathMode::InlineDollar)
+        ));
         assert!(matches!(tokens[1].kind, LaTeXTokenKind::Identifier(_)));
         assert!(tokens[1].in_math);
         assert_eq!(tokens[2].kind, LaTeXTokenKind::Superscript);
         assert!(matches!(tokens[3].kind, LaTeXTokenKind::Number(_)));
-        assert!(matches!(tokens[4].kind, LaTeXTokenKind::MathClose(MathMode::InlineDollar)));
+        assert!(matches!(
+            tokens[4].kind,
+            LaTeXTokenKind::MathClose(MathMode::InlineDollar)
+        ));
     }
 
     #[test]
@@ -810,8 +824,12 @@ mod tests {
         let tokens = tokenizer.tokenize(r"\begin{equation}");
 
         // Should have: \begin, {, equation, }
-        assert!(tokens.iter().any(|t| matches!(&t.kind, LaTeXTokenKind::Command(s) if s == "begin")));
-        assert!(tokens.iter().any(|t| matches!(&t.kind, LaTeXTokenKind::Environment(s) if s == "equation")));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(&t.kind, LaTeXTokenKind::Command(s) if s == "begin")));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(&t.kind, LaTeXTokenKind::Environment(s) if s == "equation")));
     }
 
     #[test]
@@ -819,7 +837,9 @@ mod tests {
         let tokenizer = LaTeXTokenizer::new();
         let tokens = tokenizer.tokenize(r"$3.14$");
 
-        assert!(tokens.iter().any(|t| matches!(&t.kind, LaTeXTokenKind::Number(s) if s == "3.14")));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(&t.kind, LaTeXTokenKind::Number(s) if s == "3.14")));
     }
 
     #[test]
@@ -844,7 +864,9 @@ mod tests {
         let tokenizer = LaTeXTokenizer::with_config(config);
         let tokens = tokenizer.tokenize(r"text % comment");
 
-        assert!(tokens.iter().any(|t| matches!(&t.kind, LaTeXTokenKind::Comment(_))));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(&t.kind, LaTeXTokenKind::Comment(_))));
     }
 
     #[test]
@@ -852,8 +874,14 @@ mod tests {
         let tokenizer = LaTeXTokenizer::new();
         let tokens = tokenizer.tokenize(r"\[x\]");
 
-        assert!(matches!(tokens[0].kind, LaTeXTokenKind::MathOpen(MathMode::DisplayBracket)));
-        assert!(matches!(tokens.last().unwrap().kind, LaTeXTokenKind::MathClose(MathMode::DisplayBracket)));
+        assert!(matches!(
+            tokens[0].kind,
+            LaTeXTokenKind::MathOpen(MathMode::DisplayBracket)
+        ));
+        assert!(matches!(
+            tokens.last().unwrap().kind,
+            LaTeXTokenKind::MathClose(MathMode::DisplayBracket)
+        ));
     }
 
     #[test]

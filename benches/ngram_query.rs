@@ -74,10 +74,7 @@ fn ngram_query_benchmark(c: &mut Criterion) {
     // log_prob with OOV context: exercises full backoff to unigram + smoothing.
     c.bench_function("log_prob_oov_context", |b| {
         b.iter(|| {
-            let lp = model.log_prob(
-                black_box("dog"),
-                black_box(&["frabjous", "snorgleblat"]),
-            );
+            let lp = model.log_prob(black_box("dog"), black_box(&["frabjous", "snorgleblat"]));
             black_box(lp)
         });
     });

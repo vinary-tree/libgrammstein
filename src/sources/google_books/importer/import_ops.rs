@@ -94,7 +94,11 @@ impl GoogleBooksImporter {
 
                 // Mark completion in storage layer (important for sharded storage)
                 if let Err(e) = self.storage.mark_prefix_completed(prefix, order) {
-                    log::warn!("Failed to mark prefix {} as completed in storage: {}", prefix, e);
+                    log::warn!(
+                        "Failed to mark prefix {} as completed in storage: {}",
+                        prefix,
+                        e
+                    );
                 }
 
                 self.checkpoint.add_ngrams(order, ngrams_in_file);
@@ -116,12 +120,19 @@ impl GoogleBooksImporter {
 
                 // Flush lock-free overlays for shards exceeding threshold
                 // (lightweight: only acquires write locks on over-threshold shards)
-                if let Err(e) = self.storage.flush_lockfree_over_threshold(self.lockfree_flush_threshold) {
+                if let Err(e) = self
+                    .storage
+                    .flush_lockfree_over_threshold(self.lockfree_flush_threshold)
+                {
                     log::warn!("Lock-free flush failed: {}", e);
                 }
 
                 // Save checkpoint periodically (async for better throughput)
-                let checkpoint_interval: usize = if self.config.parallel_downloads >= 8 { 5 } else { 10 };
+                let checkpoint_interval: usize = if self.config.parallel_downloads >= 8 {
+                    5
+                } else {
+                    10
+                };
                 if (idx + 1) % checkpoint_interval == 0 {
                     self.save_checkpoint_async()?;
                 }
@@ -253,7 +264,8 @@ impl GoogleBooksImporter {
 
             // Create new atomic counters for this batch (we'll sync back after)
             let total_ngrams = Arc::new(AtomicU64::new(self.total_ngrams.load(Ordering::Relaxed)));
-            let unique_ngrams = Arc::new(AtomicU64::new(self.unique_ngrams.load(Ordering::Relaxed)));
+            let unique_ngrams =
+                Arc::new(AtomicU64::new(self.unique_ngrams.load(Ordering::Relaxed)));
 
             let config = self.config.clone();
             let language = self.config.language.clone();
@@ -316,8 +328,8 @@ impl GoogleBooksImporter {
                             url,
                             prefix,
                             order,
-                            0,                    // First attempt
-                            INITIAL_BACKOFF_MS,   // Initial backoff
+                            0,                  // First attempt
+                            INITIAL_BACKOFF_MS, // Initial backoff
                         )
                     })
                 })
@@ -327,8 +339,8 @@ impl GoogleBooksImporter {
 
             // Process results as they arrive (streaming) to avoid OOM from buffering
             // Note: Previously used .collect().await which buffered all results (~4GB for 2-grams)
-            let mut result_stream = stream::iter(futures)
-                .buffer_unordered(self.config.parallel_downloads);
+            let mut result_stream =
+                stream::iter(futures).buffer_unordered(self.config.parallel_downloads);
 
             let already_completed = total_files - pending_count;
             let mut completed_in_order = 0u32;
@@ -346,12 +358,19 @@ impl GoogleBooksImporter {
                 }
 
                 match outcome {
-                    PrefixOutcome::Success { prefix, ngram_count } => {
+                    PrefixOutcome::Success {
+                        prefix,
+                        ngram_count,
+                    } => {
                         self.checkpoint.complete_prefix(order, &prefix);
 
                         // Mark completion in storage layer (important for sharded storage)
                         if let Err(e) = self.storage.mark_prefix_completed(&prefix, order) {
-                            log::warn!("Failed to mark prefix {} as completed in storage: {}", prefix, e);
+                            log::warn!(
+                                "Failed to mark prefix {} as completed in storage: {}",
+                                prefix,
+                                e
+                            );
                         }
 
                         self.checkpoint.stats.ngrams_by_order[(order - 1) as usize] += ngram_count;
@@ -367,27 +386,46 @@ impl GoogleBooksImporter {
                             total_files,
                             bytes_downloaded: self.checkpoint.stats.bytes_downloaded,
                             ngrams_per_second: self.calculate_rate(),
-                            eta_seconds: self.estimate_eta(already_completed + completed_in_order, total_files),
+                            eta_seconds: self
+                                .estimate_eta(already_completed + completed_in_order, total_files),
                             phase: ImportPhase::Importing,
                         });
                     }
-                    PrefixOutcome::Deferred { url, prefix, order: o, attempt, backoff_ms, error: _ } => {
+                    PrefixOutcome::Deferred {
+                        url,
+                        prefix,
+                        order: o,
+                        attempt,
+                        backoff_ms,
+                        error: _,
+                    } => {
                         // Collect deferred item for retry later (Arc<str> is cheap to store)
                         deferred_items.push((url, prefix, o, attempt, backoff_ms));
                     }
-                    PrefixOutcome::Failed { prefix, error, attempts } => {
+                    PrefixOutcome::Failed {
+                        prefix,
+                        error,
+                        attempts,
+                    } => {
                         // Collect permanent failures (will be reported at end)
                         failed_prefixes.push((prefix, error, attempts));
                     }
                 }
 
                 // Flush lock-free overlays for shards exceeding threshold
-                if let Err(e) = self.storage.flush_lockfree_over_threshold(self.lockfree_flush_threshold) {
+                if let Err(e) = self
+                    .storage
+                    .flush_lockfree_over_threshold(self.lockfree_flush_threshold)
+                {
                     log::warn!("Lock-free flush failed: {}", e);
                 }
 
                 // Save checkpoint periodically (async for better throughput)
-                let checkpoint_interval: u32 = if self.config.parallel_downloads >= 8 { 5 } else { 10 };
+                let checkpoint_interval: u32 = if self.config.parallel_downloads >= 8 {
+                    5
+                } else {
+                    10
+                };
                 if completed_in_order % checkpoint_interval == 0 {
                     self.save_checkpoint_async()?;
                 }
@@ -396,10 +434,16 @@ impl GoogleBooksImporter {
             // Process deferred items in additional passes until all complete or fail
             while !deferred_items.is_empty() {
                 // Wait for the minimum backoff time before retry pass
-                let min_backoff = deferred_items.iter().map(|(_, _, _, _, b)| *b).min().unwrap_or(1000);
+                let min_backoff = deferred_items
+                    .iter()
+                    .map(|(_, _, _, _, b)| *b)
+                    .min()
+                    .unwrap_or(1000);
                 tracing::info!(
                     "Processing {} deferred prefixes for order {} after {}ms delay",
-                    deferred_items.len(), order, min_backoff
+                    deferred_items.len(),
+                    order,
+                    min_backoff
                 );
                 tokio::time::sleep(Duration::from_millis(min_backoff)).await;
 
@@ -423,8 +467,8 @@ impl GoogleBooksImporter {
                     })
                     .collect();
 
-                let mut retry_stream = stream::iter(retry_futures)
-                    .buffer_unordered(self.config.parallel_downloads);
+                let mut retry_stream =
+                    stream::iter(retry_futures).buffer_unordered(self.config.parallel_downloads);
 
                 while let Some(outcome) = retry_stream.next().await {
                     self.total_ngrams
@@ -438,15 +482,23 @@ impl GoogleBooksImporter {
                     }
 
                     match outcome {
-                        PrefixOutcome::Success { prefix, ngram_count } => {
+                        PrefixOutcome::Success {
+                            prefix,
+                            ngram_count,
+                        } => {
                             self.checkpoint.complete_prefix(order, &prefix);
 
                             // Mark completion in storage layer (important for sharded storage)
                             if let Err(e) = self.storage.mark_prefix_completed(&prefix, order) {
-                                log::warn!("Failed to mark prefix {} as completed in storage: {}", prefix, e);
+                                log::warn!(
+                                    "Failed to mark prefix {} as completed in storage: {}",
+                                    prefix,
+                                    e
+                                );
                             }
 
-                            self.checkpoint.stats.ngrams_by_order[(order - 1) as usize] += ngram_count;
+                            self.checkpoint.stats.ngrams_by_order[(order - 1) as usize] +=
+                                ngram_count;
                             completed_in_order += 1;
 
                             // Convert Arc<str> to String for public API
@@ -459,15 +511,29 @@ impl GoogleBooksImporter {
                                 total_files,
                                 bytes_downloaded: self.checkpoint.stats.bytes_downloaded,
                                 ngrams_per_second: self.calculate_rate(),
-                                eta_seconds: self.estimate_eta(already_completed + completed_in_order, total_files),
+                                eta_seconds: self.estimate_eta(
+                                    already_completed + completed_in_order,
+                                    total_files,
+                                ),
                                 phase: ImportPhase::Importing,
                             });
                         }
-                        PrefixOutcome::Deferred { url, prefix, order: o, attempt, backoff_ms, error: _ } => {
+                        PrefixOutcome::Deferred {
+                            url,
+                            prefix,
+                            order: o,
+                            attempt,
+                            backoff_ms,
+                            error: _,
+                        } => {
                             // Re-defer for another pass (Arc<str> is cheap to clone)
                             deferred_items.push((url, prefix, o, attempt, backoff_ms));
                         }
-                        PrefixOutcome::Failed { prefix, error, attempts } => {
+                        PrefixOutcome::Failed {
+                            prefix,
+                            error,
+                            attempts,
+                        } => {
                             failed_prefixes.push((prefix, error, attempts));
                         }
                     }
@@ -478,7 +544,8 @@ impl GoogleBooksImporter {
             if !failed_prefixes.is_empty() {
                 tracing::warn!(
                     "Order {} completed with {} failed prefixes:",
-                    order, failed_prefixes.len()
+                    order,
+                    failed_prefixes.len()
                 );
                 for (prefix, error, attempts) in &failed_prefixes {
                     tracing::warn!("  {} (after {} attempts): {}", prefix, attempts, error);
@@ -665,10 +732,7 @@ impl GoogleBooksImporter {
             order_start_times.insert(order, Instant::now());
 
             // Emit OrderStarted event
-            let _ = event_tx.send(ImportEvent::OrderStarted {
-                order,
-                total_files,
-            });
+            let _ = event_tx.send(ImportEvent::OrderStarted { order, total_files });
 
             // Emit initial OrderProgress with checkpoint state for resume.
             // This ensures the TUI displays correct progress immediately on resume
@@ -730,7 +794,12 @@ impl GoogleBooksImporter {
             while let Some(update) = worker_rx.recv().await {
                 // Most updates map to a single event, but some need multiple events
                 match update {
-                    WorkerUpdate::Started { worker_id, order, prefix, attempt } => {
+                    WorkerUpdate::Started {
+                        worker_id,
+                        order,
+                        prefix,
+                        attempt,
+                    } => {
                         // Always emit WorkerStarted
                         let _ = event_tx_worker.send(ImportEvent::WorkerStarted {
                             worker_id,
@@ -746,7 +815,13 @@ impl GoogleBooksImporter {
                             });
                         }
                     }
-                    WorkerUpdate::Finished { worker_id, order, prefix, ngram_count, duration } => {
+                    WorkerUpdate::Finished {
+                        worker_id,
+                        order,
+                        prefix,
+                        ngram_count,
+                        duration,
+                    } => {
                         let _ = event_tx_worker.send(ImportEvent::WorkerFinished {
                             worker_id,
                             order,
@@ -755,13 +830,22 @@ impl GoogleBooksImporter {
                             duration,
                         });
                     }
-                    WorkerUpdate::NgramProgress { worker_id, ngram_count } => {
+                    WorkerUpdate::NgramProgress {
+                        worker_id,
+                        ngram_count,
+                    } => {
                         let _ = event_tx_worker.send(ImportEvent::WorkerNgramProgress {
                             worker_id,
                             ngram_count,
                         });
                     }
-                    WorkerUpdate::Retrying { worker_id, order, prefix, attempt, error } => {
+                    WorkerUpdate::Retrying {
+                        worker_id,
+                        order,
+                        prefix,
+                        attempt,
+                        error,
+                    } => {
                         // Emit WorkerRetrying for TUI worker status display
                         let _ = event_tx_worker.send(ImportEvent::WorkerRetrying {
                             worker_id,
@@ -777,7 +861,14 @@ impl GoogleBooksImporter {
                             order,
                         });
                     }
-                    WorkerUpdate::Deferred { worker_id, order, prefix, attempt, delay_seconds: _, error } => {
+                    WorkerUpdate::Deferred {
+                        worker_id,
+                        order,
+                        prefix,
+                        attempt,
+                        delay_seconds: _,
+                        error,
+                    } => {
                         // Emit WorkerRetrying for TUI worker status display
                         let _ = event_tx_worker.send(ImportEvent::WorkerRetrying {
                             worker_id,
@@ -805,14 +896,17 @@ impl GoogleBooksImporter {
         // Workers may requeue failed jobs, so we need space for:
         // - Initial jobs + failed retries
         // - Additional capacity for requeued jobs (workers * max_retries)
-        let failed_retry_count: usize = self.config.orders.clone()
+        let failed_retry_count: usize = self
+            .config
+            .orders
+            .clone()
             .map(|o| self.checkpoint.failed_prefix_count(o))
             .sum();
         let requeue_capacity = parallel_downloads * MAX_RETRIES as usize;
         // Use async_channel for lock-free MPMC queue - each worker gets a clone of the receiver
         // This eliminates the Tokio Mutex bottleneck that caused all workers to synchronize
         let (job_tx, job_rx) = async_channel::bounded::<Job>(
-            total_pending as usize + failed_retry_count + requeue_capacity + 1
+            total_pending as usize + failed_retry_count + requeue_capacity + 1,
         );
         // Note: job_rx is Clone - no Arc<Mutex<...>> wrapper needed
 
@@ -864,14 +958,14 @@ impl GoogleBooksImporter {
         // Workers will detect queue exhaustion via the all-deferred blocking logic.
 
         // Track queue size for all-deferred detection
-        let queue_size = Arc::new(AtomicUsize::new(total_pending as usize + failed_retry_count));
+        let queue_size = Arc::new(AtomicUsize::new(
+            total_pending as usize + failed_retry_count,
+        ));
 
         // Pre-allocate per-worker stats atomics for race-free sampling.
         // Use 2x parallel_downloads to handle dynamic spawning without reallocation.
         let max_workers = parallel_downloads * 2;
-        let worker_stats: Vec<AtomicU64> = (0..max_workers)
-            .map(|_| AtomicU64::new(0))
-            .collect();
+        let worker_stats: Vec<AtomicU64> = (0..max_workers).map(|_| AtomicU64::new(0)).collect();
 
         // Create shared HTTP client with connection pooling for all workers.
         // This prevents the concurrency amplification bug where each worker creating
@@ -1038,81 +1132,77 @@ impl GoogleBooksImporter {
         let mut results_received = 0u64;
 
         // Helper closure to signal all workers to shut down
-        let signal_all_shutdown = |shutdown_txs: &std::collections::HashMap<
-            usize,
-            tokio::sync::watch::Sender<bool>,
-        >| {
-            for tx in shutdown_txs.values() {
-                let _ = tx.send(true);
-            }
-        };
+        let signal_all_shutdown =
+            |shutdown_txs: &std::collections::HashMap<usize, tokio::sync::watch::Sender<bool>>| {
+                for tx in shutdown_txs.values() {
+                    let _ = tx.send(true);
+                }
+            };
 
         // Helper closure to handle parallelism changes
         // Returns the number of new workers spawned (for active_workers tracking)
-        let handle_parallelism_change = |target: usize,
-                                         worker_handles: &mut std::collections::HashMap<
-            usize,
-            tokio::task::JoinHandle<()>,
-        >,
-                                         worker_shutdown_txs: &mut std::collections::HashMap<
-            usize,
-            tokio::sync::watch::Sender<bool>,
-        >,
-                                         next_worker_id: &mut usize,
-                                         job_rx: &async_channel::Receiver<Job>,
-                                         job_tx: &async_channel::Sender<Job>,
-                                         shared_state: &Arc<WorkerSharedState>,
-                                         result_tx: &tokio::sync::mpsc::Sender<JobResult>,
-                                         worker_exit_tx: &tokio::sync::mpsc::Sender<usize>,
-                                         event_tx: &tokio::sync::broadcast::Sender<ImportEvent>|
-         -> usize {
-            let current_count = worker_handles.len();
-            let mut spawned = 0usize;
+        let handle_parallelism_change =
+            |target: usize,
+             worker_handles: &mut std::collections::HashMap<usize, tokio::task::JoinHandle<()>>,
+             worker_shutdown_txs: &mut std::collections::HashMap<
+                usize,
+                tokio::sync::watch::Sender<bool>,
+            >,
+             next_worker_id: &mut usize,
+             job_rx: &async_channel::Receiver<Job>,
+             job_tx: &async_channel::Sender<Job>,
+             shared_state: &Arc<WorkerSharedState>,
+             result_tx: &tokio::sync::mpsc::Sender<JobResult>,
+             worker_exit_tx: &tokio::sync::mpsc::Sender<usize>,
+             event_tx: &tokio::sync::broadcast::Sender<ImportEvent>|
+             -> usize {
+                let current_count = worker_handles.len();
+                let mut spawned = 0usize;
 
-            if target > current_count {
-                // Spawn additional workers immediately (each worker gets a clone of the receiver)
-                for _ in 0..(target - current_count) {
-                    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-                    let handle = tokio::spawn(worker_task(
-                        *next_worker_id,
-                        job_rx.clone(),
-                        job_tx.clone(),
-                        shutdown_rx,
-                        Arc::clone(shared_state),
-                        result_tx.clone(),
-                        worker_exit_tx.clone(),
-                    ));
-                    worker_handles.insert(*next_worker_id, handle);
-                    worker_shutdown_txs.insert(*next_worker_id, shutdown_tx);
-                    let _ = event_tx.send(ImportEvent::Log {
-                        level: LogLevel::Info,
-                        message: format!("Spawned worker {}", *next_worker_id),
-                    });
-                    *next_worker_id += 1;
-                    spawned += 1;
-                }
-            } else if target < current_count {
-                // Signal excess workers to shut down (highest IDs first)
-                let workers_to_remove = current_count - target;
-                let mut ids_to_remove: Vec<_> = worker_handles.keys().copied().collect();
-                ids_to_remove.sort_by(|a, b| b.cmp(a)); // Descending order
-
-                for &worker_id in ids_to_remove.iter().take(workers_to_remove) {
-                    if let Some(shutdown_tx) = worker_shutdown_txs.get(&worker_id) {
-                        let _ = shutdown_tx.send(true);
+                if target > current_count {
+                    // Spawn additional workers immediately (each worker gets a clone of the receiver)
+                    for _ in 0..(target - current_count) {
+                        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+                        let handle = tokio::spawn(worker_task(
+                            *next_worker_id,
+                            job_rx.clone(),
+                            job_tx.clone(),
+                            shutdown_rx,
+                            Arc::clone(shared_state),
+                            result_tx.clone(),
+                            worker_exit_tx.clone(),
+                        ));
+                        worker_handles.insert(*next_worker_id, handle);
+                        worker_shutdown_txs.insert(*next_worker_id, shutdown_tx);
                         let _ = event_tx.send(ImportEvent::Log {
                             level: LogLevel::Info,
-                            message: format!(
-                                "Signaling worker {} to stop after current job",
-                                worker_id
-                            ),
+                            message: format!("Spawned worker {}", *next_worker_id),
                         });
+                        *next_worker_id += 1;
+                        spawned += 1;
+                    }
+                } else if target < current_count {
+                    // Signal excess workers to shut down (highest IDs first)
+                    let workers_to_remove = current_count - target;
+                    let mut ids_to_remove: Vec<_> = worker_handles.keys().copied().collect();
+                    ids_to_remove.sort_by(|a, b| b.cmp(a)); // Descending order
+
+                    for &worker_id in ids_to_remove.iter().take(workers_to_remove) {
+                        if let Some(shutdown_tx) = worker_shutdown_txs.get(&worker_id) {
+                            let _ = shutdown_tx.send(true);
+                            let _ = event_tx.send(ImportEvent::Log {
+                                level: LogLevel::Info,
+                                message: format!(
+                                    "Signaling worker {} to stop after current job",
+                                    worker_id
+                                ),
+                            });
+                        }
                     }
                 }
-            }
 
-            spawned
-        };
+                spawned
+            };
 
         while results_received < total_pending {
             // Check if all workers have exited before any results can arrive

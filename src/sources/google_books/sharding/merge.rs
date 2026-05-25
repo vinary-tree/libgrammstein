@@ -202,7 +202,9 @@ impl<'a> MergeCoordinator<'a> {
         let start_time = std::time::Instant::now();
 
         // Discover all shard files on disk (not just cached ones)
-        let shard_files = self.coordinator.discover_shard_files()
+        let shard_files = self
+            .coordinator
+            .discover_shard_files()
             .map_err(|e| MergeError::Trie(format!("Failed to discover shard files: {}", e)))?;
         if shard_files.is_empty() {
             return Err(MergeError::NoShards);
@@ -211,7 +213,11 @@ impl<'a> MergeCoordinator<'a> {
         let shard_keys: Vec<ShardKey> = shard_files.into_iter().map(|(key, _)| key).collect();
         let total_shards = shard_keys.len();
 
-        log::info!("Starting merge of {} shards to {:?}", total_shards, output_path);
+        log::info!(
+            "Starting merge of {} shards to {:?}",
+            total_shards,
+            output_path
+        );
 
         // Create output trie
         let mut output_trie = PersistentARTrie::<u64>::create(output_path)
@@ -238,21 +244,21 @@ impl<'a> MergeCoordinator<'a> {
                 total_shards
             );
 
-            let shard = self
-                .coordinator
-                .get_or_create_shard(key)
-                .map_err(|e| MergeError::ShardOpen {
-                    shard_key: key.to_string(),
-                    message: e.to_string(),
-                })?;
+            let shard =
+                self.coordinator
+                    .get_or_create_shard(key)
+                    .map_err(|e| MergeError::ShardOpen {
+                        shard_key: key.to_string(),
+                        message: e.to_string(),
+                    })?;
             let mut guard = shard.write();
-            guard.flush_lockfree().map_err(|e| {
-                MergeError::Trie(format!("Shard {} flush failed: {}", key, e))
-            })?;
+            guard
+                .flush_lockfree()
+                .map_err(|e| MergeError::Trie(format!("Shard {} flush failed: {}", key, e)))?;
 
-            let iter = guard.iter_with_counts().map_err(|e| {
-                MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
-            })?;
+            let iter = guard
+                .iter_with_counts()
+                .map_err(|e| MergeError::Trie(format!("Shard {} iteration failed: {}", key, e)))?;
 
             for (ngram, count) in iter {
                 output_trie
@@ -280,9 +286,7 @@ impl<'a> MergeCoordinator<'a> {
         });
 
         let duration = start_time.elapsed();
-        let bytes_written = std::fs::metadata(output_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let bytes_written = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
 
         Ok(MergeStats {
             phases: 1,
@@ -299,7 +303,9 @@ impl<'a> MergeCoordinator<'a> {
     /// Returns a HashMap of (ngram, count) pairs.
     pub fn merge_to_memory(&self) -> MergeResult<XxHashMap<Vec<u8>, u64>> {
         // Discover all shard files on disk (not just cached ones)
-        let shard_files = self.coordinator.discover_shard_files()
+        let shard_files = self
+            .coordinator
+            .discover_shard_files()
             .map_err(|e| MergeError::Trie(format!("Failed to discover shard files: {}", e)))?;
         if shard_files.is_empty() {
             return Err(MergeError::NoShards);
@@ -316,17 +322,16 @@ impl<'a> MergeCoordinator<'a> {
             .map(|key| {
                 log::trace!("Merging shard '{}' to memory", key);
 
-                let shard = self
-                    .coordinator
-                    .get_or_create_shard(key)
-                    .map_err(|e| MergeError::ShardOpen {
+                let shard = self.coordinator.get_or_create_shard(key).map_err(|e| {
+                    MergeError::ShardOpen {
                         shard_key: key.to_string(),
                         message: e.to_string(),
-                    })?;
-                let mut guard = shard.write();
-                guard.flush_lockfree().map_err(|e| {
-                    MergeError::Trie(format!("Shard {} flush failed: {}", key, e))
+                    }
                 })?;
+                let mut guard = shard.write();
+                guard
+                    .flush_lockfree()
+                    .map_err(|e| MergeError::Trie(format!("Shard {} flush failed: {}", key, e)))?;
                 let iter = guard.iter_with_counts().map_err(|e| {
                     MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
                 })?;
@@ -371,20 +376,20 @@ impl<'a> MergeCoordinator<'a> {
         for key in shard_keys {
             log::trace!("Iterating shard '{}'", key);
 
-            let shard = self
-                .coordinator
-                .get_or_create_shard(&key)
-                .map_err(|e| MergeError::ShardOpen {
-                    shard_key: key.to_string(),
-                    message: e.to_string(),
-                })?;
+            let shard =
+                self.coordinator
+                    .get_or_create_shard(&key)
+                    .map_err(|e| MergeError::ShardOpen {
+                        shard_key: key.to_string(),
+                        message: e.to_string(),
+                    })?;
             let mut guard = shard.write();
-            guard.flush_lockfree().map_err(|e| {
-                MergeError::Trie(format!("Shard {} flush failed: {}", key, e))
-            })?;
-            let iter = guard.iter_with_counts().map_err(|e| {
-                MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
-            })?;
+            guard
+                .flush_lockfree()
+                .map_err(|e| MergeError::Trie(format!("Shard {} flush failed: {}", key, e)))?;
+            let iter = guard
+                .iter_with_counts()
+                .map_err(|e| MergeError::Trie(format!("Shard {} iteration failed: {}", key, e)))?;
             all_entries.extend(iter);
         }
 
@@ -451,14 +456,14 @@ impl<'a> MergeBuilder<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::config::{ShardConfig, ShardGranularity};
+    use super::*;
     use tempfile::TempDir;
 
     fn create_test_coordinator() -> (TempDir, ShardCoordinator) {
         let dir = TempDir::new().expect("Failed to create temp dir");
-        let config = ShardConfig::new(dir.path().join("shards"))
-            .with_granularity(ShardGranularity::TwoChar);
+        let config =
+            ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
         let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
 
@@ -468,7 +473,9 @@ mod tests {
         coordinator.store_ngram("apple|pie", 30).expect("store");
         coordinator.store_ngram("apple|cider", 20).expect("store");
         coordinator.store_ngram("banana|split", 15).expect("store");
-        coordinator.store_ngram("cherry|blossom", 10).expect("store");
+        coordinator
+            .store_ngram("cherry|blossom", 10)
+            .expect("store");
         coordinator.store_ngram("zebra|crossing", 5).expect("store");
 
         (dir, coordinator)
@@ -509,8 +516,8 @@ mod tests {
     #[test]
     fn test_merge_to_trie() {
         let (dir, coordinator) = create_test_coordinator();
-        let merger = MergeCoordinator::new(&coordinator)
-            .with_work_dir(dir.path().join("merge_work"));
+        let merger =
+            MergeCoordinator::new(&coordinator).with_work_dir(dir.path().join("merge_work"));
 
         let output_path = dir.path().join("merged.artrie");
         let stats = merger
@@ -530,8 +537,8 @@ mod tests {
     #[test]
     fn test_merge_progress() {
         let (dir, coordinator) = create_test_coordinator();
-        let merger = MergeCoordinator::new(&coordinator)
-            .with_work_dir(dir.path().join("merge_work"));
+        let merger =
+            MergeCoordinator::new(&coordinator).with_work_dir(dir.path().join("merge_work"));
 
         let output_path = dir.path().join("merged.artrie");
         let mut progress_updates = Vec::new();
@@ -566,8 +573,8 @@ mod tests {
     #[test]
     fn test_merge_empty_coordinator() {
         let dir = TempDir::new().expect("Failed to create temp dir");
-        let config = ShardConfig::new(dir.path().join("shards"))
-            .with_granularity(ShardGranularity::TwoChar);
+        let config =
+            ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
         let coordinator = ShardCoordinator::new(config).expect("create");
         let merger = MergeCoordinator::new(&coordinator);

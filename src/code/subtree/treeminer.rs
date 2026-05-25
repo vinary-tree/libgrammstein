@@ -112,7 +112,8 @@ impl TreeminerD {
         }
 
         let num_trees = trees.len();
-        let min_support_count = ((self.config.min_support * num_trees as f64).ceil() as usize).max(1);
+        let min_support_count =
+            ((self.config.min_support * num_trees as f64).ceil() as usize).max(1);
 
         // Build tree lookup ONCE and reuse across all levels
         // This avoids O(T) HashMap construction per level
@@ -134,9 +135,19 @@ impl TreeminerD {
 
         while !current_level.is_empty() && pattern_size <= self.config.max_pattern_size {
             let (next_level, generated, pruned) = if self.config.parallel {
-                self.extend_patterns_parallel_with_lookup(&current_level, &tree_map, min_support_count, num_trees)
+                self.extend_patterns_parallel_with_lookup(
+                    &current_level,
+                    &tree_map,
+                    min_support_count,
+                    num_trees,
+                )
             } else {
-                self.extend_patterns_with_lookup(&current_level, &tree_map, min_support_count, num_trees)
+                self.extend_patterns_with_lookup(
+                    &current_level,
+                    &tree_map,
+                    min_support_count,
+                    num_trees,
+                )
             };
 
             candidates_generated += generated;
@@ -173,16 +184,16 @@ impl TreeminerD {
     }
 
     /// Build vertical representation: for each label, list of (tree_id, positions).
-    fn build_vertical_representation(&self, trees: &[FlatTree]) -> HashMap<Arc<str>, Vec<(u64, Vec<usize>)>> {
+    fn build_vertical_representation(
+        &self,
+        trees: &[FlatTree],
+    ) -> HashMap<Arc<str>, Vec<(u64, Vec<usize>)>> {
         let mut vertical: HashMap<Arc<str>, Vec<(u64, Vec<usize>)>> = HashMap::new();
 
         for tree in trees {
             let positions = tree.label_positions();
             for (label, pos) in positions {
-                vertical
-                    .entry(label)
-                    .or_default()
-                    .push((tree.tree_id, pos));
+                vertical.entry(label).or_default().push((tree.tree_id, pos));
             }
         }
 
@@ -527,8 +538,16 @@ mod tests {
         let result = miner.mine(&[tree1, tree2]);
 
         // A and B should be frequent in both
-        let a_patterns: Vec<_> = result.patterns.iter().filter(|p| p.root_label() == Some("A")).collect();
-        let b_patterns: Vec<_> = result.patterns.iter().filter(|p| p.root_label() == Some("B")).collect();
+        let a_patterns: Vec<_> = result
+            .patterns
+            .iter()
+            .filter(|p| p.root_label() == Some("A"))
+            .collect();
+        let b_patterns: Vec<_> = result
+            .patterns
+            .iter()
+            .filter(|p| p.root_label() == Some("B"))
+            .collect();
 
         assert!(!a_patterns.is_empty());
         assert!(!b_patterns.is_empty());
@@ -546,13 +565,21 @@ mod tests {
         // With 100% support, X should not be frequent (only in 2 of 3 trees)
         let miner_100 = miner_with_min_size(1.0, 1);
         let result_100 = miner_100.mine(&[tree1.clone(), tree2.clone(), tree3.clone()]);
-        let x_patterns: Vec<_> = result_100.patterns.iter().filter(|p| p.root_label() == Some("X")).collect();
+        let x_patterns: Vec<_> = result_100
+            .patterns
+            .iter()
+            .filter(|p| p.root_label() == Some("X"))
+            .collect();
         assert!(x_patterns.is_empty() || x_patterns[0].support < 3);
 
         // With 50% support, X should be frequent (in 2 of 3 trees = 66%)
         let miner_50 = miner_with_min_size(0.5, 1);
         let result_50 = miner_50.mine(&[tree1, tree2, tree3]);
-        let x_patterns: Vec<_> = result_50.patterns.iter().filter(|p| p.root_label() == Some("X")).collect();
+        let x_patterns: Vec<_> = result_50
+            .patterns
+            .iter()
+            .filter(|p| p.root_label() == Some("X"))
+            .collect();
         assert!(!x_patterns.is_empty());
         assert!(x_patterns[0].support >= 2);
     }

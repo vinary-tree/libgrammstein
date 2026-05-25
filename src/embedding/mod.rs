@@ -31,40 +31,35 @@
 //! let results = model.analogy("man", "king", "woman", 5);
 //! ```
 
+mod acoustic;
 mod bpe;
 mod model;
 mod phonetic;
 mod trainer;
-mod acoustic;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
 pub use bpe::{
-    extract_subwords, hash_subword, BpeTokenizer, BpeTrainer, MergeOp,
-    BPE_END_OF_WORD, BPE_UNKNOWN,
+    extract_subwords, hash_subword, BpeTokenizer, BpeTrainer, MergeOp, BPE_END_OF_WORD, BPE_UNKNOWN,
 };
 
 pub use model::{
-    SubwordEmbedding, DEFAULT_BUCKET_COUNT, DEFAULT_EMBEDDING_DIM,
-    DEFAULT_MAX_SUBWORD_LEN, DEFAULT_MIN_SUBWORD_LEN,
+    SubwordEmbedding, DEFAULT_BUCKET_COUNT, DEFAULT_EMBEDDING_DIM, DEFAULT_MAX_SUBWORD_LEN,
+    DEFAULT_MIN_SUBWORD_LEN,
 };
 
-pub use trainer::{
-    EmbeddingConfig, EmbeddingProgress, EmbeddingTrainer, EmbeddingTrainerBuilder,
-};
+pub use trainer::{EmbeddingConfig, EmbeddingProgress, EmbeddingTrainer, EmbeddingTrainerBuilder};
 
-pub use phonetic::{
-    PhoneticEmbedding, DEFAULT_PHONETIC_FUEL, DEFAULT_PHONETIC_WEIGHT,
-};
+pub use phonetic::{PhoneticEmbedding, DEFAULT_PHONETIC_FUEL, DEFAULT_PHONETIC_WEIGHT};
 
 pub use acoustic::{
-    AcousticWordEmbedding, AcousticEmbeddingConfig, AcousticEmbeddingStats,
-    AcousticEncoder, LinearEncoder, PoolingStrategy,
+    AcousticEmbeddingConfig, AcousticEmbeddingStats, AcousticEncoder, AcousticWordEmbedding,
+    LinearEncoder, PoolingStrategy,
 };
 
 #[cfg(feature = "gpu")]
 pub use gpu::{
-    GpuAccelerator, GpuBatchDotProduct, GpuContext, GpuError, GpuGradientAccum,
-    GpuSigmoid, GpuSimilaritySearch,
+    GpuAccelerator, GpuBatchDotProduct, GpuContext, GpuError, GpuGradientAccum, GpuSigmoid,
+    GpuSimilaritySearch,
 };

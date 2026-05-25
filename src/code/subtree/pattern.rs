@@ -102,7 +102,11 @@ impl FlatTree {
         Self::new(nodes, tree_id)
     }
 
-    fn flatten_recursive(node: &super::super::ast::AstNode, depth: usize, nodes: &mut Vec<FlatNode>) {
+    fn flatten_recursive(
+        node: &super::super::ast::AstNode,
+        depth: usize,
+        nodes: &mut Vec<FlatNode>,
+    ) {
         // Track scope based on how many backtracks we've implied
         let scope = nodes.len();
         nodes.push(FlatNode::new(node.kind.as_str(), depth, scope));

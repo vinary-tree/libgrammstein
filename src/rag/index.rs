@@ -96,18 +96,12 @@ impl<B: RetrievalBackend> RagIndex<B> {
     /// Query for similar documents.
     ///
     /// Returns document metadata and similarity scores.
-    pub fn query(
-        &self,
-        embedding: &[f32],
-        top_k: usize,
-    ) -> Vec<(DocumentMeta, f32)> {
+    pub fn query(&self, embedding: &[f32], top_k: usize) -> Vec<(DocumentMeta, f32)> {
         let results = self.backend.query(embedding, top_k);
 
         results
             .into_iter()
-            .filter_map(|(id, score)| {
-                self.documents.get(&id).map(|meta| (meta.clone(), score))
-            })
+            .filter_map(|(id, score)| self.documents.get(&id).map(|meta| (meta.clone(), score)))
             .collect()
     }
 
@@ -279,8 +273,13 @@ impl RagIndex<ExactCosineBackend> {
         let state_path = path.join("state.json");
         let state_file = File::create(&state_path)?;
         let state_writer = BufWriter::new(state_file);
-        serde_json::to_writer(state_writer, &IndexState { next_id: self.next_id })
-            .map_err(|e| RagError::Serialization(e.to_string()))?;
+        serde_json::to_writer(
+            state_writer,
+            &IndexState {
+                next_id: self.next_id,
+            },
+        )
+        .map_err(|e| RagError::Serialization(e.to_string()))?;
 
         // Save topic model (if exists)
         if let Some(ref topic_model) = self.topic_model {
@@ -487,7 +486,9 @@ mod tests {
         };
 
         // Extract topics
-        let model = index.extract_topics(topic_config, &documents_text).expect("topic extraction failed");
+        let model = index
+            .extract_topics(topic_config, &documents_text)
+            .expect("topic extraction failed");
 
         // Verify model has topics
         assert_eq!(model.num_topics(), 3);
@@ -499,7 +500,11 @@ mod tests {
         // Verify documents have topic IDs assigned
         for doc_id in [0u32, 1, 2, 3, 4, 5] {
             let topics = index.document_topics(DocumentId::new(doc_id));
-            assert!(!topics.is_empty(), "Document {} should have topic IDs", doc_id);
+            assert!(
+                !topics.is_empty(),
+                "Document {} should have topic IDs",
+                doc_id
+            );
         }
     }
 
@@ -545,7 +550,9 @@ mod tests {
             ..Default::default()
         };
 
-        index.extract_topics(topic_config, &documents_text).expect("extraction failed");
+        index
+            .extract_topics(topic_config, &documents_text)
+            .expect("extraction failed");
 
         // Save index with topic model
         let temp_path = std::env::temp_dir().join("test_index_with_topics");
@@ -566,7 +573,9 @@ mod tests {
 
     #[test]
     fn test_clear_topic_model() {
-        use crate::topic::{ClusteringConfig, CtfidfConfig, TopicConfig, TopicModel, TopicId, Topic};
+        use crate::topic::{
+            ClusteringConfig, CtfidfConfig, Topic, TopicConfig, TopicId, TopicModel,
+        };
 
         let config = RagIndexConfig {
             embedding_dim: 3,

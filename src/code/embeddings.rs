@@ -34,7 +34,9 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 
 // Re-use the existing neural infrastructure from libgrammstein
-use crate::neural::{Device, ModernBertEmbedder, ModernBertModel, ModernBertConfig, EmbeddingConfig};
+use crate::neural::{
+    Device, EmbeddingConfig, ModernBertConfig, ModernBertEmbedder, ModernBertModel,
+};
 
 /// Detected model format in a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,8 +101,8 @@ impl ModelArchitecture {
             model_type: Option<String>,
         }
 
-        let config: MinimalConfig = serde_json::from_str(config_json)
-            .unwrap_or(MinimalConfig { model_type: None });
+        let config: MinimalConfig =
+            serde_json::from_str(config_json).unwrap_or(MinimalConfig { model_type: None });
 
         match config.model_type.as_deref() {
             Some("modernbert") => ModelArchitecture::ModernBert,
@@ -213,14 +215,19 @@ impl EmbedderBackend {
     /// Embed a single text and return the embedding vector.
     fn embed(&self, text: &str) -> Result<Vec<f32>, CodeEmbedderError> {
         match self {
-            EmbedderBackend::ModernBert(embedder) => {
-                embedder.embed(text)
-                    .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))
-            }
-            EmbedderBackend::Bert { model, tokenizer, device, hidden_size: _ } => {
+            EmbedderBackend::ModernBert(embedder) => embedder
+                .embed(text)
+                .map_err(|e| CodeEmbedderError::Embedding(e.to_string())),
+            EmbedderBackend::Bert {
+                model,
+                tokenizer,
+                device,
+                hidden_size: _,
+            } => {
                 // Tokenize
-                let encoding = tokenizer.encode(text, true)
-                    .map_err(|e| CodeEmbedderError::Embedding(format!("Tokenization error: {}", e)))?;
+                let encoding = tokenizer.encode(text, true).map_err(|e| {
+                    CodeEmbedderError::Embedding(format!("Tokenization error: {}", e))
+                })?;
 
                 let ids = encoding.get_ids();
                 let token_type_ids: Vec<u32> = vec![0; ids.len()];
@@ -237,14 +244,17 @@ impl EmbedderBackend {
                     .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))?;
 
                 // Forward pass
-                let hidden_states = model.forward(&input_ids, &token_type_tensor, None)
+                let hidden_states = model
+                    .forward(&input_ids, &token_type_tensor, None)
                     .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))?;
 
                 // Extract CLS token (first token)
-                let cls_embedding = hidden_states.i((0, 0))
+                let cls_embedding = hidden_states
+                    .i((0, 0))
                     .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))?;
 
-                cls_embedding.to_vec1()
+                cls_embedding
+                    .to_vec1()
                     .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))
             }
         }
@@ -253,18 +263,23 @@ impl EmbedderBackend {
     /// Embed a batch of texts.
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, CodeEmbedderError> {
         match self {
-            EmbedderBackend::ModernBert(embedder) => {
-                embedder.embed_batch(texts)
-                    .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))
-            }
-            EmbedderBackend::Bert { model, tokenizer, device, hidden_size: _ } => {
+            EmbedderBackend::ModernBert(embedder) => embedder
+                .embed_batch(texts)
+                .map_err(|e| CodeEmbedderError::Embedding(e.to_string())),
+            EmbedderBackend::Bert {
+                model,
+                tokenizer,
+                device,
+                hidden_size: _,
+            } => {
                 if texts.is_empty() {
                     return Ok(vec![]);
                 }
 
                 // Tokenize all texts
-                let encodings = tokenizer.encode_batch(texts.to_vec(), true)
-                    .map_err(|e| CodeEmbedderError::Embedding(format!("Tokenization error: {}", e)))?;
+                let encodings = tokenizer.encode_batch(texts.to_vec(), true).map_err(|e| {
+                    CodeEmbedderError::Embedding(format!("Tokenization error: {}", e))
+                })?;
 
                 // Find max length and pad
                 let max_len = encodings.iter().map(|e| e.len()).max().unwrap_or(0);
@@ -288,15 +303,18 @@ impl EmbedderBackend {
                     .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))?;
 
                 // Forward pass
-                let hidden_states = model.forward(&input_tensor, &type_tensor, None)
+                let hidden_states = model
+                    .forward(&input_tensor, &type_tensor, None)
                     .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))?;
 
                 // Extract CLS embeddings
                 let mut embeddings = Vec::with_capacity(batch_size);
                 for i in 0..batch_size {
-                    let cls = hidden_states.i((i, 0))
+                    let cls = hidden_states
+                        .i((i, 0))
                         .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))?;
-                    let vec: Vec<f32> = cls.to_vec1()
+                    let vec: Vec<f32> = cls
+                        .to_vec1()
                         .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))?;
                     embeddings.push(vec);
                 }
@@ -389,7 +407,10 @@ impl CodeEmbedder {
     ///     CodeEmbedderConfig::default()
     /// )?;
     /// ```
-    pub fn from_path(path: impl AsRef<Path>, config: CodeEmbedderConfig) -> Result<Self, CodeEmbedderError> {
+    pub fn from_path(
+        path: impl AsRef<Path>,
+        config: CodeEmbedderConfig,
+    ) -> Result<Self, CodeEmbedderError> {
         let path = path.as_ref();
 
         if !path.exists() {
@@ -443,21 +464,28 @@ impl CodeEmbedder {
     ///
     /// Auto-detects the model architecture from `config.json` and uses
     /// the appropriate Candle model loader.
-    fn load_safetensors_model(path: &Path, config: CodeEmbedderConfig) -> Result<Self, CodeEmbedderError> {
+    fn load_safetensors_model(
+        path: &Path,
+        config: CodeEmbedderConfig,
+    ) -> Result<Self, CodeEmbedderError> {
         let config_path = path.join("config.json");
 
         // Read config.json to detect architecture
-        let config_json = std::fs::read_to_string(&config_path)
-            .map_err(|e| CodeEmbedderError::ModelLoad(format!(
+        let config_json = std::fs::read_to_string(&config_path).map_err(|e| {
+            CodeEmbedderError::ModelLoad(format!(
                 "Failed to read config.json from {}: {}",
-                path.display(), e
-            )))?;
+                path.display(),
+                e
+            ))
+        })?;
 
         let architecture = ModelArchitecture::from_config(&config_json);
 
         match architecture {
             ModelArchitecture::ModernBert => Self::load_modernbert(path, config),
-            ModelArchitecture::Roberta | ModelArchitecture::Bert => Self::load_bert_family(path, config, architecture),
+            ModelArchitecture::Roberta | ModelArchitecture::Bert => {
+                Self::load_bert_family(path, config, architecture)
+            }
             ModelArchitecture::Unknown => Err(CodeEmbedderError::ModelLoad(format!(
                 "Unknown model architecture in {}. Supported architectures:\n\
                  - modernbert (ModernBERT)\n\
@@ -482,7 +510,9 @@ impl CodeEmbedder {
         };
 
         // Get the Candle device
-        let device = config.device.to_candle()
+        let device = config
+            .device
+            .to_candle()
             .map_err(|e| CodeEmbedderError::ModelLoad(format!("Device error: {}", e)))?;
 
         // Load the model from local files
@@ -492,11 +522,14 @@ impl CodeEmbedder {
             &tokenizer_path,
             bert_config,
             device,
-        ).map_err(|e| CodeEmbedderError::ModelLoad(format!(
-            "Failed to load ModernBERT model from {}: {}",
-            path.display(),
-            e
-        )))?;
+        )
+        .map_err(|e| {
+            CodeEmbedderError::ModelLoad(format!(
+                "Failed to load ModernBERT model from {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
 
         // Create embedding config
         let embed_config = EmbeddingConfig {
@@ -525,48 +558,65 @@ impl CodeEmbedder {
     /// Load a BERT-family model (BERT, RoBERTa) from a directory.
     ///
     /// This handles UniXcoder, GraphCodeBERT, CodeBERT, and other BERT/RoBERTa models.
-    fn load_bert_family(path: &Path, config: CodeEmbedderConfig, architecture: ModelArchitecture) -> Result<Self, CodeEmbedderError> {
+    fn load_bert_family(
+        path: &Path,
+        config: CodeEmbedderConfig,
+        architecture: ModelArchitecture,
+    ) -> Result<Self, CodeEmbedderError> {
         let model_path = path.join("model.safetensors");
         let config_path = path.join("config.json");
         let tokenizer_path = path.join("tokenizer.json");
 
         // Get the Candle device
-        let device = config.device.to_candle()
+        let device = config
+            .device
+            .to_candle()
             .map_err(|e| CodeEmbedderError::ModelLoad(format!("Device error: {}", e)))?;
 
         // Load BERT config
         let config_json = std::fs::read_to_string(&config_path)
             .map_err(|e| CodeEmbedderError::ModelLoad(format!("Failed to read config: {}", e)))?;
 
-        let bert_config: BertConfig = serde_json::from_str(&config_json)
-            .map_err(|e| CodeEmbedderError::ModelLoad(format!(
+        let bert_config: BertConfig = serde_json::from_str(&config_json).map_err(|e| {
+            CodeEmbedderError::ModelLoad(format!(
                 "Failed to parse {} config from {}: {}",
-                architecture.name(), path.display(), e
-            )))?;
+                architecture.name(),
+                path.display(),
+                e
+            ))
+        })?;
 
         let hidden_size = bert_config.hidden_size;
 
         // Load tokenizer
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| CodeEmbedderError::ModelLoad(format!(
+        let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
+            CodeEmbedderError::ModelLoad(format!(
                 "Failed to load tokenizer from {}: {}",
-                tokenizer_path.display(), e
-            )))?;
+                tokenizer_path.display(),
+                e
+            ))
+        })?;
 
         // Load model weights
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[&model_path], DType::F32, &device)
-                .map_err(|e| CodeEmbedderError::ModelLoad(format!(
-                    "Failed to load model weights from {}: {}",
-                    model_path.display(), e
-                )))?
+            VarBuilder::from_mmaped_safetensors(&[&model_path], DType::F32, &device).map_err(
+                |e| {
+                    CodeEmbedderError::ModelLoad(format!(
+                        "Failed to load model weights from {}: {}",
+                        model_path.display(),
+                        e
+                    ))
+                },
+            )?
         };
 
-        let model = BertModel::load(vb, &bert_config)
-            .map_err(|e| CodeEmbedderError::ModelLoad(format!(
+        let model = BertModel::load(vb, &bert_config).map_err(|e| {
+            CodeEmbedderError::ModelLoad(format!(
                 "Failed to initialize {} model: {}",
-                architecture.name(), e
-            )))?;
+                architecture.name(),
+                e
+            ))
+        })?;
 
         let cache = if config.use_cache {
             Some(DashMap::with_capacity(config.cache_size))
@@ -684,7 +734,11 @@ impl CodeEmbedder {
     }
 
     /// Scores how well a candidate completion fits a context.
-    pub fn score_completion(&self, context: &str, candidate: &str) -> Result<f64, CodeEmbedderError> {
+    pub fn score_completion(
+        &self,
+        context: &str,
+        candidate: &str,
+    ) -> Result<f64, CodeEmbedderError> {
         let combined = format!("{}{}", context, candidate);
         let context_embed = self.embed(context)?;
         let combined_embed = self.embed(&combined)?;
@@ -755,7 +809,10 @@ mod tests {
     fn test_embedding_model_config() {
         assert_eq!(EmbeddingModel::UniXcoder.embedding_dim(), 768);
         assert_eq!(EmbeddingModel::UniXcoder.max_length(), 512);
-        assert_eq!(EmbeddingModel::UniXcoder.hf_model_id(), "microsoft/unixcoder-base");
+        assert_eq!(
+            EmbeddingModel::UniXcoder.hf_model_id(),
+            "microsoft/unixcoder-base"
+        );
     }
 
     #[test]
@@ -780,32 +837,56 @@ mod tests {
     fn test_architecture_detection() {
         // ModernBERT detection
         let modernbert = r#"{"model_type": "modernbert"}"#;
-        assert_eq!(ModelArchitecture::from_config(modernbert), ModelArchitecture::ModernBert);
+        assert_eq!(
+            ModelArchitecture::from_config(modernbert),
+            ModelArchitecture::ModernBert
+        );
 
         // RoBERTa detection (UniXcoder, GraphCodeBERT, CodeBERT use this)
         let roberta = r#"{"model_type": "roberta"}"#;
-        assert_eq!(ModelArchitecture::from_config(roberta), ModelArchitecture::Roberta);
+        assert_eq!(
+            ModelArchitecture::from_config(roberta),
+            ModelArchitecture::Roberta
+        );
 
         // BERT detection
         let bert = r#"{"model_type": "bert"}"#;
-        assert_eq!(ModelArchitecture::from_config(bert), ModelArchitecture::Bert);
+        assert_eq!(
+            ModelArchitecture::from_config(bert),
+            ModelArchitecture::Bert
+        );
 
         // Unknown/missing model_type
         let unknown = r#"{"model_type": "gpt2"}"#;
-        assert_eq!(ModelArchitecture::from_config(unknown), ModelArchitecture::Unknown);
+        assert_eq!(
+            ModelArchitecture::from_config(unknown),
+            ModelArchitecture::Unknown
+        );
 
         let missing = r#"{"hidden_size": 768}"#;
-        assert_eq!(ModelArchitecture::from_config(missing), ModelArchitecture::Unknown);
+        assert_eq!(
+            ModelArchitecture::from_config(missing),
+            ModelArchitecture::Unknown
+        );
 
         let invalid_json = "not valid json";
-        assert_eq!(ModelArchitecture::from_config(invalid_json), ModelArchitecture::Unknown);
+        assert_eq!(
+            ModelArchitecture::from_config(invalid_json),
+            ModelArchitecture::Unknown
+        );
     }
 
     #[test]
     fn test_model_format_detection() {
         // This test verifies the ModelFormat struct logic
         // The actual detection requires filesystem access, so we test the expected_files method
-        assert_eq!(ModelFormat::Onnx.expected_files(), &["model.onnx", "tokenizer.json"]);
-        assert_eq!(ModelFormat::SafeTensors.expected_files(), &["model.safetensors", "config.json", "tokenizer.json"]);
+        assert_eq!(
+            ModelFormat::Onnx.expected_files(),
+            &["model.onnx", "tokenizer.json"]
+        );
+        assert_eq!(
+            ModelFormat::SafeTensors.expected_files(),
+            &["model.safetensors", "config.json", "tokenizer.json"]
+        );
     }
 }

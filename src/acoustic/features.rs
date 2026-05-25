@@ -583,9 +583,7 @@ impl FeatureExtractor {
         let mut spectrum = vec![Complex::new(0.0f32, 0.0f32); self.config.fft_size / 2 + 1];
 
         // Perform FFT
-        self.fft
-            .process(frame, &mut spectrum)
-            .expect("FFT failed");
+        self.fft.process(frame, &mut spectrum).expect("FFT failed");
 
         // Compute power or magnitude spectrum
         spectrum

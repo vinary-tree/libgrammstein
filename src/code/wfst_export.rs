@@ -180,7 +180,9 @@ impl<W: Semiring + FromLogProb> PcfgWfstBuilder<W> {
         }
 
         // Get all rules for this non-terminal and collect them to avoid borrow conflict
-        let rules: Vec<_> = self.grammar.rules_for(symbol)
+        let rules: Vec<_> = self
+            .grammar
+            .rules_for(symbol)
             .into_iter()
             .filter(|(_, prob)| *prob >= self.config.min_probability)
             .map(|(production, prob)| (production.clone(), prob))

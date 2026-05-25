@@ -24,9 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::ngram::vocabulary::{
-    decode_ngram_key_bytes, encode_indices_to_key_bytes,
-};
+use crate::ngram::vocabulary::{decode_ngram_key_bytes, encode_indices_to_key_bytes};
 
 use super::super::aggregator::YearAggregator;
 use super::super::checkpoint::ImportCheckpoint;
@@ -377,7 +375,10 @@ where
 
         // Insert into transaction (SET semantics, not increment)
         // tx_insert_ngram splits to SmallVec internally, avoiding heap alloc
-        if let Err(e) = ctx.storage.tx_insert_ngram(&mut tx, &agg.ngram, agg.total_count) {
+        if let Err(e) = ctx
+            .storage
+            .tx_insert_ngram(&mut tx, &agg.ngram, agg.total_count)
+        {
             stream_err = Some(e.into());
             break;
         }
@@ -386,11 +387,17 @@ where
 
         // Chunked commit: bound per-transaction memory for large files
         if tx_chunk_size > 0 && chunk_count >= tx_chunk_size {
-            match ctx.storage.commit_and_renew_prefix_tx(&mut tx, prefix, order) {
+            match ctx
+                .storage
+                .commit_and_renew_prefix_tx(&mut tx, prefix, order)
+            {
                 Ok(committed) => {
                     log::trace!(
                         "Worker {}: committed chunk for {} '{}' ({} n-grams)",
-                        worker_id, source_label, prefix, committed
+                        worker_id,
+                        source_label,
+                        prefix,
+                        committed
                     );
                     chunk_count = 0;
                 }
@@ -416,7 +423,10 @@ where
         if let Err(abort_err) = ctx.storage.abort_prefix_tx(tx) {
             log::warn!(
                 "Worker {}: failed to abort transaction for {} '{}': {}",
-                worker_id, source_label, prefix, abort_err
+                worker_id,
+                source_label,
+                prefix,
+                abort_err
             );
         }
         return Err(e);
@@ -425,10 +435,15 @@ where
     // Commit the final chunk and mark prefix as complete
     let committed = ctx.storage.commit_prefix_tx(tx)?;
     ctx.total_ngrams.fetch_add(count, Ordering::Relaxed);
-    ctx.unique_ngrams.fetch_add(committed as u64, Ordering::Relaxed);
+    ctx.unique_ngrams
+        .fetch_add(committed as u64, Ordering::Relaxed);
     log::trace!(
         "Worker {}: committed {} '{}' with {} n-grams ({} inserted)",
-        worker_id, source_label, prefix, count, committed
+        worker_id,
+        source_label,
+        prefix,
+        count,
+        committed
     );
     Ok(count)
 }
@@ -475,10 +490,8 @@ async fn process_single_attempt(
     );
 
     // Use the shared HTTP client for connection pooling and HTTP/2 multiplexing
-    let stream = reader.stream_aggregated_with_client(
-        shared.config.year_range,
-        Some(shared.http_client.clone()),
-    );
+    let stream = reader
+        .stream_aggregated_with_client(shared.config.year_range, Some(shared.http_client.clone()));
     tokio::pin!(stream);
 
     // Local counters for this job (packed into per-worker atomic for race-free sampling)
@@ -499,12 +512,18 @@ async fn process_single_attempt(
             while let Some(result) = stream.next().await {
                 let agg = match result {
                     Ok(agg) => agg,
-                    Err(e) => { stream_err = Some(e.into()); break; }
+                    Err(e) => {
+                        stream_err = Some(e.into());
+                        break;
+                    }
                 };
 
                 // Insert into transaction (SET semantics, not increment)
                 // tx_insert_ngram splits to SmallVec internally, avoiding heap alloc
-                if let Err(e) = shared.storage.tx_insert_ngram(&mut tx, &agg.ngram, agg.total_count) {
+                if let Err(e) = shared
+                    .storage
+                    .tx_insert_ngram(&mut tx, &agg.ngram, agg.total_count)
+                {
                     stream_err = Some(e.into());
                     break;
                 }
@@ -513,15 +532,23 @@ async fn process_single_attempt(
 
                 // Chunked commit: bound per-transaction memory for large files
                 if tx_chunk_size > 0 && chunk_count >= tx_chunk_size {
-                    match shared.storage.commit_and_renew_prefix_tx(&mut tx, &job.prefix, job.order) {
+                    match shared
+                        .storage
+                        .commit_and_renew_prefix_tx(&mut tx, &job.prefix, job.order)
+                    {
                         Ok(committed) => {
                             log::trace!(
                                 "Worker {}: committed chunk for prefix '{}' ({} n-grams)",
-                                worker_id, job.prefix, committed
+                                worker_id,
+                                job.prefix,
+                                committed
                             );
                             chunk_count = 0;
                         }
-                        Err(e) => { stream_err = Some(e.into()); break; }
+                        Err(e) => {
+                            stream_err = Some(e.into());
+                            break;
+                        }
                     }
                 }
 
@@ -537,7 +564,9 @@ async fn process_single_attempt(
                 if let Err(abort_err) = shared.storage.abort_prefix_tx(tx) {
                     log::warn!(
                         "Worker {}: failed to abort transaction for prefix '{}': {}",
-                        worker_id, job.prefix, abort_err
+                        worker_id,
+                        job.prefix,
+                        abort_err
                     );
                 }
                 return Err(e);
@@ -547,7 +576,9 @@ async fn process_single_attempt(
             let committed = shared.storage.commit_prefix_tx(tx)?;
             log::trace!(
                 "Worker {}: committed prefix '{}' with {} n-grams",
-                worker_id, job.prefix, committed
+                worker_id,
+                job.prefix,
+                committed
             );
             Ok(count)
         }
@@ -561,11 +592,7 @@ async fn process_single_attempt(
 
         while let Some(result) = stream.next().await {
             let agg = result?;
-            let storage_result = store_ngram_shared(
-                &agg.ngram,
-                agg.total_count,
-                &shared.storage,
-            )?;
+            let storage_result = store_ngram_shared(&agg.ngram, agg.total_count, &shared.storage)?;
             count += 1;
             if storage_result.is_new {
                 unique_count += 1;
@@ -580,7 +607,9 @@ async fn process_single_attempt(
 
         // Update unique_ngrams counter for single-trie mode
         if unique_count > 0 {
-            shared.unique_ngrams.fetch_add(unique_count, Ordering::Relaxed);
+            shared
+                .unique_ngrams
+                .fetch_add(unique_count, Ordering::Relaxed);
         }
 
         Ok(count)
@@ -588,7 +617,9 @@ async fn process_single_attempt(
 
     // Final flush to global counters (for checkpoint persistence)
     if let Ok(ngram_count) = result {
-        shared.total_ngrams.fetch_add(ngram_count, Ordering::Relaxed);
+        shared
+            .total_ngrams
+            .fetch_add(ngram_count, Ordering::Relaxed);
     }
 
     // Reset per-worker stats after job completion (so next job starts fresh)
@@ -598,7 +629,6 @@ async fn process_single_attempt(
 
     result
 }
-
 
 /// Process a single job attempt using cached file mode.
 ///
@@ -658,9 +688,15 @@ async fn process_single_attempt_cached(
             while let Some(result) = stream.next().await {
                 let agg = match result {
                     Ok(agg) => agg,
-                    Err(e) => { stream_err = Some(e.into()); break; }
+                    Err(e) => {
+                        stream_err = Some(e.into());
+                        break;
+                    }
                 };
-                if let Err(e) = shared.storage.tx_insert_ngram(&mut tx, &agg.ngram, agg.total_count) {
+                if let Err(e) = shared
+                    .storage
+                    .tx_insert_ngram(&mut tx, &agg.ngram, agg.total_count)
+                {
                     stream_err = Some(e.into());
                     break;
                 }
@@ -669,15 +705,23 @@ async fn process_single_attempt_cached(
 
                 // Chunked commit: bound per-transaction memory for large files
                 if tx_chunk_size > 0 && chunk_count >= tx_chunk_size {
-                    match shared.storage.commit_and_renew_prefix_tx(&mut tx, &job.prefix, job.order) {
+                    match shared
+                        .storage
+                        .commit_and_renew_prefix_tx(&mut tx, &job.prefix, job.order)
+                    {
                         Ok(committed) => {
                             log::trace!(
                                 "Worker {}: committed chunk for cached prefix '{}' ({} n-grams)",
-                                worker_id, job.prefix, committed
+                                worker_id,
+                                job.prefix,
+                                committed
                             );
                             chunk_count = 0;
                         }
-                        Err(e) => { stream_err = Some(e.into()); break; }
+                        Err(e) => {
+                            stream_err = Some(e.into());
+                            break;
+                        }
                     }
                 }
 
@@ -691,7 +735,9 @@ async fn process_single_attempt_cached(
                 if let Err(abort_err) = shared.storage.abort_prefix_tx(tx) {
                     log::warn!(
                         "Worker {}: failed to abort transaction for prefix '{}': {}",
-                        worker_id, job.prefix, abort_err
+                        worker_id,
+                        job.prefix,
+                        abort_err
                     );
                 }
                 return Err(e);
@@ -700,7 +746,9 @@ async fn process_single_attempt_cached(
             let committed = shared.storage.commit_prefix_tx(tx)?;
             log::trace!(
                 "Worker {}: committed cached prefix '{}' with {} n-grams",
-                worker_id, job.prefix, committed
+                worker_id,
+                job.prefix,
+                committed
             );
             Ok(count)
         }
@@ -713,11 +761,7 @@ async fn process_single_attempt_cached(
 
         while let Some(result) = stream.next().await {
             let agg = result?;
-            let storage_result = store_ngram_shared(
-                &agg.ngram,
-                agg.total_count,
-                &shared.storage,
-            )?;
+            let storage_result = store_ngram_shared(&agg.ngram, agg.total_count, &shared.storage)?;
             count += 1;
             if storage_result.is_new {
                 unique_count += 1;
@@ -730,7 +774,9 @@ async fn process_single_attempt_cached(
         }
 
         if unique_count > 0 {
-            shared.unique_ngrams.fetch_add(unique_count, Ordering::Relaxed);
+            shared
+                .unique_ngrams
+                .fetch_add(unique_count, Ordering::Relaxed);
         }
 
         Ok(count)
@@ -742,7 +788,9 @@ async fn process_single_attempt_cached(
 
     // Final flush to global counters
     if let Ok(ngram_count) = result {
-        shared.total_ngrams.fetch_add(ngram_count, Ordering::Relaxed);
+        shared
+            .total_ngrams
+            .fetch_add(ngram_count, Ordering::Relaxed);
     }
 
     // Reset per-worker stats after job completion
@@ -815,7 +863,8 @@ pub(super) async fn worker_task(
             if consecutive_deferred > 0 {
                 log::debug!(
                     "Worker {} queue closed with {} deferred jobs pending",
-                    worker_id, consecutive_deferred
+                    worker_id,
+                    consecutive_deferred
                 );
             }
             log::debug!("Worker {} finished - queue empty", worker_id);
@@ -846,12 +895,15 @@ pub(super) async fn worker_task(
                         // Add per-worker jitter to prevent thundering herd when all workers
                         // wake up simultaneously after all-deferred sleep
                         let jitter = Duration::from_millis(
-                            (worker_id as u64 * 100) + (rand::random::<u64>() % 500)
+                            (worker_id as u64 * 100) + (rand::random::<u64>() % 500),
                         );
                         let staggered_wait = wait + jitter;
                         log::debug!(
                             "Worker {} blocking {}ms (+{}ms jitter) - all {} jobs deferred",
-                            worker_id, wait.as_millis(), jitter.as_millis(), queue_size
+                            worker_id,
+                            wait.as_millis(),
+                            jitter.as_millis(),
+                            queue_size
                         );
                         tokio::time::sleep(staggered_wait).await;
                     }
@@ -883,14 +935,17 @@ pub(super) async fn worker_task(
         // - Leverages existing all-deferred starvation prevention
         //
         // Formally verified in formal/tla/AsyncShardSync.tla
-        if shared.storage.is_prefix_shard_syncing(&job.prefix, job.order) {
+        if shared
+            .storage
+            .is_prefix_shard_syncing(&job.prefix, job.order)
+        {
             // Shard is syncing - defer without incrementing retry count
             let deferred_job = Job {
                 url: Arc::clone(&job.url),
                 prefix: Arc::clone(&job.prefix),
                 order: job.order,
-                attempt: job.attempt,        // NO increment (not an error)
-                backoff_ms: job.backoff_ms,  // NO change
+                attempt: job.attempt,       // NO increment (not an error)
+                backoff_ms: job.backoff_ms, // NO change
                 ready_at: Some(Instant::now() + Duration::from_millis(50)), // Small delay
             };
 
@@ -908,9 +963,8 @@ pub(super) async fn worker_task(
             let queue_size = shared.queue_size.load(Ordering::SeqCst);
             if queue_size > 0 && consecutive_deferred >= queue_size {
                 // All jobs deferred (all targeting syncing shards) - wait briefly
-                let jitter = Duration::from_millis(
-                    (worker_id as u64 * 10) + (rand::random::<u64>() % 100)
-                );
+                let jitter =
+                    Duration::from_millis((worker_id as u64 * 10) + (rand::random::<u64>() % 100));
                 log::debug!(
                     "Worker {} blocking {}ms - all {} jobs targeting syncing shards",
                     worker_id,
@@ -970,7 +1024,9 @@ pub(super) async fn worker_task(
                 if result_tx.send(job_result).await.is_err() {
                     // Main task dropped, exit worker
                     let _ = worker_exit_tx.send(worker_id).await;
-                    let _ = shared.progress_tx.try_send(WorkerUpdate::Exited { worker_id });
+                    let _ = shared
+                        .progress_tx
+                        .try_send(WorkerUpdate::Exited { worker_id });
                     return;
                 }
             }
@@ -982,8 +1038,12 @@ pub(super) async fn worker_task(
                 let debug_info = RequestDebugInfo::from_error(&job.url, &e, elapsed);
 
                 // Calculate actual delay for logging
-                let delay_ms = retry_job.ready_at
-                    .map(|ra| ra.saturating_duration_since(std::time::Instant::now()).as_millis() as u64)
+                let delay_ms = retry_job
+                    .ready_at
+                    .map(|ra| {
+                        ra.saturating_duration_since(std::time::Instant::now())
+                            .as_millis() as u64
+                    })
                     .unwrap_or(retry_job.backoff_ms);
 
                 // Log detailed debug info (including Retry-After if present)
@@ -999,7 +1059,11 @@ pub(super) async fn worker_task(
                     retry_job.attempt,
                     MAX_RETRIES,
                     delay_ms,
-                    if retry_after.is_some() { " (from Retry-After header)" } else { "" },
+                    if retry_after.is_some() {
+                        " (from Retry-After header)"
+                    } else {
+                        ""
+                    },
                     debug_info.url,
                     debug_info.error_message,
                     debug_info.status_code,
@@ -1060,7 +1124,9 @@ pub(super) async fn worker_task(
                     };
                     if result_tx.send(job_result).await.is_err() {
                         let _ = worker_exit_tx.send(worker_id).await;
-                        let _ = shared.progress_tx.try_send(WorkerUpdate::Exited { worker_id });
+                        let _ = shared
+                            .progress_tx
+                            .try_send(WorkerUpdate::Exited { worker_id });
                         return;
                     }
                 } else {
@@ -1091,7 +1157,9 @@ pub(super) async fn worker_task(
                     };
                     if result_tx.send(job_result).await.is_err() {
                         let _ = worker_exit_tx.send(worker_id).await;
-                        let _ = shared.progress_tx.try_send(WorkerUpdate::Exited { worker_id });
+                        let _ = shared
+                            .progress_tx
+                            .try_send(WorkerUpdate::Exited { worker_id });
                         return;
                     }
                 }
@@ -1103,7 +1171,9 @@ pub(super) async fn worker_task(
     let _ = worker_exit_tx.send(worker_id).await;
 
     // Emit exited event so TUI can remove the worker from display
-    let _ = shared.progress_tx.try_send(WorkerUpdate::Exited { worker_id });
+    let _ = shared
+        .progress_tx
+        .try_send(WorkerUpdate::Exited { worker_id });
     log::debug!("Worker {} exited", worker_id);
 }
 
@@ -1181,16 +1251,9 @@ pub(super) async fn process_prefix_file(
 
     // Branch to cached processing if enabled
     if ctx.config.cache_files {
-        let outcome = process_prefix_file_cached(
-            &ctx,
-            worker_id,
-            url,
-            prefix,
-            order,
-            attempt,
-            backoff_ms,
-        )
-        .await;
+        let outcome =
+            process_prefix_file_cached(&ctx, worker_id, url, prefix, order, attempt, backoff_ms)
+                .await;
 
         // Return worker ID to pool
         return_worker_id(ctx.worker_id_pool_tx.clone(), worker_id).await;
@@ -1206,11 +1269,8 @@ pub(super) async fn process_prefix_file(
 
     // Single attempt processing with transaction-based atomicity
     let result: Result<u64, ImportError> = async {
-        let mut reader = HttpNgramReader::with_options(
-            &url,
-            ctx.config.skip_pos_tags,
-            ctx.config.min_count,
-        );
+        let mut reader =
+            HttpNgramReader::with_options(&url, ctx.config.skip_pos_tags, ctx.config.min_count);
 
         // Stream n-grams instead of buffering entire file in memory.
         // This is critical for large 2-gram files (50-100M n-grams, 6-8GB).
@@ -1233,11 +1293,7 @@ pub(super) async fn process_prefix_file(
             let mut count = 0u64;
             while let Some(result) = stream.next().await {
                 let agg = result?;
-                let storage_result = store_ngram_shared(
-                    &agg.ngram,
-                    agg.total_count,
-                    &ctx.storage,
-                )?;
+                let storage_result = store_ngram_shared(&agg.ngram, agg.total_count, &ctx.storage)?;
                 count += 1;
                 local_total += 1;
                 if storage_result.is_new {
@@ -1305,7 +1361,10 @@ pub(super) async fn process_prefix_file(
             let next_backoff_ms = backoff_ms * 2;
             tracing::debug!(
                 "Prefix '{}' (order {}) failed attempt {} with retryable error, deferring: {}",
-                prefix, order, attempt + 1, e
+                prefix,
+                order,
+                attempt + 1,
+                e
             );
             if let Some(ref tx) = ctx.progress_tx {
                 let _ = tx.try_send(WorkerUpdate::Deferred {
@@ -1330,7 +1389,10 @@ pub(super) async fn process_prefix_file(
             // Non-retryable error or max retries exceeded
             tracing::warn!(
                 "Prefix '{}' (order {}) failed permanently after {} attempts: {}",
-                prefix, order, attempt + 1, e
+                prefix,
+                order,
+                attempt + 1,
+                e
             );
             PrefixOutcome::Failed {
                 prefix,
@@ -1433,7 +1495,8 @@ pub(super) async fn process_prefix_file_cached(
 
         if let Some(tx) = maybe_tx {
             // Sharded mode: delegate chunked-tx body to shared helper
-            process_aggregated_stream(stream, tx, &ctx, &prefix, order, worker_id, "cached prefix").await
+            process_aggregated_stream(stream, tx, &ctx, &prefix, order, worker_id, "cached prefix")
+                .await
         } else {
             // Single-trie mode
             tokio::pin!(stream);
@@ -1444,11 +1507,7 @@ pub(super) async fn process_prefix_file_cached(
 
             while let Some(result) = stream.next().await {
                 let agg = result?;
-                let storage_result = store_ngram_shared(
-                    &agg.ngram,
-                    agg.total_count,
-                    &ctx.storage,
-                )?;
+                let storage_result = store_ngram_shared(&agg.ngram, agg.total_count, &ctx.storage)?;
                 count += 1;
                 local_total += 1;
                 if storage_result.is_new {
@@ -1528,12 +1587,10 @@ pub(super) async fn process_prefix_file_cached(
                 error: e,
             }
         }
-        Err(e) => {
-            PrefixOutcome::Failed {
-                prefix,
-                error: e,
-                attempts: (attempt + 1) as u32,
-            }
-        }
+        Err(e) => PrefixOutcome::Failed {
+            prefix,
+            error: e,
+            attempts: (attempt + 1) as u32,
+        },
     }
 }

@@ -14,9 +14,7 @@ pub fn sparkline_data(data: &VecDeque<f64>) -> Vec<u64> {
     let max_val = data.iter().cloned().fold(f64::MIN, f64::max);
     let scale = if max_val > 0.0 { 100.0 / max_val } else { 1.0 };
 
-    data.iter()
-        .map(|v| (v * scale) as u64)
-        .collect()
+    data.iter().map(|v| (v * scale) as u64).collect()
 }
 
 /// Create a mini progress bar using Unicode block characters.
@@ -27,7 +25,7 @@ pub fn mini_progress_bar(progress: f32, width: usize) -> String {
     let empty = width.saturating_sub(filled);
 
     let filled_char = '\u{2588}'; // Full block
-    let empty_char = '\u{2591}';  // Light shade
+    let empty_char = '\u{2591}'; // Light shade
 
     format!(
         "{}{}",
@@ -74,8 +72,14 @@ pub fn segmented_progress_bar(
     let empty_width = width.saturating_sub(succeeded_width + skipped_width);
 
     vec![
-        Span::styled("█".repeat(succeeded_width), Style::default().fg(Color::Green)),
-        Span::styled("█".repeat(skipped_width), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            "█".repeat(succeeded_width),
+            Style::default().fg(Color::Green),
+        ),
+        Span::styled(
+            "█".repeat(skipped_width),
+            Style::default().fg(Color::Yellow),
+        ),
         Span::raw("░".repeat(empty_width)),
     ]
 }

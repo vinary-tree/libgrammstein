@@ -41,8 +41,8 @@
 //! let vocab = create_vocabulary(&path)?;
 //!
 //! // Each word maps to a unique u64 index (idempotent insert)
-//! let the_idx = vocab.write().insert("the");   // Returns 1
-//! let quick_idx = vocab.write().insert("quick"); // Returns 2
+//! let the_idx = vocab.write().insert("the").expect("test insert");   // Returns 1
+//! let quick_idx = vocab.write().insert("quick").expect("test insert"); // Returns 2
 //!
 //! // N-gram keys are varint-encoded Latin-1 strings
 //! let bigram_key = encode_ngram_key(&["the", "quick"], &vocab);
@@ -59,13 +59,12 @@ use parking_lot::RwLock;
 use thiserror::Error;
 
 // Re-export from libdictenstein
-pub use libdictenstein::persistent_vocab_artrie::{
-    ConcurrentMode, ConcurrentVocabARTrie, ConcurrentVocabStats,
-    LockFreeVocab, LockFreeVocabStats,
-    PersistentVocabARTrie, SharedVocabARTrie, VocabSyncHandle,
-};
 pub use libdictenstein::persistent_artrie::dict_impl::DurabilityPolicy;
 pub use libdictenstein::persistent_artrie::recovery::RecoveryReport;
+pub use libdictenstein::persistent_vocab_artrie::{
+    ConcurrentMode, ConcurrentVocabARTrie, ConcurrentVocabStats, LockFreeVocab, LockFreeVocabStats,
+    PersistentVocabARTrie, SharedVocabARTrie, VocabSyncHandle,
+};
 
 /// First valid vocabulary index.
 ///
@@ -288,7 +287,10 @@ pub fn open_or_create_concurrent_vocabulary_lockfree_with_capacity(
         PersistentVocabARTrie::create_with_start_index(path, FIRST_VALID_INDEX)?
     };
 
-    Ok(Arc::new(ConcurrentVocabARTrie::new_lockfree_with_capacity(trie, estimated_terms)))
+    Ok(Arc::new(ConcurrentVocabARTrie::new_lockfree_with_capacity(
+        trie,
+        estimated_terms,
+    )))
 }
 
 /// Create a new lock-free concurrent vocabulary with BloomFilter.
@@ -390,7 +392,9 @@ pub fn encode_ngram_key(words: &[&str], vocab: &SharedVocabARTrie) -> String {
     let mut buf = Vec::with_capacity(words.len() * 2); // Estimate 2 bytes/word average
     let mut guard = vocab.write();
     for word in words {
-        let index = guard.insert(word);
+        let index = guard
+            .insert(word)
+            .expect("vocabulary insert: persistent ARTrie I/O failed");
         encode_varint(index, &mut buf);
     }
     // Convert bytes to Latin-1 string (each byte → char U+00XX)
@@ -398,11 +402,18 @@ pub fn encode_ngram_key(words: &[&str], vocab: &SharedVocabARTrie) -> String {
 }
 
 /// Try to encode an n-gram as a varint-encoded Latin-1 string (fallible version).
-pub fn try_encode_ngram_key(
-    words: &[&str],
-    vocab: &SharedVocabARTrie,
-) -> VocabularyResult<String> {
-    Ok(encode_ngram_key(words, vocab))
+///
+/// Returns `Err` if the underlying persistent vocabulary insert fails (I/O,
+/// corruption, etc.). Use this in contexts where you can propagate the error
+/// rather than panicking.
+pub fn try_encode_ngram_key(words: &[&str], vocab: &SharedVocabARTrie) -> VocabularyResult<String> {
+    let mut buf = Vec::with_capacity(words.len() * 2);
+    let mut guard = vocab.write();
+    for word in words {
+        let index = guard.insert(word)?;
+        encode_varint(index, &mut buf);
+    }
+    Ok(buf.into_iter().map(|b| char::from(b)).collect())
 }
 
 /// Encode an n-gram using batch insert for vocabulary terms.
@@ -431,7 +442,10 @@ pub fn encode_ngram_key_batch(words: &[&str], vocab: &SharedVocabARTrie) -> Stri
     }
 
     // Use batch insert for single WAL record
-    let indices = vocab.write().insert_batch(words);
+    let indices = vocab
+        .write()
+        .insert_batch(words)
+        .expect("vocabulary batch insert: persistent ARTrie I/O failed");
 
     // Convert indices to varint-encoded Latin-1 string
     let mut buf = Vec::with_capacity(indices.len() * 2);
@@ -444,11 +458,22 @@ pub fn encode_ngram_key_batch(words: &[&str], vocab: &SharedVocabARTrie) -> Stri
 /// Try to encode an n-gram using batch insert (fallible version).
 ///
 /// Uses `insert_batch()` to insert all tokens in a single WAL record.
+/// Returns `Err` if the underlying persistent vocabulary insert fails
+/// (I/O, corruption, etc.). Use this in contexts where you can propagate
+/// the error rather than panicking.
 pub fn try_encode_ngram_key_batch(
     words: &[&str],
     vocab: &SharedVocabARTrie,
 ) -> VocabularyResult<String> {
-    Ok(encode_ngram_key_batch(words, vocab))
+    if words.is_empty() {
+        return Ok(String::new());
+    }
+    let indices = vocab.write().insert_batch(words)?;
+    let mut buf = Vec::with_capacity(indices.len() * 2);
+    for index in indices {
+        encode_varint(index, &mut buf);
+    }
+    Ok(buf.into_iter().map(|b| char::from(b)).collect())
 }
 
 // ============================================================================
@@ -608,10 +633,7 @@ pub fn with_encoded_ngram_key_lockfree<R>(
 /// Like `with_encoded_ngram_key_lockfree` but returns the key as a `Vec<u8>` for
 /// callers that need ownership. Slightly less efficient than the callback variant
 /// since it clones the buffer, but avoids lifetime issues.
-pub fn encode_ngram_key_lockfree_bytes(
-    words: &[&str],
-    vocab: &ConcurrentVocabARTrie,
-) -> Vec<u8> {
+pub fn encode_ngram_key_lockfree_bytes(words: &[&str], vocab: &ConcurrentVocabARTrie) -> Vec<u8> {
     with_encoded_ngram_key_lockfree(words, vocab, |key| key.to_vec())
 }
 
@@ -634,7 +656,9 @@ pub fn encode_ngram_key_bytes(words: &[&str], vocab: &SharedVocabARTrie) -> Vec<
     let mut buf = Vec::with_capacity(words.len() * 2);
     let mut guard = vocab.write();
     for word in words {
-        let index = guard.insert(word);
+        let index = guard
+            .insert(word)
+            .expect("vocabulary insert: persistent ARTrie I/O failed");
         encode_varint(index, &mut buf);
     }
     buf
@@ -643,7 +667,10 @@ pub fn encode_ngram_key_bytes(words: &[&str], vocab: &SharedVocabARTrie) -> Vec<
 /// Encode an n-gram as raw varint bytes using existing vocabulary entries only.
 ///
 /// Returns `None` if any word is not in the vocabulary.
-pub fn encode_ngram_key_existing_bytes(words: &[&str], vocab: &SharedVocabARTrie) -> Option<Vec<u8>> {
+pub fn encode_ngram_key_existing_bytes(
+    words: &[&str],
+    vocab: &SharedVocabARTrie,
+) -> Option<Vec<u8>> {
     let mut buf = Vec::with_capacity(words.len() * 2);
     let guard = vocab.read();
     for word in words {
@@ -791,9 +818,9 @@ mod tests {
     fn test_insert_new_word() {
         let (_dir, vocab) = create_temp_vocab();
 
-        let idx1 = vocab.write().insert("the");
-        let idx2 = vocab.write().insert("quick");
-        let idx3 = vocab.write().insert("brown");
+        let idx1 = vocab.write().insert("the").expect("test insert");
+        let idx2 = vocab.write().insert("quick").expect("test insert");
+        let idx3 = vocab.write().insert("brown").expect("test insert");
 
         // Each word should get a unique index
         assert_ne!(idx1, idx2);
@@ -810,8 +837,8 @@ mod tests {
     fn test_insert_existing_word() {
         let (_dir, vocab) = create_temp_vocab();
 
-        let idx1 = vocab.write().insert("hello");
-        let idx2 = vocab.write().insert("hello");
+        let idx1 = vocab.write().insert("hello").expect("test insert");
+        let idx2 = vocab.write().insert("hello").expect("test insert");
 
         // Same word should return same index
         assert_eq!(idx1, idx2);
@@ -824,7 +851,7 @@ mod tests {
 
         assert!(vocab.read().get_index("nonexistent").is_none());
 
-        let idx1 = vocab.write().insert("test");
+        let idx1 = vocab.write().insert("test").expect("test insert");
         let idx2 = vocab.read().get_index("test");
 
         assert_eq!(idx2, Some(idx1));
@@ -835,7 +862,7 @@ mod tests {
         let (_dir, vocab) = create_temp_vocab();
 
         assert!(!vocab.read().contains("word"));
-        vocab.write().insert("word");
+        vocab.write().insert("word").expect("test insert");
         assert!(vocab.read().contains("word"));
     }
 
@@ -928,8 +955,8 @@ mod tests {
         let (_dir, vocab) = create_temp_vocab();
 
         // Insert some words first
-        vocab.write().insert("the");
-        vocab.write().insert("quick");
+        vocab.write().insert("the").expect("test insert");
+        vocab.write().insert("quick").expect("test insert");
 
         // Batch encode with mix of existing and new words
         let words = ["the", "quick", "brown", "fox"];
@@ -1012,9 +1039,9 @@ mod tests {
         let (_dir, vocab) = create_temp_vocab();
 
         // Insert words
-        let idx1 = vocab.write().insert("hello");
-        let idx2 = vocab.write().insert("world");
-        let idx3 = vocab.write().insert("rust");
+        let idx1 = vocab.write().insert("hello").expect("test insert");
+        let idx2 = vocab.write().insert("world").expect("test insert");
+        let idx3 = vocab.write().insert("rust").expect("test insert");
 
         // Reverse lookups should work
         assert_eq!(vocab.read().get_term(idx1), Some("hello".to_string()));
@@ -1045,9 +1072,9 @@ mod tests {
     fn test_case_sensitivity() {
         let (_dir, vocab) = create_temp_vocab();
 
-        let lower = vocab.write().insert("the");
-        let upper = vocab.write().insert("The");
-        let all_caps = vocab.write().insert("THE");
+        let lower = vocab.write().insert("the").expect("test insert");
+        let upper = vocab.write().insert("The").expect("test insert");
+        let all_caps = vocab.write().insert("THE").expect("test insert");
 
         // Case-sensitive: all should be different
         assert_ne!(lower, upper);
@@ -1059,9 +1086,9 @@ mod tests {
     fn test_punctuation_as_tokens() {
         let (_dir, vocab) = create_temp_vocab();
 
-        let comma = vocab.write().insert(",");
-        let period = vocab.write().insert(".");
-        let quote = vocab.write().insert("\"");
+        let comma = vocab.write().insert(",").expect("test insert");
+        let period = vocab.write().insert(".").expect("test insert");
+        let quote = vocab.write().insert("\"").expect("test insert");
 
         // Each punctuation should be a unique token
         assert_ne!(comma, period);
@@ -1083,8 +1110,8 @@ mod tests {
         let idx2;
         {
             let vocab = create_vocabulary(&path).expect("Failed to create vocab");
-            idx1 = vocab.write().insert("hello");
-            idx2 = vocab.write().insert("world");
+            idx1 = vocab.write().insert("hello").expect("test insert");
+            idx2 = vocab.write().insert("world").expect("test insert");
             vocab.write().checkpoint().expect("Checkpoint failed");
         }
 
@@ -1097,7 +1124,7 @@ mod tests {
             assert_eq!(vocab.read().get_index("world"), Some(idx2));
 
             // New word should get next index
-            let idx3 = vocab.write().insert("new");
+            let idx3 = vocab.write().insert("new").expect("test insert");
             assert_eq!(idx3, 3); // Sequential after idx1=1, idx2=2
         }
     }
@@ -1110,8 +1137,8 @@ mod tests {
         assert!(encode_ngram_key_existing(&["unknown"], &vocab).is_none());
 
         // Add some words
-        vocab.write().insert("the");
-        vocab.write().insert("quick");
+        vocab.write().insert("the").expect("test insert");
+        vocab.write().insert("quick").expect("test insert");
 
         // Now they should work
         let key = encode_ngram_key_existing(&["the", "quick"], &vocab);
@@ -1138,7 +1165,9 @@ mod tests {
         let mut handles = vec![];
         for _ in 0..10 {
             let vocab = Arc::clone(&vocab);
-            handles.push(thread::spawn(move || vocab.write().insert("shared_word")));
+            handles.push(thread::spawn(move || {
+                vocab.write().insert("shared_word").expect("test insert")
+            }));
         }
 
         // Collect results
@@ -1159,7 +1188,11 @@ mod tests {
         // Verify that Latin-1 encoding correctly round-trips all byte values
         for byte in 0u8..=255 {
             let c = char::from(byte);
-            assert_eq!(c as u8, byte, "Byte {} should round-trip through char", byte);
+            assert_eq!(
+                c as u8, byte,
+                "Byte {} should round-trip through char",
+                byte
+            );
         }
     }
 
@@ -1171,7 +1204,10 @@ mod tests {
         // Insert more than 131,068 words (old PUA limit)
         // We'll test with a smaller number for speed, but verify indices are correct
         for i in 0..1000 {
-            let idx = vocab.write().insert(&format!("word{}", i));
+            let idx = vocab
+                .write()
+                .insert(&format!("word{}", i))
+                .expect("test insert");
             // Indices start at 1, not 0
             assert_eq!(idx, (i + 1) as u64);
         }
@@ -1192,7 +1228,7 @@ mod tests {
         let (_dir, vocab) = create_temp_vocab();
 
         // After inserting, vocabulary should be dirty
-        vocab.write().insert("test");
+        vocab.write().insert("test").expect("test insert");
         assert!(vocab.read().is_dirty());
 
         // After checkpoint, should no longer be dirty
@@ -1208,7 +1244,7 @@ mod tests {
         assert!(!vocab.read().contains_index(0));
 
         // After insert, index 1 should exist
-        vocab.write().insert("test");
+        vocab.write().insert("test").expect("test insert");
         assert!(vocab.read().contains_index(1));
         assert!(!vocab.read().contains_index(2)); // Not yet inserted
     }
@@ -1224,8 +1260,8 @@ mod tests {
         assert!(vocab.read().has_bloom_filter());
 
         // Insert some words
-        vocab.write().insert("hello");
-        vocab.write().insert("world");
+        vocab.write().insert("hello").expect("test insert");
+        vocab.write().insert("world").expect("test insert");
 
         // Bloom filter should report these might exist
         assert!(vocab.read().might_contain("hello"));
@@ -1354,7 +1390,11 @@ mod tests {
         // New term should get the next index.
         // The lock-free layer starts from next_index of the persistent trie (3).
         let idx3 = concurrent2.insert_cas("new");
-        assert!(idx3 >= 3, "New term index should be at least 3, got {}", idx3);
+        assert!(
+            idx3 >= 3,
+            "New term index should be at least 3, got {}",
+            idx3
+        );
     }
 
     #[test]
@@ -1370,7 +1410,9 @@ mod tests {
         concurrent.insert_cas("three");
 
         // Check stats
-        let stats = concurrent.lockfree_stats().expect("should have lockfree stats");
+        let stats = concurrent
+            .lockfree_stats()
+            .expect("should have lockfree stats");
         assert_eq!(stats.entry_count, 3);
         assert_eq!(stats.next_index, 4); // 1, 2, 3 inserted, next is 4 (start at 1)
 

@@ -4,7 +4,7 @@
 //! with checkpoint/resume support for long-running imports.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,11 +18,8 @@ use crate::ngram::vocabulary::{
     open_or_create_concurrent_vocabulary_lockfree_with_capacity,
 };
 
-
 use super::aggregator::YearAggregator;
-use super::checkpoint::{
-    CheckpointError, ImportCheckpoint, MknPhase, TrieCheckpointStorage,
-};
+use super::checkpoint::{CheckpointError, ImportCheckpoint, MknPhase, TrieCheckpointStorage};
 use super::config::GoogleBooksConfig;
 use super::events::{ImportCommand, ImportEvent, LogLevel};
 use super::languages::{get_file_url, get_metadata, get_prefixes, is_supported};
@@ -44,16 +41,16 @@ fn estimate_ngram_count(config: &GoogleBooksConfig) -> u64 {
     // These are rough estimates based on Google Books v3 dataset
     let per_order: &[u64] = match config.language.as_str() {
         "en" | "eng" => &[
-            0,          // Order 0 (unused)
-            13_000_000, // 1-grams: ~13M
-            314_000_000, // 2-grams: ~314M
-            977_000_000, // 3-grams: ~977M
+            0,             // Order 0 (unused)
+            13_000_000,    // 1-grams: ~13M
+            314_000_000,   // 2-grams: ~314M
+            977_000_000,   // 3-grams: ~977M
             1_313_000_000, // 4-grams: ~1.3B
             1_176_000_000, // 5-grams: ~1.2B
         ],
         _ => &[
-            0,          // Order 0 (unused)
-            5_000_000,  // 1-grams (estimate for non-English)
+            0,           // Order 0 (unused)
+            5_000_000,   // 1-grams (estimate for non-English)
             100_000_000, // 2-grams
             300_000_000, // 3-grams
             500_000_000, // 4-grams
@@ -195,10 +192,7 @@ fn extract_retry_after(error: &ImportError) -> Option<RetryAfter> {
 /// Check if an error is specifically a rate limit error (HTTP 429).
 #[cfg(feature = "google-books")]
 fn is_rate_limit_error(error: &ImportError) -> bool {
-    matches!(
-        error,
-        ImportError::Reader(ReaderError::RateLimited { .. })
-    )
+    matches!(error, ImportError::Reader(ReaderError::RateLimited { .. }))
 }
 
 /// Result of storing an n-gram, with counter deltas for batched updates.
@@ -250,9 +244,9 @@ fn store_ngram_shared_legacy(
 ) -> Result<NgramStorageResult, ImportError> {
     let mut trie_guard = trie.write();
     let is_new = trie_guard.get_value_bytes(ngram.as_bytes()).is_none();
-    trie_guard.increment_bytes(ngram.as_bytes(), count as i64).map_err(|e| {
-        ImportError::Trie(format!("Failed to store ngram '{}': {}", ngram, e))
-    })?;
+    trie_guard
+        .increment_bytes(ngram.as_bytes(), count as i64)
+        .map_err(|e| ImportError::Trie(format!("Failed to store ngram '{}': {}", ngram, e)))?;
     Ok(NgramStorageResult { is_new })
 }
 
@@ -302,7 +296,6 @@ impl TrieCheckpointStorage for PersistentARTrie<u64> {
 // ============================================================================
 // Worker Pool Infrastructure
 // ============================================================================
-
 
 // ============================================================================
 // Type definitions
@@ -604,18 +597,16 @@ impl GoogleBooksImporter {
         let vocabulary = open_or_create_concurrent_vocabulary_lockfree_with_capacity(
             &vocabulary_path,
             estimated_vocab,
-        ).map_err(|e| {
-            ImportError::Trie(format!("Failed to create/open vocabulary: {}", e))
-        })?;
+        )
+        .map_err(|e| ImportError::Trie(format!("Failed to create/open vocabulary: {}", e)))?;
 
         // Create storage backend with vocabulary for compact encoding
         let storage = NgramStorage::resume_or_start_with_vocabulary(
             &config,
             estimated_ngrams,
             Some(vocabulary),
-        ).map_err(|e| {
-            ImportError::Trie(format!("Failed to create storage: {}", e))
-        })?;
+        )
+        .map_err(|e| ImportError::Trie(format!("Failed to create storage: {}", e)))?;
 
         // Log storage mode and vocabulary status
         if storage.is_sharded() {
@@ -661,7 +652,10 @@ impl GoogleBooksImporter {
     /// - 200_000+: Large-memory systems with fast storage
     pub fn set_lockfree_flush_threshold(&mut self, threshold: u64) {
         self.lockfree_flush_threshold = threshold;
-        log::info!("Lock-free flush threshold set to {} entries per shard", threshold);
+        log::info!(
+            "Lock-free flush threshold set to {} entries per shard",
+            threshold
+        );
     }
 
     /// Get the current lock-free overlay flush threshold.
@@ -771,10 +765,9 @@ impl GoogleBooksImporter {
                 importer.checkpoint.stats.ngrams_processed,
                 Ordering::Relaxed,
             );
-            importer.unique_ngrams.store(
-                importer.checkpoint.stats.unique_ngrams,
-                Ordering::Relaxed,
-            );
+            importer
+                .unique_ngrams
+                .store(importer.checkpoint.stats.unique_ngrams, Ordering::Relaxed);
 
             // Clean up JSON checkpoint if it exists (we have trie data now)
             if ImportCheckpoint::exists(&checkpoint_path) {
@@ -857,10 +850,9 @@ impl GoogleBooksImporter {
                 importer.checkpoint.stats.ngrams_processed,
                 Ordering::Relaxed,
             );
-            importer.unique_ngrams.store(
-                importer.checkpoint.stats.unique_ngrams,
-                Ordering::Relaxed,
-            );
+            importer
+                .unique_ngrams
+                .store(importer.checkpoint.stats.unique_ngrams, Ordering::Relaxed);
 
             // Migrate JSON checkpoint to trie for future consistency
             log::info!("Migrating JSON checkpoint to trie-based storage...");
@@ -885,10 +877,7 @@ impl GoogleBooksImporter {
     /// This can lead to index inconsistency on resume.
     ///
     /// **Warning threshold**: 1 MB (WAL files should be ~64 bytes when checkpointed)
-    fn check_vocabulary_wal_consistency(
-        vocabulary_path: &Path,
-        checkpoint_path: &Path,
-    ) {
+    fn check_vocabulary_wal_consistency(vocabulary_path: &Path, checkpoint_path: &Path) {
         // Only check if a checkpoint exists (indicating a resume scenario)
         let checkpoint_trie_path = checkpoint_path.with_extension("checkpoint.artrie");
         let has_checkpoint = checkpoint_path.exists() || checkpoint_trie_path.exists();
@@ -961,8 +950,6 @@ impl GoogleBooksImporter {
         }
     }
 
-
-
     /// Process a single local file.
     ///
     /// For single-trie mode, uses file transactions with INCREMENT semantics
@@ -1000,7 +987,8 @@ impl GoogleBooksImporter {
             ngrams_in_file += 1;
         }
 
-        self.total_ngrams.fetch_add(ngrams_in_file, Ordering::Relaxed);
+        self.total_ngrams
+            .fetch_add(ngrams_in_file, Ordering::Relaxed);
         Ok(ngrams_in_file)
     }
 
@@ -1009,12 +997,15 @@ impl GoogleBooksImporter {
     /// Uses INCREMENT semantics for cross-file count accumulation with
     /// atomic per-file commit/rollback.
     fn process_file_with_transaction(&self, path: &Path) -> Result<u64, ImportError> {
-        let file_id = path.file_name()
+        let file_id = path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown");
 
         // Begin file transaction
-        let mut tx = self.storage.begin_file_tx(file_id)
+        let mut tx = self
+            .storage
+            .begin_file_tx(file_id)
             .map_err(|e| ImportError::Trie(format!("Failed to begin file tx: {}", e)))?;
 
         let result = self.process_file_inner(&mut tx, path);
@@ -1022,10 +1013,12 @@ impl GoogleBooksImporter {
         match result {
             Ok(ngrams_in_file) => {
                 // Commit atomically
-                self.storage.commit_file_tx(tx)
+                self.storage
+                    .commit_file_tx(tx)
                     .map_err(|e| ImportError::Trie(format!("Failed to commit file tx: {}", e)))?;
 
-                self.total_ngrams.fetch_add(ngrams_in_file, Ordering::Relaxed);
+                self.total_ngrams
+                    .fetch_add(ngrams_in_file, Ordering::Relaxed);
                 Ok(ngrams_in_file)
             }
             Err(e) => {
@@ -1056,7 +1049,8 @@ impl GoogleBooksImporter {
 
             if let Some(aggregated) = aggregator.push(record) {
                 // Use tx_increment for INCREMENT semantics
-                self.storage.tx_increment_ngram(tx, &aggregated.ngram, aggregated.total_count)
+                self.storage
+                    .tx_increment_ngram(tx, &aggregated.ngram, aggregated.total_count)
                     .map_err(|e| ImportError::Trie(format!("Failed to increment ngram: {}", e)))?;
                 ngrams_in_file += 1;
             }
@@ -1064,7 +1058,8 @@ impl GoogleBooksImporter {
 
         // Flush final n-gram
         if let Some(aggregated) = aggregator.flush() {
-            self.storage.tx_increment_ngram(tx, &aggregated.ngram, aggregated.total_count)
+            self.storage
+                .tx_increment_ngram(tx, &aggregated.ngram, aggregated.total_count)
                 .map_err(|e| ImportError::Trie(format!("Failed to increment ngram: {}", e)))?;
             ngrams_in_file += 1;
         }
@@ -1077,9 +1072,10 @@ impl GoogleBooksImporter {
     /// Uses the storage backend (single-trie or sharded).
     /// MKN statistics are computed as a post-processing step after import completes.
     fn store_ngram(&self, ngram: &str, count: u64) -> Result<(), ImportError> {
-        let is_new = self.storage.store(ngram, count).map_err(|e| {
-            ImportError::Trie(format!("Failed to store ngram '{}': {}", ngram, e))
-        })?;
+        let is_new = self
+            .storage
+            .store(ngram, count)
+            .map_err(|e| ImportError::Trie(format!("Failed to store ngram '{}': {}", ngram, e)))?;
 
         if is_new {
             self.unique_ngrams.fetch_add(1, Ordering::Relaxed);
@@ -1110,8 +1106,6 @@ impl GoogleBooksImporter {
 
         Some(remaining as u64)
     }
-
-
 
     /// Build final statistics.
     fn build_stats(&self) -> Result<ImportStats, ImportError> {
@@ -1221,10 +1215,8 @@ where
     result
 }
 
-
 /// Default checkpoint interval for periodic checkpoints (5 seconds).
 pub const DEFAULT_CHECKPOINT_INTERVAL_MS: u64 = 5000;
-
 
 #[cfg(feature = "google-books")]
 mod checkpoint_ops;

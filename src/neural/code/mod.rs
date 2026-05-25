@@ -26,10 +26,10 @@ mod ensemble;
 mod graphcodebert;
 mod unixcoder;
 
-pub use codet5::{CodeT5Embedder, CodeT5Config};
+pub use codet5::{CodeT5Config, CodeT5Embedder};
 pub use ensemble::{EnsembleCodeEmbedder, EnsembleStrategy};
-pub use graphcodebert::{GraphCodeBertEmbedder, GraphCodeBertConfig};
-pub use unixcoder::{UniXcoderEmbedder, UniXcoderConfig};
+pub use graphcodebert::{GraphCodeBertConfig, GraphCodeBertEmbedder};
+pub use unixcoder::{UniXcoderConfig, UniXcoderEmbedder};
 
 use std::sync::Arc;
 
@@ -224,11 +224,8 @@ pub trait CodeEmbedder: Send + Sync {
     /// Embed multiple code snippets in a batch.
     ///
     /// More efficient than calling `embed_code` repeatedly for multiple snippets.
-    fn embed_code_batch(
-        &self,
-        codes: &[&str],
-        languages: &[CodeLanguage],
-    ) -> Result<Vec<Vec<f32>>>;
+    fn embed_code_batch(&self, codes: &[&str], languages: &[CodeLanguage])
+        -> Result<Vec<Vec<f32>>>;
 
     /// Get the embedding dimension.
     fn embedding_dim(&self) -> usize;
@@ -300,7 +297,8 @@ impl CodeEmbeddingCache {
         }
 
         let key = self.compute_key(code, language);
-        self.cache.insert(key, Arc::from(embedding.into_boxed_slice()));
+        self.cache
+            .insert(key, Arc::from(embedding.into_boxed_slice()));
     }
 
     /// Clear the cache.

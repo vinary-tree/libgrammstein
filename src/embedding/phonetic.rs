@@ -39,9 +39,7 @@
 //! See liblevenshtein's `docs/verification/phonetic/` for details.
 
 use dashmap::DashMap;
-use liblevenshtein::phonetic::{
-    zompist_rules_char, OnlinePhoneticTransducerChar, RewriteRuleChar,
-};
+use liblevenshtein::phonetic::{zompist_rules_char, OnlinePhoneticTransducerChar, RewriteRuleChar};
 use std::sync::Arc;
 
 use super::SubwordEmbedding;
@@ -358,10 +356,7 @@ impl PhoneticEmbedding {
             .collect();
 
         // Sort by combined similarity
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         scored.truncate(k);
         scored
@@ -395,10 +390,7 @@ impl PhoneticEmbedding {
             })
             .collect();
 
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         scored.truncate(k);
         scored

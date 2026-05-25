@@ -181,22 +181,27 @@ impl EquationRagIndex {
     }
 
     /// Retrieve similar equations with domain filter.
-    pub fn retrieve_in_domain(&self, query_embedding: &[f32], domain: &str) -> Vec<RetrievalResult> {
+    pub fn retrieve_in_domain(
+        &self,
+        query_embedding: &[f32],
+        domain: &str,
+    ) -> Vec<RetrievalResult> {
         self.retrieve_with_filter(query_embedding, Some(domain))
     }
 
     /// Retrieve similar equations with optional domain filter.
-    fn retrieve_with_filter(&self, query_embedding: &[f32], domain: Option<&str>) -> Vec<RetrievalResult> {
+    fn retrieve_with_filter(
+        &self,
+        query_embedding: &[f32],
+        domain: Option<&str>,
+    ) -> Vec<RetrievalResult> {
         if query_embedding.len() != self.dimension {
             return Vec::new();
         }
 
         // Get candidate indices
         let candidates: Vec<usize> = if let Some(domain) = domain {
-            self.domain_index
-                .get(domain)
-                .cloned()
-                .unwrap_or_default()
+            self.domain_index.get(domain).cloned().unwrap_or_default()
         } else {
             (0..self.equations.len()).collect()
         };
@@ -308,7 +313,11 @@ impl EquationRetriever {
     }
 
     /// Retrieve with domain filter (not cached).
-    pub fn retrieve_in_domain(&self, query_embedding: &[f32], domain: &str) -> Vec<RetrievalResult> {
+    pub fn retrieve_in_domain(
+        &self,
+        query_embedding: &[f32],
+        domain: &str,
+    ) -> Vec<RetrievalResult> {
         self.index.retrieve_in_domain(query_embedding, domain)
     }
 
@@ -356,7 +365,10 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// Convert an embedding to a cache key.
 fn embedding_to_cache_key(embedding: &[f32]) -> Vec<u8> {
     // Quantize to reduce cache key size and improve hit rate
-    embedding.iter().map(|&x| (x * 127.0).clamp(-128.0, 127.0) as i8 as u8).collect()
+    embedding
+        .iter()
+        .map(|&x| (x * 127.0).clamp(-128.0, 127.0) as i8 as u8)
+        .collect()
 }
 
 /// Builder for equation RAG index.
@@ -466,13 +478,15 @@ mod tests {
             "eq1".to_string(),
             "x^2".to_string(),
             create_test_embedding(1, 8),
-        ).with_domain("algebra".to_string());
+        )
+        .with_domain("algebra".to_string());
 
         let doc2 = EquationDocument::new(
             "eq2".to_string(),
             "\\int x dx".to_string(),
             create_test_embedding(2, 8),
-        ).with_domain("calculus".to_string());
+        )
+        .with_domain("calculus".to_string());
 
         index.add(doc1).unwrap();
         index.add(doc2).unwrap();
@@ -498,11 +512,7 @@ mod tests {
         let mut doc_emb = vec![0.0f32; 8];
         doc_emb[0] = 1.0; // Unit vector along first axis
 
-        let doc = EquationDocument::new(
-            "eq1".to_string(),
-            "x^2".to_string(),
-            doc_emb,
-        );
+        let doc = EquationDocument::new("eq1".to_string(), "x^2".to_string(), doc_emb);
         index.add(doc).unwrap();
 
         // Query with an orthogonal embedding (unit vector along second axis)
@@ -534,11 +544,13 @@ mod tests {
     #[test]
     fn test_retriever_cache() {
         let mut index = EquationRagIndex::new(8);
-        index.add(EquationDocument::new(
-            "eq1".to_string(),
-            "x^2".to_string(),
-            create_test_embedding(1, 8),
-        )).unwrap();
+        index
+            .add(EquationDocument::new(
+                "eq1".to_string(),
+                "x^2".to_string(),
+                create_test_embedding(1, 8),
+            ))
+            .unwrap();
 
         let mut retriever = EquationRetriever::new(index);
 

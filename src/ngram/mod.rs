@@ -58,6 +58,7 @@ pub mod vocabulary_indexed;
 pub mod accumulator;
 
 pub use entry::{NgramEntry, NgramEntrySnapshot};
+pub use metadata_filtering_zipper::{MetadataFilteringZipper, METADATA_PREFIX};
 pub use model::NgramModel;
 #[cfg(feature = "serde-extras")]
 pub use model::{PortableNgramModel, PortableVocabulary};
@@ -68,13 +69,12 @@ pub use trainer::{
 pub use trie::{IterableDictionary, NgramTrie, NGRAM_SEPARATOR};
 pub use vocabulary::{
     create_vocabulary, create_vocabulary_with_bloom, decode_ngram_key, decode_varint,
-    encode_ngram_key, encode_ngram_key_batch, encode_ngram_key_existing, encode_varint, ngram_order,
-    open_or_create_vocabulary, open_or_create_vocabulary_with_bloom, open_vocabulary,
+    encode_ngram_key, encode_ngram_key_batch, encode_ngram_key_existing, encode_varint,
+    ngram_order, open_or_create_vocabulary, open_or_create_vocabulary_with_bloom, open_vocabulary,
     open_vocabulary_with_recovery, try_encode_ngram_key, try_encode_ngram_key_batch,
     DurabilityPolicy, PersistentVocabARTrie, RecoveryReport, SharedVocabARTrie, VocabSyncHandle,
     VocabularyError, VocabularyResult, FIRST_VALID_INDEX,
 };
-pub use metadata_filtering_zipper::{MetadataFilteringZipper, METADATA_PREFIX};
 pub use vocabulary_indexed::{
     decode_key_to_indices, VocabularyIndexedDictionary, VocabularyIndexedNode,
 };

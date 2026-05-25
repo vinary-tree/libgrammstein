@@ -64,8 +64,8 @@ mod postprocess;
 mod router;
 
 pub use backend::{
-    Backend, BackendCapabilities, BackendInfo, ExtractedDocument, ExtractedPage,
-    MarkerBackend, NougatBackend, PdfBackend,
+    Backend, BackendCapabilities, BackendInfo, ExtractedDocument, ExtractedPage, MarkerBackend,
+    NougatBackend, PdfBackend,
 };
 pub use config::{PdfConfig, PdfConfigBuilder};
 pub use error::{PdfError, PdfResult};
@@ -128,11 +128,7 @@ impl PdfExtractor {
     }
 
     /// Extract from multiple PDFs in parallel.
-    pub fn extract_batch<P, F>(
-        &self,
-        paths: &[P],
-        progress: F,
-    ) -> Vec<PdfResult<ExtractedDocument>>
+    pub fn extract_batch<P, F>(&self, paths: &[P], progress: F) -> Vec<PdfResult<ExtractedDocument>>
     where
         P: AsRef<Path> + Sync,
         F: Fn(BatchProgress) + Send + Sync,

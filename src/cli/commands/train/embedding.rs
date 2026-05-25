@@ -13,10 +13,12 @@ use crate::corpus::CorpusReader;
 
 use super::corpus_reader::create_corpus_reader;
 
-pub(super) fn train_embedding(args: TrainEmbeddingArgs, verbose: bool, quiet: bool) -> CliResult<()> {
-    use crate::cli::checkpoint::{
-        CheckpointManager, TrainingTimer,
-    };
+pub(super) fn train_embedding(
+    args: TrainEmbeddingArgs,
+    verbose: bool,
+    quiet: bool,
+) -> CliResult<()> {
+    use crate::cli::checkpoint::{CheckpointManager, TrainingTimer};
     use crate::embedding::{EmbeddingTrainerBuilder, SubwordEmbedding};
 
     if verbose {
@@ -53,18 +55,9 @@ pub(super) fn train_embedding(args: TrainEmbeddingArgs, verbose: bool, quiet: bo
         let checkpoint = manager.load_embedding_checkpoint(resume_path)?;
 
         if !quiet {
-            eprintln!(
-                "Resuming from checkpoint: {}",
-                style(resume_path).cyan()
-            );
-            eprintln!(
-                "  {} epochs completed",
-                checkpoint.state.completed_epochs
-            );
-            eprintln!(
-                "  {:.2}s elapsed",
-                checkpoint.state.elapsed_secs
-            );
+            eprintln!("Resuming from checkpoint: {}", style(resume_path).cyan());
+            eprintln!("  {} epochs completed", checkpoint.state.completed_epochs);
+            eprintln!("  {:.2}s elapsed", checkpoint.state.elapsed_secs);
         }
 
         // Load the saved model
@@ -261,4 +254,3 @@ fn train_embedding_with_checkpoints(
 
     Ok(model)
 }
-

@@ -16,23 +16,26 @@ use tempfile::TempDir;
 /// vocab and n-gram density.
 fn write_synthetic_corpus(path: &std::path::Path, sentences: usize) {
     let pool = [
-        "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog",
-        "a", "cat", "sat", "on", "mat", "and", "watched", "bird",
-        "in", "garden", "she", "opened", "door", "walked", "into", "room",
-        "they", "ran", "across", "field", "through", "woods", "I", "made",
-        "cup", "of", "tea", "sat", "down", "to", "think", "he",
-        "picked", "up", "book", "started", "read", "closed", "his", "eyes",
-        "listened", "rain", "drove", "along", "road", "past", "old", "church",
+        "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog", "a", "cat", "sat", "on",
+        "mat", "and", "watched", "bird", "in", "garden", "she", "opened", "door", "walked", "into",
+        "room", "they", "ran", "across", "field", "through", "woods", "I", "made", "cup", "of",
+        "tea", "sat", "down", "to", "think", "he", "picked", "up", "book", "started", "read",
+        "closed", "his", "eyes", "listened", "rain", "drove", "along", "road", "past", "old",
+        "church",
     ];
     let mut file = std::fs::File::create(path).expect("create corpus");
     // Simple deterministic mixer — no rand crate dependency in benches.
     let mut state: u64 = 0xCAFEBABEDEADBEEF;
     for _ in 0..sentences {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let len = 8 + (state >> 60) as usize; // 8..=23 words
         let mut words = Vec::with_capacity(len);
         for _ in 0..len {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             words.push(pool[(state as usize) % pool.len()]);
         }
         writeln!(file, "{}.", words.join(" ")).expect("write");

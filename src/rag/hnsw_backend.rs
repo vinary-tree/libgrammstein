@@ -230,10 +230,7 @@ impl HnswBackend {
         self.ensure_built();
 
         // parallel_search takes &[Vec<T>], so we need owned Vecs
-        let normalized: Vec<Vec<f32>> = embeddings
-            .iter()
-            .map(|e| normalize_embedding(e))
-            .collect();
+        let normalized: Vec<Vec<f32>> = embeddings.iter().map(|e| normalize_embedding(e)).collect();
 
         let index_guard = self.index.read();
         let Some(ref index) = *index_guard else {
@@ -305,13 +302,15 @@ impl HnswBackend {
         let allowed_ids: Vec<usize> = points_guard
             .iter()
             .enumerate()
-            .filter_map(|(idx, (_, doc_id))| {
-                if filter(*doc_id) {
-                    Some(idx)
-                } else {
-                    None
-                }
-            })
+            .filter_map(
+                |(idx, (_, doc_id))| {
+                    if filter(*doc_id) {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                },
+            )
             .collect();
 
         if allowed_ids.is_empty() {
@@ -319,8 +318,7 @@ impl HnswBackend {
         }
 
         // Use filtered search
-        let results =
-            index.search_filter(&normalized, top_k, ef_search, Some(&allowed_ids));
+        let results = index.search_filter(&normalized, top_k, ef_search, Some(&allowed_ids));
 
         results
             .iter()
@@ -398,9 +396,9 @@ impl HnswBackend {
     fn load_native_graph(path: &Path) -> Result<Hnsw<'static, f32, DistDot>> {
         let mut reloader = HnswIo::new(path, "hnsw_index");
 
-        let hnsw: Hnsw<f32, DistDot> = reloader
-            .load_hnsw()
-            .map_err(|e| RagError::Serialization(format!("Failed to reload HNSW graph: {:?}", e)))?;
+        let hnsw: Hnsw<f32, DistDot> = reloader.load_hnsw().map_err(|e| {
+            RagError::Serialization(format!("Failed to reload HNSW graph: {:?}", e))
+        })?;
 
         // Safety: With default ReloadOptions (no mmap), data is fully deserialized
         // and owned by the Hnsw struct, so 'static lifetime is valid.
@@ -530,10 +528,8 @@ impl RetrievalBackend for HnswBackend {
                 .map_err(|e| RagError::Serialization(e.to_string()))?;
 
             // Serialize batch of document IDs
-            let batch_ids: Vec<DocumentId> = points_guard[start..end]
-                .iter()
-                .map(|(_, id)| *id)
-                .collect();
+            let batch_ids: Vec<DocumentId> =
+                points_guard[start..end].iter().map(|(_, id)| *id).collect();
             bincode::serialize_into(&mut writer, &batch_ids)
                 .map_err(|e| RagError::Serialization(e.to_string()))?;
         }
@@ -544,9 +540,9 @@ impl RetrievalBackend for HnswBackend {
         let index_guard = self.index.read();
         if let Some(ref index) = *index_guard {
             // hnsw_rs file_dump takes a directory path and basename
-            index
-                .file_dump(path, "hnsw_index")
-                .map_err(|e| RagError::Serialization(format!("Failed to dump HNSW graph: {}", e)))?;
+            index.file_dump(path, "hnsw_index").map_err(|e| {
+                RagError::Serialization(format!("Failed to dump HNSW graph: {}", e))
+            })?;
         }
 
         Ok(())
@@ -629,7 +625,10 @@ impl RetrievalBackend for HnswBackend {
                 }
             }
         } else {
-            log::debug!("No native HNSW graph files found at {:?}, will rebuild", path);
+            log::debug!(
+                "No native HNSW graph files found at {:?}, will rebuild",
+                path
+            );
             (None, true)
         };
 

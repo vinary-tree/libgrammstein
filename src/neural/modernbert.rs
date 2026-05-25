@@ -71,9 +71,10 @@ pub struct ModernBertModel {
 impl ModernBertModel {
     /// Load a ModernBERT model from HuggingFace Hub.
     pub fn load(config: ModernBertConfig) -> Result<Self> {
-        let device = config.device.to_candle().map_err(|e| {
-            NeuralError::DeviceNotAvailable(format!("{:?}: {}", config.device, e))
-        })?;
+        let device = config
+            .device
+            .to_candle()
+            .map_err(|e| NeuralError::DeviceNotAvailable(format!("{:?}: {}", config.device, e)))?;
 
         // Download model files from HuggingFace Hub
         let api = Api::new().map_err(|e| NeuralError::ModelLoad(e.to_string()))?;
@@ -114,9 +115,8 @@ impl ModernBertModel {
             .map_err(|e| NeuralError::Tokenization(format!("Failed to load tokenizer: {}", e)))?;
 
         // Load model weights
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[model_path], config.dtype, &device)?
-        };
+        let vb =
+            unsafe { VarBuilder::from_mmaped_safetensors(&[model_path], config.dtype, &device)? };
 
         let model = ModernBert::load(vb, &model_config)?;
 
@@ -244,10 +244,8 @@ impl ModernBertModel {
             attention_mask.extend(std::iter::repeat(0.0).take(max_len - len));
         }
 
-        let input_tensor =
-            Tensor::from_vec(padded_ids, (batch_size, max_len), &self.device)?;
-        let mask_tensor =
-            Tensor::from_vec(attention_mask, (batch_size, max_len), &self.device)?;
+        let input_tensor = Tensor::from_vec(padded_ids, (batch_size, max_len), &self.device)?;
+        let mask_tensor = Tensor::from_vec(attention_mask, (batch_size, max_len), &self.device)?;
 
         let hidden_states = self.forward(&input_tensor, Some(&mask_tensor))?;
 

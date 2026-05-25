@@ -49,7 +49,9 @@ impl DetectedModel {
 
     fn vocab_size(&self) -> usize {
         match self {
-            DetectedModel::Hybrid { ngram_vocab_size, .. } => *ngram_vocab_size,
+            DetectedModel::Hybrid {
+                ngram_vocab_size, ..
+            } => *ngram_vocab_size,
             DetectedModel::Ngram { vocab_size, .. } => *vocab_size,
             DetectedModel::Embedding { vocab_size, .. } => *vocab_size,
             DetectedModel::Unknown => 0,
@@ -59,13 +61,14 @@ impl DetectedModel {
 
 /// Try to detect model type and extract metadata.
 fn detect_model(path: &Path) -> DetectedModel {
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
-    use crate::ngram::{NgramEntry, NgramModel};
-    use crate::hybrid::HybridLanguageModel;
     use crate::embedding::SubwordEmbedding;
+    use crate::hybrid::HybridLanguageModel;
+    use crate::ngram::{NgramEntry, NgramModel};
+    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 
     // Try hybrid model first (most complex)
-    if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new) {
+    if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new)
+    {
         return DetectedModel::Hybrid {
             ngram_order: model.ngram_model().order(),
             ngram_vocab_size: model.ngram_model().vocab_size(),
@@ -117,7 +120,8 @@ fn extract_language_from_path(path: &Path, models_dir: &Path) -> (String, Option
     }
 
     // Fallback: try to infer from filename
-    let filename = path.file_stem()
+    let filename = path
+        .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
 
@@ -162,9 +166,7 @@ fn scan_models_dir(dir: &Path, models_dir: &Path, verbose: bool) -> Vec<ModelEnt
                     eprintln!("  Scanning: {}", path.display());
                 }
 
-                let size_bytes = std::fs::metadata(&path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
                 let detected = detect_model(&path);
                 let (language, dialect) = extract_language_from_path(&path, models_dir);
@@ -227,7 +229,8 @@ fn models_list(args: ModelsListArgs, verbose: bool) -> CliResult<()> {
     // Sort by language, then dialect, then type
     let mut sorted = filtered;
     sorted.sort_by(|a, b| {
-        a.language.cmp(&b.language)
+        a.language
+            .cmp(&b.language)
             .then_with(|| a.dialect.cmp(&b.dialect))
             .then_with(|| a.model_type.cmp(&b.model_type))
     });
@@ -244,7 +247,8 @@ fn models_list(args: ModelsListArgs, verbose: bool) -> CliResult<()> {
                         m.model_type.clone(),
                         format_number(m.vocab_size),
                         humansize::format_size(m.size_bytes, humansize::BINARY),
-                        m.path.file_name()
+                        m.path
+                            .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| m.path.display().to_string()),
                     ]
@@ -271,11 +275,7 @@ fn models_list(args: ModelsListArgs, verbose: bool) -> CliResult<()> {
     }
 
     println!();
-    println!(
-        "{} {} model(s) found",
-        style("info:").cyan(),
-        sorted.len()
-    );
+    println!("{} {} model(s) found", style("info:").cyan(), sorted.len());
 
     Ok(())
 }
@@ -290,9 +290,7 @@ fn models_info(args: ModelsInfoArgs, verbose: bool) -> CliResult<()> {
         eprintln!("Loading model: {}", args.model.display());
     }
 
-    let file_size_bytes = std::fs::metadata(&args.model)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let file_size_bytes = std::fs::metadata(&args.model).map(|m| m.len()).unwrap_or(0);
 
     // Try to load and get detailed info
     let info = load_model_info(&args.model, file_size_bytes)?;
@@ -308,13 +306,14 @@ fn models_info(args: ModelsInfoArgs, verbose: bool) -> CliResult<()> {
 
 /// Load model and extract detailed information.
 fn load_model_info(path: &Path, file_size_bytes: u64) -> CliResult<ModelInfo> {
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
-    use crate::ngram::{NgramEntry, NgramModel};
-    use crate::hybrid::HybridLanguageModel;
     use crate::embedding::SubwordEmbedding;
+    use crate::hybrid::HybridLanguageModel;
+    use crate::ngram::{NgramEntry, NgramModel};
+    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 
     // Try hybrid model first
-    if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new) {
+    if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new)
+    {
         return Ok(ModelInfo {
             path: path.display().to_string(),
             model_type: "HybridLanguageModel<DynamicDawgChar>".to_string(),

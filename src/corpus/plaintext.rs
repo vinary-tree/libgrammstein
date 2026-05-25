@@ -145,32 +145,34 @@ impl CorpusReader for PlaintextReader {
         let normalizer = self.normalizer.clone();
         let paths = self.paths.clone();
 
-        Box::new(paths.into_iter().filter_map(move |path| {
-            match Self::read_file(&path) {
-                Ok(content) => {
-                    let normalized = normalizer.normalize(&content);
-                    Some(Document {
-                        id: None,
-                        title: path.file_stem().map(|s| s.to_string_lossy().to_string()),
-                        content: normalized,
-                        source: Some(path),
-                    })
-                }
-                Err(e) => {
-                    log::warn!("Failed to read file {}: {}", path.display(), e);
-                    None
-                }
-            }
-        }))
+        Box::new(
+            paths
+                .into_iter()
+                .filter_map(move |path| match Self::read_file(&path) {
+                    Ok(content) => {
+                        let normalized = normalizer.normalize(&content);
+                        Some(Document {
+                            id: None,
+                            title: path.file_stem().map(|s| s.to_string_lossy().to_string()),
+                            content: normalized,
+                            source: Some(path),
+                        })
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to read file {}: {}", path.display(), e);
+                        None
+                    }
+                }),
+        )
     }
 
     fn sentences(&self) -> Box<dyn Iterator<Item = String> + Send + '_> {
         let tokenizer = self.tokenizer.clone();
         let documents = self.documents();
 
-        Box::new(documents.flat_map(move |doc| {
-            tokenizer.sentences(&doc.content).collect::<Vec<_>>()
-        }))
+        Box::new(
+            documents.flat_map(move |doc| tokenizer.sentences(&doc.content).collect::<Vec<_>>()),
+        )
     }
 
     fn document_count(&self) -> Option<usize> {

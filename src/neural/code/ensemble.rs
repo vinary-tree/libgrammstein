@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use super::{CodeEmbedder, CodeLanguage, Result, CodeEmbeddingError};
+use super::{CodeEmbedder, CodeEmbeddingError, CodeLanguage, Result};
 
 /// Strategy for combining embeddings from multiple models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -67,7 +67,8 @@ impl EnsembleCodeEmbedder {
             ));
         }
 
-        let weights = weights.unwrap_or_else(|| vec![1.0 / embedders.len() as f64; embedders.len()]);
+        let weights =
+            weights.unwrap_or_else(|| vec![1.0 / embedders.len() as f64; embedders.len()]);
 
         if weights.len() != embedders.len() {
             return Err(CodeEmbeddingError::Inference(format!(
@@ -303,7 +304,11 @@ mod tests {
         ) -> Result<Vec<Vec<f32>>> {
             codes
                 .iter()
-                .zip(languages.iter().chain(std::iter::repeat(&CodeLanguage::Unknown)))
+                .zip(
+                    languages
+                        .iter()
+                        .chain(std::iter::repeat(&CodeLanguage::Unknown)),
+                )
                 .map(|(code, lang)| self.embed_code(code, *lang))
                 .collect()
         }
@@ -373,12 +378,9 @@ mod tests {
             Arc::new(MockEmbedder::new(3, 2.0)),
         ];
 
-        let mut ensemble = EnsembleCodeEmbedder::with_strategy(
-            embedders,
-            EnsembleStrategy::MaxPooling,
-            None,
-        )
-        .unwrap();
+        let mut ensemble =
+            EnsembleCodeEmbedder::with_strategy(embedders, EnsembleStrategy::MaxPooling, None)
+                .unwrap();
         ensemble.set_normalize_final(false);
 
         let embedding = ensemble.embed_code("test", CodeLanguage::Rust).unwrap();
@@ -393,12 +395,9 @@ mod tests {
             Arc::new(MockEmbedder::new(3, 3.0)),
         ];
 
-        let mut ensemble = EnsembleCodeEmbedder::with_strategy(
-            embedders,
-            EnsembleStrategy::MeanPooling,
-            None,
-        )
-        .unwrap();
+        let mut ensemble =
+            EnsembleCodeEmbedder::with_strategy(embedders, EnsembleStrategy::MeanPooling, None)
+                .unwrap();
         ensemble.set_normalize_final(false);
 
         let embedding = ensemble.embed_code("test", CodeLanguage::Rust).unwrap();
@@ -414,11 +413,8 @@ mod tests {
             Arc::new(MockEmbedder::new(4, 2.0)), // Different dimension
         ];
 
-        let result = EnsembleCodeEmbedder::with_strategy(
-            embedders,
-            EnsembleStrategy::WeightedAverage,
-            None,
-        );
+        let result =
+            EnsembleCodeEmbedder::with_strategy(embedders, EnsembleStrategy::WeightedAverage, None);
 
         assert!(result.is_err());
     }

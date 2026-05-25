@@ -209,7 +209,10 @@ impl AcousticWordEmbedding {
     }
 
     /// Create with a custom encoder.
-    pub fn with_encoder(encoder: Arc<dyn AcousticEncoder>, config: AcousticEmbeddingConfig) -> Self {
+    pub fn with_encoder(
+        encoder: Arc<dyn AcousticEncoder>,
+        config: AcousticEmbeddingConfig,
+    ) -> Self {
         let text_projection = config.text_projection_dim.map(|text_dim| {
             let hidden = encoder.hidden_dim();
             let scale = (2.0 / (hidden + text_dim) as f32).sqrt();
@@ -235,7 +238,9 @@ impl AcousticWordEmbedding {
     /// Get embedding dimension.
     pub fn embedding_dim(&self) -> usize {
         if self.text_projection.is_some() {
-            self.config.text_projection_dim.unwrap_or(self.encoder.hidden_dim())
+            self.config
+                .text_projection_dim
+                .unwrap_or(self.encoder.hidden_dim())
         } else {
             self.encoder.hidden_dim()
         }
@@ -548,11 +553,7 @@ mod tests {
         let config = AcousticEmbeddingConfig::default();
         let awe = AcousticWordEmbedding::new(config);
 
-        let frames = vec![
-            vec![1.0f32; 128],
-            vec![2.0f32; 128],
-            vec![3.0f32; 128],
-        ];
+        let frames = vec![vec![1.0f32; 128], vec![2.0f32; 128], vec![3.0f32; 128]];
 
         // Test mean pooling
         let mean = awe.apply_pooling(&frames);

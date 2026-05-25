@@ -31,7 +31,9 @@ trait ScoringModel {
 
 /// N-gram model wrapper for scoring.
 struct NgramScoringModel {
-    model: crate::ngram::NgramModel<liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>>,
+    model: crate::ngram::NgramModel<
+        liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>,
+    >,
 }
 
 impl ScoringModel for NgramScoringModel {
@@ -44,13 +46,19 @@ impl ScoringModel for NgramScoringModel {
     }
 
     fn description(&self) -> String {
-        format!("N-gram (order={}, vocab={})", self.model.order(), self.model.vocab_size())
+        format!(
+            "N-gram (order={}, vocab={})",
+            self.model.order(),
+            self.model.vocab_size()
+        )
     }
 }
 
 /// Hybrid model wrapper for scoring.
 struct HybridScoringModel {
-    model: crate::hybrid::HybridLanguageModel<liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>>,
+    model: crate::hybrid::HybridLanguageModel<
+        liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>,
+    >,
 }
 
 impl ScoringModel for HybridScoringModel {
@@ -75,9 +83,9 @@ impl ScoringModel for HybridScoringModel {
 
 /// Load a model for scoring.
 fn load_model_for_scoring(path: &Path) -> CliResult<Box<dyn ScoringModel>> {
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
-    use crate::ngram::NgramModel;
     use crate::hybrid::HybridLanguageModel;
+    use crate::ngram::NgramModel;
+    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 
     // Try to load as hybrid model first (more complex)
     if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::new) {
@@ -122,13 +130,19 @@ impl SimilarityModel for EmbeddingSimilarityModel {
     }
 
     fn description(&self) -> String {
-        format!("Embedding (dim={}, vocab={})", self.model.dim(), self.model.vocab_size())
+        format!(
+            "Embedding (dim={}, vocab={})",
+            self.model.dim(),
+            self.model.vocab_size()
+        )
     }
 }
 
 /// Hybrid model wrapper for similarity (uses embedding component).
 struct HybridSimilarityModel {
-    model: crate::hybrid::HybridLanguageModel<liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>>,
+    model: crate::hybrid::HybridLanguageModel<
+        liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>,
+    >,
 }
 
 impl SimilarityModel for HybridSimilarityModel {
@@ -151,9 +165,9 @@ impl SimilarityModel for HybridSimilarityModel {
 
 /// Load a model for similarity queries.
 fn load_model_for_similarity(path: &Path) -> CliResult<Box<dyn SimilarityModel>> {
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
     use crate::embedding::SubwordEmbedding;
     use crate::hybrid::HybridLanguageModel;
+    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 
     // Try to load as hybrid model first
     if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::new) {
@@ -183,7 +197,9 @@ trait CompletionModel {
 
 /// Hybrid model wrapper for completions (can iterate vocabulary).
 struct HybridCompletionModel {
-    model: crate::hybrid::HybridLanguageModel<liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>>,
+    model: crate::hybrid::HybridLanguageModel<
+        liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>,
+    >,
 }
 
 impl CompletionModel for HybridCompletionModel {
@@ -224,13 +240,13 @@ impl CompletionModel for HybridCompletionModel {
 /// N-gram model wrapper for completions.
 /// Note: This is slower because we need to iterate the trie.
 struct NgramCompletionModel {
-    model: crate::ngram::NgramModel<liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>>,
+    model: crate::ngram::NgramModel<
+        liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>,
+    >,
 }
 
 impl CompletionModel for NgramCompletionModel {
     fn top_completions(&self, context: &[&str], k: usize) -> Vec<(String, f64)> {
-        
-
         // Get unique unigrams from the trie
         let mut unigrams: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -259,15 +275,19 @@ impl CompletionModel for NgramCompletionModel {
     }
 
     fn description(&self) -> String {
-        format!("N-gram (order={}, vocab={})", self.model.order(), self.model.vocab_size())
+        format!(
+            "N-gram (order={}, vocab={})",
+            self.model.order(),
+            self.model.vocab_size()
+        )
     }
 }
 
 /// Load a model for completion queries.
 fn load_model_for_completions(path: &Path) -> CliResult<Box<dyn CompletionModel>> {
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
-    use crate::ngram::NgramModel;
     use crate::hybrid::HybridLanguageModel;
+    use crate::ngram::NgramModel;
+    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 
     // Try to load as hybrid model first (preferred - has vocabulary from embedding)
     if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::new) {
@@ -361,8 +381,14 @@ fn query_score(args: QueryScoreArgs, verbose: bool) -> CliResult<()> {
         println!("Tokens: {}", style(tokens.join(" ")).cyan());
         println!("Mode:   {}", mode);
         println!();
-        println!("Log probability: {}", style(format!("{:.4}", log_prob)).green());
-        println!("Perplexity:      {}", style(format!("{:.2}", perplexity)).green());
+        println!(
+            "Log probability: {}",
+            style(format!("{:.4}", log_prob)).green()
+        );
+        println!(
+            "Perplexity:      {}",
+            style(format!("{:.2}", perplexity)).green()
+        );
     }
 
     Ok(())

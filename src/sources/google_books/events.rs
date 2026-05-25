@@ -25,10 +25,7 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 pub enum ImportEvent {
     /// Import started for a specific n-gram order.
-    OrderStarted {
-        order: u8,
-        total_files: u64,
-    },
+    OrderStarted { order: u8, total_files: u64 },
 
     /// An order completed successfully.
     OrderCompleted {
@@ -53,10 +50,7 @@ pub enum ImportEvent {
     },
 
     /// Worker n-gram processing progress (periodic update).
-    WorkerNgramProgress {
-        worker_id: usize,
-        ngram_count: u64,
-    },
+    WorkerNgramProgress { worker_id: usize, ngram_count: u64 },
 
     /// Worker finished processing a file.
     WorkerFinished {
@@ -102,9 +96,7 @@ pub enum ImportEvent {
     ///
     /// Emitted when a worker task exits, either because it received a shutdown
     /// signal (parallelism decreased) or because the job queue is empty.
-    WorkerExited {
-        worker_id: usize,
-    },
+    WorkerExited { worker_id: usize },
 
     /// Periodic statistics update.
     StatsSnapshot {
@@ -117,9 +109,7 @@ pub enum ImportEvent {
     },
 
     /// Checkpoint saved.
-    CheckpointSaved {
-        prefix: String,
-    },
+    CheckpointSaved { prefix: String },
 
     /// Checkpoint progress update.
     ///
@@ -160,10 +150,7 @@ pub enum ImportEvent {
     },
 
     /// Log message (for debugging/info).
-    Log {
-        level: LogLevel,
-        message: String,
-    },
+    Log { level: LogLevel, message: String },
 
     /// A prefix file failed after exhausting all retries.
     ///

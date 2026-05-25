@@ -292,7 +292,10 @@ mod tests {
             .in_error();
 
         assert_eq!(ctx.token_type, TokenType::Identifier);
-        assert_eq!(ctx.parent_node_type, Some("function_definition".to_string()));
+        assert_eq!(
+            ctx.parent_node_type,
+            Some("function_definition".to_string())
+        );
         assert_eq!(ctx.depth, 3);
         assert!(ctx.in_error_region);
     }

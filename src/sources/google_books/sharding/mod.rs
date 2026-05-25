@@ -76,15 +76,17 @@ pub mod shard;
 
 // Re-export commonly used types
 pub use checkpoint::{
-    CheckpointError, CheckpointManager, CheckpointResult, CheckpointSummary,
-    GlobalCheckpoint, ImportPhase, ImportState, ShardCheckpointRecord,
+    CheckpointError, CheckpointManager, CheckpointResult, CheckpointSummary, GlobalCheckpoint,
+    ImportPhase, ImportState, ShardCheckpointRecord,
 };
 pub use config::{MergeConfig, MergeMode, ShardConfig, ShardGranularity};
 pub use coordinator::{
     CheckpointHandle, CoordinatorError, CoordinatorPrefixTx, CoordinatorResult, CoordinatorStats,
     ShardCoordinator, ShardSummary,
 };
-pub use merge::{MergeBuilder, MergeCoordinator, MergeError, MergeProgress, MergeResult, MergeStats};
+pub use merge::{
+    MergeBuilder, MergeCoordinator, MergeError, MergeProgress, MergeResult, MergeStats,
+};
 pub use mkn::{
     ContinuationCounts, DiscountParams, FrequencyCounts, MknAggregator, MknError, MknResult,
     MknStats, MknSummary, OrderSummary,
@@ -95,5 +97,6 @@ pub use routing::{
     shard_key_for_file_prefix, ShardKey,
 };
 pub use shard::{
-    PrefixTransaction, ShardError, ShardHandle, ShardResult, ShardStats, ShardSyncHandle, WriteToken,
+    PrefixTransaction, ShardError, ShardHandle, ShardResult, ShardStats, ShardSyncHandle,
+    WriteToken,
 };

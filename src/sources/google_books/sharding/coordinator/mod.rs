@@ -245,7 +245,9 @@ pub struct CheckpointHandle {
 impl CheckpointHandle {
     /// Create an empty checkpoint handle (for single-trie mode).
     pub fn empty() -> Self {
-        Self { handles: Vec::new() }
+        Self {
+            handles: Vec::new(),
+        }
     }
 
     /// Check if all shards have completed sync (non-blocking).
@@ -277,7 +279,8 @@ impl CheckpointHandle {
     /// sequentially.
     pub fn wait_all_parallel(self) -> CoordinatorResult<()> {
         use rayon::prelude::*;
-        let errors: Vec<_> = self.handles
+        let errors: Vec<_> = self
+            .handles
             .into_par_iter()
             .filter_map(|h| h.wait().err())
             .collect();
@@ -285,7 +288,11 @@ impl CheckpointHandle {
             Ok(())
         } else {
             Err(CoordinatorError::Checkpoint(
-                errors.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
+                errors
+                    .into_iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; "),
             ))
         }
     }
@@ -366,7 +373,10 @@ impl ShardCoordinator {
     /// pool size; later callers with a different `max_workers` share the
     /// existing pool (rayon caps concurrency at `num_threads` internally,
     /// so a smaller request is naturally bounded).
-    fn get_or_build_parallel_pool(&self, max_workers: usize) -> CoordinatorResult<&rayon::ThreadPool> {
+    fn get_or_build_parallel_pool(
+        &self,
+        max_workers: usize,
+    ) -> CoordinatorResult<&rayon::ThreadPool> {
         // Fast path: pool already built.
         if let Some(pool) = self.parallel_pool.get() {
             return Ok(pool);
@@ -729,8 +739,6 @@ impl ShardCoordinator {
             }
         }
     }
-
-
 }
 
 impl Drop for ShardCoordinator {
@@ -758,9 +766,9 @@ pub struct ShardSummary {
 
 // Sub-modules each provide additional `impl ShardCoordinator { ... }` blocks
 // grouped by concern (split out of this file's earlier god-module form).
-mod routing;
 mod discovery;
 mod import_state;
+mod routing;
 mod sync;
 mod transactions;
 

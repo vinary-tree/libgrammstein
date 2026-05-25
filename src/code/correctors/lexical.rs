@@ -145,7 +145,11 @@ impl<L: CodeLanguage> LexicalCorrector<L> {
 
         for i in 1..=m {
             for j in 1..=n {
-                let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+                let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                    0
+                } else {
+                    1
+                };
                 dp[i][j] = (dp[i - 1][j] + 1)
                     .min(dp[i][j - 1] + 1)
                     .min(dp[i - 1][j - 1] + cost);
@@ -283,14 +287,7 @@ impl<L: CodeLanguage + Send + Sync> CodeCorrector for LexicalCorrector<L> {
         let text = &source[start_byte..end_byte];
 
         // Create a temporary token for the range
-        let token = CodeToken::new(
-            text,
-            start_byte,
-            0,
-            0,
-            TokenType::Unknown,
-            "unknown",
-        );
+        let token = CodeToken::new(text, start_byte, 0, 0, TokenType::Unknown, "unknown");
 
         let context = TokenContext::new(TokenType::Unknown);
         self.correct_token(&token, &context)
@@ -324,7 +321,9 @@ mod tests {
             panic!("Not implemented for tests")
         }
         fn keywords(&self) -> &[&str] {
-            &["if", "else", "while", "for", "return", "function", "let", "const", "var"]
+            &[
+                "if", "else", "while", "for", "return", "function", "let", "const", "var",
+            ]
         }
         fn special_tokens(&self) -> &[&str] {
             &[]
@@ -354,12 +353,30 @@ mod tests {
 
     #[test]
     fn test_levenshtein_distance() {
-        assert_eq!(LexicalCorrector::<MockLanguage>::levenshtein_distance("", ""), 0);
-        assert_eq!(LexicalCorrector::<MockLanguage>::levenshtein_distance("abc", ""), 3);
-        assert_eq!(LexicalCorrector::<MockLanguage>::levenshtein_distance("", "abc"), 3);
-        assert_eq!(LexicalCorrector::<MockLanguage>::levenshtein_distance("abc", "abc"), 0);
-        assert_eq!(LexicalCorrector::<MockLanguage>::levenshtein_distance("abc", "abd"), 1);
-        assert_eq!(LexicalCorrector::<MockLanguage>::levenshtein_distance("function", "funtion"), 1);
+        assert_eq!(
+            LexicalCorrector::<MockLanguage>::levenshtein_distance("", ""),
+            0
+        );
+        assert_eq!(
+            LexicalCorrector::<MockLanguage>::levenshtein_distance("abc", ""),
+            3
+        );
+        assert_eq!(
+            LexicalCorrector::<MockLanguage>::levenshtein_distance("", "abc"),
+            3
+        );
+        assert_eq!(
+            LexicalCorrector::<MockLanguage>::levenshtein_distance("abc", "abc"),
+            0
+        );
+        assert_eq!(
+            LexicalCorrector::<MockLanguage>::levenshtein_distance("abc", "abd"),
+            1
+        );
+        assert_eq!(
+            LexicalCorrector::<MockLanguage>::levenshtein_distance("function", "funtion"),
+            1
+        );
     }
 
     #[test]
@@ -406,7 +423,9 @@ mod tests {
         let corrections = corrector.correct_token(&token, &context);
 
         assert!(!corrections.is_empty());
-        assert!(corrections.iter().any(|c| c.replacement == "calculateTotal"));
+        assert!(corrections
+            .iter()
+            .any(|c| c.replacement == "calculateTotal"));
     }
 
     #[test]

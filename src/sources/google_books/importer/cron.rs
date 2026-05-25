@@ -75,10 +75,12 @@ impl CheckpointState {
         // instead of the previous sync_vocabulary() + rotate_vocabulary_wal() pair
         // which caused two back-to-back HashMap rebuilds (~3.42 GB transient spike).
         log::debug!("Periodic checkpoint: merging vocabulary and rotating WAL...");
-        self.storage.merge_and_rotate_vocabulary_wal().map_err(|e| {
-            self.checkpoint_in_progress.store(false, Ordering::Release);
-            ImportError::Trie(format!("Failed to merge and rotate vocabulary WAL: {}", e))
-        })?;
+        self.storage
+            .merge_and_rotate_vocabulary_wal()
+            .map_err(|e| {
+                self.checkpoint_in_progress.store(false, Ordering::Release);
+                ImportError::Trie(format!("Failed to merge and rotate vocabulary WAL: {}", e))
+            })?;
 
         log::debug!("Periodic checkpoint: syncing shards...");
         self.storage.sync_parallel(8).map_err(|e| {

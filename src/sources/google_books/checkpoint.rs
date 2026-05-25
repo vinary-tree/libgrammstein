@@ -80,21 +80,24 @@ pub struct OrderProgress {
 impl OrderProgress {
     /// Get all completed prefixes.
     pub fn completed_prefixes(&self) -> impl Iterator<Item = &String> {
-        self.prefix_states.iter()
+        self.prefix_states
+            .iter()
             .filter(|(_, s)| **s == PrefixState::Completed)
             .map(|(p, _)| p)
     }
 
     /// Get all in-progress prefixes.
     pub fn in_progress_prefixes(&self) -> impl Iterator<Item = &String> {
-        self.prefix_states.iter()
+        self.prefix_states
+            .iter()
             .filter(|(_, s)| **s == PrefixState::InProgress)
             .map(|(p, _)| p)
     }
 
     /// Get all failed prefixes.
     pub fn failed_prefixes(&self) -> impl Iterator<Item = &String> {
-        self.prefix_states.iter()
+        self.prefix_states
+            .iter()
             .filter(|(_, s)| **s == PrefixState::Failed)
             .map(|(p, _)| p)
     }
@@ -322,10 +325,7 @@ impl ImportCheckpoint {
         let value: serde_json::Value =
             serde_json::from_reader(reader).map_err(CheckpointError::Json)?;
 
-        let version = value
-            .get("version")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1) as u32;
+        let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
 
         if version > Self::CURRENT_VERSION {
             return Err(CheckpointError::UnsupportedVersion {
@@ -606,8 +606,8 @@ impl ImportCheckpoint {
                     return false;
                 }
                 match p.get_state(prefix) {
-                    None => true,           // Not started - needs processing
-                    Some(PrefixState::Failed) => true,  // Failed - retry
+                    None => true,                      // Not started - needs processing
+                    Some(PrefixState::Failed) => true, // Failed - retry
                     Some(PrefixState::Completed) => false,
                     Some(PrefixState::InProgress) => false,
                 }
@@ -899,7 +899,11 @@ impl PrefixLen {
     /// single-letter prefix, higher orders use two letters.
     #[inline]
     fn for_order(order: u8) -> Self {
-        if order == 1 { Self::One } else { Self::Two }
+        if order == 1 {
+            Self::One
+        } else {
+            Self::Two
+        }
     }
 
     /// Maximum valid index for this prefix encoding (26 for One, 676 for Two).
@@ -918,12 +922,20 @@ impl PrefixLen {
 fn index_to_prefix(index: u16, prefix_len: PrefixLen) -> String {
     match prefix_len {
         PrefixLen::One => {
-            debug_assert!(index < 26, "Index {} out of range for single-char prefix", index);
+            debug_assert!(
+                index < 26,
+                "Index {} out of range for single-char prefix",
+                index
+            );
             let c = (b'a' + index as u8) as char;
             c.to_string()
         }
         PrefixLen::Two => {
-            debug_assert!(index < 676, "Index {} out of range for two-char prefix", index);
+            debug_assert!(
+                index < 676,
+                "Index {} out of range for two-char prefix",
+                index
+            );
             let c1 = (b'a' + (index / 26) as u8) as char;
             let c2 = (b'a' + (index % 26) as u8) as char;
             format!("{}{}", c1, c2)
@@ -1089,8 +1101,11 @@ impl ImportCheckpoint {
             .map_err(|e| CheckpointError::Trie(e.to_string()))?;
         keys_written += 1;
 
-        trie.store_checkpoint_u64(CHECKPOINT_FILES_PROCESSED_KEY, self.stats.files_processed as u64)
-            .map_err(|e| CheckpointError::Trie(e.to_string()))?;
+        trie.store_checkpoint_u64(
+            CHECKPOINT_FILES_PROCESSED_KEY,
+            self.stats.files_processed as u64,
+        )
+        .map_err(|e| CheckpointError::Trie(e.to_string()))?;
         keys_written += 1;
 
         trie.store_checkpoint_u64(CHECKPOINT_BYTES_DOWNLOADED_KEY, self.stats.bytes_downloaded)
@@ -1191,8 +1206,7 @@ impl ImportCheckpoint {
             .load_checkpoint_u64(CHECKPOINT_TIMESTAMP_KEY)
             .map_err(|e| CheckpointError::Trie(e.to_string()))?
             .unwrap_or(0);
-        let timestamp = DateTime::from_timestamp(timestamp_secs as i64, 0)
-            .unwrap_or_else(Utc::now);
+        let timestamp = DateTime::from_timestamp(timestamp_secs as i64, 0).unwrap_or_else(Utc::now);
 
         // Load stats
         let ngrams_processed = trie
@@ -1484,7 +1498,8 @@ mod tests {
         let path = dir.path().join("test.checkpoint.json");
 
         let mut cp = ImportCheckpoint::new();
-        cp.complete_order(1).expect("no in-progress prefixes for order 1"); // Mark order 1 as complete
+        cp.complete_order(1)
+            .expect("no in-progress prefixes for order 1"); // Mark order 1 as complete
         cp.complete_prefix(2, "aa"); // Order 2 has prefix "aa" done
         cp.add_ngrams(2, 12345);
 
@@ -1517,7 +1532,8 @@ mod tests {
         assert!(cp.needs_prefix(2, "ac"));
 
         // Mark order 2 as complete - now all prefixes are "done"
-        cp.complete_order(2).expect("no in-progress prefixes for order 2");
+        cp.complete_order(2)
+            .expect("no in-progress prefixes for order 2");
         assert!(!cp.needs_prefix(2, "ac"));
         assert!(!cp.needs_prefix(2, "zz"));
     }
@@ -1539,7 +1555,8 @@ mod tests {
         cp.complete_prefix(1, "a");
         cp.complete_prefix(1, "b");
 
-        cp.complete_order(1).expect("no in-progress prefixes for order 1");
+        cp.complete_order(1)
+            .expect("no in-progress prefixes for order 1");
 
         assert!(cp.is_order_complete(1));
         // v2: Prefixes are NOT cleared, kept for verification
@@ -1549,7 +1566,7 @@ mod tests {
     #[test]
     fn test_complete_order_with_in_progress_fails() {
         let mut cp = ImportCheckpoint::new();
-        cp.start_prefix(1, "a");  // Mark prefix as in-progress
+        cp.start_prefix(1, "a"); // Mark prefix as in-progress
 
         // Attempting to complete order should fail (TLA+ invariant violation)
         let result = cp.complete_order(1);
@@ -1585,7 +1602,8 @@ mod tests {
         assert!(cp.needs_prefix(2, "ab"));
 
         // Finish order 1
-        cp.complete_order(1).expect("no in-progress prefixes for order 1");
+        cp.complete_order(1)
+            .expect("no in-progress prefixes for order 1");
         assert!(cp.is_order_complete(1));
         assert!(!cp.is_order_complete(2));
 
@@ -1730,7 +1748,7 @@ mod tests {
         let mut cp = ImportCheckpoint::new();
         cp.start_prefix(2, "aa");
         cp.fail_prefix(2, "aa");
-        cp.start_prefix(2, "ab");  // In progress
+        cp.start_prefix(2, "ab"); // In progress
 
         cp.save(&path).unwrap();
 
@@ -1765,7 +1783,7 @@ mod tests {
         // Invalid
         assert_eq!(prefix_to_index("A"), None); // uppercase
         assert_eq!(prefix_to_index("1"), None); // digit
-        assert_eq!(prefix_to_index(""), None);  // empty
+        assert_eq!(prefix_to_index(""), None); // empty
     }
 
     #[test]
@@ -1886,8 +1904,8 @@ mod tests {
     fn test_pack_states_all_state_types() {
         let mut states = HashMap::new();
         states.insert("aa".to_string(), PrefixState::InProgress); // index 0
-        states.insert("ab".to_string(), PrefixState::Completed);  // index 1
-        states.insert("ac".to_string(), PrefixState::Failed);     // index 2
+        states.insert("ab".to_string(), PrefixState::Completed); // index 1
+        states.insert("ac".to_string(), PrefixState::Failed); // index 2
 
         let chunks = pack_states(&states, PrefixLen::Two);
 

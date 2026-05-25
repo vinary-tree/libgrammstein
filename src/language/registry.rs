@@ -344,10 +344,7 @@ impl ModelRegistry {
             metadata: model_metadata,
         };
 
-        index
-            .entry(lang.to_string())
-            .or_default()
-            .push(entry);
+        index.entry(lang.to_string()).or_default().push(entry);
 
         Ok(())
     }
@@ -361,12 +358,7 @@ impl ModelRegistry {
     pub fn find(&self, lang: &LanguageTag) -> Vec<&ModelEntry> {
         self.index
             .get(lang.language())
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter(|e| e.language == *lang)
-                    .collect()
-            })
+            .map(|entries| entries.iter().filter(|e| e.language == *lang).collect())
             .unwrap_or_default()
     }
 

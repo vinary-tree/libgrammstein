@@ -173,7 +173,9 @@ fn inspect_directory(dir: &PathBuf, args: &Args) -> Result<(), Box<dyn std::erro
     }
 
     // Check sharding checkpoint if it exists
-    let shard_checkpoint = dir.join(format!("{}_shards", args.prefix)).join("checkpoint.json");
+    let shard_checkpoint = dir
+        .join(format!("{}_shards", args.prefix))
+        .join("checkpoint.json");
     if shard_checkpoint.exists() {
         println!("\n--- Sharding Checkpoint ---");
         inspect_sharding_checkpoint(&shard_checkpoint)?;
@@ -283,14 +285,18 @@ fn inspect_json_checkpoint(path: &PathBuf) -> Result<(), Box<dyn std::error::Err
                 );
 
                 // Show completed prefixes
-                if let Some(completed) = progress_obj.get("completed_prefixes").and_then(|v| v.as_array()) {
-                    let prefixes: Vec<&str> = completed
-                        .iter()
-                        .filter_map(|v| v.as_str())
-                        .collect();
+                if let Some(completed) = progress_obj
+                    .get("completed_prefixes")
+                    .and_then(|v| v.as_array())
+                {
+                    let prefixes: Vec<&str> = completed.iter().filter_map(|v| v.as_str()).collect();
                     if !prefixes.is_empty() {
                         let prefix_str = if prefixes.len() > 10 {
-                            format!("{} (and {} more)", prefixes[..10].join(", "), prefixes.len() - 10)
+                            format!(
+                                "{} (and {} more)",
+                                prefixes[..10].join(", "),
+                                prefixes.len() - 10
+                            )
                         } else {
                             prefixes.join(", ")
                         };
@@ -299,11 +305,12 @@ fn inspect_json_checkpoint(path: &PathBuf) -> Result<(), Box<dyn std::error::Err
                 }
 
                 // Show in-progress prefixes (important for debugging)
-                if let Some(in_progress) = progress_obj.get("in_progress_prefixes").and_then(|v| v.as_array()) {
-                    let prefixes: Vec<&str> = in_progress
-                        .iter()
-                        .filter_map(|v| v.as_str())
-                        .collect();
+                if let Some(in_progress) = progress_obj
+                    .get("in_progress_prefixes")
+                    .and_then(|v| v.as_array())
+                {
+                    let prefixes: Vec<&str> =
+                        in_progress.iter().filter_map(|v| v.as_str()).collect();
                     if !prefixes.is_empty() {
                         println!("      In Progress: {}", prefixes.join(", "));
                     }
@@ -414,9 +421,21 @@ fn inspect_trie_checkpoint_inner(
         }
 
         if is_complete || !states.is_empty() {
-            let completed: Vec<_> = states.iter().filter(|(_, s)| *s == "Completed").map(|(p, _)| p.as_str()).collect();
-            let in_progress: Vec<_> = states.iter().filter(|(_, s)| *s == "InProgress").map(|(p, _)| p.as_str()).collect();
-            let failed: Vec<_> = states.iter().filter(|(_, s)| *s == "Failed").map(|(p, _)| p.as_str()).collect();
+            let completed: Vec<_> = states
+                .iter()
+                .filter(|(_, s)| *s == "Completed")
+                .map(|(p, _)| p.as_str())
+                .collect();
+            let in_progress: Vec<_> = states
+                .iter()
+                .filter(|(_, s)| *s == "InProgress")
+                .map(|(p, _)| p.as_str())
+                .collect();
+            let failed: Vec<_> = states
+                .iter()
+                .filter(|(_, s)| *s == "Failed")
+                .map(|(p, _)| p.as_str())
+                .collect();
 
             println!(
                 "    Order {}: completed={}, in_progress={}, failed={}, is_complete={}",
@@ -430,7 +449,11 @@ fn inspect_trie_checkpoint_inner(
             if args.all_prefixes || args.verbose {
                 if !completed.is_empty() {
                     let prefix_str = if completed.len() > 20 {
-                        format!("{} (and {} more)", completed[..20].join(", "), completed.len() - 20)
+                        format!(
+                            "{} (and {} more)",
+                            completed[..20].join(", "),
+                            completed.len() - 20
+                        )
                     } else {
                         completed.join(", ")
                     };
@@ -608,11 +631,7 @@ fn inspect_sharding_checkpoint(path: &PathBuf) -> Result<(), Box<dyn std::error:
         // Count in-progress shards
         let in_progress: Vec<_> = shards
             .iter()
-            .filter(|(_, v)| {
-                v.get("current_prefix")
-                    .and_then(|p| p.as_str())
-                    .is_some()
-            })
+            .filter(|(_, v)| v.get("current_prefix").and_then(|p| p.as_str()).is_some())
             .collect();
 
         if !in_progress.is_empty() {

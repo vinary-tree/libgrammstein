@@ -188,7 +188,11 @@ impl WordExtractor {
     /// Get extraction statistics.
     pub fn stats(&self, min_frequency: u64) -> DictionaryStats {
         let total_words = self.counts.len();
-        let words_kept = self.counts.iter().filter(|e| *e.value() >= min_frequency).count();
+        let words_kept = self
+            .counts
+            .iter()
+            .filter(|e| *e.value() >= min_frequency)
+            .count();
 
         DictionaryStats {
             total_words,
@@ -205,7 +209,9 @@ impl WordExtractor {
             *self.counts.entry(entry.key().clone()).or_insert(0) += *entry.value();
         }
         self.total_tokens.fetch_add(
-            other.total_tokens.load(std::sync::atomic::Ordering::Relaxed),
+            other
+                .total_tokens
+                .load(std::sync::atomic::Ordering::Relaxed),
             std::sync::atomic::Ordering::Relaxed,
         );
         self.sentences_processed.fetch_add(
@@ -227,7 +233,10 @@ impl WordExtractor {
 
     /// Export to a standard HashMap (for serialization).
     pub fn to_hashmap(&self) -> HashMap<String, u64> {
-        self.counts.iter().map(|e| (e.key().clone(), *e.value())).collect()
+        self.counts
+            .iter()
+            .map(|e| (e.key().clone(), *e.value()))
+            .collect()
     }
 }
 

@@ -220,7 +220,11 @@ impl LinearAcousticModel {
     }
 
     /// Load model from safetensors file.
-    pub fn load<P: AsRef<Path>>(path: P, config: AcousticModelConfig, device: &Device) -> Result<Self> {
+    pub fn load<P: AsRef<Path>>(
+        path: P,
+        config: AcousticModelConfig,
+        device: &Device,
+    ) -> Result<Self> {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, device)? };
 
         let input_proj = linear(config.feature_dim, config.hidden_dim, vb.pp("input_proj"))?;
@@ -322,7 +326,10 @@ struct SelfAttention {
 
 impl SelfAttention {
     fn new(hidden_dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
-        assert!(hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads");
+        assert!(
+            hidden_dim % num_heads == 0,
+            "hidden_dim must be divisible by num_heads"
+        );
         let head_dim = hidden_dim / num_heads;
 
         let q_proj = linear(hidden_dim, hidden_dim, vb.pp("q_proj"))?;
@@ -392,10 +399,14 @@ impl TransformerLayer {
         let self_attn = SelfAttention::new(hidden_dim, num_heads, vb.pp("self_attn"))?;
         let ff = FeedForward::new(hidden_dim, ff_dim, vb.pp("ff"))?;
 
-        let norm1_weight = vb.get_with_hints(hidden_dim, "norm1.weight", candle_nn::Init::Const(1.0))?;
-        let norm1_bias = vb.get_with_hints(hidden_dim, "norm1.bias", candle_nn::Init::Const(0.0))?;
-        let norm2_weight = vb.get_with_hints(hidden_dim, "norm2.weight", candle_nn::Init::Const(1.0))?;
-        let norm2_bias = vb.get_with_hints(hidden_dim, "norm2.bias", candle_nn::Init::Const(0.0))?;
+        let norm1_weight =
+            vb.get_with_hints(hidden_dim, "norm1.weight", candle_nn::Init::Const(1.0))?;
+        let norm1_bias =
+            vb.get_with_hints(hidden_dim, "norm1.bias", candle_nn::Init::Const(0.0))?;
+        let norm2_weight =
+            vb.get_with_hints(hidden_dim, "norm2.weight", candle_nn::Init::Const(1.0))?;
+        let norm2_bias =
+            vb.get_with_hints(hidden_dim, "norm2.bias", candle_nn::Init::Const(0.0))?;
 
         Ok(Self {
             self_attn,
@@ -412,7 +423,9 @@ impl TransformerLayer {
         let mean = x.mean_keepdim(candle_core::D::Minus1)?;
         let var = x.var_keepdim(candle_core::D::Minus1)?;
         let eps = 1e-5;
-        let x_norm = x.broadcast_sub(&mean)?.broadcast_div(&(var + eps)?.sqrt()?)?;
+        let x_norm = x
+            .broadcast_sub(&mean)?
+            .broadcast_div(&(var + eps)?.sqrt()?)?;
         x_norm.broadcast_mul(weight)?.broadcast_add(bias)
     }
 
@@ -470,7 +483,11 @@ impl TransformerAcousticModel {
     }
 
     /// Load model from safetensors file.
-    pub fn load<P: AsRef<Path>>(path: P, config: AcousticModelConfig, device: &Device) -> Result<Self> {
+    pub fn load<P: AsRef<Path>>(
+        path: P,
+        config: AcousticModelConfig,
+        device: &Device,
+    ) -> Result<Self> {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, device)? };
 
         let input_proj = linear(config.feature_dim, config.hidden_dim, vb.pp("input_proj"))?;
@@ -701,7 +718,11 @@ mod tests {
 
         // Check that outputs are log probabilities (should sum to ~1 when exponentiated)
         let sum: f32 = posteriors[0].iter().map(|&p| p.exp()).sum();
-        assert!((sum - 1.0).abs() < 0.01, "Log softmax output should sum to ~1, got {}", sum);
+        assert!(
+            (sum - 1.0).abs() < 0.01,
+            "Log softmax output should sum to ~1, got {}",
+            sum
+        );
     }
 
     #[test]
@@ -730,7 +751,11 @@ mod tests {
 
         // Check that outputs are log probabilities
         let sum: f32 = posteriors[0].iter().map(|&p| p.exp()).sum();
-        assert!((sum - 1.0).abs() < 0.01, "Log softmax output should sum to ~1, got {}", sum);
+        assert!(
+            (sum - 1.0).abs() < 0.01,
+            "Log softmax output should sum to ~1, got {}",
+            sum
+        );
     }
 
     #[test]

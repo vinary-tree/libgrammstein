@@ -31,7 +31,7 @@ use std::path::Path;
 
 use tokenizers::models::bpe::{BpeTrainer, BPE};
 use tokenizers::normalizers::Sequence as NormalizerSequence;
-use tokenizers::normalizers::{Lowercase, NFD, StripAccents};
+use tokenizers::normalizers::{Lowercase, StripAccents, NFD};
 use tokenizers::pre_tokenizers::whitespace::Whitespace;
 use tokenizers::{AddedToken, Tokenizer};
 
@@ -132,7 +132,6 @@ impl SubwordTokenizer {
         S: AsRef<str>,
     {
         use tokenizers::models::TrainerWrapper;
-        
 
         // Create BPE trainer
         let trainer = BpeTrainer::builder()
@@ -171,7 +170,9 @@ impl SubwordTokenizer {
         let text_refs: Vec<String> = texts.into_iter().map(|s| s.as_ref().to_string()).collect();
 
         if text_refs.is_empty() {
-            return Err(SubwordError::Training("No training texts provided".to_string()));
+            return Err(SubwordError::Training(
+                "No training texts provided".to_string(),
+            ));
         }
 
         // Train the tokenizer using the trainer

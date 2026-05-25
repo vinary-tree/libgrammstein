@@ -236,7 +236,13 @@ impl LanguageHints {
             language: Some("rust".into()),
             is_multi_paradigm: true,
             custom_oop_keywords: vec!["impl".into(), "self".into(), "Self".into()],
-            custom_fp_keywords: vec!["iter".into(), "map".into(), "filter".into(), "fold".into(), "|".into()],
+            custom_fp_keywords: vec![
+                "iter".into(),
+                "map".into(),
+                "filter".into(),
+                "fold".into(),
+                "|".into(),
+            ],
             ignore_keywords: vec!["use".into(), "mod".into(), "pub".into()],
             ..Default::default()
         }
@@ -247,7 +253,12 @@ impl LanguageHints {
         Self {
             language: Some("javascript".into()),
             is_multi_paradigm: true,
-            custom_oop_keywords: vec!["class".into(), "extends".into(), "this".into(), "new".into()],
+            custom_oop_keywords: vec![
+                "class".into(),
+                "extends".into(),
+                "this".into(),
+                "new".into(),
+            ],
             custom_fp_keywords: vec!["=>".into(), "map".into(), "filter".into(), "reduce".into()],
             custom_reactive_keywords: vec!["Observable".into(), "subscribe".into(), "pipe".into()],
             ignore_keywords: vec!["import".into(), "export".into(), "require".into()],
@@ -260,7 +271,12 @@ impl LanguageHints {
         Self {
             language: Some("java".into()),
             is_oop_language: true,
-            custom_oop_keywords: vec!["class".into(), "extends".into(), "implements".into(), "new".into()],
+            custom_oop_keywords: vec![
+                "class".into(),
+                "extends".into(),
+                "implements".into(),
+                "new".into(),
+            ],
             custom_fp_keywords: vec!["stream".into(), "->".into()],
             custom_reactive_keywords: vec!["Flux".into(), "Mono".into(), "Observable".into()],
             ignore_keywords: vec!["import".into(), "package".into()],
@@ -273,7 +289,13 @@ impl LanguageHints {
         Self {
             language: Some("haskell".into()),
             is_fp_language: true,
-            custom_fp_keywords: vec!["where".into(), "let".into(), "in".into(), "do".into(), ">>=".into()],
+            custom_fp_keywords: vec![
+                "where".into(),
+                "let".into(),
+                "in".into(),
+                "do".into(),
+                ">>=".into(),
+            ],
             ignore_keywords: vec!["import".into(), "module".into()],
             ..Default::default()
         }

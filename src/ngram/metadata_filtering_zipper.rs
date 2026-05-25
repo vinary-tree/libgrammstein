@@ -191,7 +191,9 @@ mod tests {
         assert!(!a.is_at_root());
 
         // Should be able to descend to '\x00' since we're not at root
-        let null = a.descend('\x00').expect("should descend to '\\x00' after root");
+        let null = a
+            .descend('\x00')
+            .expect("should descend to '\\x00' after root");
         assert!(null.descend('b').is_some());
     }
 

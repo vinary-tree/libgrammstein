@@ -5,11 +5,13 @@ use crate::cli::error::{print_success, CliError, CliResult};
 use crate::ngram::NgramEntry;
 
 pub(super) fn train_hybrid(args: TrainHybridArgs, verbose: bool, quiet: bool) -> CliResult<()> {
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
-    use crate::embedding::SubwordEmbedding;
-    use crate::hybrid::{HybridConfig, HybridLanguageModel, InterpolationStrategy as HybridStrategy};
-    use crate::ngram::NgramModel;
     use crate::cli::args::InterpolationStrategy as CliStrategy;
+    use crate::embedding::SubwordEmbedding;
+    use crate::hybrid::{
+        HybridConfig, HybridLanguageModel, InterpolationStrategy as HybridStrategy,
+    };
+    use crate::ngram::NgramModel;
+    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 
     if verbose {
         eprintln!("Creating hybrid model");
@@ -106,10 +108,22 @@ pub(super) fn train_hybrid(args: TrainHybridArgs, verbose: bool, quiet: bool) ->
 
     if !quiet {
         print_success(&format!("Hybrid model saved to: {}", args.output.display()));
-        eprintln!("  N-gram order:        {}", hybrid_model.ngram_model().order());
-        eprintln!("  N-gram vocab:        {}", hybrid_model.ngram_model().vocab_size());
-        eprintln!("  Embedding dim:       {}", hybrid_model.embedding_model().dim());
-        eprintln!("  Embedding vocab:     {}", hybrid_model.embedding_model().vocab_size());
+        eprintln!(
+            "  N-gram order:        {}",
+            hybrid_model.ngram_model().order()
+        );
+        eprintln!(
+            "  N-gram vocab:        {}",
+            hybrid_model.ngram_model().vocab_size()
+        );
+        eprintln!(
+            "  Embedding dim:       {}",
+            hybrid_model.embedding_model().dim()
+        );
+        eprintln!(
+            "  Embedding vocab:     {}",
+            hybrid_model.embedding_model().vocab_size()
+        );
         eprintln!("  Strategy:            {:?}", args.strategy);
         eprintln!("  Alpha:               {}", args.alpha);
         eprintln!("  Cache size:          {}", args.cache_size);
@@ -118,4 +132,3 @@ pub(super) fn train_hybrid(args: TrainHybridArgs, verbose: bool, quiet: bool) ->
 
     Ok(())
 }
-

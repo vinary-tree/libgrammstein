@@ -66,7 +66,11 @@ impl GutenbergReader {
         }
 
         let paths = collect_txt_files(dir)?;
-        log::info!("Found {} Gutenberg text files in {}", paths.len(), dir.display());
+        log::info!(
+            "Found {} Gutenberg text files in {}",
+            paths.len(),
+            dir.display()
+        );
 
         Ok(Self {
             paths,
@@ -114,7 +118,10 @@ impl CorpusReader for GutenbergReader {
                     let normalized = normalizer.normalize(&stripped);
 
                     if normalized.is_empty() {
-                        log::warn!("Empty content after stripping boilerplate: {}", path.display());
+                        log::warn!(
+                            "Empty content after stripping boilerplate: {}",
+                            path.display()
+                        );
                         return None;
                     }
 
@@ -131,9 +138,7 @@ impl CorpusReader for GutenbergReader {
                         });
 
                     // Use filename as title
-                    let title = path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().to_string());
+                    let title = path.file_stem().map(|s| s.to_string_lossy().to_string());
 
                     Some(Document {
                         id,
@@ -152,9 +157,10 @@ impl CorpusReader for GutenbergReader {
 
     fn sentences(&self) -> Box<dyn Iterator<Item = String> + Send + '_> {
         let tokenizer = self.tokenizer.clone();
-        Box::new(self.documents().flat_map(move |doc| {
-            tokenizer.sentences(&doc.content).collect::<Vec<_>>()
-        }))
+        Box::new(
+            self.documents()
+                .flat_map(move |doc| tokenizer.sentences(&doc.content).collect::<Vec<_>>()),
+        )
     }
 
     fn document_count(&self) -> Option<usize> {
@@ -206,10 +212,7 @@ fn strip_gutenberg_boilerplate(text: &str) -> String {
                 let candidate = pos + newline_pos + 1;
                 // Skip any additional blank lines
                 let remaining = &text[candidate..];
-                let skip_blanks = remaining
-                    .chars()
-                    .take_while(|c| c.is_whitespace())
-                    .count();
+                let skip_blanks = remaining.chars().take_while(|c| c.is_whitespace()).count();
                 start_idx = candidate + skip_blanks;
                 break;
             }

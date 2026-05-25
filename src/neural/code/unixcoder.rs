@@ -20,7 +20,10 @@ use ort::value::Tensor;
 use parking_lot::Mutex;
 use tokenizers::Tokenizer;
 
-use super::{CodeEmbedder, CodeEmbeddingCache, CodeEmbeddingCacheConfig, CodeLanguage, Result, CodeEmbeddingError};
+use super::{
+    CodeEmbedder, CodeEmbeddingCache, CodeEmbeddingCacheConfig, CodeEmbeddingError, CodeLanguage,
+    Result,
+};
 
 /// Configuration for UniXcoder embedder.
 #[derive(Clone, Debug)]
@@ -64,7 +67,10 @@ impl UniXcoderConfig {
         let model_dir = model_dir.as_ref();
         Self {
             model_path: model_dir.join("model.onnx").to_string_lossy().to_string(),
-            tokenizer_path: model_dir.join("tokenizer.json").to_string_lossy().to_string(),
+            tokenizer_path: model_dir
+                .join("tokenizer.json")
+                .to_string_lossy()
+                .to_string(),
             embedding_dim: 768,
             ..Default::default()
         }
@@ -105,39 +111,57 @@ pub struct UniXcoderEmbedder {
 impl UniXcoderEmbedder {
     /// Load a UniXcoder model from files.
     pub fn load(config: UniXcoderConfig) -> Result<Self> {
-        let tokenizer = Tokenizer::from_file(&config.tokenizer_path)
-            .map_err(|e| CodeEmbeddingError::ModelLoad(format!(
-                "Failed to load tokenizer from {}: {}", config.tokenizer_path, e
-            )))?;
+        let tokenizer = Tokenizer::from_file(&config.tokenizer_path).map_err(|e| {
+            CodeEmbeddingError::ModelLoad(format!(
+                "Failed to load tokenizer from {}: {}",
+                config.tokenizer_path, e
+            ))
+        })?;
 
         let session = Session::builder()
-            .map_err(|e| CodeEmbeddingError::Onnx(format!("Failed to create session builder: {}", e)))?
+            .map_err(|e| {
+                CodeEmbeddingError::Onnx(format!("Failed to create session builder: {}", e))
+            })?
             .with_optimization_level(config.graph_optimization_level())
-            .map_err(|e| CodeEmbeddingError::Onnx(format!("Failed to set optimization level: {}", e)))?
+            .map_err(|e| {
+                CodeEmbeddingError::Onnx(format!("Failed to set optimization level: {}", e))
+            })?
             .with_intra_threads(config.num_threads)
             .map_err(|e| CodeEmbeddingError::Onnx(format!("Failed to set thread count: {}", e)))?
             .commit_from_file(&config.model_path)
-            .map_err(|e| CodeEmbeddingError::ModelLoad(format!(
-                "Failed to load ONNX model from {}: {}", config.model_path, e
-            )))?;
+            .map_err(|e| {
+                CodeEmbeddingError::ModelLoad(format!(
+                    "Failed to load ONNX model from {}: {}",
+                    config.model_path, e
+                ))
+            })?;
 
         // Detect input/output names
-        let input_ids_name = session.inputs.iter()
+        let input_ids_name = session
+            .inputs
+            .iter()
             .find(|i| i.name.contains("input_ids"))
             .map(|i| i.name.to_string())
             .unwrap_or_else(|| "input_ids".to_string());
 
-        let attention_mask_name = session.inputs.iter()
+        let attention_mask_name = session
+            .inputs
+            .iter()
             .find(|i| i.name.contains("attention_mask"))
             .map(|i| i.name.to_string())
             .unwrap_or_else(|| "attention_mask".to_string());
 
-        let output_name = session.outputs.first()
+        let output_name = session
+            .outputs
+            .first()
             .map(|o| o.name.to_string())
             .unwrap_or_else(|| "last_hidden_state".to_string());
 
         let embedding_dim = config.embedding_dim;
-        let cache = config.cache_config.as_ref().map(|c| CodeEmbeddingCache::new(c.clone()));
+        let cache = config
+            .cache_config
+            .as_ref()
+            .map(|c| CodeEmbeddingCache::new(c.clone()));
 
         Ok(Self {
             session: Arc::new(Mutex::new(session)),
@@ -158,7 +182,8 @@ impl UniXcoderEmbedder {
     }
 
     fn tokenize(&self, code: &str) -> Result<(Vec<i64>, Vec<i64>)> {
-        let encoding = self.tokenizer
+        let encoding = self
+            .tokenizer
             .encode(code, true)
             .map_err(|e| CodeEmbeddingError::Tokenization(e.to_string()))?;
 
@@ -186,32 +211,47 @@ impl UniXcoderEmbedder {
 
         let seq_len = input_ids.len();
 
-        let input_ids_array = Array2::from_shape_vec((1, seq_len), input_ids)
-            .map_err(|e| CodeEmbeddingError::Inference(format!("Failed to create input_ids array: {}", e)))?;
-        let attention_mask_array = Array2::from_shape_vec((1, seq_len), attention_mask)
-            .map_err(|e| CodeEmbeddingError::Inference(format!("Failed to create attention_mask array: {}", e)))?;
+        let input_ids_array = Array2::from_shape_vec((1, seq_len), input_ids).map_err(|e| {
+            CodeEmbeddingError::Inference(format!("Failed to create input_ids array: {}", e))
+        })?;
+        let attention_mask_array =
+            Array2::from_shape_vec((1, seq_len), attention_mask).map_err(|e| {
+                CodeEmbeddingError::Inference(format!(
+                    "Failed to create attention_mask array: {}",
+                    e
+                ))
+            })?;
 
-        let input_ids_tensor = Tensor::from_array(input_ids_array)
-            .map_err(|e| CodeEmbeddingError::Onnx(format!("Failed to create input_ids tensor: {}", e)))?;
-        let attention_mask_tensor = Tensor::from_array(attention_mask_array)
-            .map_err(|e| CodeEmbeddingError::Onnx(format!("Failed to create attention_mask tensor: {}", e)))?;
+        let input_ids_tensor = Tensor::from_array(input_ids_array).map_err(|e| {
+            CodeEmbeddingError::Onnx(format!("Failed to create input_ids tensor: {}", e))
+        })?;
+        let attention_mask_tensor = Tensor::from_array(attention_mask_array).map_err(|e| {
+            CodeEmbeddingError::Onnx(format!("Failed to create attention_mask tensor: {}", e))
+        })?;
 
         let inputs: Vec<(Cow<'_, str>, ort::value::DynValue)> = vec![
-            (Cow::Owned(self.input_ids_name.clone()), input_ids_tensor.into_dyn()),
-            (Cow::Owned(self.attention_mask_name.clone()), attention_mask_tensor.into_dyn()),
+            (
+                Cow::Owned(self.input_ids_name.clone()),
+                input_ids_tensor.into_dyn(),
+            ),
+            (
+                Cow::Owned(self.attention_mask_name.clone()),
+                attention_mask_tensor.into_dyn(),
+            ),
         ];
 
         let mut session = self.session.lock();
-        let outputs = session.run(inputs)
+        let outputs = session
+            .run(inputs)
             .map_err(|e| CodeEmbeddingError::Inference(format!("Inference failed: {}", e)))?;
 
-        let output = outputs.get(&self.output_name)
-            .ok_or_else(|| CodeEmbeddingError::Inference(format!(
-                "Output '{}' not found", self.output_name
-            )))?;
+        let output = outputs.get(&self.output_name).ok_or_else(|| {
+            CodeEmbeddingError::Inference(format!("Output '{}' not found", self.output_name))
+        })?;
 
-        let (shape, data) = output.try_extract_tensor::<f32>()
-            .map_err(|e| CodeEmbeddingError::Inference(format!("Failed to extract tensor: {}", e)))?;
+        let (shape, data) = output.try_extract_tensor::<f32>().map_err(|e| {
+            CodeEmbeddingError::Inference(format!("Failed to extract tensor: {}", e))
+        })?;
 
         let shape_dims: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
 
@@ -226,7 +266,8 @@ impl UniXcoderEmbedder {
             }
             _ => {
                 return Err(CodeEmbeddingError::Inference(format!(
-                    "Unexpected output shape: {:?}", shape_dims
+                    "Unexpected output shape: {:?}",
+                    shape_dims
                 )));
             }
         };
@@ -285,7 +326,11 @@ impl CodeEmbedder for UniXcoderEmbedder {
 
         codes
             .iter()
-            .zip(languages.iter().chain(std::iter::repeat(&CodeLanguage::Unknown)))
+            .zip(
+                languages
+                    .iter()
+                    .chain(std::iter::repeat(&CodeLanguage::Unknown)),
+            )
             .map(|(code, lang)| self.embed_code(code, *lang))
             .collect()
     }

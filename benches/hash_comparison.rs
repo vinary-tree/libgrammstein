@@ -33,9 +33,7 @@ fn load_vocabulary_words() -> Vec<String> {
     // for the duration of the iteration to amortize lock-acquisition cost.
     let guard = vocab.read();
     let count = guard.len() as u64;
-    (1..=count)
-        .filter_map(|i| guard.get_term(i))
-        .collect()
+    (1..=count).filter_map(|i| guard.get_term(i)).collect()
 }
 
 fn generate_synthetic_words(count: usize) -> Vec<String> {
@@ -129,16 +127,21 @@ fn bench_single_hash(c: &mut Criterion) {
         (b"international", "13-byte"),
         (b"0123456789abcdef", "16-byte"),
         (b"this is a longer string", "23-byte"),
-        (b"this is a much longer string that exceeds typical word lengths", "63-byte"),
+        (
+            b"this is a much longer string that exceeds typical word lengths",
+            "63-byte",
+        ),
     ];
 
     for &(input, label) in test_inputs {
         let is_long = input.len() >= GXHASH_MIN_SIZE;
 
         // Proposed hybrid (xxh3 + gxhash)
-        group.bench_with_input(BenchmarkId::new("proposed_hybrid", label), input, |b, bytes| {
-            b.iter(|| black_box(hash_proposed_hybrid(black_box(bytes))))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("proposed_hybrid", label),
+            input,
+            |b, bytes| b.iter(|| black_box(hash_proposed_hybrid(black_box(bytes)))),
+        );
 
         // xxh3-only
         group.bench_with_input(BenchmarkId::new("xxh3_only", label), input, |b, bytes| {
@@ -146,15 +149,19 @@ fn bench_single_hash(c: &mut Criterion) {
         });
 
         // Current hybrid for reference
-        group.bench_with_input(BenchmarkId::new("current_hybrid", label), input, |b, bytes| {
-            b.iter(|| black_box(hash_current_hybrid(black_box(bytes))))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("current_hybrid", label),
+            input,
+            |b, bytes| b.iter(|| black_box(hash_current_hybrid(black_box(bytes)))),
+        );
 
         // Only benchmark direct gxhash for safe inputs (≥16 bytes)
         if is_long {
-            group.bench_with_input(BenchmarkId::new("gxhash_direct", label), input, |b, bytes| {
-                b.iter(|| black_box(hash_gxhash_direct(black_box(bytes))))
-            });
+            group.bench_with_input(
+                BenchmarkId::new("gxhash_direct", label),
+                input,
+                |b, bytes| b.iter(|| black_box(hash_gxhash_direct(black_box(bytes)))),
+            );
         }
 
         // FNV-1a for reference on short inputs
@@ -311,9 +318,7 @@ fn bench_hash_with_seed(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("hybrid_seeded", label),
             input,
-            |b, bytes| {
-                b.iter(|| black_box(hash_current_hybrid_with_seed(black_box(bytes), seed)))
-            },
+            |b, bytes| b.iter(|| black_box(hash_current_hybrid_with_seed(black_box(bytes), seed))),
         );
 
         group.bench_with_input(BenchmarkId::new("xxh3_seeded", label), input, |b, bytes| {
@@ -350,13 +355,23 @@ fn bench_ngram_keys(c: &mut Criterion) {
     let ngram_bytes: Vec<&[u8]> = ngram_keys.iter().map(|s| s.as_bytes()).collect();
 
     // Analyze n-gram key lengths
-    let short_keys: usize = ngram_bytes.iter().filter(|b| b.len() < GXHASH_MIN_SIZE).count();
-    let long_keys: usize = ngram_bytes.iter().filter(|b| b.len() >= GXHASH_MIN_SIZE).count();
-    let avg_len: f64 = ngram_bytes.iter().map(|b| b.len()).sum::<usize>() as f64 / ngram_bytes.len() as f64;
+    let short_keys: usize = ngram_bytes
+        .iter()
+        .filter(|b| b.len() < GXHASH_MIN_SIZE)
+        .count();
+    let long_keys: usize = ngram_bytes
+        .iter()
+        .filter(|b| b.len() >= GXHASH_MIN_SIZE)
+        .count();
+    let avg_len: f64 =
+        ngram_bytes.iter().map(|b| b.len()).sum::<usize>() as f64 / ngram_bytes.len() as f64;
 
     println!(
         "\nN-gram key stats: {} total, {} short (<16B), {} long (≥16B), avg len: {:.1}B",
-        ngram_keys.len(), short_keys, long_keys, avg_len
+        ngram_keys.len(),
+        short_keys,
+        long_keys,
+        avg_len
     );
 
     let mut group = c.benchmark_group("ngram_keys_xxh3_vs_proposed");

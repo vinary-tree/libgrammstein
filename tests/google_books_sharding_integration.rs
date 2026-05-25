@@ -10,18 +10,18 @@
 
 #![cfg(feature = "google-books")]
 
+use libdictenstein::persistent_artrie::PersistentARTrie;
 use libgrammstein::sources::google_books::sharding::{
     MergeCoordinator, MknAggregator, ShardConfig, ShardCoordinator, ShardGranularity,
     ShardedTrieView,
 };
-use libdictenstein::persistent_artrie::PersistentARTrie;
 use tempfile::TempDir;
 
 /// Create a test coordinator with sample data.
 fn create_coordinator_with_data() -> (TempDir, ShardCoordinator) {
     let dir = TempDir::new().expect("Failed to create temp dir");
-    let config = ShardConfig::new(dir.path().join("shards"))
-        .with_granularity(ShardGranularity::TwoChar);
+    let config =
+        ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
     let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
 
@@ -107,7 +107,9 @@ fn test_full_workflow() {
 
     // 6. Compute MKN statistics
     let aggregator = MknAggregator::new(&coordinator);
-    let stats = aggregator.compute_all().expect("Failed to compute MKN stats");
+    let stats = aggregator
+        .compute_all()
+        .expect("Failed to compute MKN stats");
 
     // Should have counts for orders 1-3
     assert!(stats.frequency_counts[1].total_unique > 0);
@@ -150,9 +152,7 @@ fn test_checkpoint_and_recovery() {
         coordinator.store_ngram("apple|pie", 100).expect("store");
         coordinator.store_ngram("banana|split", 50).expect("store");
 
-        coordinator
-            .checkpoint_all()
-            .expect("Failed to checkpoint");
+        coordinator.checkpoint_all().expect("Failed to checkpoint");
     }
 
     // Phase 2: Resume and verify data persists
@@ -225,8 +225,16 @@ fn test_mkn_discount_computation() {
     // Discount values should be in reasonable range
     for (order, d) in discounts.iter().enumerate().skip(1) {
         if order <= 3 {
-            assert!(d.d1 >= 0.0 && d.d1 <= 1.0, "D1 out of range for order {}", order);
-            assert!(d.d2 >= 0.0 && d.d2 <= 2.0, "D2 out of range for order {}", order);
+            assert!(
+                d.d1 >= 0.0 && d.d1 <= 1.0,
+                "D1 out of range for order {}",
+                order
+            );
+            assert!(
+                d.d2 >= 0.0 && d.d2 <= 2.0,
+                "D2 out of range for order {}",
+                order
+            );
             assert!(
                 d.d3_plus >= 0.0 && d.d3_plus <= 3.0,
                 "D3+ out of range for order {}",
@@ -241,7 +249,9 @@ fn test_mkn_continuation_counts() {
     let (_dir, coordinator) = create_coordinator_with_data();
     let aggregator = MknAggregator::new(&coordinator).with_continuations();
 
-    let stats = aggregator.compute_all().expect("Failed to compute MKN stats");
+    let stats = aggregator
+        .compute_all()
+        .expect("Failed to compute MKN stats");
 
     // For bigrams, should have continuation counts
     let cont = &stats.continuation_counts[2];
@@ -305,7 +315,8 @@ fn test_parallel_storage() {
         .with_granularity(ShardGranularity::TwoChar)
         .with_max_open_shards(100);
 
-    let coordinator = Arc::new(ShardCoordinator::new(config).expect("Failed to create coordinator"));
+    let coordinator =
+        Arc::new(ShardCoordinator::new(config).expect("Failed to create coordinator"));
 
     // Spawn multiple threads to store n-grams concurrently
     let mut handles = Vec::new();
@@ -348,8 +359,8 @@ fn test_parallel_storage() {
 #[test]
 fn test_empty_coordinator() {
     let dir = TempDir::new().expect("Failed to create temp dir");
-    let config = ShardConfig::new(dir.path().join("shards"))
-        .with_granularity(ShardGranularity::TwoChar);
+    let config =
+        ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
     let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
 
@@ -367,8 +378,8 @@ fn test_empty_coordinator() {
 #[test]
 fn test_duplicate_storage() {
     let dir = TempDir::new().expect("Failed to create temp dir");
-    let config = ShardConfig::new(dir.path().join("shards"))
-        .with_granularity(ShardGranularity::TwoChar);
+    let config =
+        ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
     let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
 
@@ -384,8 +395,8 @@ fn test_duplicate_storage() {
 #[test]
 fn test_special_characters() {
     let dir = TempDir::new().expect("Failed to create temp dir");
-    let config = ShardConfig::new(dir.path().join("shards"))
-        .with_granularity(ShardGranularity::TwoChar);
+    let config =
+        ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
     let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
 

@@ -87,7 +87,9 @@ where
     /// let lm = GrammsteinLanguageModel::from_components(ngram, embedding);
     /// ```
     pub fn from_components(ngram: NgramModel<D>, embedding: SubwordEmbedding) -> Self {
-        Self::Hybrid(Arc::new(HybridLanguageModel::with_defaults(ngram, embedding)))
+        Self::Hybrid(Arc::new(HybridLanguageModel::with_defaults(
+            ngram, embedding,
+        )))
     }
 
     /// Create a hybrid model with custom configuration.

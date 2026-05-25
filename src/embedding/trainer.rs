@@ -159,10 +159,7 @@ impl NegativeSampler {
         let mut table = Vec::with_capacity(table_size);
 
         // Compute smoothed frequencies (count^0.75)
-        let smoothed: Vec<f64> = word_counts
-            .iter()
-            .map(|&c| (c as f64).powf(0.75))
-            .collect();
+        let smoothed: Vec<f64> = word_counts.iter().map(|&c| (c as f64).powf(0.75)).collect();
         let total: f64 = smoothed.iter().sum();
 
         // Fill table proportionally
@@ -244,7 +241,8 @@ impl EmbeddingTrainer {
     {
         // Phase 1: Build vocabulary with streaming (no sentence collection)
         log::info!("Building vocabulary (streaming pass 1)...");
-        let (vocab, word_counts, total_words) = self.build_vocabulary_streaming(reader_factory()?)?;
+        let (vocab, word_counts, total_words) =
+            self.build_vocabulary_streaming(reader_factory()?)?;
 
         log::info!(
             "Vocabulary: {} words, {} total tokens",
@@ -253,8 +251,9 @@ impl EmbeddingTrainer {
         );
 
         // Phase 2: Initialize model
-        let mut model = SubwordEmbedding::new(vocab.clone(), self.config.dim, self.config.bucket_count)
-            .with_subword_range(self.config.min_subword_len, self.config.max_subword_len);
+        let mut model =
+            SubwordEmbedding::new(vocab.clone(), self.config.dim, self.config.bucket_count)
+                .with_subword_range(self.config.min_subword_len, self.config.max_subword_len);
 
         self.initialize_embeddings(&mut model);
 
@@ -269,7 +268,15 @@ impl EmbeddingTrainer {
 
             // Create fresh reader for this epoch
             let reader = reader_factory()?;
-            self.train_epoch_streaming(reader, &mut model, &vocab, &word_counts, total_words, &sampler, lr)?;
+            self.train_epoch_streaming(
+                reader,
+                &mut model,
+                &vocab,
+                &word_counts,
+                total_words,
+                &sampler,
+                lr,
+            )?;
         }
 
         Ok(model)
@@ -360,8 +367,8 @@ impl EmbeddingTrainer {
                     // Subsampling for frequent words
                     let center_count = word_counts[center_idx];
                     let freq = center_count as f32 / total_words as f32;
-                    let keep_prob = ((freq / subsample_threshold).sqrt() + 1.0)
-                        * (subsample_threshold / freq);
+                    let keep_prob =
+                        ((freq / subsample_threshold).sqrt() + 1.0) * (subsample_threshold / freq);
 
                     let mut rng = thread_rng();
                     if rng.gen::<f32>() > keep_prob {
@@ -427,7 +434,8 @@ impl EmbeddingTrainer {
     pub fn train<R: CorpusReader + 'static>(&self, reader: R) -> Result<SubwordEmbedding> {
         // Phase 1: Build vocabulary with prefetched streaming
         log::info!("Building vocabulary...");
-        let (vocab, word_counts, total_words, sentences) = self.build_vocabulary_and_collect(reader)?;
+        let (vocab, word_counts, total_words, sentences) =
+            self.build_vocabulary_and_collect(reader)?;
 
         if sentences.len() > 1_000_000 {
             log::warn!(
@@ -444,8 +452,9 @@ impl EmbeddingTrainer {
         );
 
         // Phase 2: Initialize model
-        let mut model = SubwordEmbedding::new(vocab.clone(), self.config.dim, self.config.bucket_count)
-            .with_subword_range(self.config.min_subword_len, self.config.max_subword_len);
+        let mut model =
+            SubwordEmbedding::new(vocab.clone(), self.config.dim, self.config.bucket_count)
+                .with_subword_range(self.config.min_subword_len, self.config.max_subword_len);
 
         // Initialize embeddings with small random values
         self.initialize_embeddings(&mut model);
@@ -455,7 +464,14 @@ impl EmbeddingTrainer {
 
         // Phase 4: Train on collected sentences
         log::info!("Training {} epochs...", self.config.epochs);
-        self.train_epochs_on_sentences(&sentences, &mut model, &vocab, &word_counts, total_words, &sampler)?;
+        self.train_epochs_on_sentences(
+            &sentences,
+            &mut model,
+            &vocab,
+            &word_counts,
+            total_words,
+            &sampler,
+        )?;
 
         Ok(model)
     }
@@ -467,11 +483,13 @@ impl EmbeddingTrainer {
         progress_tx: Sender<EmbeddingProgress>,
     ) -> Result<SubwordEmbedding> {
         // Phase 1: Build vocabulary with prefetched streaming
-        let (vocab, word_counts, total_words, sentences) = self.build_vocabulary_and_collect(reader)?;
+        let (vocab, word_counts, total_words, sentences) =
+            self.build_vocabulary_and_collect(reader)?;
 
         // Phase 2: Initialize model
-        let mut model = SubwordEmbedding::new(vocab.clone(), self.config.dim, self.config.bucket_count)
-            .with_subword_range(self.config.min_subword_len, self.config.max_subword_len);
+        let mut model =
+            SubwordEmbedding::new(vocab.clone(), self.config.dim, self.config.bucket_count)
+                .with_subword_range(self.config.min_subword_len, self.config.max_subword_len);
 
         self.initialize_embeddings(&mut model);
 
@@ -582,7 +600,14 @@ impl EmbeddingTrainer {
             log::info!("Epoch {}/{}, lr={:.6}", epoch + 1, self.config.epochs, lr);
 
             self.train_epoch_on_sentences(
-                sentences, model, &word_to_idx, word_counts, total_words, sampler, lr, &stats,
+                sentences,
+                model,
+                &word_to_idx,
+                word_counts,
+                total_words,
+                sampler,
+                lr,
+                &stats,
             )?;
 
             log::info!(
@@ -616,7 +641,14 @@ impl EmbeddingTrainer {
             let lr = self.config.learning_rate * (1.0 - epoch as f32 / self.config.epochs as f32);
 
             self.train_epoch_on_sentences(
-                sentences, model, &word_to_idx, word_counts, total_words, sampler, lr, &stats,
+                sentences,
+                model,
+                &word_to_idx,
+                word_counts,
+                total_words,
+                sampler,
+                lr,
+                &stats,
             )?;
 
             let _ = progress_tx.try_send(EmbeddingProgress {
@@ -665,8 +697,8 @@ impl EmbeddingTrainer {
                 // Subsampling for frequent words
                 let center_count = word_counts[center_idx];
                 let freq = center_count as f32 / total_words as f32;
-                let keep_prob = ((freq / subsample_threshold).sqrt() + 1.0)
-                    * (subsample_threshold / freq);
+                let keep_prob =
+                    ((freq / subsample_threshold).sqrt() + 1.0) * (subsample_threshold / freq);
 
                 let mut rng = thread_rng();
                 if rng.gen::<f32>() > keep_prob {
@@ -736,7 +768,10 @@ impl EmbeddingTrainer {
         let mut grad_in = Array1::<f32>::zeros(dim);
 
         // Positive sample (context word)
-        let ctx_vec = model.embedding_by_index(context_idx).expect("valid index").to_owned();
+        let ctx_vec = model
+            .embedding_by_index(context_idx)
+            .expect("valid index")
+            .to_owned();
         let dot = center_vec.dot(&ctx_vec);
         let score = Self::sigmoid(dot);
         let grad = (1.0 - score) * lr;
@@ -747,7 +782,10 @@ impl EmbeddingTrainer {
 
         // Negative samples
         for &neg_idx in &negatives {
-            let neg_vec = model.embedding_by_index(neg_idx).expect("valid index").to_owned();
+            let neg_vec = model
+                .embedding_by_index(neg_idx)
+                .expect("valid index")
+                .to_owned();
             let dot = center_vec.dot(&neg_vec);
             let score = Self::sigmoid(dot);
             let grad = -score * lr;
@@ -760,7 +798,11 @@ impl EmbeddingTrainer {
         model.update_word_embedding(center_idx, &grad_in, 1.0);
 
         // Update subword embeddings
-        let subwords = extract_subwords(center_word, self.config.min_subword_len, self.config.max_subword_len);
+        let subwords = extract_subwords(
+            center_word,
+            self.config.min_subword_len,
+            self.config.max_subword_len,
+        );
         if !subwords.is_empty() {
             let subword_grad = &grad_in / subwords.len() as f32;
             for subword in &subwords {
@@ -771,10 +813,22 @@ impl EmbeddingTrainer {
     }
 
     /// Get input vector for a word (word embedding + averaged subword embeddings).
-    fn get_input_vector(&self, model: &SubwordEmbedding, word_idx: usize, word: &str) -> Array1<f32> {
-        let word_vec = model.embedding_by_index(word_idx).expect("valid index").to_owned();
+    fn get_input_vector(
+        &self,
+        model: &SubwordEmbedding,
+        word_idx: usize,
+        word: &str,
+    ) -> Array1<f32> {
+        let word_vec = model
+            .embedding_by_index(word_idx)
+            .expect("valid index")
+            .to_owned();
 
-        let subwords = extract_subwords(word, self.config.min_subword_len, self.config.max_subword_len);
+        let subwords = extract_subwords(
+            word,
+            self.config.min_subword_len,
+            self.config.max_subword_len,
+        );
         if subwords.is_empty() {
             return word_vec;
         }

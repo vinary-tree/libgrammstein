@@ -264,7 +264,11 @@ pub struct CorrectionPipeline<L: CodeLanguage> {
 
 impl<L: CodeLanguage + Clone + Send + Sync> CorrectionPipeline<L> {
     /// Creates a new correction pipeline.
-    pub fn new(language: Arc<L>, grammar: Option<WeightedCFG>, config: PipelineConfig) -> Result<Self, PipelineError> {
+    pub fn new(
+        language: Arc<L>,
+        grammar: Option<WeightedCFG>,
+        config: PipelineConfig,
+    ) -> Result<Self, PipelineError> {
         let corrector = EnsembleCorrector::with_defaults(Arc::clone(&language), grammar);
         let parser = CodeParser::new(Arc::clone(&language))
             .map_err(|e| PipelineError::ParseError(format!("{}", e)))?;
@@ -278,7 +282,10 @@ impl<L: CodeLanguage + Clone + Send + Sync> CorrectionPipeline<L> {
     }
 
     /// Creates a pipeline with default configuration.
-    pub fn with_defaults(language: Arc<L>, grammar: Option<WeightedCFG>) -> Result<Self, PipelineError> {
+    pub fn with_defaults(
+        language: Arc<L>,
+        grammar: Option<WeightedCFG>,
+    ) -> Result<Self, PipelineError> {
         Self::new(language, grammar, PipelineConfig::default())
     }
 
@@ -306,7 +313,9 @@ impl<L: CodeLanguage + Clone + Send + Sync> CorrectionPipeline<L> {
     /// this prevents accumulating 100K+ corrections.
     pub fn analyze(&mut self, source: &str) -> Result<AnalysisResult, PipelineError> {
         // Phase 1: Parse
-        let parsed = self.parser.parse(source)
+        let parsed = self
+            .parser
+            .parse(source)
             .map_err(|e| PipelineError::ParseError(format!("{}", e)))?;
 
         // Phase 2: Tokenize
@@ -352,7 +361,10 @@ impl<L: CodeLanguage + Clone + Send + Sync> CorrectionPipeline<L> {
                 diagnostics.push(Diagnostic {
                     severity: DiagnosticSeverity::Hint,
                     message: correction.context.clone().unwrap_or_else(|| {
-                        format!("Consider: {} -> {}", correction.original, correction.replacement)
+                        format!(
+                            "Consider: {} -> {}",
+                            correction.original, correction.replacement
+                        )
                     }),
                     start_byte: correction.start_byte,
                     end_byte: correction.end_byte,
@@ -439,7 +451,10 @@ impl<L: CodeLanguage + Clone + Send + Sync> CorrectionPipeline<L> {
         let mut result = source.to_string();
         for correction in sorted {
             if correction.start_byte < result.len() && correction.end_byte <= result.len() {
-                result.replace_range(correction.start_byte..correction.end_byte, &correction.replacement);
+                result.replace_range(
+                    correction.start_byte..correction.end_byte,
+                    &correction.replacement,
+                );
             }
         }
 
@@ -526,11 +541,7 @@ mod tests {
         fn file_extensions(&self) -> &[&str] {
             &["mock"]
         }
-        fn classify_token(
-            &self,
-            _token: &str,
-            _node_kind: &str,
-        ) -> TokenType {
+        fn classify_token(&self, _token: &str, _node_kind: &str) -> TokenType {
             TokenType::Unknown
         }
         fn is_valid_identifier(&self, s: &str) -> bool {

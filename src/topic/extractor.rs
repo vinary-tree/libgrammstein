@@ -9,7 +9,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::checkpoint::{ExtractionPhase, TopicExtractionCheckpoint};
-use super::clustering::{compute_distance_matrix_parallel, ClusteringResult, HierarchicalClustering};
+use super::clustering::{
+    compute_distance_matrix_parallel, ClusteringResult, HierarchicalClustering,
+};
 use super::config::TopicConfig;
 use super::ctfidf::CtfIdf;
 use super::dendrogram::Dendrogram;
@@ -38,12 +40,18 @@ impl ExtractionResult {
 
     /// Get leaf topics (finest granularity).
     pub fn leaf_topics(&self) -> Vec<&Topic> {
-        self.topics.iter().filter(|t| t.children.is_empty()).collect()
+        self.topics
+            .iter()
+            .filter(|t| t.children.is_empty())
+            .collect()
     }
 
     /// Get root topics (coarsest granularity).
     pub fn root_topics(&self) -> Vec<&Topic> {
-        self.topics.iter().filter(|t| t.parent_id.is_none()).collect()
+        self.topics
+            .iter()
+            .filter(|t| t.parent_id.is_none())
+            .collect()
     }
 
     /// Get topic by ID.
@@ -138,15 +146,14 @@ impl TopicExtractor {
         let clustering_result = self.run_clustering(embeddings, &mut checkpoint)?;
 
         // Phase 2: Build vocabulary and extract keywords
-        let (keywords_per_topic, vocabulary) =
-            self.run_keyword_extraction(documents, &clustering_result.assignments, &mut checkpoint)?;
+        let (keywords_per_topic, vocabulary) = self.run_keyword_extraction(
+            documents,
+            &clustering_result.assignments,
+            &mut checkpoint,
+        )?;
 
         // Phase 3: Generate topic descriptions
-        let topics = self.build_topics(
-            &clustering_result,
-            &keywords_per_topic,
-            embeddings,
-        )?;
+        let topics = self.build_topics(&clustering_result, &keywords_per_topic, embeddings)?;
 
         // Build document-topic assignments
         let document_topics = self.build_document_topics(&clustering_result.assignments);
@@ -270,7 +277,8 @@ impl TopicExtractor {
             let description = summarizer.describe_from_keywords(&keywords);
 
             // Compute centroid
-            let centroid = self.compute_centroid(cluster_id, &clustering_result.assignments, embeddings);
+            let centroid =
+                self.compute_centroid(cluster_id, &clustering_result.assignments, embeddings);
 
             // Count documents
             let document_count = clustering_result
@@ -412,7 +420,9 @@ mod tests {
         let embeddings = make_test_embeddings();
         let documents = make_test_documents();
 
-        let result = extractor.extract(&embeddings, &documents).expect("extraction failed");
+        let result = extractor
+            .extract(&embeddings, &documents)
+            .expect("extraction failed");
 
         // Should have 3 topics
         assert_eq!(result.topics.len(), 3);
@@ -445,7 +455,9 @@ mod tests {
         let embeddings = make_test_embeddings();
         let documents = make_test_documents();
 
-        let result = extractor.extract(&embeddings, &documents).expect("extraction failed");
+        let result = extractor
+            .extract(&embeddings, &documents)
+            .expect("extraction failed");
 
         // Test leaf_topics
         let leaves = result.leaf_topics();
@@ -480,18 +492,17 @@ mod tests {
         let documents = vec!["single doc".to_string()];
 
         let result = extractor.extract(&embeddings, &documents);
-        assert!(matches!(result, Err(TopicError::InsufficientDocuments { .. })));
+        assert!(matches!(
+            result,
+            Err(TopicError::InsufficientDocuments { .. })
+        ));
     }
 
     #[test]
     fn test_compute_centroid() {
         let extractor = TopicExtractor::default();
 
-        let embeddings = vec![
-            vec![1.0, 0.0],
-            vec![0.0, 1.0],
-            vec![1.0, 1.0],
-        ];
+        let embeddings = vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![1.0, 1.0]];
         let assignments = vec![0, 0, 1];
 
         // Cluster 0 has embeddings [1,0] and [0,1], centroid = [0.5, 0.5]

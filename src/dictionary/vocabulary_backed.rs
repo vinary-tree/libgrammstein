@@ -55,7 +55,10 @@ impl<'a> VocabularyDictionary<'a> {
     /// * `vocabulary` - The shared vocabulary from n-gram training
     /// * `storage` - The n-gram storage containing unigram counts
     pub fn new(vocabulary: SharedVocabARTrie, storage: &'a NgramStorage) -> Self {
-        Self { vocabulary, storage }
+        Self {
+            vocabulary,
+            storage,
+        }
     }
 
     /// Check if a word exists in the vocabulary.
@@ -140,7 +143,9 @@ mod tests {
 
         // Merge lock-free vocabulary entries into persistent layer
         // (required before VocabularyDictionary can see them)
-        storage.sync_vocabulary().expect("Failed to sync vocabulary");
+        storage
+            .sync_vocabulary()
+            .expect("Failed to sync vocabulary");
 
         // Create dictionary
         let dict = VocabularyDictionary::new(vocabulary, &storage);

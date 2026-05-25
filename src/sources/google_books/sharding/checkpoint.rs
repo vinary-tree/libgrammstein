@@ -341,7 +341,11 @@ impl GlobalCheckpoint {
     }
 
     /// Get or create a shard record.
-    pub fn get_or_create_shard(&mut self, key: &ShardKey, path: impl Into<PathBuf>) -> &mut ShardCheckpointRecord {
+    pub fn get_or_create_shard(
+        &mut self,
+        key: &ShardKey,
+        path: impl Into<PathBuf>,
+    ) -> &mut ShardCheckpointRecord {
         let key_str = key.to_string();
         self.shards
             .entry(key_str)
@@ -406,7 +410,10 @@ impl GlobalCheckpoint {
 
     /// Get shards that were in progress when checkpointed.
     pub fn in_progress_shards(&self) -> Vec<&ShardCheckpointRecord> {
-        self.shards.values().filter(|r| r.is_in_progress()).collect()
+        self.shards
+            .values()
+            .filter(|r| r.is_in_progress())
+            .collect()
     }
 
     /// Detect if recovery is needed and update state accordingly.
@@ -521,7 +528,10 @@ pub struct CheckpointManager {
 
 impl CheckpointManager {
     /// Create a new checkpoint manager.
-    pub fn new(checkpoint_path: impl Into<PathBuf>, auto_save_interval_ms: u64) -> CheckpointResult<Self> {
+    pub fn new(
+        checkpoint_path: impl Into<PathBuf>,
+        auto_save_interval_ms: u64,
+    ) -> CheckpointResult<Self> {
         let checkpoint_path = checkpoint_path.into();
         let checkpoint = GlobalCheckpoint::load_or_create(&checkpoint_path)?;
 
@@ -628,7 +638,10 @@ mod tests {
         checkpoint.detect_recovery_needed();
         assert!(checkpoint.needs_recovery());
 
-        if let ImportState::RequiresRecovery { in_progress_shards, .. } = &checkpoint.import_state {
+        if let ImportState::RequiresRecovery {
+            in_progress_shards, ..
+        } = &checkpoint.import_state
+        {
             assert_eq!(in_progress_shards.len(), 1);
             assert_eq!(in_progress_shards[0], "th");
         } else {
@@ -648,7 +661,12 @@ mod tests {
         checkpoint.complete_import(1000000, 500000);
         assert!(checkpoint.is_completed());
 
-        if let ImportState::Completed { total_ngrams, unique_ngrams, .. } = &checkpoint.import_state {
+        if let ImportState::Completed {
+            total_ngrams,
+            unique_ngrams,
+            ..
+        } = &checkpoint.import_state
+        {
             assert_eq!(*total_ngrams, 1000000);
             assert_eq!(*unique_ngrams, 500000);
         } else {

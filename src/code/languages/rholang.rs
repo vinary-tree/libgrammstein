@@ -42,10 +42,8 @@ impl CodeLanguage for Rholang {
             // Control flow and declarations
             "new", "in", "if", "else", "let", "match", "select", "contract", "for",
             // Logical operators (keyword form)
-            "or", "and", "matches", "not",
-            // Bundle types
-            "bundle", "bundle-", "bundle+", "bundle0",
-            // Literals
+            "or", "and", "matches", "not", // Bundle types
+            "bundle", "bundle-", "bundle+", "bundle0", // Literals
             "true", "false", "Nil",
         ]
     }
@@ -53,22 +51,22 @@ impl CodeLanguage for Rholang {
     fn special_tokens(&self) -> &[&str] {
         &[
             // Channel operations
-            "@",   // Quote (process -> name)
-            "*",   // Eval/dereference (name -> process)
+            "@", // Quote (process -> name)
+            "*", // Eval/dereference (name -> process)
             // Send operations
-            "!",   // Send single
-            "!!",  // Send persistent
-            "!?",  // Synchronous send-then-receive
+            "!",  // Send single
+            "!!", // Send persistent
+            "!?", // Synchronous send-then-receive
             // Receive operations
             "<-",  // Linear receive
             "<=",  // Persistent receive
             "<<-", // Peek (non-consuming receive)
             "?!",  // Receive-then-send
             // Process algebra
-            "|",   // Parallel composition
-            "&",   // Concurrent binding
-            ";",   // Sequential composition
-            "=>",  // Pattern match arm
+            "|",  // Parallel composition
+            "&",  // Concurrent binding
+            ";",  // Sequential composition
+            "=>", // Pattern match arm
             // Set operations
             "++",  // Union/concatenation
             "--",  // Difference
@@ -77,8 +75,8 @@ impl CodeLanguage for Rholang {
             "~",   // Negation
             "%%",  // Interpolation
             // Variable reference kinds
-            "=",   // Simple binding
-            "=*",  // Binding with dereference
+            "=",  // Simple binding
+            "=*", // Binding with dereference
             // Remainder patterns
             "...", // Spread/rest
         ]
@@ -274,10 +272,7 @@ mod tests {
     fn test_rholang_token_classification() {
         let rholang = Rholang::new();
 
-        assert_eq!(
-            rholang.classify_token("new", "new"),
-            TokenType::Keyword
-        );
+        assert_eq!(rholang.classify_token("new", "new"), TokenType::Keyword);
         assert_eq!(
             rholang.classify_token("true", "bool_literal"),
             TokenType::BooleanLiteral

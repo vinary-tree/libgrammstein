@@ -140,64 +140,66 @@ impl CommandCategory {
         match name {
             // Greek letters
             "alpha" | "beta" | "gamma" | "delta" | "epsilon" | "zeta" | "eta" | "theta"
-            | "iota" | "kappa" | "lambda" | "mu" | "nu" | "xi" | "omicron" | "pi"
-            | "rho" | "sigma" | "tau" | "upsilon" | "phi" | "chi" | "psi" | "omega"
-            | "Gamma" | "Delta" | "Theta" | "Lambda" | "Xi" | "Pi" | "Sigma" | "Upsilon"
-            | "Phi" | "Psi" | "Omega" | "varepsilon" | "vartheta" | "varpi" | "varrho"
-            | "varsigma" | "varphi" => CommandCategory::GreekLetter,
+            | "iota" | "kappa" | "lambda" | "mu" | "nu" | "xi" | "omicron" | "pi" | "rho"
+            | "sigma" | "tau" | "upsilon" | "phi" | "chi" | "psi" | "omega" | "Gamma" | "Delta"
+            | "Theta" | "Lambda" | "Xi" | "Pi" | "Sigma" | "Upsilon" | "Phi" | "Psi" | "Omega"
+            | "varepsilon" | "vartheta" | "varpi" | "varrho" | "varsigma" | "varphi" => {
+                CommandCategory::GreekLetter
+            }
 
             // Operators
-            "sum" | "prod" | "int" | "oint" | "iint" | "iiint" | "coprod" | "bigcup"
-            | "bigcap" | "bigvee" | "bigwedge" | "bigoplus" | "bigotimes" | "biguplus"
-            | "bigsqcup" | "lim" | "sup" | "inf" | "max" | "min" => CommandCategory::Operator,
+            "sum" | "prod" | "int" | "oint" | "iint" | "iiint" | "coprod" | "bigcup" | "bigcap"
+            | "bigvee" | "bigwedge" | "bigoplus" | "bigotimes" | "biguplus" | "bigsqcup"
+            | "lim" | "sup" | "inf" | "max" | "min" => CommandCategory::Operator,
 
             // Relations
-            "leq" | "geq" | "neq" | "equiv" | "sim" | "simeq" | "approx" | "cong"
-            | "propto" | "subset" | "supset" | "subseteq" | "supseteq" | "in" | "ni"
-            | "notin" | "prec" | "succ" | "preceq" | "succeq" | "ll" | "gg" | "perp"
-            | "parallel" | "vdash" | "dashv" | "models" => CommandCategory::Relation,
+            "leq" | "geq" | "neq" | "equiv" | "sim" | "simeq" | "approx" | "cong" | "propto"
+            | "subset" | "supset" | "subseteq" | "supseteq" | "in" | "ni" | "notin" | "prec"
+            | "succ" | "preceq" | "succeq" | "ll" | "gg" | "perp" | "parallel" | "vdash"
+            | "dashv" | "models" => CommandCategory::Relation,
 
             // Accents
-            "hat" | "check" | "breve" | "acute" | "grave" | "tilde" | "bar" | "vec"
-            | "dot" | "ddot" | "dddot" | "ddddot" | "widehat" | "widetilde" | "overline"
-            | "underline" | "overbrace" | "underbrace" => CommandCategory::Accent,
+            "hat" | "check" | "breve" | "acute" | "grave" | "tilde" | "bar" | "vec" | "dot"
+            | "ddot" | "dddot" | "ddddot" | "widehat" | "widetilde" | "overline" | "underline"
+            | "overbrace" | "underbrace" => CommandCategory::Accent,
 
             // Delimiters
-            "left" | "right" | "big" | "Big" | "bigg" | "Bigg" | "lfloor" | "rfloor"
-            | "lceil" | "rceil" | "langle" | "rangle" | "vert" | "Vert"
-            => CommandCategory::Delimiter,
+            "left" | "right" | "big" | "Big" | "bigg" | "Bigg" | "lfloor" | "rfloor" | "lceil"
+            | "rceil" | "langle" | "rangle" | "vert" | "Vert" => CommandCategory::Delimiter,
 
             // Functions
-            "sin" | "cos" | "tan" | "cot" | "sec" | "csc" | "arcsin" | "arccos"
-            | "arctan" | "sinh" | "cosh" | "tanh" | "coth" | "exp" | "log" | "ln"
-            | "lg" | "det" | "dim" | "ker" | "hom" | "arg" | "deg" | "gcd"
-            => CommandCategory::Function,
+            "sin" | "cos" | "tan" | "cot" | "sec" | "csc" | "arcsin" | "arccos" | "arctan"
+            | "sinh" | "cosh" | "tanh" | "coth" | "exp" | "log" | "ln" | "lg" | "det" | "dim"
+            | "ker" | "hom" | "arg" | "deg" | "gcd" => CommandCategory::Function,
 
             // Spacing
-            "quad" | "qquad" | "," | ";" | ":" | "!" | "hspace" | "vspace" | "hfill"
-            | "vfill" | "smallskip" | "medskip" | "bigskip" | "thinspace" | "enspace"
-            => CommandCategory::Spacing,
+            "quad" | "qquad" | "," | ";" | ":" | "!" | "hspace" | "vspace" | "hfill" | "vfill"
+            | "smallskip" | "medskip" | "bigskip" | "thinspace" | "enspace" => {
+                CommandCategory::Spacing
+            }
 
             // Environments
             "begin" | "end" => CommandCategory::Environment,
 
             // Formatting
-            "textbf" | "textit" | "texttt" | "textrm" | "textsf" | "textsc" | "emph"
-            | "mathbf" | "mathit" | "mathrm" | "mathsf" | "mathtt"
-            | "mathcal" | "mathfrak" | "mathbb" | "boldsymbol" => CommandCategory::Formatting,
+            "textbf" | "textit" | "texttt" | "textrm" | "textsf" | "textsc" | "emph" | "mathbf"
+            | "mathit" | "mathrm" | "mathsf" | "mathtt" | "mathcal" | "mathfrak" | "mathbb"
+            | "boldsymbol" => CommandCategory::Formatting,
 
             // Structure
             "section" | "subsection" | "subsubsection" | "chapter" | "part" | "paragraph"
-            | "subparagraph" | "title" | "author" | "date" | "maketitle"
-            => CommandCategory::Structure,
+            | "subparagraph" | "title" | "author" | "date" | "maketitle" => {
+                CommandCategory::Structure
+            }
 
             // Arrows
             "rightarrow" | "leftarrow" | "leftrightarrow" | "Rightarrow" | "Leftarrow"
             | "Leftrightarrow" | "longrightarrow" | "longleftarrow" | "longleftrightarrow"
             | "Longrightarrow" | "Longleftarrow" | "Longleftrightarrow" | "uparrow"
-            | "downarrow" | "updownarrow" | "Uparrow" | "Downarrow" | "Updownarrow"
-            | "nearrow" | "searrow" | "nwarrow" | "swarrow" | "mapsto" | "hookrightarrow"
-            | "hookleftarrow" => CommandCategory::Arrow,
+            | "downarrow" | "updownarrow" | "Uparrow" | "Downarrow" | "Updownarrow" | "nearrow"
+            | "searrow" | "nwarrow" | "swarrow" | "mapsto" | "hookrightarrow" | "hookleftarrow" => {
+                CommandCategory::Arrow
+            }
 
             _ => CommandCategory::Other,
         }
@@ -288,10 +290,7 @@ impl LaTeXEmbedder {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() > 1 {
                 let command = parts[0].to_string();
-                let vector: Vec<f32> = parts[1..]
-                    .iter()
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
+                let vector: Vec<f32> = parts[1..].iter().filter_map(|s| s.parse().ok()).collect();
 
                 if vector.len() == self.config.dimension {
                     let mut embedding = CommandEmbedding::new(command.clone(), vector, 0);
@@ -319,7 +318,8 @@ impl LaTeXEmbedder {
 
     /// Add a command embedding.
     pub fn add_command_embedding(&mut self, embedding: CommandEmbedding) {
-        self.command_embeddings.insert(embedding.command.clone(), embedding);
+        self.command_embeddings
+            .insert(embedding.command.clone(), embedding);
     }
 
     /// Add an equation embedding.
@@ -381,7 +381,11 @@ impl LaTeXEmbedder {
     ///
     /// Uses a min-heap to maintain only the top-k elements during iteration,
     /// achieving O(n log k) complexity instead of O(n log n) for sort+truncate.
-    pub fn most_similar_equations(&self, query_vector: &[f32], k: usize) -> Vec<(&EquationEmbedding, f32)> {
+    pub fn most_similar_equations(
+        &self,
+        query_vector: &[f32],
+        k: usize,
+    ) -> Vec<(&EquationEmbedding, f32)> {
         if k == 0 {
             return Vec::new();
         }
@@ -530,11 +534,26 @@ mod tests {
 
     #[test]
     fn test_command_category() {
-        assert_eq!(CommandCategory::from_command("alpha"), CommandCategory::GreekLetter);
-        assert_eq!(CommandCategory::from_command("sum"), CommandCategory::Operator);
-        assert_eq!(CommandCategory::from_command("sin"), CommandCategory::Function);
-        assert_eq!(CommandCategory::from_command("leq"), CommandCategory::Relation);
-        assert_eq!(CommandCategory::from_command("begin"), CommandCategory::Environment);
+        assert_eq!(
+            CommandCategory::from_command("alpha"),
+            CommandCategory::GreekLetter
+        );
+        assert_eq!(
+            CommandCategory::from_command("sum"),
+            CommandCategory::Operator
+        );
+        assert_eq!(
+            CommandCategory::from_command("sin"),
+            CommandCategory::Function
+        );
+        assert_eq!(
+            CommandCategory::from_command("leq"),
+            CommandCategory::Relation
+        );
+        assert_eq!(
+            CommandCategory::from_command("begin"),
+            CommandCategory::Environment
+        );
     }
 
     #[test]

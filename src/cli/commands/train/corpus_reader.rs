@@ -6,7 +6,10 @@ use crate::cli::args::CorpusFormat;
 use crate::cli::error::{CliError, CliResult};
 use crate::corpus::{CorpusReader, GutenbergReader, PlaintextReader, WikipediaReader};
 
-pub(super) fn create_corpus_reader(path: &str, format: CorpusFormat) -> CliResult<Box<dyn CorpusReader>> {
+pub(super) fn create_corpus_reader(
+    path: &str,
+    format: CorpusFormat,
+) -> CliResult<Box<dyn CorpusReader>> {
     let path_obj = Path::new(path);
 
     match format {
@@ -38,8 +41,7 @@ pub(super) fn create_corpus_reader(path: &str, format: CorpusFormat) -> CliResul
             // Local file
             if path_obj.exists() {
                 Ok(Box::new(
-                    WikipediaReader::new(path_obj)
-                        .map_err(|e| CliError::corpus(e.to_string()))?,
+                    WikipediaReader::new(path_obj).map_err(|e| CliError::corpus(e.to_string()))?,
                 ))
             } else {
                 Err(CliError::file_not_found(path_obj))

@@ -358,7 +358,11 @@ impl TuiState {
                 );
             }
 
-            ImportEvent::WorkerStarted { worker_id, order, prefix } => {
+            ImportEvent::WorkerStarted {
+                worker_id,
+                order,
+                prefix,
+            } => {
                 if let Some(worker) = self.workers.get_mut(*worker_id) {
                     worker.status = WorkerStatus::Downloading;
                     worker.prefix = Some(prefix.clone());
@@ -437,10 +441,7 @@ impl TuiState {
                 }
                 self.add_log(
                     LogLevel::Warn,
-                    format!(
-                        "Retry {}/{}: {} - {}",
-                        attempt, max_attempts, prefix, error
-                    ),
+                    format!("Retry {}/{}: {} - {}", attempt, max_attempts, prefix, error),
                 );
             }
 
@@ -899,7 +900,10 @@ impl TuiState {
     /// Derives from per-order progress data, ensuring consistency
     /// with the Order Progress display.
     pub fn total_files_completed(&self) -> u64 {
-        self.order_progress.values().map(|p| p.files_completed).sum()
+        self.order_progress
+            .values()
+            .map(|p| p.files_completed)
+            .sum()
     }
 
     /// Get the display phase, inferring from state if PhaseChanged event was missed.
@@ -1142,14 +1146,17 @@ mod tests {
         let mut state = TuiState::new("en", 1, 1, 4);
 
         // Simulate all orders complete, workers exited, but phase still shows cleanup
-        state.order_progress.insert(1, OrderProgressState {
-            files_completed: 27,
-            total_files: 27,
-            is_complete: true,
-            files_succeeded: 27,
-            files_skipped: 0,
-            ngrams_processed: 1000,
-        });
+        state.order_progress.insert(
+            1,
+            OrderProgressState {
+                files_completed: 27,
+                total_files: 27,
+                is_complete: true,
+                files_succeeded: 27,
+                files_skipped: 0,
+                ngrams_processed: 1000,
+            },
+        );
         state.workers.clear(); // All workers exited
         state.current_phase = "Cleaning Up".to_string();
 
@@ -1162,36 +1169,49 @@ mod tests {
         let mut state = TuiState::new("en", 1, 3, 4);
 
         // Simulate OrderProgress events for multiple orders
-        state.order_progress.insert(1, OrderProgressState {
-            files_completed: 10,
-            total_files: 27,
-            is_complete: false,
-            files_succeeded: 8,
-            files_skipped: 2,
-            ngrams_processed: 1000,
-        });
-        state.order_progress.insert(2, OrderProgressState {
-            files_completed: 15,
-            total_files: 676,
-            is_complete: false,
-            files_succeeded: 15,
-            files_skipped: 0,
-            ngrams_processed: 5000,
-        });
-        state.order_progress.insert(3, OrderProgressState {
-            files_completed: 5,
-            total_files: 676,
-            is_complete: false,
-            files_succeeded: 5,
-            files_skipped: 0,
-            ngrams_processed: 2000,
-        });
+        state.order_progress.insert(
+            1,
+            OrderProgressState {
+                files_completed: 10,
+                total_files: 27,
+                is_complete: false,
+                files_succeeded: 8,
+                files_skipped: 2,
+                ngrams_processed: 1000,
+            },
+        );
+        state.order_progress.insert(
+            2,
+            OrderProgressState {
+                files_completed: 15,
+                total_files: 676,
+                is_complete: false,
+                files_succeeded: 15,
+                files_skipped: 0,
+                ngrams_processed: 5000,
+            },
+        );
+        state.order_progress.insert(
+            3,
+            OrderProgressState {
+                files_completed: 5,
+                total_files: 676,
+                is_complete: false,
+                files_succeeded: 5,
+                files_skipped: 0,
+                ngrams_processed: 2000,
+            },
+        );
 
         // total_files_completed should sum across all orders
         assert_eq!(state.total_files_completed(), 30); // 10 + 15 + 5
 
         // Verify it matches what Order Progress bar would show
-        let sum: u64 = state.order_progress.values().map(|p| p.files_completed).sum();
+        let sum: u64 = state
+            .order_progress
+            .values()
+            .map(|p| p.files_completed)
+            .sum();
         assert_eq!(state.total_files_completed(), sum);
     }
 

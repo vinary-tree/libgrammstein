@@ -44,7 +44,10 @@ fn bench_state_transitions(c: &mut Criterion) {
         let prefix_count = prefixes.len();
 
         group.bench_with_input(
-            BenchmarkId::new("start_complete_cycle", format!("order_{}_prefixes_{}", order, prefix_count)),
+            BenchmarkId::new(
+                "start_complete_cycle",
+                format!("order_{}_prefixes_{}", order, prefix_count),
+            ),
             &prefixes,
             |b, prefixes| {
                 b.iter(|| {
@@ -87,7 +90,10 @@ fn bench_needs_prefix(c: &mut Criterion) {
         }
 
         group.bench_with_input(
-            BenchmarkId::new("lookup", format!("order_{}_prefixes_{}", order, prefix_count)),
+            BenchmarkId::new(
+                "lookup",
+                format!("order_{}_prefixes_{}", order, prefix_count),
+            ),
             &(checkpoint, prefixes),
             |b, (checkpoint, prefixes): &(ImportCheckpoint, Vec<String>)| {
                 b.iter(|| {
@@ -163,13 +169,17 @@ fn bench_sparse_remaining(c: &mut Criterion) {
     let mut checkpoint = ImportCheckpoint::new();
     let order = 2u8;
     for (i, prefix) in prefixes.iter().enumerate() {
-        if i % 20 != 0 {  // Complete 95%, leave 5% remaining
+        if i % 20 != 0 {
+            // Complete 95%, leave 5% remaining
             checkpoint.complete_prefix(order, prefix);
         }
     }
 
     group.bench_with_input(
-        BenchmarkId::new("find_remaining", format!("prefixes_{}_remaining_{}", prefix_count, prefix_count / 20)),
+        BenchmarkId::new(
+            "find_remaining",
+            format!("prefixes_{}_remaining_{}", prefix_count, prefix_count / 20),
+        ),
         &(checkpoint, prefixes),
         |b, (checkpoint, prefixes): &(ImportCheckpoint, Vec<String>)| {
             b.iter(|| {
@@ -207,7 +217,10 @@ fn bench_bitmap_pack(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(fill_count as u64));
         group.bench_with_input(
-            BenchmarkId::new("pack", format!("{}%_fill_{}_prefixes", fill_percent, fill_count)),
+            BenchmarkId::new(
+                "pack",
+                format!("{}%_fill_{}_prefixes", fill_percent, fill_count),
+            ),
             &checkpoint,
             |b, checkpoint| {
                 b.iter(|| {

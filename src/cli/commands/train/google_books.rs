@@ -9,9 +9,15 @@ use console::style;
 use crate::cli::args::ImportGoogleBooksArgs;
 use crate::cli::error::{print_success, CliError, CliResult};
 
-pub(super) fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, quiet: bool) -> CliResult<()> {
+pub(super) fn import_google_books(
+    args: ImportGoogleBooksArgs,
+    verbose: bool,
+    quiet: bool,
+) -> CliResult<()> {
     use crate::cli::args::ShardingModeArg;
-    use crate::sources::google_books::{GoogleBooksConfig, GoogleBooksImporter, LanguageInfo, ShardingMode, ShardingOptions};
+    use crate::sources::google_books::{
+        GoogleBooksConfig, GoogleBooksImporter, LanguageInfo, ShardingMode, ShardingOptions,
+    };
 
     if verbose {
         eprintln!("Importing Google Books N-grams");
@@ -50,8 +56,8 @@ pub(super) fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, qu
         use crate::sources::google_books::is_valid_prefix;
 
         // Check that the prefix is valid for at least one order in the range
-        let valid_for_any_order = (args.min_order..=args.max_order)
-            .any(|order| is_valid_prefix(order, prefix));
+        let valid_for_any_order =
+            (args.min_order..=args.max_order).any(|order| is_valid_prefix(order, prefix));
 
         if !valid_for_any_order {
             return Err(CliError::unsupported(format!(
@@ -118,7 +124,10 @@ pub(super) fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, qu
                     .expect("Invalid progress template"),
             );
             pb.enable_steady_tick(std::time::Duration::from_millis(100));
-            pb.set_message(format!("Importing from local files: {}", local_dir.display()));
+            pb.set_message(format!(
+                "Importing from local files: {}",
+                local_dir.display()
+            ));
             Some(pb)
         };
 
@@ -179,8 +188,8 @@ pub(super) fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, qu
         let stats = if show_tui {
             // Use ratatui TUI for rich interactive display
             use crate::cli::tui::ImportTui;
-            use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
             use tracing_appender::rolling::{RollingFileAppender, Rotation};
+            use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
             // Create event/command channels
             let (event_tx, _) = tokio::sync::broadcast::channel::<ImportEvent>(1024);
@@ -261,30 +270,38 @@ pub(super) fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, qu
 
             // Run import in background
             let import_handle = runtime.spawn(async move {
-                importer.import_http_reactive(event_tx_clone, command_rx, keep_shards).await
+                importer
+                    .import_http_reactive(event_tx_clone, command_rx, keep_shards)
+                    .await
             });
 
             // Set up file-based tracing for debugging (works even when TUI is active)
-            let log_dir = args.output.parent()
+            let log_dir = args
+                .output
+                .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| std::env::temp_dir().join("grammstein-logs"));
             std::fs::create_dir_all(&log_dir).ok();
 
-            let file_appender = RollingFileAppender::new(
-                Rotation::NEVER,
-                &log_dir,
-                "import-debug.log",
-            );
+            let file_appender =
+                RollingFileAppender::new(Rotation::NEVER, &log_dir, "import-debug.log");
             let (non_blocking, tracing_guard) = tracing_appender::non_blocking(file_appender);
 
             // Use try_init() to avoid panic if already initialized
             let _ = tracing_subscriber::registry()
-                .with(tracing_subscriber::fmt::layer()
-                    .with_writer(non_blocking)
-                    .with_ansi(false)
-                    .with_target(true))
-                .with(tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "libgrammstein::sources::google_books=debug,libgrammstein::cli::tui=debug".parse().expect("valid filter")))
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(non_blocking)
+                        .with_ansi(false)
+                        .with_target(true),
+                )
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                        "libgrammstein::sources::google_books=debug,libgrammstein::cli::tui=debug"
+                            .parse()
+                            .expect("valid filter")
+                    }),
+                )
                 .try_init();
 
             // Note: tracing-subscriber with 'fmt' feature automatically sets up
@@ -351,7 +368,7 @@ pub(super) fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, qu
             // Check TUI result - if user cancelled (returned Ok(false)), abort the import
             let user_cancelled = match &tui_result {
                 Ok(completed) => !completed, // false means user quit before completion
-                Err(_) => false, // Error in TUI, not user cancellation
+                Err(_) => false,             // Error in TUI, not user cancellation
             };
 
             if user_cancelled {
@@ -363,8 +380,9 @@ pub(super) fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, qu
                 let import_result = runtime.block_on(async {
                     tokio::time::timeout(
                         std::time::Duration::from_secs(60), // 60 seconds for checkpoint
-                        import_handle
-                    ).await
+                        import_handle,
+                    )
+                    .await
                 });
 
                 match import_result {
@@ -389,13 +407,11 @@ pub(super) fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, qu
             }
 
             // Wait for import to finish (normal completion path)
-            let import_result = runtime.block_on(async {
-                import_handle.await
-            });
+            let import_result = runtime.block_on(async { import_handle.await });
 
             // Handle import result
-            let import_result = import_result
-                .map_err(|e| CliError::io(format!("Import task failed: {}", e)))?;
+            let import_result =
+                import_result.map_err(|e| CliError::io(format!("Import task failed: {}", e)))?;
             import_result.map_err(|e| CliError::io(format!("HTTP import failed: {}", e)))?
         } else {
             // Quiet mode: use simple logging without TUI
@@ -468,7 +484,9 @@ pub(super) fn import_google_books(args: ImportGoogleBooksArgs, verbose: bool, qu
 
             let result = runtime
                 .block_on(async {
-                    importer.import_http_reactive(event_tx_clone, command_rx, keep_shards).await
+                    importer
+                        .import_http_reactive(event_tx_clone, command_rx, keep_shards)
+                        .await
                 })
                 .map_err(|e| CliError::io(format!("HTTP import failed: {}", e)))?;
 
@@ -490,10 +508,7 @@ fn print_import_stats(stats: &crate::sources::google_books::ImportStats, output:
     use console::style;
 
     println!();
-    println!(
-        "{} Google Books import complete",
-        style("✓").green().bold()
-    );
+    println!("{} Google Books import complete", style("✓").green().bold());
     println!();
     println!("  Total n-grams:  {}", stats.total_ngrams);
     println!("  Unique n-grams: {}", stats.unique_ngrams);

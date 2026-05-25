@@ -31,8 +31,7 @@ fn dump_checkpoint_bin() -> &'static str {
 /// `open()` replays the WAL on next load, so synced data is durable.
 fn make_byte_checkpoint(dir: &Path) {
     let path = dir.join("english.checkpoint.artrie");
-    let mut trie =
-        PersistentARTrie::<u64>::create(&path).expect("PersistentARTrie::create failed");
+    let mut trie = PersistentARTrie::<u64>::create(&path).expect("PersistentARTrie::create failed");
     trie.insert_with_value(VERSION_KEY, 3);
     trie.insert_with_value(NGRAMS_PROCESSED_KEY, 1_234_567);
     trie.insert_with_value(MKN_PHASE_KEY, 200);
@@ -118,8 +117,7 @@ fn inspects_current_vocabulary() {
         stdout
     );
     // At least one of the inserted terms appears in the sample output
-    let any_term =
-        stdout.contains("hello") || stdout.contains("world") || stdout.contains("ngram");
+    let any_term = stdout.contains("hello") || stdout.contains("world") || stdout.contains("ngram");
     assert!(any_term, "expected sample terms in stdout: {}", stdout);
 }
 
@@ -145,8 +143,7 @@ fn roundtrip_save_then_dump_byte_checkpoint() {
     let path = tmp.path().join("english.checkpoint.artrie");
 
     {
-        let mut trie =
-            PersistentARTrie::<u64>::create(&path).expect("PersistentARTrie::create");
+        let mut trie = PersistentARTrie::<u64>::create(&path).expect("PersistentARTrie::create");
         trie.insert_with_value(VERSION_KEY, 4);
         trie.insert_with_value(NGRAMS_PROCESSED_KEY, 42_000_000);
         trie.insert_with_value(MKN_PHASE_KEY, 200);

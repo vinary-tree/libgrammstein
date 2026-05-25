@@ -7,9 +7,7 @@ use super::grammar::GrammarCorrector;
 use super::lexical::LexicalCorrector;
 use super::semantic::SemanticCorrector;
 use crate::code::ast::ParsedCode;
-use crate::code::correction::{
-    CodeCorrector, Correction, CorrectionSource,
-};
+use crate::code::correction::{CodeCorrector, Correction, CorrectionSource};
 use crate::code::cpg::CodePropertyGraph;
 use crate::code::language::{CodeLanguage, TokenContext};
 use crate::code::pcfg::WeightedCFG;
@@ -77,7 +75,8 @@ impl<L: CodeLanguage + Clone> EnsembleCorrector<L> {
         config: EnsembleCorrectorConfig,
     ) -> Self {
         let lexical = Some(LexicalCorrector::with_defaults(Arc::clone(&language)));
-        let grammar_corrector = grammar.map(|g| GrammarCorrector::with_defaults(Arc::clone(&language), g));
+        let grammar_corrector =
+            grammar.map(|g| GrammarCorrector::with_defaults(Arc::clone(&language), g));
         let semantic = Some(SemanticCorrector::with_defaults(Arc::clone(&language)));
 
         Self {
@@ -134,7 +133,11 @@ impl<L: CodeLanguage + Clone> EnsembleCorrector<L> {
     }
 
     /// Collects corrections from all sources for a token.
-    fn collect_corrections(&self, token: &CodeToken, context: &TokenContext) -> Vec<(Correction, f64)> {
+    fn collect_corrections(
+        &self,
+        token: &CodeToken,
+        context: &TokenContext,
+    ) -> Vec<(Correction, f64)> {
         let mut corrections = Vec::new();
 
         // Lexical corrections
@@ -211,7 +214,8 @@ impl<L: CodeLanguage + Clone> EnsembleCorrector<L> {
                 // Multiple sources agree - merge and boost
                 let sources: Vec<CorrectionSource> = group.iter().map(|(c, _)| c.source).collect();
                 let total_weight: f64 = group.iter().map(|(_, w)| w).sum();
-                let avg_confidence: f64 = group.iter().map(|(c, w)| c.confidence * w).sum::<f64>() / total_weight;
+                let avg_confidence: f64 =
+                    group.iter().map(|(c, w)| c.confidence * w).sum::<f64>() / total_weight;
 
                 // Take the best correction as base. NaN confidences are
                 // treated as Equal so a single bad score can't panic the
@@ -237,10 +241,7 @@ impl<L: CodeLanguage + Clone> EnsembleCorrector<L> {
 
                 best.confidence = (avg_confidence * boost).min(1.0);
                 best.source = CorrectionSource::Combined;
-                best.context = Some(format!(
-                    "Suggested by {} sources",
-                    sources.len()
-                ));
+                best.context = Some(format!("Suggested by {} sources", sources.len()));
 
                 merged.push(best);
             }
@@ -256,7 +257,9 @@ impl<L: CodeLanguage + Clone> EnsembleCorrector<L> {
 
         // Sort by confidence descending
         corrections.sort_by(|a, b| {
-            b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal)
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Truncate to max candidates
@@ -266,11 +269,7 @@ impl<L: CodeLanguage + Clone> EnsembleCorrector<L> {
     }
 
     /// Performs full analysis on parsed code with CPG.
-    pub fn analyze_full(
-        &self,
-        parsed: &ParsedCode,
-        cpg: &CodePropertyGraph,
-    ) -> Vec<Correction> {
+    pub fn analyze_full(&self, parsed: &ParsedCode, cpg: &CodePropertyGraph) -> Vec<Correction> {
         let mut all_corrections = Vec::new();
 
         // Get semantic corrections from full analysis
@@ -304,12 +303,7 @@ impl<L: CodeLanguage + Clone + Send + Sync> CodeCorrector for EnsembleCorrector<
         self.finalize_corrections(merged)
     }
 
-    fn correct_range(
-        &self,
-        source: &str,
-        start_byte: usize,
-        end_byte: usize,
-    ) -> Vec<Correction> {
+    fn correct_range(&self, source: &str, start_byte: usize, end_byte: usize) -> Vec<Correction> {
         let text = &source[start_byte..end_byte];
         let token = CodeToken::new(
             text,
@@ -424,7 +418,8 @@ impl<L: CodeLanguage + Clone> EnsembleCorrectorBuilder<L> {
         };
 
         let grammar = if self.enable_grammar {
-            self.grammar.map(|g| GrammarCorrector::with_defaults(Arc::clone(&self.language), g))
+            self.grammar
+                .map(|g| GrammarCorrector::with_defaults(Arc::clone(&self.language), g))
         } else {
             None
         };
@@ -454,28 +449,46 @@ mod tests {
     struct MockLanguage;
 
     impl CodeLanguage for MockLanguage {
-        fn name(&self) -> &str { "mock" }
-        fn display_name(&self) -> &str { "Mock" }
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn display_name(&self) -> &str {
+            "Mock"
+        }
         fn tree_sitter_language(&self) -> tree_sitter::Language {
             panic!("Not implemented for tests")
         }
         fn keywords(&self) -> &[&str] {
             &["if", "else", "while", "for", "return", "function"]
         }
-        fn special_tokens(&self) -> &[&str] { &[] }
-        fn file_extensions(&self) -> &[&str] { &["mock"] }
-        fn classify_token(&self, _token: &str, _node_kind: &str) -> crate::code::language::TokenType {
+        fn special_tokens(&self) -> &[&str] {
+            &[]
+        }
+        fn file_extensions(&self) -> &[&str] {
+            &["mock"]
+        }
+        fn classify_token(
+            &self,
+            _token: &str,
+            _node_kind: &str,
+        ) -> crate::code::language::TokenType {
             crate::code::language::TokenType::Unknown
         }
         fn is_valid_identifier(&self, s: &str) -> bool {
             !s.is_empty() && s.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false)
         }
-        fn builtin_types(&self) -> &[&str] { &["int", "string", "bool"] }
-        fn stdlib_functions(&self) -> &[&str] { &["print", "read"] }
+        fn builtin_types(&self) -> &[&str] {
+            &["int", "string", "bool"]
+        }
+        fn stdlib_functions(&self) -> &[&str] {
+            &["print", "read"]
+        }
         fn comment_syntax(&self) -> crate::code::language::CommentSyntax {
             crate::code::language::CommentSyntax::default()
         }
-        fn is_whitespace_significant(&self) -> bool { false }
+        fn is_whitespace_significant(&self) -> bool {
+            false
+        }
     }
 
     #[test]

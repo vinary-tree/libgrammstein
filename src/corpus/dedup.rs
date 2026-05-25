@@ -334,7 +334,11 @@ impl Deduplicator {
     /// Get the current memory usage estimate in bytes.
     pub fn memory_usage(&self) -> usize {
         let seen_size = self.seen.capacity() * std::mem::size_of::<u64>();
-        let minhash_size = self.minhash_signatures.iter().map(|s| s.hashes.len() * 8).sum::<usize>();
+        let minhash_size = self
+            .minhash_signatures
+            .iter()
+            .map(|s| s.hashes.len() * 8)
+            .sum::<usize>();
         seen_size + minhash_size
     }
 }
@@ -457,7 +461,10 @@ mod tests {
     #[test]
     fn test_normalization() {
         assert_eq!(Deduplicator::normalize("Hello World!"), "hello world");
-        assert_eq!(Deduplicator::normalize("  Multiple   spaces  "), "multiple spaces");
+        assert_eq!(
+            Deduplicator::normalize("  Multiple   spaces  "),
+            "multiple spaces"
+        );
         assert_eq!(Deduplicator::normalize("Numbers123Here"), "numbers123here");
         assert_eq!(Deduplicator::normalize("!@#$%^&*()"), "");
     }

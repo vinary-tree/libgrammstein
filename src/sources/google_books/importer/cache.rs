@@ -11,9 +11,9 @@
 
 use std::path::Path;
 
-use super::ImportError;
 use super::super::reader::ReaderError;
 use super::super::task_manager::RetryAfter;
+use super::ImportError;
 
 /// Download a raw `.gz` file to local cache for later import.
 ///
@@ -45,7 +45,11 @@ pub(super) async fn download_to_cache(
         tokio::fs::create_dir_all(parent).await.map_err(|e| {
             ImportError::Io(std::io::Error::new(
                 e.kind(),
-                format!("Failed to create cache directory {}: {}", parent.display(), e),
+                format!(
+                    "Failed to create cache directory {}: {}",
+                    parent.display(),
+                    e
+                ),
             ))
         })?;
     }
@@ -63,11 +67,7 @@ pub(super) async fn download_to_cache(
     let mut request = client.get(url);
     if existing_len > 0 {
         request = request.header(reqwest::header::RANGE, format!("bytes={}-", existing_len));
-        log::debug!(
-            "Requesting resume from byte {} for {}",
-            existing_len,
-            url
-        );
+        log::debug!("Requesting resume from byte {} for {}", existing_len, url);
     }
 
     let response = request
@@ -110,10 +110,7 @@ pub(super) async fn download_to_cache(
 
             // Re-request without Range header
             let retry_resp = client.get(url).send().await.map_err(|e| {
-                ImportError::Reader(ReaderError::Http(format!(
-                    "GET {} (retry): {}",
-                    url, e
-                )))
+                ImportError::Reader(ReaderError::Http(format!("GET {} (retry): {}", url, e)))
             })?;
             let retry_status = retry_resp.status();
             (retry_resp, retry_status, 0u64)
@@ -130,16 +127,12 @@ pub(super) async fn download_to_cache(
 
     // Open file in append mode (206 resume) or create mode (200 fresh download)
     use tokio::io::BufWriter;
-    use tokio_util::io::StreamReader;
     use tokio_stream::StreamExt;
+    use tokio_util::io::StreamReader;
 
     let file = if status == reqwest::StatusCode::PARTIAL_CONTENT && existing_len > 0 {
         // 206 Partial Content — server confirmed resume; append to existing partial file
-        log::info!(
-            "Resuming download from byte {} for {}",
-            existing_len,
-            url
-        );
+        log::info!("Resuming download from byte {} for {}", existing_len, url);
         tokio::fs::OpenOptions::new()
             .append(true)
             .open(&downloading_path)
@@ -192,38 +185,46 @@ pub(super) async fn download_to_cache(
     let mut reader = StreamReader::new(mapped_stream);
 
     // Single efficient copy with internal buffering
-    tokio::io::copy(&mut reader, &mut writer).await.map_err(|e| {
-        ImportError::Io(std::io::Error::new(
-            e.kind(),
-            format!(
-                "Failed to download {} to {}: {}",
-                url,
-                downloading_path.display(),
-                e
-            ),
-        ))
-    })?;
+    tokio::io::copy(&mut reader, &mut writer)
+        .await
+        .map_err(|e| {
+            ImportError::Io(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "Failed to download {} to {}: {}",
+                    url,
+                    downloading_path.display(),
+                    e
+                ),
+            ))
+        })?;
 
     writer.flush().await.map_err(|e| {
         ImportError::Io(std::io::Error::new(
             e.kind(),
-            format!("Failed to flush cache file {}: {}", downloading_path.display(), e),
+            format!(
+                "Failed to flush cache file {}: {}",
+                downloading_path.display(),
+                e
+            ),
         ))
     })?;
     drop(writer);
 
     // Atomic rename: .gz.downloading → .gz
-    tokio::fs::rename(&downloading_path, cache_path).await.map_err(|e| {
-        ImportError::Io(std::io::Error::new(
-            e.kind(),
-            format!(
-                "Failed to rename {} → {}: {}",
-                downloading_path.display(),
-                cache_path.display(),
-                e
-            ),
-        ))
-    })?;
+    tokio::fs::rename(&downloading_path, cache_path)
+        .await
+        .map_err(|e| {
+            ImportError::Io(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "Failed to rename {} → {}: {}",
+                    downloading_path.display(),
+                    cache_path.display(),
+                    e
+                ),
+            ))
+        })?;
 
     log::debug!("Cached {} → {}", url, cache_path.display());
     Ok(())
@@ -237,7 +238,11 @@ pub(super) async fn cleanup_cache_file(cache_path: &Path) {
     // Remove the cached .gz file
     if cache_path.exists() {
         if let Err(e) = tokio::fs::remove_file(cache_path).await {
-            log::warn!("Failed to remove cached file {}: {}", cache_path.display(), e);
+            log::warn!(
+                "Failed to remove cached file {}: {}",
+                cache_path.display(),
+                e
+            );
         }
     }
     // Remove any partial .downloading remnant

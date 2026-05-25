@@ -287,17 +287,13 @@ impl GnnSemanticScorer {
                 // Query incoming edges on-demand (writes to this variable)
                 let incoming_data_flow = cpg
                     .edges_to(node_idx)
-                    .filter(|(_, e)| {
-                        matches!(e.kind, CpgEdgeKind::DfgFlow | CpgEdgeKind::DfgWrite)
-                    })
+                    .filter(|(_, e)| matches!(e.kind, CpgEdgeKind::DfgFlow | CpgEdgeKind::DfgWrite))
                     .count();
 
                 // Query outgoing edges on-demand (reads from this variable)
                 let outgoing_data_flow = cpg
                     .edges_from(node_idx)
-                    .filter(|(_, e)| {
-                        matches!(e.kind, CpgEdgeKind::DfgFlow | CpgEdgeKind::DfgRead)
-                    })
+                    .filter(|(_, e)| matches!(e.kind, CpgEdgeKind::DfgFlow | CpgEdgeKind::DfgRead))
                     .count();
 
                 if incoming_data_flow > 0 && outgoing_data_flow == 0 {
@@ -384,14 +380,10 @@ impl GnnSemanticScorer {
         let chars_a: Vec<char> = a.chars().collect();
         let chars_b: Vec<char> = b.chars().collect();
 
-        let bigrams_a: std::collections::HashSet<_> = chars_a
-            .windows(2)
-            .map(|w| (w[0], w[1]))
-            .collect();
-        let bigrams_b: std::collections::HashSet<_> = chars_b
-            .windows(2)
-            .map(|w| (w[0], w[1]))
-            .collect();
+        let bigrams_a: std::collections::HashSet<_> =
+            chars_a.windows(2).map(|w| (w[0], w[1])).collect();
+        let bigrams_b: std::collections::HashSet<_> =
+            chars_b.windows(2).map(|w| (w[0], w[1])).collect();
 
         if bigrams_a.is_empty() || bigrams_b.is_empty() {
             // Single character strings - use exact match

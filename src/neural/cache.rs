@@ -284,7 +284,9 @@ impl EmbeddingCache {
         Self {
             entries: dashmap::DashMap::with_capacity(max_entries),
             max_entries,
-            access_order: parking_lot::Mutex::new(std::collections::VecDeque::with_capacity(max_entries)),
+            access_order: parking_lot::Mutex::new(std::collections::VecDeque::with_capacity(
+                max_entries,
+            )),
         }
     }
 
@@ -319,7 +321,8 @@ impl EmbeddingCache {
         let embedding: std::sync::Arc<[f32]> = embedding.into();
 
         // Check if we need to evict (brief lock scope)
-        let should_evict = self.entries.len() >= self.max_entries && !self.entries.contains_key(&hash);
+        let should_evict =
+            self.entries.len() >= self.max_entries && !self.entries.contains_key(&hash);
 
         if should_evict {
             let oldest = {
@@ -387,7 +390,10 @@ mod tests {
         cache.insert("world", vec![4.0, 5.0, 6.0]);
 
         assert_eq!(cache.len(), 2);
-        assert_eq!(cache.get("hello").as_deref(), Some([1.0, 2.0, 3.0].as_slice()));
+        assert_eq!(
+            cache.get("hello").as_deref(),
+            Some([1.0, 2.0, 3.0].as_slice())
+        );
 
         // Insert third entry, should evict oldest
         cache.insert("test", vec![7.0, 8.0, 9.0]);

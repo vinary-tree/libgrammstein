@@ -2,8 +2,8 @@
 //!
 //! Provides URL patterns, file prefixes, and metadata for supported languages.
 
-use std::collections::HashMap;
 use lazy_static::lazy_static;
+use std::collections::HashMap;
 
 /// Metadata for a supported language.
 #[derive(Clone, Debug)]
@@ -150,9 +150,8 @@ lazy_static! {
 /// `char` to `&'static str`. A const slice is simpler, allocation-free,
 /// and lets the compiler verify length at compile time.
 pub static UNIGRAM_PREFIXES: &[&str] = &[
-    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
-    "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
-    "other",
+    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s",
+    "t", "u", "v", "w", "x", "y", "z", "other",
 ];
 
 /// Get the URL for a specific n-gram file.
@@ -171,11 +170,7 @@ pub fn get_file_url(language: &str, order: u8, prefix: &str) -> Option<String> {
 
     Some(format!(
         "{}/googlebooks-{}-all-{}gram-{}-{}.gz",
-        BASE_URL,
-        metadata.corpus_id,
-        order,
-        VERSION,
-        prefix
+        BASE_URL, metadata.corpus_id, order, VERSION, prefix
     ))
 }
 
@@ -194,11 +189,7 @@ pub fn get_order_urls(language: &str, order: u8) -> Option<Vec<String>> {
         .map(|prefix| {
             format!(
                 "{}/googlebooks-{}-all-{}gram-{}-{}.gz",
-                BASE_URL,
-                metadata.corpus_id,
-                order,
-                VERSION,
-                prefix
+                BASE_URL, metadata.corpus_id, order, VERSION, prefix
             )
         })
         .collect();

@@ -46,11 +46,8 @@ pub struct TopicModel {
 impl TopicModel {
     /// Create a new topic model from extraction results.
     pub fn from_extraction(result: ExtractionResult, config: TopicConfig) -> Self {
-        let topics: HashMap<TopicId, Topic> = result
-            .topics
-            .into_iter()
-            .map(|t| (t.id, t))
-            .collect();
+        let topics: HashMap<TopicId, Topic> =
+            result.topics.into_iter().map(|t| (t.id, t)).collect();
 
         // Compute number of levels from topic hierarchy
         let num_levels = topics.values().map(|t| t.level).max().unwrap_or(0) + 1;
@@ -126,12 +123,7 @@ impl TopicModel {
     pub fn children(&self, parent_id: TopicId) -> Vec<&Topic> {
         self.topics
             .get(&parent_id)
-            .map(|t| {
-                t.children
-                    .iter()
-                    .filter_map(|id| self.get(*id))
-                    .collect()
-            })
+            .map(|t| t.children.iter().filter_map(|id| self.get(*id)).collect())
             .unwrap_or_default()
     }
 
@@ -212,8 +204,7 @@ impl TopicModel {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let file = File::open(path.as_ref())?;
         let reader = BufReader::new(file);
-        serde_json::from_reader(reader)
-            .map_err(|e| TopicError::SerializationError(e.to_string()))
+        serde_json::from_reader(reader).map_err(|e| TopicError::SerializationError(e.to_string()))
     }
 
     /// Save the model to a file (bincode format for efficiency).
@@ -237,7 +228,10 @@ impl TopicModel {
         let avg_keywords = if self.topics.is_empty() {
             0.0
         } else {
-            self.topics.values().map(|t| t.keywords.len()).sum::<usize>() as f64
+            self.topics
+                .values()
+                .map(|t| t.keywords.len())
+                .sum::<usize>() as f64
                 / self.topics.len() as f64
         };
 
@@ -276,7 +270,11 @@ impl std::fmt::Display for TopicModelStats {
         writeln!(f, "  Documents: {}", self.num_documents)?;
         writeln!(f, "  Hierarchy Levels: {}", self.num_levels)?;
         writeln!(f, "  Vocabulary Size: {}", self.vocabulary_size)?;
-        writeln!(f, "  Avg Keywords/Topic: {:.2}", self.avg_keywords_per_topic)?;
+        writeln!(
+            f,
+            "  Avg Keywords/Topic: {:.2}",
+            self.avg_keywords_per_topic
+        )?;
         writeln!(
             f,
             "  Total Doc Assignments: {}",
@@ -324,7 +322,9 @@ mod tests {
         };
 
         let mut extractor = TopicExtractor::new(config.clone());
-        let result = extractor.extract(&embeddings, &documents).expect("extraction failed");
+        let result = extractor
+            .extract(&embeddings, &documents)
+            .expect("extraction failed");
 
         TopicModel::from_extraction(result, config)
     }
@@ -467,8 +467,8 @@ mod tests {
 
     #[test]
     fn test_with_vocabulary() {
-        let model = create_test_model()
-            .with_vocabulary(vec!["test".to_string(), "vocab".to_string()]);
+        let model =
+            create_test_model().with_vocabulary(vec!["test".to_string(), "vocab".to_string()]);
 
         assert_eq!(model.vocabulary().len(), 2);
         assert_eq!(model.vocabulary()[0], "test");

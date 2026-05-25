@@ -7,12 +7,12 @@
 //! - **Semantic**: GNN/embedding-based semantic analysis
 //! - **Ensemble**: Combined scoring from all sources
 
-pub mod lexical;
-pub mod grammar;
-pub mod semantic;
 pub mod ensemble;
+pub mod grammar;
+pub mod lexical;
+pub mod semantic;
 
-pub use lexical::LexicalCorrector;
-pub use grammar::GrammarCorrector;
-pub use semantic::SemanticCorrector;
 pub use ensemble::EnsembleCorrector;
+pub use grammar::GrammarCorrector;
+pub use lexical::LexicalCorrector;
+pub use semantic::SemanticCorrector;

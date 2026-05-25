@@ -89,14 +89,7 @@ pub(super) fn train_ngram(args: TrainNgramArgs, verbose: bool, quiet: bool) -> C
         if !stats.is_running() {
             // Save checkpoint on interrupt before exiting
             if let Some(ref manager) = checkpoint_manager {
-                save_ngram_checkpoint(
-                    manager,
-                    &mut accumulator,
-                    &state,
-                    &args,
-                    &timer,
-                    quiet,
-                )?;
+                save_ngram_checkpoint(manager, &mut accumulator, &state, &args, &timer, quiet)?;
             }
             progress.abandon();
             return Err(CliError::Interrupted);
@@ -104,7 +97,10 @@ pub(super) fn train_ngram(args: TrainNgramArgs, verbose: bool, quiet: bool) -> C
 
         // Tokenize sentence
         let tokens: Vec<String> = if args.lowercase {
-            tokenizer.words(&sentence).map(|s| s.to_lowercase()).collect()
+            tokenizer
+                .words(&sentence)
+                .map(|s| s.to_lowercase())
+                .collect()
         } else {
             tokenizer.words(&sentence).collect()
         };
@@ -133,20 +129,17 @@ pub(super) fn train_ngram(args: TrainNgramArgs, verbose: bool, quiet: bool) -> C
 
         // Update progress
         if state.sentences_processed % 10000 == 0 {
-            progress.update(state.sentences_processed, state.tokens_processed, state.bytes_read);
+            progress.update(
+                state.sentences_processed,
+                state.tokens_processed,
+                state.bytes_read,
+            );
         }
 
         // Periodic checkpoint
         if state.sentences_processed % checkpoint_interval == 0 {
             if let Some(ref manager) = checkpoint_manager {
-                save_ngram_checkpoint(
-                    manager,
-                    &mut accumulator,
-                    &state,
-                    &args,
-                    &timer,
-                    quiet,
-                )?;
+                save_ngram_checkpoint(manager, &mut accumulator, &state, &args, &timer, quiet)?;
             }
         }
     }
@@ -164,7 +157,11 @@ pub(super) fn train_ngram(args: TrainNgramArgs, verbose: bool, quiet: bool) -> C
     let unique_ngrams = accumulator.len();
     finalize_ngram_model(&accumulator, &args, quiet)?;
 
-    progress.finish(state.sentences_processed, state.tokens_processed, unique_ngrams as u64);
+    progress.finish(
+        state.sentences_processed,
+        state.tokens_processed,
+        unique_ngrams as u64,
+    );
 
     if !quiet {
         print_success(&format!("Model saved to: {}", args.output.display()));
@@ -188,13 +185,9 @@ fn resume_ngram_training(
     Option<CheckpointManager>,
     TrainingTimer,
 )> {
-    let checkpoint_dir = args
-        .checkpoint
-        .checkpoint
-        .as_ref()
-        .ok_or_else(|| {
-            CliError::unsupported("--checkpoint directory required when using --resume")
-        })?;
+    let checkpoint_dir = args.checkpoint.checkpoint.as_ref().ok_or_else(|| {
+        CliError::unsupported("--checkpoint directory required when using --resume")
+    })?;
 
     let manager = CheckpointManager::new(checkpoint_dir, args.checkpoint.keep_checkpoints)?;
     let checkpoint = manager.load_ngram_checkpoint(checkpoint_path)?;
@@ -271,8 +264,8 @@ fn finalize_ngram_model(
     args: &TrainNgramArgs,
     quiet: bool,
 ) -> CliResult<()> {
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
     use crate::ngram::{NgramModel, NgramTrie};
+    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 
     if !quiet {
         eprintln!("Finalizing model (converting to inference format)...");
@@ -295,7 +288,10 @@ fn finalize_ngram_model(
     }
 
     if !quiet {
-        eprintln!("  Exported {} n-grams (min_count={})", entry_count, args.min_count);
+        eprintln!(
+            "  Exported {} n-grams (min_count={})",
+            entry_count, args.min_count
+        );
     }
 
     // Build final model with smoothing
@@ -333,8 +329,8 @@ fn train_ngram_inmemory(
     progress: TrainingProgress,
     _stats: Arc<TrainingStats>,
 ) -> CliResult<()> {
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
     use crate::ngram::TrainerBuilder;
+    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 
     if verbose {
         eprintln!("Using in-memory training (no checkpointing)");
@@ -378,4 +374,3 @@ fn train_ngram_inmemory(
 
     Ok(())
 }
-

@@ -7,9 +7,8 @@ use std::sync::LazyLock;
 use unicode_normalization::UnicodeNormalization;
 
 /// Regex for collapsing multiple whitespace.
-static WHITESPACE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\s+").expect("Invalid whitespace regex")
-});
+static WHITESPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s+").expect("Invalid whitespace regex"));
 
 /// Regex for removing control characters.
 static CONTROL_CHARS: LazyLock<Regex> = LazyLock::new(|| {

@@ -76,8 +76,10 @@ impl GoogleBooksImporter {
         // Sync atomic counters FROM checkpoint stats (source of truth).
         // The checkpoint.add_ngrams() method maintains accurate counts incrementally.
         // We sync the atomics from checkpoint to keep real-time display consistent.
-        self.total_ngrams.store(self.checkpoint.stats.ngrams_processed, Ordering::Relaxed);
-        self.unique_ngrams.store(self.checkpoint.stats.unique_ngrams, Ordering::Relaxed);
+        self.total_ngrams
+            .store(self.checkpoint.stats.ngrams_processed, Ordering::Relaxed);
+        self.unique_ngrams
+            .store(self.checkpoint.stats.unique_ngrams, Ordering::Relaxed);
         self.checkpoint.stats.elapsed_seconds = self.start_time.elapsed().as_secs();
 
         // CRITICAL: Merge vocabulary lock-free layer and rotate WAL FIRST to ensure
@@ -91,9 +93,11 @@ impl GoogleBooksImporter {
         // called merge_into() internally, causing two back-to-back HashMap rebuilds
         // of the vocabulary's reverse_index (~3.42 GB transient spike for 5.8M words).
         // The combined method does a single merge, halving the peak memory usage.
-        self.storage.merge_and_rotate_vocabulary_wal().map_err(|e| {
-            ImportError::Trie(format!("Failed to merge and rotate vocabulary WAL: {}", e))
-        })?;
+        self.storage
+            .merge_and_rotate_vocabulary_wal()
+            .map_err(|e| {
+                ImportError::Trie(format!("Failed to merge and rotate vocabulary WAL: {}", e))
+            })?;
 
         // CRITICAL: Sync and checkpoint n-gram shards to prevent WAL replay on resume.
         // Without this, n-grams written to shard WALs before a checkpoint are replayed
@@ -103,12 +107,12 @@ impl GoogleBooksImporter {
         // - Workers can continue on shards that aren't syncing
         // - Only workers targeting a syncing shard defer their job
         // - Formally verified in formal/tla/AsyncShardSync.tla
-        self.storage.sync_parallel(max_concurrent_syncs).map_err(|e| {
-            ImportError::Trie(format!("Failed to sync storage: {}", e))
-        })?;
-        self.storage.checkpoint_parallel(max_concurrent_syncs).map_err(|e| {
-            ImportError::Trie(format!("Failed to checkpoint storage: {}", e))
-        })?;
+        self.storage
+            .sync_parallel(max_concurrent_syncs)
+            .map_err(|e| ImportError::Trie(format!("Failed to sync storage: {}", e)))?;
+        self.storage
+            .checkpoint_parallel(max_concurrent_syncs)
+            .map_err(|e| ImportError::Trie(format!("Failed to checkpoint storage: {}", e)))?;
 
         // Save checkpoint to the storage's metadata trie AFTER syncing all
         // data. `save_import_checkpoint` writes the checkpoint keys then
@@ -116,9 +120,7 @@ impl GoogleBooksImporter {
         // tracking consistent.
         self.storage
             .save_import_checkpoint(&self.checkpoint)
-            .map_err(|e| {
-                ImportError::Trie(format!("Failed to save checkpoint to trie: {}", e))
-            })?;
+            .map_err(|e| ImportError::Trie(format!("Failed to save checkpoint to trie: {}", e)))?;
 
         log::debug!("Checkpoint saved: {}", self.checkpoint.progress_summary());
         Ok(())
@@ -153,8 +155,10 @@ impl GoogleBooksImporter {
         event_tx: Option<&tokio::sync::broadcast::Sender<gb_events::ImportEvent>>,
     ) -> Result<(), ImportError> {
         // Sync atomic counters FROM checkpoint stats (source of truth).
-        self.total_ngrams.store(self.checkpoint.stats.ngrams_processed, Ordering::Relaxed);
-        self.unique_ngrams.store(self.checkpoint.stats.unique_ngrams, Ordering::Relaxed);
+        self.total_ngrams
+            .store(self.checkpoint.stats.ngrams_processed, Ordering::Relaxed);
+        self.unique_ngrams
+            .store(self.checkpoint.stats.unique_ngrams, Ordering::Relaxed);
         self.checkpoint.stats.elapsed_seconds = self.start_time.elapsed().as_secs();
 
         // CRITICAL: Rotate vocabulary WAL FIRST to ensure vocabulary indices are
@@ -163,14 +167,15 @@ impl GoogleBooksImporter {
         // Note: We use rotate_vocabulary_wal() instead of checkpoint_vocabulary() to
         // avoid file bloat from repeated full trie serialization. WAL replay provides
         // crash recovery.
-        self.storage.rotate_vocabulary_wal().map_err(|e| {
-            ImportError::Trie(format!("Failed to rotate vocabulary WAL: {}", e))
-        })?;
+        self.storage
+            .rotate_vocabulary_wal()
+            .map_err(|e| ImportError::Trie(format!("Failed to rotate vocabulary WAL: {}", e)))?;
 
         // Start async checkpoint - this rotates WALs and returns immediately
-        let handle = self.storage.checkpoint_async().map_err(|e| {
-            ImportError::Trie(format!("Failed to start async checkpoint: {}", e))
-        })?;
+        let handle = self
+            .storage
+            .checkpoint_async()
+            .map_err(|e| ImportError::Trie(format!("Failed to start async checkpoint: {}", e)))?;
 
         log::debug!(
             "Async checkpoint initiated: {} resources rotating",
@@ -180,41 +185,46 @@ impl GoogleBooksImporter {
         // Wait for all syncs to complete using parallel waiting for sharded storage.
         // This reduces wait time from O(n) to O(1) for n shards by waiting on all
         // shard sync handles concurrently rather than sequentially.
-        handle.wait_all_parallel().map_err(|e| {
-            ImportError::Trie(format!("Async checkpoint sync failed: {}", e))
-        })?;
+        handle
+            .wait_all_parallel()
+            .map_err(|e| ImportError::Trie(format!("Async checkpoint sync failed: {}", e)))?;
 
         // Finish checkpoint - truncate WALs with bounded I/O parallelism
         // Create a progress callback that emits CheckpointProgress events
-        let progress_callback: Option<Box<dyn Fn(usize, usize) + Send + Sync>> = event_tx.map(|tx| {
-            let tx = tx.clone();
-            Box::new(move |processed: usize, total: usize| {
-                let percent = if total > 0 {
-                    (processed as f32 / total as f32) * 100.0
-                } else {
-                    100.0
-                };
-                let _ = tx.send(gb_events::ImportEvent::CheckpointProgress {
-                    shards_processed: processed,
-                    total_shards: total,
-                    percent_complete: percent,
-                });
-            }) as Box<dyn Fn(usize, usize) + Send + Sync>
-        });
+        let progress_callback: Option<Box<dyn Fn(usize, usize) + Send + Sync>> =
+            event_tx.map(|tx| {
+                let tx = tx.clone();
+                Box::new(move |processed: usize, total: usize| {
+                    let percent = if total > 0 {
+                        (processed as f32 / total as f32) * 100.0
+                    } else {
+                        100.0
+                    };
+                    let _ = tx.send(gb_events::ImportEvent::CheckpointProgress {
+                        shards_processed: processed,
+                        total_shards: total,
+                        percent_complete: percent,
+                    });
+                }) as Box<dyn Fn(usize, usize) + Send + Sync>
+            });
 
-        self.storage.checkpoint_async_finish_with_progress(Self::DEFAULT_CHECKPOINT_PARALLELISM, progress_callback).map_err(|e| {
-            ImportError::Trie(format!("Failed to finish async checkpoint: {}", e))
-        })?;
+        self.storage
+            .checkpoint_async_finish_with_progress(
+                Self::DEFAULT_CHECKPOINT_PARALLELISM,
+                progress_callback,
+            )
+            .map_err(|e| ImportError::Trie(format!("Failed to finish async checkpoint: {}", e)))?;
 
         // Save checkpoint metadata AFTER syncing all data
         // This ensures consistency between data and progress tracking.
         self.storage
             .save_import_checkpoint(&self.checkpoint)
-            .map_err(|e| {
-                ImportError::Trie(format!("Failed to save checkpoint to trie: {}", e))
-            })?;
+            .map_err(|e| ImportError::Trie(format!("Failed to save checkpoint to trie: {}", e)))?;
 
-        log::debug!("Async checkpoint saved: {}", self.checkpoint.progress_summary());
+        log::debug!(
+            "Async checkpoint saved: {}",
+            self.checkpoint.progress_summary()
+        );
         Ok(())
     }
 

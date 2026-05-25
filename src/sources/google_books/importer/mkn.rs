@@ -59,9 +59,17 @@ impl GoogleBooksImporter {
         let estimated_ngrams = self.total_ngrams.load(Ordering::Relaxed);
 
         // Emit MknStarted event
-        let source = if self.storage.is_sharded() { "shards" } else { "single_trie" };
+        let source = if self.storage.is_sharded() {
+            "shards"
+        } else {
+            "single_trie"
+        };
         if let Some(tx) = event_tx {
-            log::debug!("[IMPORTER] Sending MknStarted: source={}, estimated_ngrams={}", source, estimated_ngrams);
+            log::debug!(
+                "[IMPORTER] Sending MknStarted: source={}, estimated_ngrams={}",
+                source,
+                estimated_ngrams
+            );
             let _ = tx.send(ImportEvent::MknStarted {
                 source: source.to_string(),
                 estimated_ngrams,
@@ -82,11 +90,18 @@ impl GoogleBooksImporter {
                 self.save_checkpoint()?;
 
                 let duration = mkn_start.elapsed();
-                log::info!("MKN statistics computed successfully in {:.1}s", duration.as_secs_f64());
+                log::info!(
+                    "MKN statistics computed successfully in {:.1}s",
+                    duration.as_secs_f64()
+                );
 
                 // Emit MknCompleted event
                 if let Some(tx) = event_tx {
-                    log::debug!("[IMPORTER] Sending MknCompleted: continuation={}, frequency={}", continuation_entries, frequency_entries);
+                    log::debug!(
+                        "[IMPORTER] Sending MknCompleted: continuation={}, frequency={}",
+                        continuation_entries,
+                        frequency_entries
+                    );
                     let _ = tx.send(ImportEvent::MknCompleted {
                         continuation_entries,
                         frequency_entries,
@@ -120,9 +135,10 @@ impl GoogleBooksImporter {
         &self,
         event_tx: Option<&tokio::sync::broadcast::Sender<ImportEvent>>,
     ) -> Result<(u64, u64), ImportError> {
-        let coordinator = self.storage.as_sharded().ok_or_else(|| {
-            ImportError::Trie("Expected sharded storage".to_string())
-        })?;
+        let coordinator = self
+            .storage
+            .as_sharded()
+            .ok_or_else(|| ImportError::Trie("Expected sharded storage".to_string()))?;
 
         // Phase 1: Compute MKN statistics (parallel over shards via rayon)
         log::info!("MKN Phase 1: Computing statistics across shards...");
@@ -136,11 +152,10 @@ impl GoogleBooksImporter {
             });
         }
 
-        let aggregator = MknAggregator::new(coordinator)
-            .with_cancellation_flag(&self.interrupted);
-        let mkn_stats = aggregator.compute_all().map_err(|e| {
-            ImportError::Trie(format!("Failed to compute MKN statistics: {}", e))
-        })?;
+        let aggregator = MknAggregator::new(coordinator).with_cancellation_flag(&self.interrupted);
+        let mkn_stats = aggregator
+            .compute_all()
+            .map_err(|e| ImportError::Trie(format!("Failed to compute MKN statistics: {}", e)))?;
 
         if let Some(tx) = event_tx {
             let _ = tx.send(ImportEvent::MknProgress {
@@ -157,9 +172,8 @@ impl GoogleBooksImporter {
         let mkn_path = self.config.output_path.with_extension("mkn.artrie");
         log::info!("Saving MKN statistics to {:?}...", mkn_path);
 
-        let mkn_trie = PersistentARTrie::create(&mkn_path).map_err(|e| {
-            ImportError::Trie(format!("Failed to create MKN trie: {}", e))
-        })?;
+        let mkn_trie = PersistentARTrie::create(&mkn_path)
+            .map_err(|e| ImportError::Trie(format!("Failed to create MKN trie: {}", e)))?;
         let mkn_trie = Arc::new(RwLock::new(mkn_trie));
 
         let mut continuation_entries = 0u64;
@@ -171,24 +185,24 @@ impl GoogleBooksImporter {
             // Store frequency counts for each order
             for (order, counts) in mkn_stats.frequency_counts.iter().enumerate() {
                 let prefix = format!("\x00order{}\x00", order);
-                trie.upsert_bytes(format!("{}n1", prefix).as_bytes(), counts.n1).map_err(|e| {
-                    ImportError::Trie(format!("Failed to write n1: {}", e))
-                })?;
-                trie.upsert_bytes(format!("{}n2", prefix).as_bytes(), counts.n2).map_err(|e| {
-                    ImportError::Trie(format!("Failed to write n2: {}", e))
-                })?;
-                trie.upsert_bytes(format!("{}n3", prefix).as_bytes(), counts.n3).map_err(|e| {
-                    ImportError::Trie(format!("Failed to write n3: {}", e))
-                })?;
-                trie.upsert_bytes(format!("{}n4", prefix).as_bytes(), counts.n4).map_err(|e| {
-                    ImportError::Trie(format!("Failed to write n4: {}", e))
-                })?;
-                trie.upsert_bytes(format!("{}total_unique", prefix).as_bytes(), counts.total_unique).map_err(|e| {
-                    ImportError::Trie(format!("Failed to write total_unique: {}", e))
-                })?;
-                trie.upsert_bytes(format!("{}total_count", prefix).as_bytes(), counts.total_count).map_err(|e| {
-                    ImportError::Trie(format!("Failed to write total_count: {}", e))
-                })?;
+                trie.upsert_bytes(format!("{}n1", prefix).as_bytes(), counts.n1)
+                    .map_err(|e| ImportError::Trie(format!("Failed to write n1: {}", e)))?;
+                trie.upsert_bytes(format!("{}n2", prefix).as_bytes(), counts.n2)
+                    .map_err(|e| ImportError::Trie(format!("Failed to write n2: {}", e)))?;
+                trie.upsert_bytes(format!("{}n3", prefix).as_bytes(), counts.n3)
+                    .map_err(|e| ImportError::Trie(format!("Failed to write n3: {}", e)))?;
+                trie.upsert_bytes(format!("{}n4", prefix).as_bytes(), counts.n4)
+                    .map_err(|e| ImportError::Trie(format!("Failed to write n4: {}", e)))?;
+                trie.upsert_bytes(
+                    format!("{}total_unique", prefix).as_bytes(),
+                    counts.total_unique,
+                )
+                .map_err(|e| ImportError::Trie(format!("Failed to write total_unique: {}", e)))?;
+                trie.upsert_bytes(
+                    format!("{}total_count", prefix).as_bytes(),
+                    counts.total_count,
+                )
+                .map_err(|e| ImportError::Trie(format!("Failed to write total_count: {}", e)))?;
                 frequency_entries += 6;
             }
 
@@ -216,9 +230,8 @@ impl GoogleBooksImporter {
             }
 
             // Checkpoint to persist
-            trie.checkpoint().map_err(|e| {
-                ImportError::Trie(format!("Failed to checkpoint MKN trie: {}", e))
-            })?;
+            trie.checkpoint()
+                .map_err(|e| ImportError::Trie(format!("Failed to checkpoint MKN trie: {}", e)))?;
         }
 
         if let Some(tx) = event_tx {
@@ -241,7 +254,8 @@ impl GoogleBooksImporter {
 
     /// Compute MKN stats for single-trie storage (original behavior).
     fn compute_mkn_stats_single_trie(&self) -> Result<(), ImportError> {
-        self.compute_mkn_stats_single_trie_with_events(None).map(|_| ())
+        self.compute_mkn_stats_single_trie_with_events(None)
+            .map(|_| ())
     }
 
     /// Compute MKN stats for single-trie storage with optional event emission.
@@ -298,38 +312,38 @@ impl GoogleBooksImporter {
                 .unwrap_or_default();
             drop(trie);
             for (ngram, count) in entries {
-                    // Skip metadata keys (they start with \x00)
-                    if ngram.starts_with(&[0x00]) {
-                        continue;
-                    }
-
-                    // Accumulate frequency counts
-                    total_unique += 1;
-                    total_count += count;
-                    match count {
-                        1 => n1 += 1,
-                        2 => n2 += 1,
-                        3 => n3 += 1,
-                        4 => n4 += 1,
-                        _ => {}
-                    }
-
-                    // Decode varint-encoded key to word indices
-                    let indices = decode_ngram_key_bytes(&ngram);
-                    if indices.len() >= 2 {
-                        // MKN Pass 1: continuation counts (suffix → unique prefixes)
-                        // e.g., indices [0, 1, 2] → prefix=0, suffix=encode([1, 2])
-                        let prefix = indices[0];
-                        let suffix = encode_indices_to_key_bytes(&indices[1..]);
-                        continuation_pairs.insert((suffix, prefix));
-
-                        // MKN Pass 2: unique continuations (context → unique following)
-                        // e.g., indices [0, 1, 2] → context=encode([0, 1]), following=2
-                        let context = encode_indices_to_key_bytes(&indices[..indices.len() - 1]);
-                        let following = indices[indices.len() - 1];
-                        unique_cont_pairs.insert((context, following));
-                    }
+                // Skip metadata keys (they start with \x00)
+                if ngram.starts_with(&[0x00]) {
+                    continue;
                 }
+
+                // Accumulate frequency counts
+                total_unique += 1;
+                total_count += count;
+                match count {
+                    1 => n1 += 1,
+                    2 => n2 += 1,
+                    3 => n3 += 1,
+                    4 => n4 += 1,
+                    _ => {}
+                }
+
+                // Decode varint-encoded key to word indices
+                let indices = decode_ngram_key_bytes(&ngram);
+                if indices.len() >= 2 {
+                    // MKN Pass 1: continuation counts (suffix → unique prefixes)
+                    // e.g., indices [0, 1, 2] → prefix=0, suffix=encode([1, 2])
+                    let prefix = indices[0];
+                    let suffix = encode_indices_to_key_bytes(&indices[1..]);
+                    continuation_pairs.insert((suffix, prefix));
+
+                    // MKN Pass 2: unique continuations (context → unique following)
+                    // e.g., indices [0, 1, 2] → context=encode([0, 1]), following=2
+                    let context = encode_indices_to_key_bytes(&indices[..indices.len() - 1]);
+                    let following = indices[indices.len() - 1];
+                    unique_cont_pairs.insert((context, following));
+                }
+            }
         }
 
         if let Some(tx) = event_tx {
@@ -349,7 +363,12 @@ impl GoogleBooksImporter {
         );
         log::info!(
             "Frequency counts: n1={}, n2={}, n3={}, n4={}, total_unique={}, total_count={}",
-            n1, n2, n3, n4, total_unique, total_count
+            n1,
+            n2,
+            n3,
+            n4,
+            total_unique,
+            total_count
         );
 
         // Phase 2: Compute and write continuation counts
@@ -383,10 +402,7 @@ impl GoogleBooksImporter {
                 let mut count_key = b"\x00N1+\x00".to_vec();
                 count_key.extend_from_slice(suffix);
                 trie.upsert_bytes(&count_key, *count).map_err(|e| {
-                    ImportError::Trie(format!(
-                        "Failed to write MKN continuation count: {}",
-                        e
-                    ))
+                    ImportError::Trie(format!("Failed to write MKN continuation count: {}", e))
                 })?;
                 continuation_entries += 1;
             }
@@ -439,34 +455,32 @@ impl GoogleBooksImporter {
             let trie_arc = self.storage.checkpoint_trie();
             let mut trie = trie_arc.write();
 
-            trie.upsert_bytes(b"\x00mkn\x00n1", n1).map_err(|e| {
-                ImportError::Trie(format!("Failed to write MKN n1: {}", e))
-            })?;
+            trie.upsert_bytes(b"\x00mkn\x00n1", n1)
+                .map_err(|e| ImportError::Trie(format!("Failed to write MKN n1: {}", e)))?;
             frequency_entries += 1;
 
-            trie.upsert_bytes(b"\x00mkn\x00n2", n2).map_err(|e| {
-                ImportError::Trie(format!("Failed to write MKN n2: {}", e))
-            })?;
+            trie.upsert_bytes(b"\x00mkn\x00n2", n2)
+                .map_err(|e| ImportError::Trie(format!("Failed to write MKN n2: {}", e)))?;
             frequency_entries += 1;
 
-            trie.upsert_bytes(b"\x00mkn\x00n3", n3).map_err(|e| {
-                ImportError::Trie(format!("Failed to write MKN n3: {}", e))
-            })?;
+            trie.upsert_bytes(b"\x00mkn\x00n3", n3)
+                .map_err(|e| ImportError::Trie(format!("Failed to write MKN n3: {}", e)))?;
             frequency_entries += 1;
 
-            trie.upsert_bytes(b"\x00mkn\x00n4", n4).map_err(|e| {
-                ImportError::Trie(format!("Failed to write MKN n4: {}", e))
-            })?;
+            trie.upsert_bytes(b"\x00mkn\x00n4", n4)
+                .map_err(|e| ImportError::Trie(format!("Failed to write MKN n4: {}", e)))?;
             frequency_entries += 1;
 
-            trie.upsert_bytes(b"\x00mkn\x00total_unique", total_unique).map_err(|e| {
-                ImportError::Trie(format!("Failed to write MKN total_unique: {}", e))
-            })?;
+            trie.upsert_bytes(b"\x00mkn\x00total_unique", total_unique)
+                .map_err(|e| {
+                    ImportError::Trie(format!("Failed to write MKN total_unique: {}", e))
+                })?;
             frequency_entries += 1;
 
-            trie.upsert_bytes(b"\x00mkn\x00total_count", total_count).map_err(|e| {
-                ImportError::Trie(format!("Failed to write MKN total_count: {}", e))
-            })?;
+            trie.upsert_bytes(b"\x00mkn\x00total_count", total_count)
+                .map_err(|e| {
+                    ImportError::Trie(format!("Failed to write MKN total_count: {}", e))
+                })?;
             frequency_entries += 1;
         }
 

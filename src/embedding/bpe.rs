@@ -44,7 +44,11 @@ impl MergeOp {
     /// Create a new merge operation.
     pub fn new(left: String, right: String) -> Self {
         let merged = format!("{}{}", left, right);
-        Self { left, right, merged }
+        Self {
+            left,
+            right,
+            merged,
+        }
     }
 }
 
@@ -196,10 +200,7 @@ impl BpeTokenizer {
 
     /// Decode token IDs back to text.
     pub fn decode(&self, ids: &[u32]) -> String {
-        let tokens: Vec<&str> = ids
-            .iter()
-            .filter_map(|&id| self.id_to_token(id))
-            .collect();
+        let tokens: Vec<&str> = ids.iter().filter_map(|&id| self.id_to_token(id)).collect();
 
         let mut result = String::new();
         for token in tokens {
@@ -265,7 +266,10 @@ impl BpeTrainer {
     /// 2. Initialize vocabulary with characters
     /// 3. Iteratively merge most frequent pairs until vocab_size reached
     pub fn train<R: CorpusReader>(&self, reader: &R) -> Result<BpeTokenizer> {
-        log::info!("Starting BPE training with target vocab size: {}", self.vocab_size);
+        log::info!(
+            "Starting BPE training with target vocab size: {}",
+            self.vocab_size
+        );
 
         // Step 1: Count word frequencies
         let word_freqs = self.count_word_frequencies(reader)?;
@@ -301,10 +305,7 @@ impl BpeTrainer {
     }
 
     /// Count word frequencies in corpus.
-    fn count_word_frequencies<R: CorpusReader>(
-        &self,
-        reader: &R,
-    ) -> Result<HashMap<String, u64>> {
+    fn count_word_frequencies<R: CorpusReader>(&self, reader: &R) -> Result<HashMap<String, u64>> {
         let word_counts: DashMap<String, AtomicU64> = DashMap::new();
 
         let sentences: Vec<String> = reader.sentences().collect();
@@ -553,7 +554,10 @@ mod tests {
         let tokenizer = BpeTokenizer::new(vocab, merges);
 
         let tokens = tokenizer.encode_word("hello");
-        assert_eq!(tokens, vec!["hel".to_string(), format!("lo{}", BPE_END_OF_WORD)]);
+        assert_eq!(
+            tokens,
+            vec!["hel".to_string(), format!("lo{}", BPE_END_OF_WORD)]
+        );
     }
 
     #[test]

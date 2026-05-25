@@ -108,13 +108,21 @@ impl<L: CodeLanguage> SemanticCorrector<L> {
     }
 
     /// Registers a variable from the codebase.
-    pub fn register_variable(&mut self, name: String, type_name: Option<String>, scope_level: usize) {
-        let info = self.known_variables.entry(name.clone()).or_insert(VariableInfo {
-            name,
-            type_name: None,
-            scope_level,
-            use_count: 0,
-        });
+    pub fn register_variable(
+        &mut self,
+        name: String,
+        type_name: Option<String>,
+        scope_level: usize,
+    ) {
+        let info = self
+            .known_variables
+            .entry(name.clone())
+            .or_insert(VariableInfo {
+                name,
+                type_name: None,
+                scope_level,
+                use_count: 0,
+            });
         if type_name.is_some() {
             info.type_name = type_name;
         }
@@ -123,12 +131,15 @@ impl<L: CodeLanguage> SemanticCorrector<L> {
 
     /// Registers a function from the codebase.
     pub fn register_function(&mut self, name: String, arity: usize, return_type: Option<String>) {
-        self.known_functions.insert(name.clone(), FunctionInfo {
-            name,
-            param_types: vec![None; arity],
-            return_type,
-            arity,
-        });
+        self.known_functions.insert(
+            name.clone(),
+            FunctionInfo {
+                name,
+                param_types: vec![None; arity],
+                return_type,
+                arity,
+            },
+        );
     }
 
     /// Analyzes a Code Property Graph for semantic issues.
@@ -139,13 +150,11 @@ impl<L: CodeLanguage> SemanticCorrector<L> {
         issues.retain(|issue| issue.confidence >= self.config.min_confidence);
 
         // Filter by enabled checks
-        issues.retain(|issue| {
-            match issue.issue_type {
-                IssueType::VariableMisuse => self.config.check_variable_misuse,
-                IssueType::UnusedBinding => self.config.check_unused_bindings,
-                IssueType::TypeError => self.config.check_type_errors,
-                _ => true,
-            }
+        issues.retain(|issue| match issue.issue_type {
+            IssueType::VariableMisuse => self.config.check_variable_misuse,
+            IssueType::UnusedBinding => self.config.check_unused_bindings,
+            IssueType::TypeError => self.config.check_type_errors,
+            _ => true,
         });
 
         issues
@@ -228,7 +237,11 @@ impl<L: CodeLanguage> SemanticCorrector<L> {
 
         for i in 1..=m {
             for j in 1..=n {
-                let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+                let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                    0
+                } else {
+                    1
+                };
                 dp[i][j] = (dp[i - 1][j] + 1)
                     .min(dp[i][j - 1] + 1)
                     .min(dp[i - 1][j - 1] + cost);
@@ -251,8 +264,14 @@ impl<L: CodeLanguage> SemanticCorrector<L> {
         let node = cpg.all_nodes().find(|n| n.id == issue.node_idx);
 
         let (start_byte, end_byte, original) = if let Some(node) = node {
-            (node.location.0, node.location.1,
-             source.get(node.location.0..node.location.1).unwrap_or("").to_string())
+            (
+                node.location.0,
+                node.location.1,
+                source
+                    .get(node.location.0..node.location.1)
+                    .unwrap_or("")
+                    .to_string(),
+            )
         } else {
             return corrections;
         };
@@ -273,7 +292,10 @@ impl<L: CodeLanguage> SemanticCorrector<L> {
                         )
                         .with_confidence(issue.confidence * score)
                         .with_source(CorrectionSource::Neural)
-                        .with_context(format!("Possible variable misuse: did you mean '{}'?", replacement)),
+                        .with_context(format!(
+                            "Possible variable misuse: did you mean '{}'?",
+                            replacement
+                        )),
                     );
                 }
             }
@@ -348,11 +370,7 @@ impl<L: CodeLanguage> SemanticCorrector<L> {
     }
 
     /// Analyzes parsed code and returns corrections.
-    pub fn analyze_parsed(
-        &self,
-        parsed: &ParsedCode,
-        cpg: &CodePropertyGraph,
-    ) -> Vec<Correction> {
+    pub fn analyze_parsed(&self, parsed: &ParsedCode, cpg: &CodePropertyGraph) -> Vec<Correction> {
         let issues = self.analyze_cpg(cpg);
         let source = &parsed.source;
 
@@ -364,7 +382,9 @@ impl<L: CodeLanguage> SemanticCorrector<L> {
 
         // Sort by confidence
         all_corrections.sort_by(|a, b| {
-            b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal)
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         all_corrections
@@ -391,7 +411,8 @@ impl<L: CodeLanguage + Send + Sync> CodeCorrector for SemanticCorrector<L> {
             // Check if this identifier exists in known variables
             if !self.known_variables.contains_key(&token.text) {
                 // Find similar known variables
-                let mut candidates: Vec<_> = self.known_variables
+                let mut candidates: Vec<_> = self
+                    .known_variables
                     .keys()
                     .map(|name| {
                         let sim = self.name_similarity(&token.text, name);
@@ -400,12 +421,12 @@ impl<L: CodeLanguage + Send + Sync> CodeCorrector for SemanticCorrector<L> {
                     .filter(|(_, sim)| *sim > 0.5)
                     .collect();
 
-                candidates.sort_by(|a, b| {
-                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                });
+                candidates
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
                 let end_byte = token.byte_offset + token.text.len();
-                for (replacement, score) in candidates.into_iter().take(self.config.max_candidates) {
+                for (replacement, score) in candidates.into_iter().take(self.config.max_candidates)
+                {
                     corrections.push(
                         Correction::new(
                             CorrectionKind::VariableMisuse,
@@ -416,7 +437,10 @@ impl<L: CodeLanguage + Send + Sync> CodeCorrector for SemanticCorrector<L> {
                         )
                         .with_confidence(score * 0.7)
                         .with_source(CorrectionSource::Neural)
-                        .with_context(format!("Unknown identifier, did you mean '{}'?", replacement)),
+                        .with_context(format!(
+                            "Unknown identifier, did you mean '{}'?",
+                            replacement
+                        )),
                     );
                 }
             }
@@ -425,21 +449,9 @@ impl<L: CodeLanguage + Send + Sync> CodeCorrector for SemanticCorrector<L> {
         corrections
     }
 
-    fn correct_range(
-        &self,
-        source: &str,
-        start_byte: usize,
-        end_byte: usize,
-    ) -> Vec<Correction> {
+    fn correct_range(&self, source: &str, start_byte: usize, end_byte: usize) -> Vec<Correction> {
         let text = &source[start_byte..end_byte];
-        let token = CodeToken::new(
-            text,
-            start_byte,
-            0,
-            0,
-            TokenType::Identifier,
-            "identifier",
-        );
+        let token = CodeToken::new(text, start_byte, 0, 0, TokenType::Identifier, "identifier");
 
         let context = TokenContext::new(TokenType::Identifier);
         self.correct_token(&token, &context)
@@ -463,24 +475,42 @@ mod tests {
     struct MockLanguage;
 
     impl CodeLanguage for MockLanguage {
-        fn name(&self) -> &str { "mock" }
-        fn display_name(&self) -> &str { "Mock" }
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn display_name(&self) -> &str {
+            "Mock"
+        }
         fn tree_sitter_language(&self) -> tree_sitter::Language {
             panic!("Not implemented for tests")
         }
-        fn keywords(&self) -> &[&str] { &[] }
-        fn special_tokens(&self) -> &[&str] { &[] }
-        fn file_extensions(&self) -> &[&str] { &["mock"] }
+        fn keywords(&self) -> &[&str] {
+            &[]
+        }
+        fn special_tokens(&self) -> &[&str] {
+            &[]
+        }
+        fn file_extensions(&self) -> &[&str] {
+            &["mock"]
+        }
         fn classify_token(&self, _token: &str, _node_kind: &str) -> TokenType {
             TokenType::Unknown
         }
-        fn is_valid_identifier(&self, s: &str) -> bool { !s.is_empty() }
-        fn builtin_types(&self) -> &[&str] { &[] }
-        fn stdlib_functions(&self) -> &[&str] { &[] }
+        fn is_valid_identifier(&self, s: &str) -> bool {
+            !s.is_empty()
+        }
+        fn builtin_types(&self) -> &[&str] {
+            &[]
+        }
+        fn stdlib_functions(&self) -> &[&str] {
+            &[]
+        }
         fn comment_syntax(&self) -> crate::code::language::CommentSyntax {
             crate::code::language::CommentSyntax::default()
         }
-        fn is_whitespace_significant(&self) -> bool { false }
+        fn is_whitespace_significant(&self) -> bool {
+            false
+        }
     }
 
     #[test]
@@ -510,7 +540,10 @@ mod tests {
 
         assert!(corrector.known_variables.contains_key("userCount"));
         assert!(corrector.known_variables.contains_key("userName"));
-        assert_eq!(corrector.known_variables["userCount"].type_name, Some("int".to_string()));
+        assert_eq!(
+            corrector.known_variables["userCount"].type_name,
+            Some("int".to_string())
+        );
     }
 
     #[test]
@@ -536,6 +569,8 @@ mod tests {
         let corrections = corrector.correct_token(&token, &context);
 
         assert!(!corrections.is_empty());
-        assert!(corrections.iter().any(|c| c.replacement == "calculateTotal"));
+        assert!(corrections
+            .iter()
+            .any(|c| c.replacement == "calculateTotal"));
     }
 }

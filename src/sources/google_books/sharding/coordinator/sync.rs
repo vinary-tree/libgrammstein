@@ -13,12 +13,9 @@ use rayon::prelude::*;
 
 use super::super::checkpoint::CheckpointError;
 use super::super::shard::ShardSyncState;
-use super::{
-    CheckpointHandle, CoordinatorError, CoordinatorResult, ShardCoordinator, ShardKey,
-};
+use super::{CheckpointHandle, CoordinatorError, CoordinatorResult, ShardCoordinator, ShardKey};
 
 impl ShardCoordinator {
-
     /// Checkpoint all open shards.
     /// Merge lock-free overlays into persistent tries for all open shards.
     ///
@@ -464,56 +461,56 @@ impl ShardCoordinator {
                 shard_keys
                     .par_iter()
                     .filter_map(|key| {
-                    let shard = self.shards.get(key)?;
+                        let shard = self.shards.get(key)?;
 
-                    // Check if shard is clean with a read lock first (fast, non-blocking)
-                    let result = {
-                        let guard = shard.read();
-                        if !guard.is_dirty() {
-                            // Shard is clean - still collect its state for checkpoint metadata
+                        // Check if shard is clean with a read lock first (fast, non-blocking)
+                        let result = {
+                            let guard = shard.read();
+                            if !guard.is_dirty() {
+                                // Shard is clean - still collect its state for checkpoint metadata
+                                let state = guard.checkpoint_state();
+                                Some(Ok((
+                                    key.clone(),
+                                    guard.len() as u64,
+                                    state.ngrams_processed,
+                                    state.completed_prefixes.clone(),
+                                    state.current_prefix.clone(),
+                                )))
+                            } else {
+                                None
+                            }
+                        };
+
+                        let result = result.unwrap_or_else(|| {
+                            // Shard is dirty - need to checkpoint (requires write lock)
+                            let mut guard = shard.write();
+
+                            // Checkpoint (truncate WAL) - fast since data already synced
+                            if let Err(e) = guard.checkpoint() {
+                                return Err(format!("Shard {}: {}", key, e));
+                            }
+
+                            // Collect state for global checkpoint update (done outside parallel section
+                            // to avoid lock contention on checkpoint_manager)
                             let state = guard.checkpoint_state();
-                            Some(Ok((
+                            Ok((
                                 key.clone(),
                                 guard.len() as u64,
                                 state.ngrams_processed,
                                 state.completed_prefixes.clone(),
                                 state.current_prefix.clone(),
-                            )))
-                        } else {
-                            None
-                        }
-                    };
+                            ))
+                        });
 
-                    let result = result.unwrap_or_else(|| {
-                        // Shard is dirty - need to checkpoint (requires write lock)
-                        let mut guard = shard.write();
-
-                        // Checkpoint (truncate WAL) - fast since data already synced
-                        if let Err(e) = guard.checkpoint() {
-                            return Err(format!("Shard {}: {}", key, e));
+                        // Update progress counter and emit event
+                        let processed = shards_processed.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Some(ref callback) = progress_callback {
+                            callback(processed, total_shards);
                         }
 
-                        // Collect state for global checkpoint update (done outside parallel section
-                        // to avoid lock contention on checkpoint_manager)
-                        let state = guard.checkpoint_state();
-                        Ok((
-                            key.clone(),
-                            guard.len() as u64,
-                            state.ngrams_processed,
-                            state.completed_prefixes.clone(),
-                            state.current_prefix.clone(),
-                        ))
-                    });
-
-                    // Update progress counter and emit event
-                    let processed = shards_processed.fetch_add(1, Ordering::Relaxed) + 1;
-                    if let Some(ref callback) = progress_callback {
-                        callback(processed, total_shards);
-                    }
-
-                    Some(result)
-                })
-                .collect()
+                        Some(result)
+                    })
+                    .collect()
             });
 
         // Separate errors from successful results

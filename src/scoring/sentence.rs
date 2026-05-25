@@ -49,10 +49,7 @@ where
     ///
     /// Returns sentences sorted by log probability (highest first).
     pub fn rank_sentences<'b>(&self, sentences: &[&'b [&'b str]]) -> Vec<(&'b [&'b str], f64)> {
-        let mut scored: Vec<_> = sentences
-            .iter()
-            .map(|s| (*s, self.log_prob(s)))
-            .collect();
+        let mut scored: Vec<_> = sentences.iter().map(|s| (*s, self.log_prob(s))).collect();
 
         // Sort by score descending (highest log prob first)
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

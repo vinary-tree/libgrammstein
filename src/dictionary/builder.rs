@@ -527,9 +527,7 @@ mod tests {
         counts.insert("b".to_string(), 50);
         counts.insert("c".to_string(), 25);
 
-        let dict = DictionaryBuilder::new()
-            .build_from_counts(counts)
-            .unwrap();
+        let dict = DictionaryBuilder::new().build_from_counts(counts).unwrap();
 
         assert_eq!(dict.frequency("a"), Some(100));
         assert_eq!(dict.frequency("b"), Some(50));
@@ -568,9 +566,7 @@ mod tests {
         counts.insert("d".to_string(), 10);
         counts.insert("e".to_string(), 5);
 
-        let dict = DictionaryBuilder::new()
-            .build_from_counts(counts)
-            .unwrap();
+        let dict = DictionaryBuilder::new().build_from_counts(counts).unwrap();
 
         let top3 = dict.top_n(3);
         assert_eq!(top3.len(), 3);
@@ -589,13 +585,9 @@ mod tests {
         counts2.insert("b".to_string(), 30);
         counts2.insert("c".to_string(), 20);
 
-        let mut dict1 = DictionaryBuilder::new()
-            .build_from_counts(counts1)
-            .unwrap();
+        let mut dict1 = DictionaryBuilder::new().build_from_counts(counts1).unwrap();
 
-        let dict2 = DictionaryBuilder::new()
-            .build_from_counts(counts2)
-            .unwrap();
+        let dict2 = DictionaryBuilder::new().build_from_counts(counts2).unwrap();
 
         dict1.merge(&dict2);
 
@@ -638,9 +630,7 @@ mod tests {
         counts.insert("hello".to_string(), 100);
         counts.insert("world".to_string(), 50);
 
-        let dict = DictionaryBuilder::new()
-            .build_from_counts(counts)
-            .unwrap();
+        let dict = DictionaryBuilder::new().build_from_counts(counts).unwrap();
 
         // Export to temp file
         let temp_dir = tempfile::tempdir().unwrap();
@@ -663,9 +653,7 @@ mod tests {
         counts.insert("c".to_string(), 25);
         counts.insert("d".to_string(), 10);
 
-        let dict = DictionaryBuilder::new()
-            .build_from_counts(counts)
-            .unwrap();
+        let dict = DictionaryBuilder::new().build_from_counts(counts).unwrap();
 
         let range = dict.words_in_frequency_range(20, 60);
         assert_eq!(range.len(), 2); // b (50) and c (25)

@@ -101,7 +101,10 @@ impl<'a> ShardedTrieView<'a> {
                 return Vec::new();
             }
             match guard.iter_with_counts() {
-                Ok(entries) => entries.into_iter().filter(|(ngram, _)| ngram.starts_with(prefix)).collect(),
+                Ok(entries) => entries
+                    .into_iter()
+                    .filter(|(ngram, _)| ngram.starts_with(prefix))
+                    .collect(),
                 Err(e) => {
                     log::warn!("Failed to iterate shard {}: {}", key, e);
                     Vec::new()
@@ -148,8 +151,12 @@ impl<'a> ShardedTrieView<'a> {
 
         ViewStats {
             shard_count,
-            total_ngrams: coordinator_stats.total_ngrams.load(std::sync::atomic::Ordering::Relaxed),
-            unique_ngrams: coordinator_stats.unique_ngrams.load(std::sync::atomic::Ordering::Relaxed),
+            total_ngrams: coordinator_stats
+                .total_ngrams
+                .load(std::sync::atomic::Ordering::Relaxed),
+            unique_ngrams: coordinator_stats
+                .unique_ngrams
+                .load(std::sync::atomic::Ordering::Relaxed),
             total_entries: self.len(),
         }
     }
@@ -219,8 +226,8 @@ impl<'a> ShardedTrieView<'a> {
     ///
     /// A vector of (n-gram, count) pairs sorted by count (descending).
     pub fn top_n(&self, n: usize) -> Vec<(Vec<u8>, u64)> {
-        use std::collections::BinaryHeap;
         use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
 
         // Use a min-heap to efficiently track top N
         let mut heap: BinaryHeap<Reverse<(u64, Vec<u8>)>> = BinaryHeap::new();
@@ -264,14 +271,14 @@ pub struct ViewStats {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::config::{ShardConfig, ShardGranularity};
+    use super::*;
     use tempfile::TempDir;
 
     fn create_test_coordinator() -> (TempDir, ShardCoordinator) {
         let dir = TempDir::new().expect("Failed to create temp dir");
-        let config = ShardConfig::new(dir.path().join("shards"))
-            .with_granularity(ShardGranularity::TwoChar);
+        let config =
+            ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
         let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
 
@@ -280,7 +287,9 @@ mod tests {
         coordinator.store_ngram("the|slow", 50).expect("store");
         coordinator.store_ngram("apple|pie", 30).expect("store");
         coordinator.store_ngram("apple|cider", 20).expect("store");
-        coordinator.store_ngram("zebra|crossing", 10).expect("store");
+        coordinator
+            .store_ngram("zebra|crossing", 10)
+            .expect("store");
 
         (dir, coordinator)
     }

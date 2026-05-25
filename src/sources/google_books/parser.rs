@@ -101,7 +101,10 @@ pub struct NgramRecordRef<'a> {
 /// Find the next occurrence of `needle` in `haystack` starting at `start`.
 #[inline(always)]
 fn find_byte(haystack: &[u8], start: usize, needle: u8) -> Option<usize> {
-    haystack[start..].iter().position(|&b| b == needle).map(|i| start + i)
+    haystack[start..]
+        .iter()
+        .position(|&b| b == needle)
+        .map(|i| start + i)
 }
 
 /// Parse a single line from a Google Books n-gram file into a borrowed record.
@@ -196,13 +199,11 @@ pub fn parse_ngram_line(line: &str) -> Result<NgramRecord, ParseError> {
 pub fn parse_ngram_lines<'a>(
     lines: impl Iterator<Item = &'a str> + 'a,
 ) -> impl Iterator<Item = NgramRecord> + 'a {
-    lines.filter_map(|line| {
-        match parse_ngram_line(line) {
-            Ok(record) => Some(record),
-            Err(e) => {
-                log::warn!("Skipping invalid line: {}", e);
-                None
-            }
+    lines.filter_map(|line| match parse_ngram_line(line) {
+        Ok(record) => Some(record),
+        Err(e) => {
+            log::warn!("Skipping invalid line: {}", e);
+            None
         }
     })
 }

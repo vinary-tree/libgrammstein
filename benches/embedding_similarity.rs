@@ -26,7 +26,9 @@ fn build_test_model(unique_tokens: usize, dim: usize) -> (TempDir, SubwordEmbedd
     for _ in 0..(unique_tokens * 50) {
         let mut sentence = Vec::with_capacity(10);
         for _ in 0..10 {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let idx = (state as usize) % unique_tokens;
             sentence.push(format!("word{}", idx));
         }

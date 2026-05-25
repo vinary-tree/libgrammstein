@@ -180,7 +180,8 @@ impl ApiPattern {
 
     /// Get pattern as string representation.
     pub fn to_string_pattern(&self) -> String {
-        self.sequence.iter()
+        self.sequence
+            .iter()
             .map(|s| s.as_ref())
             .collect::<Vec<_>>()
             .join(" -> ")
@@ -249,8 +250,7 @@ impl ApiPatternMiner {
         }
 
         let total_sequences = sequences.len();
-        let min_support = ((self.config.min_support * total_sequences as f64)
-            .ceil() as usize)
+        let min_support = ((self.config.min_support * total_sequences as f64).ceil() as usize)
             .max(self.config.min_support_count);
 
         // Convert sequences to interned form
@@ -320,7 +320,8 @@ impl ApiPatternMiner {
 
         // Sort by support (descending) then length (descending)
         patterns.sort_by(|a, b| {
-            b.support.cmp(&a.support)
+            b.support
+                .cmp(&a.support)
                 .then_with(|| b.len().cmp(&a.len()))
         });
 
@@ -347,11 +348,7 @@ impl ApiPatternMiner {
         // Add current prefix as a pattern if it meets length requirement
         if projected.prefix.len() >= self.config.min_pattern_length {
             let support = self.count_unique_sequences(&projected.positions);
-            let pattern = ApiPattern::new(
-                projected.prefix.clone(),
-                support,
-                total_sequences,
-            );
+            let pattern = ApiPattern::new(projected.prefix.clone(), support, total_sequences);
             patterns.push(pattern);
         }
 
@@ -439,9 +436,7 @@ impl ApiPatternMiner {
             let seq = &pattern.sequence;
 
             closed.retain(|p: &ApiPattern| {
-                !(p.support == support
-                    && p.len() < len
-                    && self.is_subsequence(&p.sequence, seq))
+                !(p.support == support && p.len() < len && self.is_subsequence(&p.sequence, seq))
             });
 
             closed.push(pattern);
@@ -541,12 +536,11 @@ mod tests {
         // Should find ["open", "close"] with support 3
         assert!(!patterns.is_empty());
 
-        let open_close = patterns.iter()
-            .find(|p| {
-                p.sequence.len() == 2
-                    && p.sequence[0].as_ref() == "open"
-                    && p.sequence[1].as_ref() == "close"
-            });
+        let open_close = patterns.iter().find(|p| {
+            p.sequence.len() == 2
+                && p.sequence[0].as_ref() == "open"
+                && p.sequence[1].as_ref() == "close"
+        });
 
         assert!(open_close.is_some());
         assert_eq!(open_close.unwrap().support, 3);
@@ -571,8 +565,7 @@ mod tests {
         let patterns = miner.mine(&sequences);
 
         // Should find ["connect", "query", "fetch", "close"]
-        let long_pattern = patterns.iter()
-            .find(|p| p.sequence.len() >= 4);
+        let long_pattern = patterns.iter().find(|p| p.sequence.len() >= 4);
 
         assert!(long_pattern.is_some());
     }
@@ -596,13 +589,13 @@ mod tests {
 
         // With closed_only, should prefer longer pattern ["a", "b", "c"]
         // over shorter ones with same support
-        let has_abc = patterns.iter()
+        let has_abc = patterns
+            .iter()
             .any(|p| p.sequence.len() == 3 && p.sequence[0].as_ref() == "a");
 
-        let has_ab = patterns.iter()
-            .any(|p| p.sequence.len() == 2
-                && p.sequence[0].as_ref() == "a"
-                && p.sequence[1].as_ref() == "b");
+        let has_ab = patterns.iter().any(|p| {
+            p.sequence.len() == 2 && p.sequence[0].as_ref() == "a" && p.sequence[1].as_ref() == "b"
+        });
 
         // The closed pattern is abc (length 3), not ab (length 2)
         assert!(has_abc);
@@ -612,25 +605,24 @@ mod tests {
 
     #[test]
     fn test_strict_mining() {
-        let mut miner = ApiPatternMiner::new(ApiPatternConfig::strict()
-            .with_min_support(0.5)
-            .with_min_support_count(2));
+        let mut miner = ApiPatternMiner::new(
+            ApiPatternConfig::strict()
+                .with_min_support(0.5)
+                .with_min_support_count(2),
+        );
 
         let sequences = vec![
-            vec!["a", "x", "b"],  // a-b not consecutive
-            vec!["a", "b"],       // a-b consecutive
-            vec!["a", "b"],       // a-b consecutive
+            vec!["a", "x", "b"], // a-b not consecutive
+            vec!["a", "b"],      // a-b consecutive
+            vec!["a", "b"],      // a-b consecutive
         ];
 
         let patterns = miner.mine(&sequences);
 
         // With strict (no gaps), ["a", "b"] appears in 2 sequences
-        let ab_pattern = patterns.iter()
-            .find(|p| {
-                p.sequence.len() == 2
-                    && p.sequence[0].as_ref() == "a"
-                    && p.sequence[1].as_ref() == "b"
-            });
+        let ab_pattern = patterns.iter().find(|p| {
+            p.sequence.len() == 2 && p.sequence[0].as_ref() == "a" && p.sequence[1].as_ref() == "b"
+        });
 
         // Should find it with support 2 (only consecutive matches)
         assert!(ab_pattern.is_some());
@@ -656,12 +648,9 @@ mod tests {
         let patterns = miner.mine(&sequences);
 
         // With gaps allowed, ["a", "b"] appears in all 3 sequences
-        let ab_pattern = patterns.iter()
-            .find(|p| {
-                p.sequence.len() == 2
-                    && p.sequence[0].as_ref() == "a"
-                    && p.sequence[1].as_ref() == "b"
-            });
+        let ab_pattern = patterns.iter().find(|p| {
+            p.sequence.len() == 2 && p.sequence[0].as_ref() == "a" && p.sequence[1].as_ref() == "b"
+        });
 
         assert!(ab_pattern.is_some());
         assert_eq!(ab_pattern.unwrap().support, 3);
@@ -710,12 +699,11 @@ mod tests {
         let patterns = miner.mine(&sequences);
 
         // Should find ["fopen", "fclose"] in all sequences
-        let open_close = patterns.iter()
-            .find(|p| {
-                p.sequence.len() == 2
-                    && p.sequence[0].as_ref() == "fopen"
-                    && p.sequence[1].as_ref() == "fclose"
-            });
+        let open_close = patterns.iter().find(|p| {
+            p.sequence.len() == 2
+                && p.sequence[0].as_ref() == "fopen"
+                && p.sequence[1].as_ref() == "fclose"
+        });
 
         assert!(open_close.is_some());
         assert_eq!(open_close.unwrap().support, 5);

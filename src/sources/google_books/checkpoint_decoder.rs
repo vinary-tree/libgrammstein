@@ -36,7 +36,10 @@ pub fn decode_checkpoint(checkpoint: &ImportCheckpoint) -> String {
 
     // Header
     output.push_str(&format!("Checkpoint v{}\n", checkpoint.version));
-    output.push_str(&format!("Timestamp: {}\n", checkpoint.timestamp.format("%Y-%m-%d %H:%M:%S UTC")));
+    output.push_str(&format!(
+        "Timestamp: {}\n",
+        checkpoint.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+    ));
     output.push_str(&format!("MKN Phase: {:?}\n", checkpoint.mkn_phase));
     output.push_str(&format!("Byte Offset: {}\n", checkpoint.byte_offset));
     if let Some(ref prefix) = checkpoint.current_prefix {
@@ -46,12 +49,30 @@ pub fn decode_checkpoint(checkpoint: &ImportCheckpoint) -> String {
 
     // Global stats
     output.push_str("=== Global Stats ===\n");
-    output.push_str(&format!("N-grams Processed: {}\n", checkpoint.stats.ngrams_processed));
-    output.push_str(&format!("Unique N-grams: {}\n", checkpoint.stats.unique_ngrams));
-    output.push_str(&format!("Files Processed: {}\n", checkpoint.stats.files_processed));
-    output.push_str(&format!("Bytes Downloaded: {}\n", checkpoint.stats.bytes_downloaded));
-    output.push_str(&format!("Elapsed Seconds: {}\n", checkpoint.stats.elapsed_seconds));
-    output.push_str(&format!("N-grams by Order: {:?}\n", checkpoint.stats.ngrams_by_order));
+    output.push_str(&format!(
+        "N-grams Processed: {}\n",
+        checkpoint.stats.ngrams_processed
+    ));
+    output.push_str(&format!(
+        "Unique N-grams: {}\n",
+        checkpoint.stats.unique_ngrams
+    ));
+    output.push_str(&format!(
+        "Files Processed: {}\n",
+        checkpoint.stats.files_processed
+    ));
+    output.push_str(&format!(
+        "Bytes Downloaded: {}\n",
+        checkpoint.stats.bytes_downloaded
+    ));
+    output.push_str(&format!(
+        "Elapsed Seconds: {}\n",
+        checkpoint.stats.elapsed_seconds
+    ));
+    output.push_str(&format!(
+        "N-grams by Order: {:?}\n",
+        checkpoint.stats.ngrams_by_order
+    ));
     output.push('\n');
 
     // Per-order progress

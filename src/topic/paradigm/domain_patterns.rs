@@ -32,7 +32,6 @@ use std::sync::Arc;
 #[cfg(feature = "serde-extras")]
 use serde::{Deserialize, Serialize};
 
-
 /// Rholang-specific pattern categories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-extras", derive(Serialize, Deserialize))]
@@ -123,7 +122,8 @@ impl RholangPattern {
 
     /// Add a pattern variant.
     pub fn with_pattern(mut self, pattern: &[&str]) -> Self {
-        self.patterns.push(pattern.iter().map(|&s| Arc::from(s)).collect());
+        self.patterns
+            .push(pattern.iter().map(|&s| Arc::from(s)).collect());
         self
     }
 
@@ -236,7 +236,8 @@ impl MettaPattern {
 
     /// Add a pattern variant.
     pub fn with_pattern(mut self, pattern: &[&str]) -> Self {
-        self.patterns.push(pattern.iter().map(|&s| Arc::from(s)).collect());
+        self.patterns
+            .push(pattern.iter().map(|&s| Arc::from(s)).collect());
         self
     }
 
@@ -827,7 +828,9 @@ impl DomainPatternDetector {
 
         for pattern in self.rholang_catalog.patterns() {
             for (pos, _) in tokens.iter().enumerate() {
-                if let Some(matched_len) = self.try_match_pattern(tokens, pos, pattern.patterns.as_slice()) {
+                if let Some(matched_len) =
+                    self.try_match_pattern(tokens, pos, pattern.patterns.as_slice())
+                {
                     matches.push(RholangPatternMatch {
                         pattern_name: pattern.name.clone(),
                         category: pattern.category,
@@ -848,7 +851,9 @@ impl DomainPatternDetector {
 
         for pattern in self.metta_catalog.patterns() {
             for (pos, _) in tokens.iter().enumerate() {
-                if let Some(matched_len) = self.try_match_pattern(tokens, pos, pattern.patterns.as_slice()) {
+                if let Some(matched_len) =
+                    self.try_match_pattern(tokens, pos, pattern.patterns.as_slice())
+                {
                     matches.push(MettaPatternMatch {
                         pattern_name: pattern.name.clone(),
                         category: pattern.category,
@@ -864,10 +869,16 @@ impl DomainPatternDetector {
     }
 
     /// Try to match any pattern variant at the given position.
-    fn try_match_pattern(&self, tokens: &[&str], pos: usize, variants: &[Vec<Arc<str>>]) -> Option<usize> {
+    fn try_match_pattern(
+        &self,
+        tokens: &[&str],
+        pos: usize,
+        variants: &[Vec<Arc<str>>],
+    ) -> Option<usize> {
         for variant in variants {
             if pos + variant.len() <= tokens.len() {
-                let matches = variant.iter()
+                let matches = variant
+                    .iter()
                     .enumerate()
                     .all(|(i, p)| tokens[pos + i].to_lowercase() == p.as_ref());
 
@@ -956,8 +967,7 @@ mod tests {
         let matches = detector.detect_rholang_patterns(&tokens);
 
         // Should detect send pattern
-        let send_match = matches.iter()
-            .find(|m| m.pattern_name == "channel_send");
+        let send_match = matches.iter().find(|m| m.pattern_name == "channel_send");
         assert!(send_match.is_some());
     }
 
@@ -968,7 +978,8 @@ mod tests {
         let matches = detector.detect_rholang_patterns(&tokens);
 
         // Should detect contract pattern
-        let contract_match = matches.iter()
+        let contract_match = matches
+            .iter()
             .find(|m| m.pattern_name == "contract_definition");
         assert!(contract_match.is_some());
     }
@@ -980,7 +991,8 @@ mod tests {
         let matches = detector.detect_metta_patterns(&tokens);
 
         // Should detect function definition pattern
-        let func_match = matches.iter()
+        let func_match = matches
+            .iter()
             .find(|m| m.pattern_name == "function_definition");
         assert!(func_match.is_some());
     }
@@ -992,7 +1004,8 @@ mod tests {
         let matches = detector.detect_metta_patterns(&tokens);
 
         // Should detect type declaration pattern
-        let type_match = matches.iter()
+        let type_match = matches
+            .iter()
             .find(|m| m.pattern_name == "type_declaration" || m.pattern_name == "function_type");
         assert!(type_match.is_some());
     }
@@ -1004,8 +1017,7 @@ mod tests {
         let matches = detector.detect_metta_patterns(&tokens);
 
         // Should detect variable pattern
-        let var_match = matches.iter()
-            .find(|m| m.pattern_name == "variable_atom");
+        let var_match = matches.iter().find(|m| m.pattern_name == "variable_atom");
         assert!(var_match.is_some());
     }
 

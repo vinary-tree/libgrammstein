@@ -155,11 +155,7 @@ impl EarleyChart {
 
     /// Returns states at the given position.
     pub fn states_at(&self, pos: usize) -> impl Iterator<Item = &EarleyState> {
-        self.states
-            .get(pos)
-            .map(|s| s.iter())
-            .into_iter()
-            .flatten()
+        self.states.get(pos).map(|s| s.iter()).into_iter().flatten()
     }
 
     /// Returns the number of states at the given position.
@@ -278,11 +274,16 @@ impl GrammarConstraint {
                     let waiting_count = self.chart.state_count_at(start_pos);
                     for waiting_idx in 0..waiting_count {
                         let (w_rule_idx, w_dot_pos, w_start_pos) = {
-                            let waiting_state = match self.chart.state_at_index(start_pos, waiting_idx) {
-                                Some(s) => s,
-                                None => continue,
-                            };
-                            (waiting_state.rule_idx, waiting_state.dot_pos, waiting_state.start_pos)
+                            let waiting_state =
+                                match self.chart.state_at_index(start_pos, waiting_idx) {
+                                    Some(s) => s,
+                                    None => continue,
+                                };
+                            (
+                                waiting_state.rule_idx,
+                                waiting_state.dot_pos,
+                                waiting_state.start_pos,
+                            )
                         };
 
                         if let Some((_, w_rhs, _)) = self.parser.rule(w_rule_idx) {
@@ -386,11 +387,7 @@ impl GrammarConstraint {
                 if dot_pos < rhs.len() {
                     if let Symbol::Terminal(t) = &rhs[dot_pos] {
                         if t == token {
-                            let new_state = EarleyState::new(
-                                rule_idx,
-                                dot_pos + 1,
-                                start_pos,
-                            );
+                            let new_state = EarleyState::new(rule_idx, dot_pos + 1, start_pos);
                             self.chart.add(next_pos, new_state);
                         }
                     }
@@ -455,7 +452,10 @@ impl TokenMask {
 
     /// Creates a mask allowing specific tokens.
     pub fn from_allowed(allowed: HashSet<usize>, vocab_size: usize) -> Self {
-        Self { allowed, vocab_size }
+        Self {
+            allowed,
+            vocab_size,
+        }
     }
 
     /// Checks if a token index is allowed.

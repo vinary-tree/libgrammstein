@@ -274,16 +274,18 @@ where
 
         // Compute score based on strategy
         let score = match self.config.strategy {
-            InterpolationStrategy::Linear { alpha } => {
-                self.score_linear(word, context, alpha)
-            }
+            InterpolationStrategy::Linear { alpha } => self.score_linear(word, context, alpha),
             InterpolationStrategy::LogLinear { alpha } => {
                 self.score_log_linear(word, context, alpha)
             }
             InterpolationStrategy::NgramWithEmbeddingFallback => {
                 self.score_with_fallback(word, context)
             }
-            InterpolationStrategy::Dynamic { base_alpha, alpha_per_context, max_alpha } => {
+            InterpolationStrategy::Dynamic {
+                base_alpha,
+                alpha_per_context,
+                max_alpha,
+            } => {
                 let alpha = (base_alpha + alpha_per_context * context.len() as f64).min(max_alpha);
                 self.score_linear(word, context, alpha)
             }
@@ -446,15 +448,13 @@ where
 }
 
 // Implement Send + Sync for the hybrid model
-unsafe impl<D> Send for HybridLanguageModel<D>
-where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+unsafe impl<D> Send for HybridLanguageModel<D> where
+    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync
 {
 }
 
-unsafe impl<D> Sync for HybridLanguageModel<D>
-where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+unsafe impl<D> Sync for HybridLanguageModel<D> where
+    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync
 {
 }
 
@@ -462,7 +462,11 @@ where
 #[cfg(feature = "serde-extras")]
 impl<D> HybridLanguageModel<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync + serde::Serialize + serde::de::DeserializeOwned,
+    D: MutableMappedDictionary<Value = NgramEntry>
+        + Send
+        + Sync
+        + serde::Serialize
+        + serde::de::DeserializeOwned,
 {
     /// Save the hybrid model to a binary file.
     ///
@@ -738,7 +742,8 @@ mod tests {
         use super::*;
         use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 
-        fn create_serializable_test_models() -> (NgramModel<DynamicDawgChar<NgramEntry>>, SubwordEmbedding) {
+        fn create_serializable_test_models(
+        ) -> (NgramModel<DynamicDawgChar<NgramEntry>>, SubwordEmbedding) {
             let dir = TempDir::new().expect("Failed to create temp dir");
             let content = "the quick brown fox the quick brown dog the lazy fox \
                            the quick brown fox the quick brown dog the lazy fox \
@@ -778,10 +783,13 @@ mod tests {
             let temp_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
 
             // Save the model
-            hybrid.save(temp_file.path()).expect("Failed to save hybrid model");
+            hybrid
+                .save(temp_file.path())
+                .expect("Failed to save hybrid model");
 
             // Verify file was created with content
-            let metadata = std::fs::metadata(temp_file.path()).expect("Failed to get file metadata");
+            let metadata =
+                std::fs::metadata(temp_file.path()).expect("Failed to get file metadata");
             assert!(metadata.len() > 0, "Saved model file should not be empty");
 
             // Load the model
@@ -791,7 +799,10 @@ mod tests {
             // Verify config matches
             assert_eq!(hybrid.config().cache_size, loaded.config().cache_size);
             match (hybrid.config().strategy, loaded.config().strategy) {
-                (InterpolationStrategy::Linear { alpha: a1 }, InterpolationStrategy::Linear { alpha: a2 }) => {
+                (
+                    InterpolationStrategy::Linear { alpha: a1 },
+                    InterpolationStrategy::Linear { alpha: a2 },
+                ) => {
                     assert!((a1 - a2).abs() < 1e-10, "Alpha should match");
                 }
                 _ => panic!("Strategy should match"),

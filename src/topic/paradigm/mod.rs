@@ -42,23 +42,21 @@
 //! assert_eq!(profile.dominant_paradigm(), Some(Paradigm::ObjectOriented));
 //! ```
 
-mod config;
-mod indicators;
-mod detector;
 mod api_patterns;
+mod config;
+mod detector;
 mod domain_patterns;
+mod indicators;
 
-pub use config::{ParadigmConfig, ParadigmWeights, LanguageHints};
-pub use indicators::{
-    Paradigm, ParadigmProfile, ParadigmIndicator, IndicatorCategory,
-    OopIndicator, FpIndicator, ReactiveIndicator, ProceduralIndicator,
-};
-pub use detector::{ParadigmDetector, DetectionResult, IndicatorMatch};
-pub use api_patterns::{
-    ApiPatternMiner, ApiPatternConfig, ApiPattern, MiningStats,
-};
+pub use api_patterns::{ApiPattern, ApiPatternConfig, ApiPatternMiner, MiningStats};
+pub use config::{LanguageHints, ParadigmConfig, ParadigmWeights};
+pub use detector::{DetectionResult, IndicatorMatch, ParadigmDetector};
 pub use domain_patterns::{
-    RholangPatternCatalog, RholangPattern, RholangPatternCategory, RholangPatternMatch,
-    MettaPatternCatalog, MettaPattern, MettaPatternCategory, MettaPatternMatch,
-    DomainPatternDetector,
+    DomainPatternDetector, MettaPattern, MettaPatternCatalog, MettaPatternCategory,
+    MettaPatternMatch, RholangPattern, RholangPatternCatalog, RholangPatternCategory,
+    RholangPatternMatch,
+};
+pub use indicators::{
+    FpIndicator, IndicatorCategory, OopIndicator, Paradigm, ParadigmIndicator, ParadigmProfile,
+    ProceduralIndicator, ReactiveIndicator,
 };

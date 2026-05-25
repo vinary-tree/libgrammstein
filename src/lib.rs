@@ -181,8 +181,8 @@ pub mod prelude {
     #[cfg(feature = "rag")]
     pub use crate::rag::{
         Document, DocumentId, DocumentMetadata, ExactCosineBackend, IndexBuilder,
-        IndexBuilderConfig, LanguageTag, RagIndex, RagIndexConfig, Retriever, RetrievalConfig,
-        RetrievalResult,
+        IndexBuilderConfig, LanguageTag, RagIndex, RagIndexConfig, RetrievalConfig,
+        RetrievalResult, Retriever,
     };
 
     #[cfg(feature = "rag")]
@@ -191,28 +191,59 @@ pub mod prelude {
     // Code module exports
     #[cfg(feature = "code")]
     pub use crate::code::{
-        // Core traits and types
-        CodeLanguage, TokenType, TokenContext,
-        // Tokenization
-        CodeTokenizer, CodeToken,
-        // Parsing
-        ParsedCode, AstNode, AstError,
-        // Code Property Graph
-        CodePropertyGraph, CpgNode, CpgNodeKind, CpgEdge, CpgEdgeKind,
-        // PCFG
-        WeightedCFG, Production, PcfgTrainer,
+        AnalysisResult,
+        AstError,
+        AstNode,
         // Corpus
-        CodeCorpusReader, CodeSnippet,
+        CodeCorpusReader,
         // Correction trait and types
-        CodeCorrector, Correction, CorrectionKind, CorrectionSource, CorrectionCandidates,
-        // Concrete corrector implementations
-        LexicalCorrector, GrammarCorrector, SemanticCorrector, EnsembleCorrector,
+        CodeCorrector,
+        // Core traits and types
+        CodeLanguage,
+        // Code Property Graph
+        CodePropertyGraph,
+        CodeSnippet,
+        CodeToken,
+        // Tokenization
+        CodeTokenizer,
+        ConstrainedDecodingConfig,
+        Correction,
+        CorrectionCandidates,
+        CorrectionKind,
         // End-to-end pipeline
-        CorrectionPipeline, PipelineConfig, PipelineError, AnalysisResult, Diagnostic, DiagnosticSeverity,
+        CorrectionPipeline,
+        CorrectionSource,
+        CpgEdge,
+        CpgEdgeKind,
+        CpgNode,
+        CpgNodeKind,
+        DecodingVocabulary,
+        Diagnostic,
+        DiagnosticSeverity,
+        EnsembleCorrector,
+        GnnConfig,
+        GnnFeatures,
         // GNN semantic scoring
-        GnnSemanticScorer, GnnConfig, GnnFeatures, SemanticIssue, IssueType,
+        GnnSemanticScorer,
         // Grammar-constrained decoding
-        GrammarConstraint, ConstrainedDecodingConfig, TokenMask, DecodingVocabulary,
+        GrammarConstraint,
+        GrammarCorrector,
+        IssueType,
+        // Concrete corrector implementations
+        LexicalCorrector,
+        // Parsing
+        ParsedCode,
+        PcfgTrainer,
+        PipelineConfig,
+        PipelineError,
+        Production,
+        SemanticCorrector,
+        SemanticIssue,
+        TokenContext,
+        TokenMask,
+        TokenType,
+        // PCFG
+        WeightedCFG,
     };
 
     // Language-specific re-exports
@@ -234,17 +265,37 @@ pub mod prelude {
     // LaTeX module exports
     #[cfg(feature = "latex")]
     pub use crate::latex::{
-        // Tokenization
-        LaTeXTokenizer, LaTeXToken, LaTeXTokenKind, TokenizerConfig, MathMode, BraceKind,
-        // N-gram models
-        LaTeXNgramModel, ModeDetector, LaTeXMode, NgramConfig,
-        // Embeddings
-        LaTeXEmbedder, CommandEmbedding, EquationEmbedding, LaTeXEmbeddingConfig,
-        // Neural rescoring
-        LaTeXRescorer, RescorerConfig, RescoreResult,
+        BraceKind,
+        CommandEmbedding,
+        ComponentScore,
+        EquationDocument,
+        EquationEmbedding,
         // Equation RAG
-        EquationRagIndex, EquationDocument, EquationRetriever, EquationRetrievalConfig,
+        EquationRagIndex,
+        EquationRetrievalConfig,
+        EquationRetriever,
+        // Embeddings
+        LaTeXEmbedder,
+        LaTeXEmbeddingConfig,
+        LaTeXMode,
+        // N-gram models
+        LaTeXNgramModel,
+        // Neural rescoring
+        LaTeXRescorer,
         // Combined scorer
-        LaTeXScorer, LaTeXScorerBuilder, ScorerConfig, ScoringResult, ComponentScore,
+        LaTeXScorer,
+        LaTeXScorerBuilder,
+        LaTeXToken,
+        LaTeXTokenKind,
+        // Tokenization
+        LaTeXTokenizer,
+        MathMode,
+        ModeDetector,
+        NgramConfig,
+        RescoreResult,
+        RescorerConfig,
+        ScorerConfig,
+        ScoringResult,
+        TokenizerConfig,
     };
 }

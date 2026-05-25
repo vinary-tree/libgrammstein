@@ -30,20 +30,20 @@
 //! let embedding = embedder.embed_code("fn main() {}", CodeLanguage::Rust)?;
 //! ```
 
+mod cache;
+mod embedder;
 mod modernbert;
 mod rescorer;
-mod embedder;
 mod summarizer;
-mod cache;
 
 #[cfg(feature = "code-neural")]
 pub mod code;
 
-pub use modernbert::{ModernBertModel, ModernBertConfig, Device};
+pub use cache::{CacheConfig, KvCache};
+pub use embedder::{EmbeddingConfig, ModernBertEmbedder};
+pub use modernbert::{Device, ModernBertConfig, ModernBertModel};
 pub use rescorer::{ModernBertRescorer, RescoringConfig, ScoredPath};
-pub use embedder::{ModernBertEmbedder, EmbeddingConfig};
 pub use summarizer::{Summarizer, SummarizerConfig, Synopsis, SynopsisSource};
-pub use cache::{KvCache, CacheConfig};
 
 /// Result type for neural module operations.
 pub type Result<T> = std::result::Result<T, NeuralError>;

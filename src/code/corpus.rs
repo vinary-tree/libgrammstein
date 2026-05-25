@@ -101,11 +101,7 @@ impl<L: CodeLanguage> DirectoryCorpusReader<L> {
         })
     }
 
-    fn collect_files(
-        dir: &Path,
-        extensions: &[&str],
-        files: &mut Vec<PathBuf>,
-    ) -> io::Result<()> {
+    fn collect_files(dir: &Path, extensions: &[&str], files: &mut Vec<PathBuf>) -> io::Result<()> {
         if dir.is_dir() {
             for entry in fs::read_dir(dir)? {
                 let entry = entry?;
@@ -238,24 +234,17 @@ impl<L: CodeLanguage + 'static> CodeCorpusReader for DirectoryCorpusReader<L> {
         let language_name = self.language.name().to_string();
         Box::new(self.files.iter().filter_map(move |path| {
             let content = fs::read_to_string(path).ok()?;
-            Some(
-                CodeSnippet::new(content, &language_name)
-                    .with_path(path.clone()),
-            )
+            Some(CodeSnippet::new(content, &language_name).with_path(path.clone()))
         }))
     }
 
     fn parsed(&self) -> Box<dyn Iterator<Item = ParsedCode> + Send + '_> {
         let language = self.language.clone();
-        Box::new(
-            self.files
-                .iter()
-                .filter_map(move |path| {
-                    let content = fs::read_to_string(path).ok()?;
-                    let mut parser = CodeParser::new(language.clone()).ok()?;
-                    parser.parse(&content).ok()
-                }),
-        )
+        Box::new(self.files.iter().filter_map(move |path| {
+            let content = fs::read_to_string(path).ok()?;
+            let mut parser = CodeParser::new(language.clone()).ok()?;
+            parser.parse(&content).ok()
+        }))
     }
 
     fn language_name(&self) -> &str {
@@ -296,24 +285,17 @@ impl<L: CodeLanguage + 'static> CodeCorpusReader for FileListCorpusReader<L> {
         let language_name = self.language.name().to_string();
         Box::new(self.files.iter().filter_map(move |path| {
             let content = fs::read_to_string(path).ok()?;
-            Some(
-                CodeSnippet::new(content, &language_name)
-                    .with_path(path.clone()),
-            )
+            Some(CodeSnippet::new(content, &language_name).with_path(path.clone()))
         }))
     }
 
     fn parsed(&self) -> Box<dyn Iterator<Item = ParsedCode> + Send + '_> {
         let language = self.language.clone();
-        Box::new(
-            self.files
-                .iter()
-                .filter_map(move |path| {
-                    let content = fs::read_to_string(path).ok()?;
-                    let mut parser = CodeParser::new(language.clone()).ok()?;
-                    parser.parse(&content).ok()
-                }),
-        )
+        Box::new(self.files.iter().filter_map(move |path| {
+            let content = fs::read_to_string(path).ok()?;
+            let mut parser = CodeParser::new(language.clone()).ok()?;
+            parser.parse(&content).ok()
+        }))
     }
 
     fn language_name(&self) -> &str {
@@ -365,14 +347,10 @@ impl<L: CodeLanguage + 'static> CodeCorpusReader for InMemoryCorpusReader<L> {
 
     fn parsed(&self) -> Box<dyn Iterator<Item = ParsedCode> + Send + '_> {
         let language = self.language.clone();
-        Box::new(
-            self.snippets
-                .iter()
-                .filter_map(move |snippet| {
-                    let mut parser = CodeParser::new(language.clone()).ok()?;
-                    parser.parse(&snippet.content).ok()
-                }),
-        )
+        Box::new(self.snippets.iter().filter_map(move |snippet| {
+            let mut parser = CodeParser::new(language.clone()).ok()?;
+            parser.parse(&snippet.content).ok()
+        }))
     }
 
     fn language_name(&self) -> &str {
@@ -390,8 +368,7 @@ mod tests {
 
     #[test]
     fn test_code_snippet_creation() {
-        let snippet = CodeSnippet::new("fn main() {}", "rust")
-            .with_path("/test/main.rs");
+        let snippet = CodeSnippet::new("fn main() {}", "rust").with_path("/test/main.rs");
 
         assert_eq!(snippet.content, "fn main() {}");
         assert_eq!(snippet.language, "rust");

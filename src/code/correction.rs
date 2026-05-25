@@ -69,7 +69,8 @@ impl Correction {
     /// Returns the edit distance of this correction.
     pub fn edit_distance(&self) -> usize {
         // Simple approximation - actual distance would use liblevenshtein
-        let len_diff = (self.original.len() as isize - self.replacement.len() as isize).unsigned_abs();
+        let len_diff =
+            (self.original.len() as isize - self.replacement.len() as isize).unsigned_abs();
         if self.original == self.replacement {
             0
         } else if self.original.is_empty() || self.replacement.is_empty() {
@@ -175,12 +176,7 @@ pub trait CodeCorrector: Send + Sync {
     fn correct_token(&self, token: &CodeToken, context: &TokenContext) -> Vec<Correction>;
 
     /// Suggests corrections for a range of source code.
-    fn correct_range(
-        &self,
-        source: &str,
-        start_byte: usize,
-        end_byte: usize,
-    ) -> Vec<Correction>;
+    fn correct_range(&self, source: &str, start_byte: usize, end_byte: usize) -> Vec<Correction>;
 
     /// Returns the maximum edit distance this corrector considers.
     fn max_edit_distance(&self) -> usize {
@@ -300,13 +296,7 @@ mod tests {
     #[test]
     fn test_correction_apply() {
         let source = "pritn(\"hello\")";
-        let correction = Correction::new(
-            CorrectionKind::Spelling,
-            0,
-            5,
-            "pritn",
-            "print",
-        );
+        let correction = Correction::new(CorrectionKind::Spelling, 0, 5, "pritn", "print");
 
         let result = correction.apply(source);
         assert_eq!(result, "print(\"hello\")");
@@ -317,16 +307,13 @@ mod tests {
         let mut candidates = CorrectionCandidates::new(3);
 
         candidates.add(
-            Correction::new(CorrectionKind::Spelling, 0, 5, "pritn", "print")
-                .with_confidence(0.9),
+            Correction::new(CorrectionKind::Spelling, 0, 5, "pritn", "print").with_confidence(0.9),
         );
         candidates.add(
-            Correction::new(CorrectionKind::Spelling, 0, 5, "pritn", "prion")
-                .with_confidence(0.5),
+            Correction::new(CorrectionKind::Spelling, 0, 5, "pritn", "prion").with_confidence(0.5),
         );
         candidates.add(
-            Correction::new(CorrectionKind::Spelling, 0, 5, "pritn", "pint")
-                .with_confidence(0.7),
+            Correction::new(CorrectionKind::Spelling, 0, 5, "pritn", "pint").with_confidence(0.7),
         );
 
         // Should be sorted by confidence
@@ -342,14 +329,8 @@ mod tests {
 
         for i in 0..5 {
             candidates.add(
-                Correction::new(
-                    CorrectionKind::Spelling,
-                    0,
-                    5,
-                    "test",
-                    format!("test{}", i),
-                )
-                .with_confidence(i as f64 / 10.0),
+                Correction::new(CorrectionKind::Spelling, 0, 5, "test", format!("test{}", i))
+                    .with_confidence(i as f64 / 10.0),
             );
         }
 

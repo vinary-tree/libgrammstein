@@ -94,54 +94,29 @@
 //! model.save("latex_model.bin")?;
 //! ```
 
-pub mod tokenizer;
-pub mod ngram;
 pub mod embedding;
-pub mod rescorer;
+pub mod ngram;
 pub mod rag;
+pub mod rescorer;
 pub mod scorer;
+pub mod tokenizer;
 
 // Re-export main types
 pub use tokenizer::{
-    LaTeXTokenizer,
-    LaTeXToken,
-    LaTeXTokenKind,
-    TokenizerConfig,
-    MathMode,
-    BraceKind,
+    BraceKind, LaTeXToken, LaTeXTokenKind, LaTeXTokenizer, MathMode, TokenizerConfig,
 };
 
-pub use ngram::{
-    LaTeXNgramModel,
-    ModeDetector,
-    LaTeXMode,
-    NgramConfig,
-};
+pub use ngram::{LaTeXMode, LaTeXNgramModel, ModeDetector, NgramConfig};
 
 pub use embedding::{
-    LaTeXEmbedder,
-    CommandEmbedding,
-    EquationEmbedding,
-    EmbeddingConfig as LaTeXEmbeddingConfig,
+    CommandEmbedding, EmbeddingConfig as LaTeXEmbeddingConfig, EquationEmbedding, LaTeXEmbedder,
 };
 
-pub use rescorer::{
-    LaTeXRescorer,
-    RescorerConfig,
-    RescoreResult,
-};
+pub use rescorer::{LaTeXRescorer, RescoreResult, RescorerConfig};
 
 pub use rag::{
-    EquationRagIndex,
-    EquationDocument,
-    EquationRetriever,
+    EquationDocument, EquationRagIndex, EquationRetriever,
     RetrievalConfig as EquationRetrievalConfig,
 };
 
-pub use scorer::{
-    LaTeXScorer,
-    LaTeXScorerBuilder,
-    ScorerConfig,
-    ScoringResult,
-    ComponentScore,
-};
+pub use scorer::{ComponentScore, LaTeXScorer, LaTeXScorerBuilder, ScorerConfig, ScoringResult};

@@ -116,7 +116,9 @@ impl ShardCoordinator {
         };
 
         // Update stats
-        self.stats.unique_ngrams.fetch_add(ngram_count as u64, Ordering::Relaxed);
+        self.stats
+            .unique_ngrams
+            .fetch_add(ngram_count as u64, Ordering::Relaxed);
 
         // Mark prefix as completed in global checkpoint and force save.
         // We use save() instead of maybe_save() to ensure durability - this is
@@ -159,7 +161,9 @@ impl ShardCoordinator {
         };
 
         // Update stats (but don't mark prefix as completed)
-        self.stats.unique_ngrams.fetch_add(ngram_count as u64, Ordering::Relaxed);
+        self.stats
+            .unique_ngrams
+            .fetch_add(ngram_count as u64, Ordering::Relaxed);
 
         Ok(ngram_count)
     }

@@ -311,10 +311,7 @@ impl<L: CodeLanguage> CodeParser<L> {
         if node.is_error() || node.is_missing() {
             let start = node.start_position();
             let end = node.end_position();
-            let text = node
-                .utf8_text(source.as_bytes())
-                .unwrap_or("")
-                .to_string();
+            let text = node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
 
             errors.push(ErrorRange {
                 start_byte: node.start_byte(),

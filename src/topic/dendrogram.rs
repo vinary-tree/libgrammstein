@@ -283,7 +283,8 @@ impl Dendrogram {
 
     /// Get the depth of a node (distance from root).
     pub fn depth(&self, node_id: u32) -> Option<usize> {
-        self.root.map(|root_id| self.depth_from(root_id, node_id, 0))
+        self.root
+            .map(|root_id| self.depth_from(root_id, node_id, 0))
     }
 
     /// Recursive helper for depth computation.
@@ -341,11 +342,7 @@ mod tests {
         // Merge 0,1 at distance 1.0 -> cluster 4
         // Merge 2,3 at distance 1.5 -> cluster 5
         // Merge 4,5 at distance 2.0 -> cluster 6 (root)
-        let linkage = vec![
-            (0, 1, 1.0, 2),
-            (2, 3, 1.5, 2),
-            (4, 5, 2.0, 4),
-        ];
+        let linkage = vec![(0, 1, 1.0, 2), (2, 3, 1.5, 2), (4, 5, 2.0, 4)];
 
         let dendro = Dendrogram::from_linkage(&linkage, 4);
 
@@ -360,11 +357,7 @@ mod tests {
 
     #[test]
     fn test_cut_at_distance() {
-        let linkage = vec![
-            (0, 1, 1.0, 2),
-            (2, 3, 1.5, 2),
-            (4, 5, 2.0, 4),
-        ];
+        let linkage = vec![(0, 1, 1.0, 2), (2, 3, 1.5, 2), (4, 5, 2.0, 4)];
         let dendro = Dendrogram::from_linkage(&linkage, 4);
 
         // Cut above all merges - 1 cluster
@@ -385,11 +378,7 @@ mod tests {
 
     #[test]
     fn test_cut_to_k_clusters() {
-        let linkage = vec![
-            (0, 1, 1.0, 2),
-            (2, 3, 1.5, 2),
-            (4, 5, 2.0, 4),
-        ];
+        let linkage = vec![(0, 1, 1.0, 2), (2, 3, 1.5, 2), (4, 5, 2.0, 4)];
         let dendro = Dendrogram::from_linkage(&linkage, 4);
 
         // Cut to 2 clusters
@@ -415,11 +404,7 @@ mod tests {
 
     #[test]
     fn test_leaves_under() {
-        let linkage = vec![
-            (0, 1, 1.0, 2),
-            (2, 3, 1.5, 2),
-            (4, 5, 2.0, 4),
-        ];
+        let linkage = vec![(0, 1, 1.0, 2), (2, 3, 1.5, 2), (4, 5, 2.0, 4)];
         let dendro = Dendrogram::from_linkage(&linkage, 4);
 
         // Leaves under node 4 (merge of 0,1)
@@ -435,11 +420,7 @@ mod tests {
 
     #[test]
     fn test_nodes_at_level() {
-        let linkage = vec![
-            (0, 1, 1.0, 2),
-            (2, 3, 1.5, 2),
-            (4, 5, 2.0, 4),
-        ];
+        let linkage = vec![(0, 1, 1.0, 2), (2, 3, 1.5, 2), (4, 5, 2.0, 4)];
         let dendro = Dendrogram::from_linkage(&linkage, 4);
 
         // Nodes at distance 1.0-1.6
@@ -474,11 +455,7 @@ mod tests {
 
     #[test]
     fn test_depth() {
-        let linkage = vec![
-            (0, 1, 1.0, 2),
-            (2, 3, 1.5, 2),
-            (4, 5, 2.0, 4),
-        ];
+        let linkage = vec![(0, 1, 1.0, 2), (2, 3, 1.5, 2), (4, 5, 2.0, 4)];
         let dendro = Dendrogram::from_linkage(&linkage, 4);
 
         // Root depth is 0

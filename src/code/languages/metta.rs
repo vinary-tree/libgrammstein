@@ -85,21 +85,21 @@ impl CodeLanguage for MeTTa {
     fn special_tokens(&self) -> &[&str] {
         &[
             // Prefix operators
-            "!",  // Reduction/evaluation
-            "?",  // Query
-            "'",  // Quote
+            "!", // Reduction/evaluation
+            "?", // Query
+            "'", // Quote
             // Variable prefix
-            "$",  // Pattern variable marker
+            "$", // Pattern variable marker
             // Space reference prefix
-            "&",  // Atomspace reference (e.g., &self)
+            "&", // Atomspace reference (e.g., &self)
             // Type annotation
-            ":",  // Type annotation
+            ":", // Type annotation
             // Assignment/binding
             "=",  // Definition/equality
             ":=", // Rule definition
             // Arrows
-            "->", // Function type / transformation
-            "<-", // Reverse arrow
+            "->",  // Function type / transformation
+            "<-",  // Reverse arrow
             "<<-", // Pattern binding
             // Comparison
             "==", // Equality test
@@ -109,13 +109,13 @@ impl CodeLanguage for MeTTa {
             "<",  // Less than
             ">",  // Greater than
             // Punctuation
-            "|",  // Alternative/separator
-            ",",  // Tuple/sequence separator
-            "@",  // Apply/at
+            "|",   // Alternative/separator
+            ",",   // Tuple/sequence separator
+            "@",   // Apply/at
             "...", // Spread/variadic
-            ".",  // Dot operator
+            ".",   // Dot operator
             // Special
-            "_",  // Wildcard pattern
+            "_", // Wildcard pattern
         ]
     }
 
@@ -217,9 +217,9 @@ impl CodeLanguage for MeTTa {
                 return false;
             }
             // Check rest doesn't contain delimiters
-            return !rest.chars().any(|c| {
-                c.is_whitespace() || matches!(c, '(' | ')' | '"' | ';' | '#')
-            });
+            return !rest
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, '(' | ')' | '"' | ';' | '#'));
         }
 
         // Wildcard

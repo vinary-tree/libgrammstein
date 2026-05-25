@@ -27,10 +27,10 @@ fn generate_zipf_indices(count: usize) -> Vec<u64> {
     for i in 0..count {
         let r = (i * 17 + 31) % 100; // Pseudo-random distribution
         let value = match r {
-            0..=49 => (i % 128) as u64,          // 1-byte
-            50..=79 => 128 + (i % 16256) as u64, // 2-byte
+            0..=49 => (i % 128) as u64,              // 1-byte
+            50..=79 => 128 + (i % 16256) as u64,     // 2-byte
             80..=94 => 16384 + (i % 2080767) as u64, // 3-byte
-            _ => 2097152 + (i % 100000) as u64,  // 4+ byte
+            _ => 2097152 + (i % 100000) as u64,      // 4+ byte
         };
         values.push(value);
     }
@@ -243,17 +243,17 @@ fn bench_single_decode(c: &mut Criterion) {
             BenchmarkId::new("varint-simd", label),
             &simd_buf,
             |b, buf| {
-                b.iter(|| black_box(varint_simd::decode::decode::<u64>(black_box(buf.as_slice()))));
+                b.iter(|| {
+                    black_box(varint_simd::decode::decode::<u64>(black_box(
+                        buf.as_slice(),
+                    )))
+                });
             },
         );
 
-        group.bench_with_input(
-            BenchmarkId::new("vu128", label),
-            &vu128_buf,
-            |b, buf| {
-                b.iter(|| black_box(vu128::decode_u64(black_box(buf))));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("vu128", label), &vu128_buf, |b, buf| {
+            b.iter(|| black_box(vu128::decode_u64(black_box(buf))));
+        });
     }
 
     group.finish();

@@ -38,7 +38,10 @@ pub enum LanguageDetectionError {
 /// let tag = detect_language("The quick brown fox jumps over the lazy dog.", 0.8)?;
 /// assert_eq!(tag.language(), "en");
 /// ```
-pub fn detect_language(text: &str, min_confidence: f64) -> Result<LanguageTag, LanguageDetectionError> {
+pub fn detect_language(
+    text: &str,
+    min_confidence: f64,
+) -> Result<LanguageTag, LanguageDetectionError> {
     let info = detect(text).ok_or(LanguageDetectionError::InsufficientText)?;
 
     let confidence = info.confidence();

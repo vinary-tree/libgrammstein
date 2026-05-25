@@ -212,7 +212,8 @@ where
         let order = self.model.order();
 
         // Add epsilon transition from start to backoff
-        self.wfst.add_epsilon(self.start_state, self.backoff_state, W::one());
+        self.wfst
+            .add_epsilon(self.start_state, self.backoff_state, W::one());
 
         // First pass: add unigram transitions from backoff state
         self.add_unigrams();
@@ -241,7 +242,10 @@ where
             .collect();
 
         for word in unigram_words {
-            let word_id = self.vocabulary.get_id(&word).expect("Word must be in vocabulary");
+            let word_id = self
+                .vocabulary
+                .get_id(&word)
+                .expect("Word must be in vocabulary");
 
             // Get log probability from model
             let log_prob = self.model.log_prob(&word, &[]);
@@ -930,7 +934,10 @@ mod tests {
             }
         }
 
-        assert!(has_epsilon, "Transducer should have backoff epsilon transitions");
+        assert!(
+            has_epsilon,
+            "Transducer should have backoff epsilon transitions"
+        );
     }
 
     #[test]

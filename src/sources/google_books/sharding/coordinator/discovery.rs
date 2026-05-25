@@ -6,7 +6,6 @@ use std::sync::atomic::Ordering;
 use super::{CoordinatorResult, ShardCoordinator, ShardKey, ShardSummary};
 
 impl ShardCoordinator {
-
     /// Close all shards (checkpoint and remove from memory).
     pub fn close_all(&self) -> CoordinatorResult<()> {
         self.shutdown

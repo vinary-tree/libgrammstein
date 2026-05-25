@@ -614,17 +614,21 @@ impl ImportContext {
             }
 
             // ComputingStats -> Merging or CleaningUp
-            (PipelinePhase::ComputingStats, ImportTrigger::StatsComplete) => PipelinePhase::Merging {
-                shards_processed: 0,
-                total_shards: 0,
-            },
+            (PipelinePhase::ComputingStats, ImportTrigger::StatsComplete) => {
+                PipelinePhase::Merging {
+                    shards_processed: 0,
+                    total_shards: 0,
+                }
+            }
 
             (PipelinePhase::ComputingStats, ImportTrigger::Error(msg)) => {
                 PipelinePhase::Failed { error: msg }
             }
 
             // Merging -> CleaningUp
-            (PipelinePhase::Merging { .. }, ImportTrigger::MergeComplete) => PipelinePhase::CleaningUp,
+            (PipelinePhase::Merging { .. }, ImportTrigger::MergeComplete) => {
+                PipelinePhase::CleaningUp
+            }
 
             (PipelinePhase::Merging { .. }, ImportTrigger::Error(msg)) => {
                 PipelinePhase::Failed { error: msg }
@@ -707,7 +711,10 @@ mod tests {
             .name(),
             "Downloading"
         );
-        assert_eq!(PipelinePhase::ComputingStats.name(), "Computing MKN Statistics");
+        assert_eq!(
+            PipelinePhase::ComputingStats.name(),
+            "Computing MKN Statistics"
+        );
     }
 
     #[test]
@@ -844,11 +851,20 @@ mod tests {
         assert!(results.len() >= 2, "Expected at least 2 cleanup actions");
 
         // Worker should complete before shared_state is dropped
-        let worker_order = results.iter().find(|(_, name)| *name == "worker").map(|(n, _)| *n);
-        let shared_order = results.iter().find(|(_, name)| *name == "shared_state").map(|(n, _)| *n);
+        let worker_order = results
+            .iter()
+            .find(|(_, name)| *name == "worker")
+            .map(|(n, _)| *n);
+        let shared_order = results
+            .iter()
+            .find(|(_, name)| *name == "shared_state")
+            .map(|(n, _)| *n);
 
         if let (Some(w), Some(s)) = (worker_order, shared_order) {
-            assert!(w < s, "Worker should complete before shared_state is dropped");
+            assert!(
+                w < s,
+                "Worker should complete before shared_state is dropped"
+            );
         }
     }
 

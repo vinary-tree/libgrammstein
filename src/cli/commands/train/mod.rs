@@ -25,6 +25,8 @@ pub fn run(cmd: TrainCommands, verbose: bool, quiet: bool) -> CliResult<()> {
         TrainCommands::Embedding(args) => embedding::train_embedding(args, verbose, quiet),
         TrainCommands::Hybrid(args) => hybrid::train_hybrid(args, verbose, quiet),
         #[cfg(feature = "google-books")]
-        TrainCommands::ImportGoogleBooks(args) => google_books::import_google_books(args, verbose, quiet),
+        TrainCommands::ImportGoogleBooks(args) => {
+            google_books::import_google_books(args, verbose, quiet)
+        }
     }
 }

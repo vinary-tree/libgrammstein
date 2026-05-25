@@ -186,14 +186,8 @@ impl<B: RetrievalBackend> BatchRetriever<B> {
     }
 
     /// Query with multiple queries.
-    pub fn query_batch(
-        &mut self,
-        queries: &[&str],
-    ) -> Result<Vec<Vec<RetrievalResult>>> {
-        queries
-            .iter()
-            .map(|q| self.retriever.query(q))
-            .collect()
+    pub fn query_batch(&mut self, queries: &[&str]) -> Result<Vec<Vec<RetrievalResult>>> {
+        queries.iter().map(|q| self.retriever.query(q)).collect()
     }
 
     /// Get the inner retriever.
@@ -243,8 +237,8 @@ mod tests {
 
     #[test]
     fn test_retrieval_result() {
+        use super::super::document::{DocumentMeta, DocumentMetadata, LanguageTag};
         use crate::neural::SynopsisSource;
-        use super::super::document::{DocumentMeta, LanguageTag, DocumentMetadata};
 
         let meta = DocumentMeta {
             uri: "test://doc".to_string(),

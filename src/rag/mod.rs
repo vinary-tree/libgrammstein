@@ -22,23 +22,25 @@
 //! let results = index.query("search query", 10)?;
 //! ```
 
-mod document;
 mod backend;
+mod builder;
+mod document;
 mod exact_backend;
 #[cfg(feature = "rag-hnsw")]
 mod hnsw_backend;
 mod index;
 mod retriever;
-mod builder;
 
-pub use document::{Document, DocumentBuilder, DocumentId, DocumentMeta, DocumentMetadata, LanguageTag};
 pub use backend::RetrievalBackend;
+pub use builder::{IndexBuilder, IndexBuilderConfig};
+pub use document::{
+    Document, DocumentBuilder, DocumentId, DocumentMeta, DocumentMetadata, LanguageTag,
+};
 pub use exact_backend::ExactCosineBackend;
 #[cfg(feature = "rag-hnsw")]
 pub use hnsw_backend::HnswBackend;
 pub use index::{RagIndex, RagIndexConfig};
-pub use retriever::{Retriever, RetrievalResult, RetrievalConfig};
-pub use builder::{IndexBuilder, IndexBuilderConfig};
+pub use retriever::{RetrievalConfig, RetrievalResult, Retriever};
 
 // Re-export Synopsis from neural module for convenience
 pub use crate::neural::{Synopsis, SynopsisSource};

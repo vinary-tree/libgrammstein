@@ -478,7 +478,12 @@ mod tests {
     use super::*;
 
     fn create_test_model() -> SubwordEmbedding {
-        let vocab = vec!["king".to_string(), "queen".to_string(), "man".to_string(), "woman".to_string()];
+        let vocab = vec![
+            "king".to_string(),
+            "queen".to_string(),
+            "man".to_string(),
+            "woman".to_string(),
+        ];
         let mut model = SubwordEmbedding::new(vocab, 4, 1000);
 
         // Set up some simple embeddings for testing
@@ -629,7 +634,11 @@ mod tests {
 
         // Verify vocabulary matches
         for word in &model.idx_to_word {
-            assert!(loaded.contains(word), "Word '{}' should be in loaded model", word);
+            assert!(
+                loaded.contains(word),
+                "Word '{}' should be in loaded model",
+                word
+            );
             assert_eq!(
                 model.word_index(word),
                 loaded.word_index(word),

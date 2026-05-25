@@ -82,10 +82,7 @@ pub fn print_perplexity_results(
     );
     println!("  Log probability: {:.2}", log_prob);
     println!("  OOV rate:       {:.2}%", oov_rate * 100.0);
-    println!(
-        "  Avg tokens/sent: {:.2}",
-        tokens as f64 / sentences as f64
-    );
+    println!("  Avg tokens/sent: {:.2}", tokens as f64 / sentences as f64);
     println!();
 }
 
@@ -136,13 +133,7 @@ pub fn print_completions(context: &[String], completions: &[(String, f64)]) {
     );
     for (i, (word, log_prob)) in completions.iter().enumerate() {
         let prob = log_prob.exp();
-        println!(
-            "  {}. {:<15} {:.3}  (P={:.4})",
-            i + 1,
-            word,
-            log_prob,
-            prob
-        );
+        println!("  {}. {:<15} {:.3}  (P={:.4})", i + 1, word, log_prob, prob);
     }
 }
 
@@ -156,7 +147,10 @@ pub fn print_score(tokens: &[String], log_prob: f64, is_sentence: bool) {
 
     println!("{} \"{}\":", label, tokens.join(" "));
     println!("  Log probability: {:.4}", log_prob);
-    println!("  Perplexity:      {:.2}", (-log_prob / tokens.len() as f64).exp());
+    println!(
+        "  Perplexity:      {:.2}",
+        (-log_prob / tokens.len() as f64).exp()
+    );
 }
 
 /// Print JSON output.

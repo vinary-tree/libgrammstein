@@ -133,21 +133,18 @@ impl CheckpointManager {
         let final_path = self.checkpoint_dir.join(format!("{}.bin", name));
 
         // Write to temp file with zstd compression
-        let file = File::create(&temp_path).map_err(|e| {
-            CliError::io(format!("Failed to create checkpoint file: {}", e))
-        })?;
+        let file = File::create(&temp_path)
+            .map_err(|e| CliError::io(format!("Failed to create checkpoint file: {}", e)))?;
         let writer = BufWriter::new(file);
         let encoder = zstd::Encoder::new(writer, 3)
             .map_err(|e| CliError::io(format!("Failed to create zstd encoder: {}", e)))?
             .auto_finish();
-        bincode::serialize_into(encoder, checkpoint).map_err(|e| {
-            CliError::io(format!("Failed to serialize checkpoint: {}", e))
-        })?;
+        bincode::serialize_into(encoder, checkpoint)
+            .map_err(|e| CliError::io(format!("Failed to serialize checkpoint: {}", e)))?;
 
         // Atomic rename
-        fs::rename(&temp_path, &final_path).map_err(|e| {
-            CliError::io(format!("Failed to finalize checkpoint: {}", e))
-        })?;
+        fs::rename(&temp_path, &final_path)
+            .map_err(|e| CliError::io(format!("Failed to finalize checkpoint: {}", e)))?;
 
         // Update "latest" symlink
         let latest = self.checkpoint_dir.join("latest.bin");
@@ -205,16 +202,16 @@ impl CheckpointManager {
     pub fn list_checkpoints(&self) -> CliResult<Vec<CheckpointInfo>> {
         let mut checkpoints = Vec::new();
 
-        for entry in fs::read_dir(&self.checkpoint_dir).map_err(|e| {
-            CliError::io(format!("Failed to read checkpoint directory: {}", e))
-        })? {
+        for entry in fs::read_dir(&self.checkpoint_dir)
+            .map_err(|e| CliError::io(format!("Failed to read checkpoint directory: {}", e)))?
+        {
             let entry = entry.map_err(|e| CliError::io(format!("Directory read error: {}", e)))?;
             let path = entry.path();
 
             if path.extension().map_or(false, |ext| ext == "bin")
-                && path.file_stem().map_or(false, |s| {
-                    s.to_string_lossy().starts_with("ngram_ckpt_")
-                })
+                && path
+                    .file_stem()
+                    .map_or(false, |s| s.to_string_lossy().starts_with("ngram_ckpt_"))
             {
                 let metadata = fs::metadata(&path)
                     .map_err(|e| CliError::io(format!("Failed to read metadata: {}", e)))?;
@@ -222,10 +219,7 @@ impl CheckpointManager {
                 checkpoints.push(CheckpointInfo {
                     path,
                     size: metadata.len(),
-                    modified: metadata
-                        .modified()
-                        .ok()
-                        .map(|t| DateTime::<Utc>::from(t)),
+                    modified: metadata.modified().ok().map(|t| DateTime::<Utc>::from(t)),
                 });
             }
         }
@@ -349,21 +343,18 @@ impl CheckpointManager {
         let final_path = self.checkpoint_dir.join(format!("{}.bin", name));
 
         // Write to temp file with zstd compression
-        let file = File::create(&temp_path).map_err(|e| {
-            CliError::io(format!("Failed to create checkpoint file: {}", e))
-        })?;
+        let file = File::create(&temp_path)
+            .map_err(|e| CliError::io(format!("Failed to create checkpoint file: {}", e)))?;
         let writer = BufWriter::new(file);
         let encoder = zstd::Encoder::new(writer, 3)
             .map_err(|e| CliError::io(format!("Failed to create zstd encoder: {}", e)))?
             .auto_finish();
-        bincode::serialize_into(encoder, checkpoint).map_err(|e| {
-            CliError::io(format!("Failed to serialize checkpoint: {}", e))
-        })?;
+        bincode::serialize_into(encoder, checkpoint)
+            .map_err(|e| CliError::io(format!("Failed to serialize checkpoint: {}", e)))?;
 
         // Atomic rename
-        fs::rename(&temp_path, &final_path).map_err(|e| {
-            CliError::io(format!("Failed to finalize checkpoint: {}", e))
-        })?;
+        fs::rename(&temp_path, &final_path)
+            .map_err(|e| CliError::io(format!("Failed to finalize checkpoint: {}", e)))?;
 
         // Update embedding "latest" symlink
         let latest = self.checkpoint_dir.join("embedding_latest.bin");
@@ -415,7 +406,8 @@ impl CheckpointManager {
 
     /// Get path for embedding model checkpoints.
     pub fn embedding_model_path(&self, epoch: u32) -> PathBuf {
-        self.checkpoint_dir.join(format!("embedding_model_epoch_{}.bin", epoch))
+        self.checkpoint_dir
+            .join(format!("embedding_model_epoch_{}.bin", epoch))
     }
 }
 

@@ -5,8 +5,8 @@
 //! for semantic similarity scoring and optionally with ModernBERT for neural
 //! probability scoring.
 
-use crate::latex::tokenizer::{LaTeXToken, LaTeXTokenKind};
 use crate::latex::embedding::LaTeXEmbedder;
+use crate::latex::tokenizer::{LaTeXToken, LaTeXTokenKind};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -188,8 +188,11 @@ impl LaTeXRescorer {
         // Cache result
         self.cache.insert(sequence.clone(), score);
 
-        RescoreResult::new(sequence, score)
-            .with_components(neural_score, ngram_score, embedding_score)
+        RescoreResult::new(sequence, score).with_components(
+            neural_score,
+            ngram_score,
+            embedding_score,
+        )
     }
 
     /// Rescore multiple sequences in a batch.
@@ -283,7 +286,8 @@ impl LaTeXRescorer {
 
     /// Compute a simple validity score based on token types.
     fn compute_validity_score(&self, tokens: &[LaTeXToken]) -> f64 {
-        let valid_tokens = tokens.iter()
+        let valid_tokens = tokens
+            .iter()
             .filter(|t| !matches!(&t.kind, LaTeXTokenKind::Unknown(_)))
             .count();
         let total = tokens.len().max(1);
@@ -471,7 +475,10 @@ impl BatchRescorer {
     }
 
     /// Rescore a batch of candidates.
-    pub fn rescore_candidates(&mut self, candidates: &[RescoreCandidate]) -> Vec<(RescoreCandidate, RescoreResult)> {
+    pub fn rescore_candidates(
+        &mut self,
+        candidates: &[RescoreCandidate],
+    ) -> Vec<(RescoreCandidate, RescoreResult)> {
         let mut results = Vec::with_capacity(candidates.len());
 
         for candidate in candidates {
@@ -483,21 +490,30 @@ impl BatchRescorer {
         results.sort_by(|a, b| {
             let score_a = a.0.prior_score + a.1.score;
             let score_b = b.0.prior_score + b.1.score;
-            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         results
     }
 
     /// Get the top-k candidates after rescoring.
-    pub fn top_k(&mut self, candidates: &[RescoreCandidate], k: usize) -> Vec<(RescoreCandidate, RescoreResult)> {
+    pub fn top_k(
+        &mut self,
+        candidates: &[RescoreCandidate],
+        k: usize,
+    ) -> Vec<(RescoreCandidate, RescoreResult)> {
         let mut results = self.rescore_candidates(candidates);
         results.truncate(k);
         results
     }
 
     /// Get the best candidate after rescoring.
-    pub fn best(&mut self, candidates: &[RescoreCandidate]) -> Option<(RescoreCandidate, RescoreResult)> {
+    pub fn best(
+        &mut self,
+        candidates: &[RescoreCandidate],
+    ) -> Option<(RescoreCandidate, RescoreResult)> {
         self.top_k(candidates, 1).into_iter().next()
     }
 }

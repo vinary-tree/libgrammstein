@@ -108,22 +108,22 @@ mod features;
 mod model;
 
 pub use features::{
-    // Constants
-    DEFAULT_FRAME_SHIFT,
-    DEFAULT_FRAME_SIZE,
-    DEFAULT_HIGH_FREQ,
-    DEFAULT_LOW_FREQ,
-    DEFAULT_NUM_MFCC,
-    DEFAULT_NUM_MELS,
-    DEFAULT_PRE_EMPHASIS,
-    DEFAULT_SAMPLE_RATE,
-    LOG_EPSILON,
     // Types
     FeatureConfig,
     FeatureExtractor,
     MelFilterbank,
     StreamingFeatureExtractor,
     WindowType,
+    // Constants
+    DEFAULT_FRAME_SHIFT,
+    DEFAULT_FRAME_SIZE,
+    DEFAULT_HIGH_FREQ,
+    DEFAULT_LOW_FREQ,
+    DEFAULT_NUM_MELS,
+    DEFAULT_NUM_MFCC,
+    DEFAULT_PRE_EMPHASIS,
+    DEFAULT_SAMPLE_RATE,
+    LOG_EPSILON,
 };
 
 #[cfg(feature = "candle-model")]

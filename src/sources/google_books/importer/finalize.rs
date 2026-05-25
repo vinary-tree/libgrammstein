@@ -9,8 +9,8 @@
 //! 4. Persist the final checkpoint and build the user-facing `ImportStats`.
 
 use std::path::Path;
-use std::time::Instant;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use crate::ngram::vocabulary::open_or_create_concurrent_vocabulary_lockfree_with_capacity;
 
@@ -67,9 +67,9 @@ impl GoogleBooksImporter {
         // time. This is only done once at finalize, not during periodic
         // checkpoints (which use WAL rotation for bloat-free durability).
         log::info!("Final vocabulary compaction...");
-        self.storage.checkpoint_vocabulary().map_err(|e| {
-            ImportError::Trie(format!("Failed to checkpoint vocabulary: {}", e))
-        })?;
+        self.storage
+            .checkpoint_vocabulary()
+            .map_err(|e| ImportError::Trie(format!("Failed to checkpoint vocabulary: {}", e)))?;
 
         // Now compute MKN stats (has access to all flushed shard data)
         self.compute_mkn_stats_with_events(event_tx)?;
@@ -124,10 +124,18 @@ impl GoogleBooksImporter {
             return Ok(false);
         }
 
-        log::info!("Starting merge of {} shards (~{} n-grams)", shard_count, estimated_ngrams);
+        log::info!(
+            "Starting merge of {} shards (~{} n-grams)",
+            shard_count,
+            estimated_ngrams
+        );
 
         // Emit MergeStarted event
-        log::debug!("[IMPORTER] Sending MergeStarted: shard_count={}, estimated_ngrams={}", shard_count, estimated_ngrams);
+        log::debug!(
+            "[IMPORTER] Sending MergeStarted: shard_count={}, estimated_ngrams={}",
+            shard_count,
+            estimated_ngrams
+        );
         let _ = event_tx.send(ImportEvent::MergeStarted {
             shard_count,
             estimated_ngrams,
@@ -158,7 +166,11 @@ impl GoogleBooksImporter {
                 );
 
                 // Emit MergeCompleted event
-                log::debug!("[IMPORTER] Sending MergeCompleted: total_ngrams={}, bytes_written={}", stats.total_ngrams, stats.bytes_written);
+                log::debug!(
+                    "[IMPORTER] Sending MergeCompleted: total_ngrams={}, bytes_written={}",
+                    stats.total_ngrams,
+                    stats.bytes_written
+                );
                 let _ = event_tx.send(ImportEvent::MergeCompleted {
                     total_ngrams: stats.total_ngrams,
                     bytes_written: stats.bytes_written,
@@ -194,9 +206,10 @@ impl GoogleBooksImporter {
         let _ = event_tx.send(ImportEvent::ShardCleanupStarted { shard_count });
 
         // Get the shard directory from coordinator
-        let coordinator = self.storage.as_sharded().ok_or_else(|| {
-            ImportError::Trie("Expected sharded storage for cleanup".to_string())
-        })?;
+        let coordinator = self
+            .storage
+            .as_sharded()
+            .ok_or_else(|| ImportError::Trie("Expected sharded storage for cleanup".to_string()))?;
 
         let shard_dir = coordinator.config().shard_dir.clone();
 

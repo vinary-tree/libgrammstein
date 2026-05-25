@@ -159,14 +159,7 @@ impl KneserNeySmoothing {
 
         if context_count == 0 {
             // Context not found, backoff to shorter context
-            return self.prob_recursive(
-                word,
-                &context[1..],
-                trie,
-                vocab_size,
-                total_count,
-                false,
-            );
+            return self.prob_recursive(word, &context[1..], trie, vocab_size, total_count, false);
         }
 
         // Discounted probability
@@ -183,14 +176,8 @@ impl KneserNeySmoothing {
         let lambda = (discount * unique_continuations) / context_count as f64;
 
         // Backoff probability
-        let backoff_prob = self.prob_recursive(
-            word,
-            &context[1..],
-            trie,
-            vocab_size,
-            total_count,
-            false,
-        );
+        let backoff_prob =
+            self.prob_recursive(word, &context[1..], trie, vocab_size, total_count, false);
 
         // Interpolated probability
         discounted_prob + lambda * backoff_prob
