@@ -46,6 +46,56 @@ impl IterableDictionary for liblevenshtein::dictionary::pathmap::PathMapDictiona
     }
 }
 
+// Implement IterableDictionary for the disk-backed char ARTrie (shared handle).
+// `SharedCharARTrie<V> = Arc<RwLock<PersistentARTrieChar<V>>>` already implements
+// `MutableMappedDictionary<Value = NgramEntry>` (libdictenstein
+// persistent_artrie_char/mod.rs:718), so the supertrait holds; this adds the
+// portable-serialization iteration hook so the type can back HybridLanguageModel /
+// NgramModel / TrainerBuilder.
+impl IterableDictionary for libdictenstein::persistent_artrie_char::SharedCharARTrie<NgramEntry> {
+    fn iter_all(&self) -> Box<dyn Iterator<Item = (String, NgramEntry)> + '_> {
+        // `iter_with_values()` borrows the RwLock read guard; materialize into an
+        // owned Vec so the returned iterator does not borrow a dropped guard. The
+        // collect is load-bearing (lifetime detach), not a `needless_collect`.
+        let entries: Vec<(String, NgramEntry)> = self.read().iter_with_values().collect();
+        Box::new(entries.into_iter())
+    }
+}
+
+// Implement IterableDictionary for the vocabulary-indexed wrapper. The backend `D`
+// stores varint-encoded latin1 keys; reconstruct each word string by decoding the
+// key to vocabulary indices and reverse-looking-up each index, joined with the
+// wrapper's delimiter (pgmcp pins it to '|' to match LEGACY_NGRAM_SEPARATOR, so the
+// portable keys round-trip through NgramTrie's legacy split/join). A key whose index
+// is missing from the vocabulary is skipped defensively (no panic).
+impl<D> IterableDictionary for super::vocabulary_indexed::VocabularyIndexedDictionary<D>
+where
+    D: IterableDictionary,
+{
+    fn iter_all(&self) -> Box<dyn Iterator<Item = (String, NgramEntry)> + '_> {
+        let delimiter = self.delimiter().to_string();
+        // Hold one vocab read guard across all reverse lookups.
+        let guard = self.vocabulary().read();
+        let decoded: Vec<(String, NgramEntry)> = self
+            .backend()
+            .iter_all()
+            .filter_map(|(key, entry)| {
+                let indices = super::vocabulary_indexed::decode_key_to_indices(&key);
+                if indices.is_empty() {
+                    return None;
+                }
+                let mut words = Vec::with_capacity(indices.len());
+                for idx in indices {
+                    words.push(guard.get_term(idx)?);
+                }
+                Some((words.join(&delimiter), entry))
+            })
+            .collect();
+        drop(guard);
+        Box::new(decoded.into_iter())
+    }
+}
+
 /// Separator used between tokens in legacy n-gram keys.
 ///
 /// # Deprecation Notice
@@ -434,5 +484,92 @@ mod tests {
         let hash1 = hash_ngram_key(&["the", "quick", "brown"]);
         let hash2 = hash_ngram_key(&["the", "quick", "brown"]);
         assert_eq!(hash1, hash2, "Same input should produce same hash");
+    }
+
+    // ── IterableDictionary impls for the persistent ARTrie backends ──
+
+    #[test]
+    fn iter_all_shared_char_artrie_roundtrip() {
+        use libdictenstein::persistent_artrie_char::{PersistentARTrieChar, SharedCharARTrie};
+        use parking_lot::RwLock;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let trie = PersistentARTrieChar::<NgramEntry>::create(dir.path().join("c.artrie"))
+            .expect("create counts trie");
+        let backend: SharedCharARTrie<NgramEntry> = Arc::new(RwLock::new(trie));
+        backend.insert_with_value("ab", NgramEntry::new(3));
+        backend.insert_with_value("cd", NgramEntry::with_stats(5, 2, 1));
+
+        let got: HashMap<String, u64> = backend.iter_all().map(|(k, v)| (k, v.count())).collect();
+        assert_eq!(got.get("ab"), Some(&3));
+        assert_eq!(got.get("cd"), Some(&5));
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn iter_all_vocab_indexed_reconstructs_words() {
+        use crate::ngram::vocabulary::create_vocabulary;
+        use crate::ngram::vocabulary_indexed::VocabularyIndexedDictionary;
+        use libdictenstein::persistent_artrie_char::{PersistentARTrieChar, SharedCharARTrie};
+        use parking_lot::RwLock;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vocab = create_vocabulary(&dir.path().join("v.artrie")).expect("vocab");
+        let counts: SharedCharARTrie<NgramEntry> = Arc::new(RwLock::new(
+            PersistentARTrieChar::<NgramEntry>::create(dir.path().join("c.artrie"))
+                .expect("counts"),
+        ));
+        let dict = VocabularyIndexedDictionary::with_delimiter(counts, vocab, '|');
+
+        // Insert via the MutableMappedDictionary surface (splits on '|' →
+        // assigns vocab ids → stores latin1 varint keys in the counts trie).
+        dict.insert_with_value("the|quick|brown", NgramEntry::new(2));
+        dict.insert_with_value("the|lazy", NgramEntry::new(5));
+
+        // iter_all must decode the integer keys back to the exact word strings.
+        let got: HashMap<String, u64> = dict.iter_all().map(|(k, v)| (k, v.count())).collect();
+        assert_eq!(
+            got.get("the|quick|brown"),
+            Some(&2),
+            "trigram reconstructed"
+        );
+        assert_eq!(got.get("the|lazy"), Some(&5), "bigram reconstructed");
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn iter_all_vocab_indexed_skips_missing_index() {
+        use crate::ngram::vocabulary::{create_vocabulary, encode_varint};
+        use crate::ngram::vocabulary_indexed::{
+            decode_key_to_indices, VocabularyIndexedDictionary,
+        };
+        use libdictenstein::persistent_artrie_char::{PersistentARTrieChar, SharedCharARTrie};
+        use parking_lot::RwLock;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vocab = create_vocabulary(&dir.path().join("v.artrie")).expect("vocab");
+        let counts: SharedCharARTrie<NgramEntry> = Arc::new(RwLock::new(
+            PersistentARTrieChar::<NgramEntry>::create(dir.path().join("c.artrie"))
+                .expect("counts"),
+        ));
+        let dict = VocabularyIndexedDictionary::with_delimiter(counts.clone(), vocab, '|');
+
+        // One valid n-gram (assigns vocab ids 1,2), …
+        dict.insert_with_value("alpha|beta", NgramEntry::new(1));
+        // … plus a forged backend key for index 9999 that was never assigned.
+        let mut buf = Vec::new();
+        encode_varint(9999, &mut buf);
+        let bogus_key: String = buf.iter().map(|&b| b as char).collect(); // latin1
+        assert_eq!(decode_key_to_indices(&bogus_key), vec![9999]);
+        counts.insert_with_value(&bogus_key, NgramEntry::new(7));
+
+        // The missing-index key must be skipped (no panic), the valid one kept.
+        let got: Vec<String> = dict.iter_all().map(|(k, _)| k).collect();
+        assert_eq!(got, vec!["alpha|beta".to_string()]);
     }
 }

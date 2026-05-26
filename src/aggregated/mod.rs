@@ -553,8 +553,7 @@ mod tests {
         // Verify SharedVocabARTrie has the methods we need
         // This test verifies the API we depend on exists
         fn _check_api(v: &SharedVocabARTrie) {
-            let _: libdictenstein::persistent_artrie::error::Result<u64> =
-                v.write().insert("word");
+            let _: libdictenstein::persistent_artrie::error::Result<u64> = v.write().insert("word");
             let _: Option<u64> = v.read().get_index("word");
             let _: bool = v.read().contains("word");
             let _: usize = v.read().len();
