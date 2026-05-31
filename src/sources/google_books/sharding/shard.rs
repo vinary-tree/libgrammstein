@@ -748,10 +748,23 @@ impl ShardHandle {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            // We got the lock
+            // We got the lock. Refuse to wrap the generation counter: stale-token
+            // detection relies on generations never repeating.
+            let generation = self.write_generation.load(Ordering::Relaxed);
+            let Some(next_generation) = generation.checked_add(1) else {
+                self.write_holder.store(usize::MAX, Ordering::Relaxed);
+                self.write_locked.store(false, Ordering::Release);
+                return None;
+            };
+
             self.write_holder.store(worker_id, Ordering::Relaxed);
-            let generation = self.write_generation.fetch_add(1, Ordering::Relaxed);
-            Some(WriteToken::new(self.key.clone(), worker_id, generation + 1))
+            self.write_generation
+                .store(next_generation, Ordering::Relaxed);
+            Some(WriteToken::new(
+                self.key.clone(),
+                worker_id,
+                next_generation,
+            ))
         } else {
             None
         }
@@ -1513,6 +1526,21 @@ mod tests {
         let token2 = shard.try_acquire_write(1).expect("Failed to acquire");
         assert_eq!(shard.write_holder(), Some(1));
         shard.release_write(token2);
+    }
+
+    #[test]
+    fn test_write_token_generation_does_not_wrap() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("test_shard.artrie");
+        let key = ShardKey::new("th");
+
+        let shard = ShardHandle::create(key, &path).expect("Failed to create shard");
+        shard.write_generation.store(u64::MAX, Ordering::Relaxed);
+
+        assert!(shard.try_acquire_write(0).is_none());
+        assert!(!shard.is_write_locked());
+        assert_eq!(shard.write_holder(), None);
+        assert_eq!(shard.write_generation.load(Ordering::Relaxed), u64::MAX);
     }
 
     #[test]

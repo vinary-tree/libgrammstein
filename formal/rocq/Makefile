@@ -3,7 +3,7 @@
 # Usage:
 #   make          - Build all proofs
 #   make clean    - Remove generated files
-#   make check    - Verify proofs compile without admitted lemmas
+#   make check    - Verify proofs compile without proof holes
 #
 # For memory-intensive proofs, use resource limits:
 #   systemd-run --user --scope -p MemoryMax=16G -p CPUQuota=400% make
@@ -23,12 +23,12 @@ clean:
 	rm -f $(COQMAKEFILE) $(COQMAKEFILE).conf
 	rm -f *.vo *.vok *.vos *.glob .*.aux *.crashcoqide
 
-# Check for admitted lemmas
+# Check for incomplete or trusted proof holes
 check: all
-	@echo "Checking for admitted lemmas..."
-	@if grep -r "Admitted" *.v 2>/dev/null | grep -v "^#" | grep -v "(*"; then \
-		echo "ERROR: Found admitted lemmas!"; \
+	@echo "Checking for proof holes and trusted declarations..."
+	@if grep -nE '\b(Admitted|admit|Axiom|Parameter|Abort)\b' *.v 2>/dev/null | grep -v '^[^:]*:[[:space:]]*(\*' | grep -v '^Makefile:'; then \
+		echo "ERROR: Found proof holes or trusted declarations!"; \
 		exit 1; \
 	else \
-		echo "All proofs complete (no Admitted lemmas found)"; \
+		echo "All proofs complete (no proof holes or trusted declarations found)"; \
 	fi

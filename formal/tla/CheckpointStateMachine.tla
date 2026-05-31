@@ -21,21 +21,35 @@
 EXTENDS Naturals, FiniteSets, Sequences, TLC
 
 CONSTANTS
+    \* @type: Set(Int);
     Orders,         \* Set of n-gram orders (e.g., {1, 2, 3, 4, 5})
+    \* @type: Set(Str);
     Prefixes,       \* Set of prefix identifiers
+    \* @type: Set(Str);
     Workers         \* Set of worker IDs (for parallel processing)
 
 \* Symmetry set for model checking optimization
 PrefixSymmetry == Permutations(Prefixes)
 
 VARIABLES
+    \* @type: <<Int, Str>> -> Str;
     prefix_state,           \* (order, prefix) -> state
+    \* @type: Int -> Set(Str);
     completed_prefixes,     \* order -> Set of prefix
+    \* @type: Int -> Set(Str);
     in_progress_prefixes,   \* order -> Set of prefix
+    \* @type: Int -> Set(Str);
     failed_prefixes,        \* order -> Set of prefix
+    \* @type: Int -> Bool;
     order_complete,         \* order -> Bool
+    \* @type: Bool;
     system_running,         \* Bool: system is running (not crashed)
-    worker_assignment       \* (order, prefix) -> worker | NONE
+    \* @type: <<Int, Str>> -> Str;
+    worker_assignment,      \* (order, prefix) -> worker | NONE
+    \* @type: Bool;
+    recovery_needed,        \* Bool: a crash happened and restart is not complete
+    \* @type: Int -> Set(Str);
+    crashed_in_progress     \* order -> Set of prefixes in progress at crash time
 
 (* Prefix states as constants *)
 NotStarted == "not_started"
@@ -44,6 +58,10 @@ Completed == "completed"
 Failed == "failed"
 
 NONE == "NONE"
+
+WorkerIdsExcludeNone == NONE \notin Workers
+
+ASSUME WorkerIdsExcludeNone
 
 (* Type invariant *)
 TypeOK ==
@@ -54,6 +72,8 @@ TypeOK ==
     /\ order_complete \in [Orders -> BOOLEAN]
     /\ system_running \in BOOLEAN
     /\ worker_assignment \in [Orders \X Prefixes -> Workers \cup {NONE}]
+    /\ recovery_needed \in BOOLEAN
+    /\ crashed_in_progress \in [Orders -> SUBSET Prefixes]
 
 (* Initial state: all prefixes not started *)
 Init ==
@@ -64,6 +84,8 @@ Init ==
     /\ order_complete = [o \in Orders |-> FALSE]
     /\ system_running = TRUE
     /\ worker_assignment = [op \in Orders \X Prefixes |-> NONE]
+    /\ recovery_needed = FALSE
+    /\ crashed_in_progress = [o \in Orders |-> {}]
 
 (* ---------------------------------------------------------------------------
  * Actions - Normal Operation
@@ -81,14 +103,16 @@ Init ==
 StartPrefix(o, p, w) ==
     /\ system_running
     /\ ~order_complete[o]
-    /\ prefix_state[<<o, p>>] \in {NotStarted, Failed}  \* Can retry failed
+    \* HashMap-backed Rust state allows a caller to overwrite Completed with
+    \* InProgress for an explicit reprocess; it must not duplicate InProgress.
+    /\ prefix_state[<<o, p>>] # InProgress
     /\ prefix_state' = [prefix_state EXCEPT ![<<o, p>>] = InProgress]
     /\ in_progress_prefixes' = [in_progress_prefixes EXCEPT ![o] = @ \cup {p}]
     \* Remove from other sets if present (checkpoint.rs:319-320)
     /\ completed_prefixes' = [completed_prefixes EXCEPT ![o] = @ \ {p}]
     /\ failed_prefixes' = [failed_prefixes EXCEPT ![o] = @ \ {p}]
     /\ worker_assignment' = [worker_assignment EXCEPT ![<<o, p>>] = w]
-    /\ UNCHANGED <<order_complete, system_running>>
+    /\ UNCHANGED <<order_complete, system_running, recovery_needed, crashed_in_progress>>
 
 (*
  * Complete a prefix successfully.
@@ -103,7 +127,7 @@ CompletePrefix(o, p) ==
     /\ in_progress_prefixes' = [in_progress_prefixes EXCEPT ![o] = @ \ {p}]
     /\ completed_prefixes' = [completed_prefixes EXCEPT ![o] = @ \cup {p}]
     /\ worker_assignment' = [worker_assignment EXCEPT ![<<o, p>>] = NONE]
-    /\ UNCHANGED <<failed_prefixes, order_complete, system_running>>
+    /\ UNCHANGED <<failed_prefixes, order_complete, system_running, recovery_needed, crashed_in_progress>>
 
 (*
  * Fail a prefix (exhausted retries).
@@ -118,7 +142,7 @@ FailPrefix(o, p) ==
     /\ in_progress_prefixes' = [in_progress_prefixes EXCEPT ![o] = @ \ {p}]
     /\ failed_prefixes' = [failed_prefixes EXCEPT ![o] = @ \cup {p}]
     /\ worker_assignment' = [worker_assignment EXCEPT ![<<o, p>>] = NONE]
-    /\ UNCHANGED <<completed_prefixes, order_complete, system_running>>
+    /\ UNCHANGED <<completed_prefixes, order_complete, system_running, recovery_needed, crashed_in_progress>>
 
 (*
  * Clear a failed prefix for retry.
@@ -132,7 +156,7 @@ ClearFailed(o, p) ==
     /\ prefix_state' = [prefix_state EXCEPT ![<<o, p>>] = NotStarted]
     /\ failed_prefixes' = [failed_prefixes EXCEPT ![o] = @ \ {p}]
     /\ UNCHANGED <<completed_prefixes, in_progress_prefixes, order_complete,
-                   system_running, worker_assignment>>
+                   system_running, worker_assignment, recovery_needed, crashed_in_progress>>
 
 (*
  * Mark an order as complete.
@@ -147,7 +171,8 @@ CompleteOrder(o) ==
     /\ in_progress_prefixes[o] = {}
     /\ order_complete' = [order_complete EXCEPT ![o] = TRUE]
     /\ UNCHANGED <<prefix_state, completed_prefixes, in_progress_prefixes,
-                   failed_prefixes, system_running, worker_assignment>>
+                   failed_prefixes, system_running, worker_assignment,
+                   recovery_needed, crashed_in_progress>>
 
 (* ---------------------------------------------------------------------------
  * Actions - Crash and Recovery
@@ -162,6 +187,8 @@ CompleteOrder(o) ==
 Crash ==
     /\ system_running
     /\ system_running' = FALSE
+    /\ recovery_needed' = TRUE
+    /\ crashed_in_progress' = in_progress_prefixes
     /\ UNCHANGED <<prefix_state, completed_prefixes, in_progress_prefixes,
                    failed_prefixes, order_complete, worker_assignment>>
 
@@ -185,7 +212,8 @@ RecoverInProgressAsFailed(o) ==
            /\ worker_assignment' = [op \in Orders \X Prefixes |->
                IF op[1] = o /\ op[2] \in prefs THEN NONE
                ELSE worker_assignment[op]]
-    /\ UNCHANGED <<completed_prefixes, order_complete, system_running>>
+    /\ UNCHANGED <<completed_prefixes, order_complete, system_running,
+                   recovery_needed, crashed_in_progress>>
 
 (*
  * System restart after recovery.
@@ -197,6 +225,8 @@ Restart ==
     \* All orders must have empty in_progress sets (recovered)
     /\ \A o \in Orders: in_progress_prefixes[o] = {}
     /\ system_running' = TRUE
+    /\ recovery_needed' = FALSE
+    /\ crashed_in_progress' = [o \in Orders |-> {}]
     /\ UNCHANGED <<prefix_state, completed_prefixes, in_progress_prefixes,
                    failed_prefixes, order_complete, worker_assignment>>
 
@@ -218,16 +248,35 @@ Next ==
 Fairness ==
     /\ \A o \in Orders, p \in Prefixes, w \in Workers:
         WF_<<prefix_state, completed_prefixes, in_progress_prefixes,
-             failed_prefixes, order_complete, system_running, worker_assignment>>(
+             failed_prefixes, order_complete, system_running, worker_assignment,
+             recovery_needed, crashed_in_progress>>(
             StartPrefix(o, p, w))
     /\ \A o \in Orders, p \in Prefixes:
         WF_<<prefix_state, completed_prefixes, in_progress_prefixes,
-             failed_prefixes, order_complete, system_running, worker_assignment>>(
+             failed_prefixes, order_complete, system_running, worker_assignment,
+             recovery_needed, crashed_in_progress>>(
             CompletePrefix(o, p))
+    /\ \A o \in Orders, p \in Prefixes:
+        WF_<<prefix_state, completed_prefixes, in_progress_prefixes,
+             failed_prefixes, order_complete, system_running, worker_assignment,
+             recovery_needed, crashed_in_progress>>(
+            FailPrefix(o, p))
+    /\ \A o \in Orders:
+        WF_<<prefix_state, completed_prefixes, in_progress_prefixes,
+             failed_prefixes, order_complete, system_running, worker_assignment,
+             recovery_needed, crashed_in_progress>>(
+            RecoverInProgressAsFailed(o))
+    /\ WF_<<prefix_state, completed_prefixes, in_progress_prefixes,
+             failed_prefixes, order_complete, system_running, worker_assignment,
+             recovery_needed, crashed_in_progress>>(Restart)
 
-Spec == Init /\ [][Next]_<<prefix_state, completed_prefixes, in_progress_prefixes,
-                           failed_prefixes, order_complete, system_running,
-                           worker_assignment>>
+vars == <<prefix_state, completed_prefixes, in_progress_prefixes,
+          failed_prefixes, order_complete, system_running,
+          worker_assignment, recovery_needed, crashed_in_progress>>
+
+Spec == Init /\ [][Next]_vars
+
+FairSpec == Spec /\ Fairness
 
 (* ---------------------------------------------------------------------------
  * Safety Invariants
@@ -253,8 +302,8 @@ StateConsistent ==
         /\ (prefix_state[<<o, p>>] = Completed) <=> (p \in completed_prefixes[o])
         /\ (prefix_state[<<o, p>>] = InProgress) <=> (p \in in_progress_prefixes[o])
         /\ (prefix_state[<<o, p>>] = Failed) <=> (p \in failed_prefixes[o])
-        /\ (prefix_state[<<o, p>>] = NotStarted) <=>
-           (p \notin completed_prefixes[o] \cup in_progress_prefixes[o] \cup failed_prefixes[o])
+        \* NotStarted is the only remaining TypeOK state, so it is implied by
+        \* absence from the three active state sets.
 
 (*
  * Completed order means no prefixes are in progress.
@@ -268,7 +317,7 @@ CompletedOrderNoInProgress ==
  *)
 WorkerAssignmentConsistent ==
     \A o \in Orders, p \in Prefixes:
-        (worker_assignment[<<o, p>>] # NONE) <=> (prefix_state[<<o, p>>] = InProgress)
+        (worker_assignment[<<o, p>>] # NONE) <=> (p \in in_progress_prefixes[o])
 
 (*
  * No double-processing: a completed prefix cannot become in_progress again.
@@ -278,9 +327,19 @@ WorkerAssignmentConsistent ==
  * We make it explicit here for documentation.
  *)
 NoDoubleProcessing ==
-    \A o \in Orders, p \in Prefixes:
-        prefix_state[<<o, p>>] = Completed =>
-            p \notin in_progress_prefixes[o]
+    \A o \in Orders:
+        completed_prefixes[o] \cap in_progress_prefixes[o] = {}
+
+(*
+ * A crash records the in-progress set until restart. Every recorded prefix is
+ * either still pending recovery or has been moved to Failed.
+ *)
+CrashRecoverySound ==
+    recovery_needed =>
+        /\ ~system_running
+        /\ \A o \in Orders:
+            \A p \in crashed_in_progress[o]:
+                p \in in_progress_prefixes[o] \/ p \in failed_prefixes[o]
 
 (*
  * Combined safety invariant.
@@ -292,6 +351,7 @@ Safety ==
     /\ CompletedOrderNoInProgress
     /\ WorkerAssignmentConsistent
     /\ NoDoubleProcessing
+    /\ CrashRecoverySound
 
 (* ---------------------------------------------------------------------------
  * Recovery Correctness
@@ -302,18 +362,14 @@ Safety ==
  * (No zombie states)
  *)
 RecoveryEventual ==
-    ~system_running ~> (system_running \/ ~system_running)
+    recovery_needed ~> (\A o \in Orders: in_progress_prefixes[o] = {})
 
 (*
  * Crash recovery soundness: when system restarts, no in_progress prefixes
  * remain (they were all moved to failed).
  *)
-CrashRecoverySound ==
-    system_running =>
-        \A o \in Orders:
-            \* Either system never crashed (all is well) or
-            \* all previously in_progress prefixes are now completed or failed
-            TRUE  \* This is implicitly enforced by Restart precondition
+RestartEventuallyAfterRecovery ==
+    (~system_running /\ \A o \in Orders: in_progress_prefixes[o] = {}) ~> system_running
 
 (* ---------------------------------------------------------------------------
  * Liveness Properties

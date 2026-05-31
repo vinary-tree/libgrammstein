@@ -47,8 +47,11 @@
 EXTENDS Naturals, FiniteSets, Sequences, TLC
 
 CONSTANTS
+    \* @type: Set(Str);
     Workers,        \* Set of worker IDs (e.g., {w1, w2, w3})
+    \* @type: Set(Str);
     Jobs,           \* Set of job identifiers
+    \* @type: Int;
     MaxRetries      \* Maximum retry attempts per job
 
 \* Symmetry sets for model checking optimization
@@ -57,20 +60,27 @@ JobSymmetry == Permutations(Jobs)
 
 VARIABLES
     \* Worker state
+    \* @type: Str -> Str;
     worker_state,       \* Worker -> {Idle, PollingQueue, Processing, SendingResult, Exiting, Exited}
+    \* @type: Str -> Str;
     worker_job,         \* Worker -> Job | NONE (current job being processed)
 
     \* Job queue
+    \* @type: Seq(Str);
     job_queue,          \* Sequence of jobs waiting to be processed
 
     \* Result channel
+    \* @type: Set(Str);
     results_pending,    \* Set of jobs whose results are in the channel (sent but not received)
+    \* @type: Set(Str);
     results_received,   \* Set of jobs whose results have been received by main task
 
     \* Shutdown coordination
+    \* @type: Bool;
     shutdown_signaled,  \* Boolean: shutdown signal has been sent
 
     \* Checkpoint state
+    \* @type: Str;
     checkpoint_state    \* {NotStarted, Draining, Checkpointing, Done}
 
 (* State constants *)
@@ -93,6 +103,9 @@ QueueContains(q, j) == \E i \in 1..Len(q): q[i] = j
 
 RemoveFromQueue(q, j) ==
     SelectSeq(q, LAMBDA x: x # j)
+
+UniqueSeq(q) ==
+    \A i, k \in 1..Len(q): q[i] = q[k] => i = k
 
 (* Type invariant *)
 TypeOK ==
@@ -369,6 +382,20 @@ NoJobLost ==
             (j \in results_pending \/ j \in results_received)
 
 (*
+ * No job is represented in more than one active place. This is stronger than
+ * NoJobLost: it prevents duplicate queue entries and two workers owning the
+ * same job concurrently.
+ *)
+JobUniqueOwnership ==
+    /\ UniqueSeq(job_queue)
+    /\ \A j \in Jobs:
+        Cardinality({loc \in {"queue", "pending", "received"}:
+            (loc = "queue" /\ QueueContains(job_queue, j)) \/
+            (loc = "pending" /\ j \in results_pending) \/
+            (loc = "received" /\ j \in results_received)})
+        + Cardinality({w \in Workers: worker_job[w] = j}) <= 1
+
+(*
  * Combined safety invariant.
  *)
 Safety ==
@@ -378,6 +405,8 @@ Safety ==
     /\ IdleNoJob
     /\ ResultsDisjoint
     /\ CheckpointAfterDrain
+    /\ NoJobLost
+    /\ JobUniqueOwnership
 
 (* ---------------------------------------------------------------------------
  * Liveness Properties

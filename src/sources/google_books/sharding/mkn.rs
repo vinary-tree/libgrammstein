@@ -102,18 +102,52 @@ pub struct FrequencyCounts {
     pub total_count: u64,
 }
 
+#[inline]
+fn checked_count_add(lhs: u64, rhs: u64, field: &str) -> u64 {
+    lhs.checked_add(rhs)
+        .unwrap_or_else(|| panic!("FrequencyCounts overflow in {field}"))
+}
+
+#[inline]
+fn atomic_count_add(counter: &AtomicU64, delta: u64, field: &str) {
+    if delta == 0 {
+        return;
+    }
+
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(delta)
+        })
+        .unwrap_or_else(|_| panic!("AtomicFrequencyCounts overflow in {field}"));
+}
+
+#[inline]
+fn clamp_discount(value: f64, min: f64, max: f64) -> f64 {
+    assert!(value.is_finite(), "non-finite MKN discount intermediate");
+    debug_assert!(min.is_finite() && max.is_finite() && min <= max);
+
+    if value < min {
+        min
+    } else if value > max {
+        max
+    } else {
+        value
+    }
+}
+
 impl FrequencyCounts {
     /// Add another FrequencyCounts to this one.
     ///
     /// This operation is proven associative and commutative in
     /// `formal/rocq/FrequencyCountsMerge.v`, enabling parallel tree reduction.
     pub fn merge(&mut self, other: &FrequencyCounts) {
-        self.n1 += other.n1;
-        self.n2 += other.n2;
-        self.n3 += other.n3;
-        self.n4 += other.n4;
-        self.total_unique += other.total_unique;
-        self.total_count += other.total_count;
+        self.n1 = checked_count_add(self.n1, other.n1, "n1");
+        self.n2 = checked_count_add(self.n2, other.n2, "n2");
+        self.n3 = checked_count_add(self.n3, other.n3, "n3");
+        self.n4 = checked_count_add(self.n4, other.n4, "n4");
+        self.total_unique =
+            checked_count_add(self.total_unique, other.total_unique, "total_unique");
+        self.total_count = checked_count_add(self.total_count, other.total_count, "total_count");
     }
 }
 
@@ -132,14 +166,14 @@ impl AtomicFrequencyCounts {
     /// Add a count observation.
     pub fn observe(&self, count: u64) {
         match count {
-            1 => self.n1.fetch_add(1, Ordering::Relaxed),
-            2 => self.n2.fetch_add(1, Ordering::Relaxed),
-            3 => self.n3.fetch_add(1, Ordering::Relaxed),
-            4 => self.n4.fetch_add(1, Ordering::Relaxed),
-            _ => 0,
+            1 => atomic_count_add(&self.n1, 1, "n1"),
+            2 => atomic_count_add(&self.n2, 1, "n2"),
+            3 => atomic_count_add(&self.n3, 1, "n3"),
+            4 => atomic_count_add(&self.n4, 1, "n4"),
+            _ => {}
         };
-        self.total_unique.fetch_add(1, Ordering::Relaxed);
-        self.total_count.fetch_add(count, Ordering::Relaxed);
+        atomic_count_add(&self.total_unique, 1, "total_unique");
+        atomic_count_add(&self.total_count, count, "total_count");
     }
 
     /// Convert to non-atomic version.
@@ -218,9 +252,9 @@ impl DiscountParams {
         let y = n1 / (n1 + 2.0 * n2);
 
         // Discount parameters with clamping to valid ranges
-        let d1 = (1.0 - 2.0 * y * (n2 / n1)).max(0.0).min(1.0);
-        let d2 = (2.0 - 3.0 * y * (n3 / n2)).max(0.0).min(2.0);
-        let d3_plus = (3.0 - 4.0 * y * (n4 / n3)).max(0.0).min(3.0);
+        let d1 = clamp_discount(1.0 - 2.0 * y * (n2 / n1), 0.0, 1.0);
+        let d2 = clamp_discount(2.0 - 3.0 * y * (n3 / n2), 0.0, 2.0);
+        let d3_plus = clamp_discount(3.0 - 4.0 * y * (n4 / n3), 0.0, 3.0);
 
         Self { d1, d2, d3_plus, y }
     }
@@ -648,6 +682,7 @@ mod tests {
     use crate::ngram::vocabulary::{
         create_vocabulary, encode_indices_to_key_bytes, SharedVocabARTrie,
     };
+    use proptest::prelude::*;
     use tempfile::TempDir;
 
     /// Create a test coordinator with varint-encoded n-grams.
@@ -724,6 +759,17 @@ mod tests {
         (dir, coordinator, vocab)
     }
 
+    fn assert_valid_discounts(discounts: &DiscountParams) {
+        assert!(discounts.y.is_finite());
+        assert!(discounts.d1.is_finite());
+        assert!(discounts.d2.is_finite());
+        assert!(discounts.d3_plus.is_finite());
+        assert!((0.0..=1.0).contains(&discounts.y));
+        assert!((0.0..=1.0).contains(&discounts.d1));
+        assert!((0.0..=2.0).contains(&discounts.d2));
+        assert!((0.0..=3.0).contains(&discounts.d3_plus));
+    }
+
     #[test]
     fn test_frequency_counts() {
         let (_dir, coordinator, _vocab) = create_test_coordinator();
@@ -755,6 +801,7 @@ mod tests {
         };
 
         let discounts = DiscountParams::from_counts(&counts);
+        assert_valid_discounts(&discounts);
 
         // Y = 100 / (100 + 2*50) = 0.5
         assert!((discounts.y - 0.5).abs() < 0.01);
@@ -786,6 +833,71 @@ mod tests {
         assert_eq!(discounts.d1, 0.5);
         assert_eq!(discounts.d2, 0.75);
         assert_eq!(discounts.d3_plus, 0.9);
+    }
+
+    #[test]
+    fn test_discount_computation_extreme_counts_are_finite_and_bounded() {
+        let near_exact_limit = 1u64 << 53;
+        let cases = [
+            (1, 1, 0, 0),
+            (1, u64::MAX, u64::MAX, u64::MAX),
+            (u64::MAX, 1, 0, u64::MAX),
+            (u64::MAX, u64::MAX, u64::MAX, u64::MAX),
+            (
+                near_exact_limit - 1,
+                near_exact_limit,
+                near_exact_limit + 1,
+                0,
+            ),
+            (
+                near_exact_limit + 1,
+                near_exact_limit - 1,
+                0,
+                near_exact_limit,
+            ),
+        ];
+
+        for (n1, n2, n3, n4) in cases {
+            let counts = FrequencyCounts {
+                n1,
+                n2,
+                n3,
+                n4,
+                total_unique: 0,
+                total_count: 0,
+            };
+
+            assert_valid_discounts(&DiscountParams::from_counts(&counts));
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn test_discount_computation_positive_counts_are_finite_and_bounded(
+            n1 in 1u64..=u64::MAX,
+            n2 in 1u64..=u64::MAX,
+            n3 in any::<u64>(),
+            n4 in any::<u64>(),
+        ) {
+            let counts = FrequencyCounts {
+                n1,
+                n2,
+                n3,
+                n4,
+                total_unique: 0,
+                total_count: 0,
+            };
+
+            let discounts = DiscountParams::from_counts(&counts);
+            prop_assert!(discounts.y.is_finite());
+            prop_assert!(discounts.d1.is_finite());
+            prop_assert!(discounts.d2.is_finite());
+            prop_assert!(discounts.d3_plus.is_finite());
+            prop_assert!((0.0..=1.0).contains(&discounts.y));
+            prop_assert!((0.0..=1.0).contains(&discounts.d1));
+            prop_assert!((0.0..=2.0).contains(&discounts.d2));
+            prop_assert!((0.0..=3.0).contains(&discounts.d3_plus));
+        }
     }
 
     #[test]

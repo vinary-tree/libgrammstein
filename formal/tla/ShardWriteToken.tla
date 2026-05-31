@@ -13,24 +13,34 @@
  * Key Rust implementation details modeled:
  *   - try_acquire_write: compare_exchange(false, true, Acquire, Relaxed)
  *   - release_write: token.is_valid check, then store(false, Release)
- *   - Generation counter incremented on acquire with fetch_add(1, Relaxed)
+ *   - Generation counter incremented on acquire only when it is below u64::MAX
  *)
 
 EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
+    \* @type: Set(Str);
     Workers,        \* Set of worker IDs
+    \* @type: Set(Str);
     Shards,         \* Set of shard IDs
+    \* @type: Int;
     MaxGeneration   \* Bound for model checking (u64 in real impl)
 
 \* Symmetry set for model checking optimization
 WorkerSymmetry == Permutations(Workers)
 
 VARIABLES
+    \* @type: Str -> Bool;
     write_locked,       \* shard -> Bool: whether shard is write-locked
+    \* @type: Str -> Set(Str);
     write_holder,       \* shard -> worker_id or empty set: who holds the lock
+    \* @type: Str -> Int;
     write_generation,   \* shard -> Nat: current generation counter
+    \* @type: Str -> Int;
+    max_generation_seen,\* shard -> Nat: highest generation observed so far
+    \* @type: <<Str, Str>> -> [exists: Bool, gen: Int, valid: Bool];
     tokens,             \* (worker, shard) -> record {exists, gen, valid}
+    \* @type: Str -> Str;
     pc                  \* worker -> program counter
 
 (* Constants for program counters *)
@@ -44,20 +54,30 @@ NoToken == [exists |-> FALSE, gen |-> 0, valid |-> FALSE]
 Token(g) == [exists |-> TRUE, gen |-> g, valid |-> TRUE]
 InvalidToken(g) == [exists |-> TRUE, gen |-> g, valid |-> FALSE]
 
-(* Type invariant *)
+(* Type invariant, decomposed so TLAPS can prove preservation clause-by-clause. *)
+WriteLockedTypeOK == write_locked \in [Shards -> BOOLEAN]
+WriteHolderTypeOK == write_holder \in [Shards -> SUBSET Workers]
+WriteHolderUnique == \A s \in Shards: \A w1, w2 \in write_holder[s]: w1 = w2
+WriteGenerationTypeOK == write_generation \in [Shards -> 0..MaxGeneration]
+MaxGenerationSeenTypeOK == max_generation_seen \in [Shards -> 0..MaxGeneration]
+TokensTypeOK == tokens \in [Workers \X Shards -> [exists: BOOLEAN, gen: 0..MaxGeneration, valid: BOOLEAN]]
+PcTypeOK == pc \in [Workers -> {Idle, WantLock, HaveLock, Releasing}]
+
 TypeOK ==
-    /\ write_locked \in [Shards -> BOOLEAN]
-    /\ write_holder \in [Shards -> SUBSET Workers]
-    /\ \A s \in Shards: Cardinality(write_holder[s]) <= 1
-    /\ write_generation \in [Shards -> 0..MaxGeneration]
-    /\ tokens \in [Workers \X Shards -> [exists: BOOLEAN, gen: 0..MaxGeneration, valid: BOOLEAN]]
-    /\ pc \in [Workers -> {Idle, WantLock, HaveLock, Releasing}]
+    /\ WriteLockedTypeOK
+    /\ WriteHolderTypeOK
+    /\ WriteHolderUnique
+    /\ WriteGenerationTypeOK
+    /\ MaxGenerationSeenTypeOK
+    /\ TokensTypeOK
+    /\ PcTypeOK
 
 (* Initial state *)
 Init ==
     /\ write_locked = [s \in Shards |-> FALSE]
     /\ write_holder = [s \in Shards |-> {}]
     /\ write_generation = [s \in Shards |-> 0]
+    /\ max_generation_seen = [s \in Shards |-> 0]
     /\ tokens = [ws \in Workers \X Shards |-> NoToken]
     /\ pc = [w \in Workers |-> Idle]
 
@@ -72,7 +92,7 @@ Init ==
 RequestLock(w) ==
     /\ pc[w] = Idle
     /\ pc' = [pc EXCEPT ![w] = WantLock]
-    /\ UNCHANGED <<write_locked, write_holder, write_generation, tokens>>
+    /\ UNCHANGED <<write_locked, write_holder, write_generation, max_generation_seen, tokens>>
 
 (*
  * Try to acquire write lock on a shard.
@@ -83,22 +103,29 @@ RequestLock(w) ==
  *   2. If success: store worker_id, increment generation, return token
  *   3. If failure: return None (stay in WantLock to retry or give up)
  *)
-TryAcquire(w, s) ==
+TryAcquireSuccess(w, s) ==
     /\ pc[w] = WantLock
-    /\ IF write_locked[s] = FALSE
-       THEN
-           \* CAS succeeds - acquire the lock
-           /\ write_locked' = [write_locked EXCEPT ![s] = TRUE]
-           /\ write_holder' = [write_holder EXCEPT ![s] = {w}]
-           \* Generation incremented: fetch_add(1) returns old value,
-           \* but token gets old_value + 1 (see shard.rs:276)
-           /\ write_generation' = [write_generation EXCEPT ![s] = @ + 1]
-           /\ tokens' = [tokens EXCEPT ![<<w, s>>] = Token(write_generation[s] + 1)]
-           /\ pc' = [pc EXCEPT ![w] = HaveLock]
-       ELSE
-           \* CAS fails - cannot acquire
-           /\ UNCHANGED <<write_locked, write_holder, write_generation, tokens>>
-           /\ pc' = [pc EXCEPT ![w] = Idle]  \* Give up (or could stay in WantLock)
+    /\ write_locked[s] = FALSE
+    /\ write_generation[s] < MaxGeneration
+    \* CAS succeeds - acquire the lock
+    /\ write_locked' = [write_locked EXCEPT ![s] = TRUE]
+    /\ write_holder' = [write_holder EXCEPT ![s] = {w}]
+    \* Checked generation increment; token receives the incremented value.
+    /\ write_generation' = [write_generation EXCEPT ![s] = @ + 1]
+    /\ max_generation_seen' = [max_generation_seen EXCEPT ![s] = @ + 1]
+    /\ tokens' = [tokens EXCEPT ![<<w, s>>] = Token(write_generation[s] + 1)]
+    /\ pc' = [pc EXCEPT ![w] = HaveLock]
+
+TryAcquireFailure(w, s) ==
+    /\ pc[w] = WantLock
+    /\ ~(write_locked[s] = FALSE /\ write_generation[s] < MaxGeneration)
+    \* CAS fails or generation is exhausted - cannot acquire.
+    /\ UNCHANGED <<write_locked, write_holder, write_generation, max_generation_seen, tokens>>
+    /\ pc' = [pc EXCEPT ![w] = Idle]  \* Give up (or could stay in WantLock)
+
+TryAcquire(w, s) ==
+    \/ TryAcquireSuccess(w, s)
+    \/ TryAcquireFailure(w, s)
 
 (*
  * Worker decides to release the lock.
@@ -107,7 +134,7 @@ TryAcquire(w, s) ==
 WantRelease(w) ==
     /\ pc[w] = HaveLock
     /\ pc' = [pc EXCEPT ![w] = Releasing]
-    /\ UNCHANGED <<write_locked, write_holder, write_generation, tokens>>
+    /\ UNCHANGED <<write_locked, write_holder, write_generation, max_generation_seen, tokens>>
 
 (*
  * Release write lock.
@@ -115,24 +142,30 @@ WantRelease(w) ==
  *
  * Checks token validity (generation must match), then releases.
  *)
-Release(w, s) ==
+ReleaseValid(w, s) ==
     /\ pc[w] = Releasing
     /\ tokens[<<w, s>>].exists = TRUE
-    /\ LET token == tokens[<<w, s>>]
-           current_gen == write_generation[s]
-       IN IF token.valid /\ token.gen = current_gen
-          THEN
-              \* Valid token - release the lock
-              /\ write_holder' = [write_holder EXCEPT ![s] = {}]
-              /\ write_locked' = [write_locked EXCEPT ![s] = FALSE]
-              /\ tokens' = [tokens EXCEPT ![<<w, s>>] = NoToken]
-              /\ pc' = [pc EXCEPT ![w] = Idle]
-              /\ UNCHANGED write_generation
-          ELSE
-              \* Invalid token - release fails (token consumed anyway)
-              /\ tokens' = [tokens EXCEPT ![<<w, s>>] = NoToken]
-              /\ pc' = [pc EXCEPT ![w] = Idle]
-              /\ UNCHANGED <<write_locked, write_holder, write_generation>>
+    /\ tokens[<<w, s>>].valid
+    /\ tokens[<<w, s>>].gen = write_generation[s]
+    \* Valid token - release the lock.
+    /\ write_holder' = [write_holder EXCEPT ![s] = {}]
+    /\ write_locked' = [write_locked EXCEPT ![s] = FALSE]
+    /\ tokens' = [tokens EXCEPT ![<<w, s>>] = NoToken]
+    /\ pc' = [pc EXCEPT ![w] = Idle]
+    /\ UNCHANGED <<write_generation, max_generation_seen>>
+
+ReleaseInvalid(w, s) ==
+    /\ pc[w] = Releasing
+    /\ tokens[<<w, s>>].exists = TRUE
+    /\ ~(tokens[<<w, s>>].valid /\ tokens[<<w, s>>].gen = write_generation[s])
+    \* Invalid token - release fails (token consumed anyway).
+    /\ tokens' = [tokens EXCEPT ![<<w, s>>] = NoToken]
+    /\ pc' = [pc EXCEPT ![w] = Idle]
+    /\ UNCHANGED <<write_locked, write_holder, write_generation, max_generation_seen>>
+
+Release(w, s) ==
+    \/ ReleaseValid(w, s)
+    \/ ReleaseInvalid(w, s)
 
 (*
  * Simulate token becoming stale (e.g., another acquire happened elsewhere).
@@ -143,8 +176,8 @@ Release(w, s) ==
 TokenInvalidation(w, s) ==
     /\ tokens[<<w, s>>].exists = TRUE
     /\ tokens[<<w, s>>].gen # write_generation[s]
-    /\ tokens' = [tokens EXCEPT ![<<w, s>>].valid = FALSE]
-    /\ UNCHANGED <<write_locked, write_holder, write_generation, pc>>
+    /\ tokens' = [tokens EXCEPT ![<<w, s>>] = InvalidToken(tokens[<<w, s>>].gen)]
+    /\ UNCHANGED <<write_locked, write_holder, write_generation, max_generation_seen, pc>>
 
 (* ---------------------------------------------------------------------------
  * Next state relation
@@ -158,13 +191,17 @@ Next ==
     \/ \E w \in Workers, s \in Shards: TokenInvalidation(w, s)
 
 (* Fairness: workers eventually make progress *)
-Fairness ==
-    /\ \A w \in Workers: WF_<<write_locked, write_holder, write_generation, tokens, pc>>(RequestLock(w))
-    /\ \A w \in Workers, s \in Shards: WF_<<write_locked, write_holder, write_generation, tokens, pc>>(TryAcquire(w, s))
-    /\ \A w \in Workers: WF_<<write_locked, write_holder, write_generation, tokens, pc>>(WantRelease(w))
-    /\ \A w \in Workers, s \in Shards: WF_<<write_locked, write_holder, write_generation, tokens, pc>>(Release(w, s))
+vars == <<write_locked, write_holder, write_generation, max_generation_seen, tokens, pc>>
 
-Spec == Init /\ [][Next]_<<write_locked, write_holder, write_generation, tokens, pc>> /\ Fairness
+Fairness ==
+    /\ \A w \in Workers: WF_vars(RequestLock(w))
+    /\ \A w \in Workers, s \in Shards: WF_vars(TryAcquire(w, s))
+    /\ \A w \in Workers: WF_vars(WantRelease(w))
+    /\ \A w \in Workers, s \in Shards: WF_vars(Release(w, s))
+
+Spec == Init /\ [][Next]_vars
+
+FairSpec == Spec /\ Fairness
 
 (* State constraint for bounded model checking *)
 StateConstraint ==
@@ -174,6 +211,9 @@ StateConstraint ==
  * Safety Invariants
  * --------------------------------------------------------------------------- *)
 
+ValidTokenHolders(s) ==
+    {w \in Workers: tokens[<<w, s>>].exists /\ tokens[<<w, s>>].valid}
+
 (*
  * CRITICAL INVARIANT: At most one worker holds a valid write token per shard.
  *
@@ -182,16 +222,14 @@ StateConstraint ==
  *)
 AtMostOneWriter ==
     \A s \in Shards:
-        LET valid_holders ==
-            {w \in Workers: tokens[<<w, s>>].exists /\ tokens[<<w, s>>].valid}
-        IN Cardinality(valid_holders) <= 1
+        \A w1, w2 \in ValidTokenHolders(s): w1 = w2
 
 (*
  * If a shard is locked, exactly one worker holds it.
  *)
 LockedImpliesHolder ==
     \A s \in Shards:
-        write_locked[s] = TRUE => Cardinality(write_holder[s]) = 1
+        write_locked[s] = TRUE => \E w \in Workers: write_holder[s] = {w}
 
 (*
  * If a shard is not locked, no one holds it.
@@ -206,7 +244,7 @@ UnlockedImpliesNoHolder ==
  *)
 GenerationMonotonic ==
     \A s \in Shards:
-        write_generation[s] >= 0
+        write_generation[s] = max_generation_seen[s]
 
 (*
  * Valid tokens have generation matching current shard generation.
@@ -232,6 +270,7 @@ Safety ==
     /\ AtMostOneWriter
     /\ LockedImpliesHolder
     /\ UnlockedImpliesNoHolder
+    /\ GenerationMonotonic
     /\ ValidTokenGenerationMatch
     /\ ValidTokenImpliesHolder
 
@@ -255,6 +294,13 @@ EventuallyGranted ==
 NoStarvation ==
     \A w \in Workers:
         pc[w] = WantLock ~> (pc[w] = HaveLock \/ pc[w] = Idle)
+
+(*
+ * A worker that has acquired a lock eventually releases it.
+ *)
+HeldLockEventuallyReleases ==
+    \A w \in Workers:
+        pc[w] = HaveLock ~> pc[w] = Idle
 
 (* ---------------------------------------------------------------------------
  * Spec-to-Code Traceability

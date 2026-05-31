@@ -19,7 +19,9 @@
 EXTENDS Naturals, FiniteSets, Sequences, TLC
 
 CONSTANTS
+    \* @type: Int;
     MaxTasks,         \* Maximum number of tasks to model
+    \* @type: Int;
     MaxTime           \* Maximum simulated time steps
 
 \* Task types
@@ -44,44 +46,63 @@ TestDone == "test_done"
 
 VARIABLES
     \* Cron thread state
+    \* @type: Str;
     cron_state,
 
     \* Whether ready signal has been sent by cron thread
+    \* @type: Bool;
     ready_signal_sent,
 
     \* Whether ready signal has been received by test thread
+    \* @type: Bool;
     ready_signal_received,
 
     \* Termination flag (atomic boolean in implementation)
+    \* @type: Bool;
     terminating,
 
     \* Channel: sequence of tasks waiting to be received
     \* Each task is a record [id: Nat, type: {NORMAL, PANICKING}, due_time: Nat]
+    \* @type: Seq([id: Int, type: Str, due_time: Int]);
     channel,
 
+    \* Whether the sender side of the task channel is still open
+    \* @type: Bool;
+    channel_open,
+
     \* Task queue: set of tasks in the priority queue
+    \* @type: Set([id: Int, type: Str, due_time: Int]);
     task_queue,
 
     \* Current simulated time
+    \* @type: Int;
     current_time,
 
     \* Set of executed task IDs
+    \* @type: Set(Int);
     executed_tasks,
 
     \* Set of panicked task IDs
+    \* @type: Set(Int);
     panicked_tasks,
 
     \* Test thread state
+    \* @type: Str;
     test_state,
 
     \* Tasks the test wants to schedule: sequence of [id, type, due_time]
+    \* @type: Seq([id: Int, type: Str, due_time: Int]);
     tasks_to_schedule,
 
     \* Whether the cron thread has been spawned
+    \* @type: Bool;
     cron_spawned,
 
     \* ID for the next task
+    \* @type: Int;
     next_task_id
+
+TaskUniverse == [id: 1..MaxTasks, type: {NORMAL, PANICKING}, due_time: 0..MaxTime]
 
 (* Type invariant *)
 TypeOK ==
@@ -89,25 +110,32 @@ TypeOK ==
     /\ ready_signal_sent \in BOOLEAN
     /\ ready_signal_received \in BOOLEAN
     /\ terminating \in BOOLEAN
+    /\ channel_open \in BOOLEAN
+    /\ channel \in Seq(TaskUniverse)
+    /\ task_queue \subseteq TaskUniverse
     /\ current_time \in 0..MaxTime
     /\ executed_tasks \subseteq 1..MaxTasks
     /\ panicked_tasks \subseteq 1..MaxTasks
     /\ test_state \in {TestInit, TestWaitingReady, TestScheduling,
                        TestWaitingTasks, TestRequestingShutdown, TestJoining, TestDone}
+    /\ tasks_to_schedule \in Seq(TaskUniverse)
     /\ cron_spawned \in BOOLEAN
     /\ next_task_id \in 1..(MaxTasks + 1)
 
 (* Helper: Get minimum due time from task queue *)
+\* @type: Set([id: Int, type: Str, due_time: Int]) => Int;
 MinDueTime(queue) ==
     IF queue = {} THEN MaxTime + 1
     ELSE LET task == CHOOSE t \in queue: \A t2 \in queue: t.due_time <= t2.due_time
          IN task.due_time
 
 (* Helper: Get earliest due task from queue *)
+\* @type: Set([id: Int, type: Str, due_time: Int]) => [id: Int, type: Str, due_time: Int];
 EarliestTask(queue) ==
     CHOOSE t \in queue: \A t2 \in queue: t.due_time <= t2.due_time
 
 (* Helper: Check if any task is due *)
+\* @type: (Set([id: Int, type: Str, due_time: Int]), Int) => Bool;
 HasDueTask(queue, time) ==
     \E t \in queue: t.due_time <= time
 
@@ -118,6 +146,7 @@ Init ==
     /\ ready_signal_received = FALSE
     /\ terminating = FALSE
     /\ channel = <<>>
+    /\ channel_open = TRUE
     /\ task_queue = {}
     /\ current_time = 0
     /\ executed_tasks = {}
@@ -140,7 +169,7 @@ TestSpawnCron ==
     /\ cron_spawned' = TRUE
     /\ test_state' = TestWaitingReady
     /\ UNCHANGED <<cron_state, ready_signal_sent, ready_signal_received,
-                   terminating, channel, task_queue, current_time,
+                   terminating, channel, channel_open, task_queue, current_time,
                    executed_tasks, panicked_tasks, tasks_to_schedule, next_task_id>>
 
 (*
@@ -155,7 +184,7 @@ TestReceiveReady ==
     /\ tasks_to_schedule' = <<[id |-> 1, type |-> PANICKING, due_time |-> 0],
                                [id |-> 2, type |-> NORMAL, due_time |-> 50]>>
     /\ next_task_id' = 3
-    /\ UNCHANGED <<cron_state, ready_signal_sent, terminating, channel,
+    /\ UNCHANGED <<cron_state, ready_signal_sent, terminating, channel, channel_open,
                    task_queue, current_time, executed_tasks, panicked_tasks, cron_spawned>>
 
 (*
@@ -164,6 +193,7 @@ TestReceiveReady ==
 TestScheduleTask ==
     /\ test_state = TestScheduling
     /\ Len(tasks_to_schedule) > 0
+    /\ channel_open = TRUE
     /\ LET task == Head(tasks_to_schedule)
        IN channel' = Append(channel, task)
     /\ tasks_to_schedule' = Tail(tasks_to_schedule)
@@ -171,7 +201,7 @@ TestScheduleTask ==
        THEN test_state' = TestWaitingTasks
        ELSE test_state' = TestScheduling
     /\ UNCHANGED <<cron_state, ready_signal_sent, ready_signal_received,
-                   terminating, task_queue, current_time, executed_tasks,
+                   terminating, channel_open, task_queue, current_time, executed_tasks,
                    panicked_tasks, cron_spawned, next_task_id>>
 
 (*
@@ -183,7 +213,7 @@ TestCheckTasksDone ==
     /\ 2 \in executed_tasks  \* Normal task (id=2) has executed
     /\ test_state' = TestRequestingShutdown
     /\ UNCHANGED <<cron_state, ready_signal_sent, ready_signal_received,
-                   terminating, channel, task_queue, current_time,
+                   terminating, channel, channel_open, task_queue, current_time,
                    executed_tasks, panicked_tasks, tasks_to_schedule,
                    cron_spawned, next_task_id>>
 
@@ -195,8 +225,21 @@ TestRequestShutdown ==
     /\ terminating' = TRUE
     /\ test_state' = TestJoining
     /\ UNCHANGED <<cron_state, ready_signal_sent, ready_signal_received,
-                   channel, task_queue, current_time, executed_tasks,
+                   channel, channel_open, task_queue, current_time, executed_tasks,
                    panicked_tasks, tasks_to_schedule, cron_spawned, next_task_id>>
+
+(*
+ * Test can also drop the sending handle. This models channel close as a
+ * separate shutdown path from setting the termination flag.
+ *)
+TestDropHandle ==
+    /\ test_state = TestRequestingShutdown
+    /\ channel_open' = FALSE
+    /\ test_state' = TestJoining
+    /\ UNCHANGED <<cron_state, ready_signal_sent, ready_signal_received,
+                   terminating, channel, task_queue, current_time,
+                   executed_tasks, panicked_tasks, tasks_to_schedule,
+                   cron_spawned, next_task_id>>
 
 (*
  * Test joins cron thread (waits for termination).
@@ -206,7 +249,7 @@ TestJoin ==
     /\ cron_state = Terminated
     /\ test_state' = TestDone
     /\ UNCHANGED <<cron_state, ready_signal_sent, ready_signal_received,
-                   terminating, channel, task_queue, current_time,
+                   terminating, channel, channel_open, task_queue, current_time,
                    executed_tasks, panicked_tasks, tasks_to_schedule,
                    cron_spawned, next_task_id>>
 
@@ -217,7 +260,7 @@ Done ==
     /\ test_state = TestDone
     /\ cron_state = Terminated
     /\ UNCHANGED <<cron_state, ready_signal_sent, ready_signal_received, terminating,
-                   channel, task_queue, current_time, executed_tasks, panicked_tasks,
+                   channel, channel_open, task_queue, current_time, executed_tasks, panicked_tasks,
                    test_state, tasks_to_schedule, cron_spawned, next_task_id>>
 
 (* ---------------------------------------------------------------------------
@@ -232,7 +275,7 @@ CronSendReady ==
     /\ cron_spawned = TRUE
     /\ ready_signal_sent = FALSE
     /\ ready_signal_sent' = TRUE
-    /\ UNCHANGED <<cron_state, ready_signal_received, terminating, channel,
+    /\ UNCHANGED <<cron_state, ready_signal_received, terminating, channel, channel_open,
                    task_queue, current_time, executed_tasks, panicked_tasks,
                    test_state, tasks_to_schedule, cron_spawned, next_task_id>>
 
@@ -247,7 +290,7 @@ CronCheckDueTasks ==
     /\ HasDueTask(task_queue, current_time)
     /\ cron_state' = ExecutingTask
     /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
-                   channel, task_queue, current_time, executed_tasks,
+                   channel, channel_open, task_queue, current_time, executed_tasks,
                    panicked_tasks, test_state, tasks_to_schedule,
                    cron_spawned, next_task_id>>
 
@@ -262,7 +305,7 @@ CronCheckTermination ==
     /\ terminating = TRUE
     /\ cron_state' = Terminated
     /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
-                   channel, task_queue, current_time, executed_tasks,
+                   channel, channel_open, task_queue, current_time, executed_tasks,
                    panicked_tasks, test_state, tasks_to_schedule,
                    cron_spawned, next_task_id>>
 
@@ -278,7 +321,25 @@ CronCheckChannel ==
     /\ Len(channel) > 0
     /\ cron_state' = DrainChannel
     /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
-                   channel, task_queue, current_time, executed_tasks,
+                   channel, channel_open, task_queue, current_time, executed_tasks,
+                   panicked_tasks, test_state, tasks_to_schedule,
+                   cron_spawned, next_task_id>>
+
+(*
+ * Cron observes the task channel has closed and no queued work remains.
+ *)
+CronCheckChannelClosed ==
+    /\ cron_spawned = TRUE
+    /\ ready_signal_sent = TRUE
+    /\ cron_state = CheckEvents
+    /\ ~HasDueTask(task_queue, current_time)
+    /\ terminating = FALSE
+    /\ channel_open = FALSE
+    /\ Len(channel) = 0
+    /\ task_queue = {}
+    /\ cron_state' = Terminated
+    /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
+                   channel, channel_open, task_queue, current_time, executed_tasks,
                    panicked_tasks, test_state, tasks_to_schedule,
                    cron_spawned, next_task_id>>
 
@@ -292,9 +353,10 @@ CronNoEvents ==
     /\ ~HasDueTask(task_queue, current_time)
     /\ terminating = FALSE
     /\ Len(channel) = 0
+    /\ (channel_open = TRUE \/ task_queue # {})
     /\ cron_state' = Sleeping
     /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
-                   channel, task_queue, current_time, executed_tasks,
+                   channel, channel_open, task_queue, current_time, executed_tasks,
                    panicked_tasks, test_state, tasks_to_schedule,
                    cron_spawned, next_task_id>>
 
@@ -309,7 +371,7 @@ CronDrainTask ==
        IN task_queue' = task_queue \cup {task}
     /\ channel' = Tail(channel)
     /\ UNCHANGED <<cron_state, ready_signal_sent, ready_signal_received,
-                   terminating, current_time, executed_tasks, panicked_tasks,
+                   terminating, channel_open, current_time, executed_tasks, panicked_tasks,
                    test_state, tasks_to_schedule, cron_spawned, next_task_id>>
 
 (*
@@ -323,7 +385,7 @@ CronFinishDrain ==
        THEN cron_state' = ExecutingTask
        ELSE cron_state' = Sleeping
     /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
-                   channel, task_queue, current_time, executed_tasks,
+                   channel, channel_open, task_queue, current_time, executed_tasks,
                    panicked_tasks, test_state, tasks_to_schedule,
                    cron_spawned, next_task_id>>
 
@@ -345,7 +407,7 @@ CronExecuteTask ==
                 /\ UNCHANGED panicked_tasks
     /\ cron_state' = CheckEvents
     /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
-                   channel, current_time, test_state, tasks_to_schedule,
+                   channel, channel_open, current_time, test_state, tasks_to_schedule,
                    cron_spawned, next_task_id>>
 
 (*
@@ -354,6 +416,7 @@ CronExecuteTask ==
 CronWakeUp ==
     /\ cron_spawned = TRUE
     /\ cron_state = Sleeping
+    /\ (channel_open = TRUE \/ task_queue # {})
     \* Advance time to next event (next due task or small increment)
     /\ LET next_due == MinDueTime(task_queue)
            advance == IF next_due <= MaxTime
@@ -364,7 +427,7 @@ CronWakeUp ==
                           ELSE current_time + advance
     /\ cron_state' = CheckEvents
     /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
-                   channel, task_queue, executed_tasks, panicked_tasks,
+                   channel, channel_open, task_queue, executed_tasks, panicked_tasks,
                    test_state, tasks_to_schedule, cron_spawned, next_task_id>>
 
 (*
@@ -378,7 +441,23 @@ CronTerminateFromSleep ==
     /\ terminating = TRUE
     /\ cron_state' = Terminated
     /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
-                   channel, task_queue, current_time, executed_tasks,
+                   channel, channel_open, task_queue, current_time, executed_tasks,
+                   panicked_tasks, test_state, tasks_to_schedule,
+                   cron_spawned, next_task_id>>
+
+(*
+ * Cron wakes and sees that the channel closed with no remaining queued work.
+ *)
+CronTerminateClosedFromSleep ==
+    /\ cron_spawned = TRUE
+    /\ cron_state = Sleeping
+    /\ terminating = FALSE
+    /\ channel_open = FALSE
+    /\ Len(channel) = 0
+    /\ task_queue = {}
+    /\ cron_state' = Terminated
+    /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
+                   channel, channel_open, task_queue, current_time, executed_tasks,
                    panicked_tasks, test_state, tasks_to_schedule,
                    cron_spawned, next_task_id>>
 
@@ -393,23 +472,26 @@ Next ==
     \/ TestScheduleTask
     \/ TestCheckTasksDone
     \/ TestRequestShutdown
+    \/ TestDropHandle
     \/ TestJoin
     \* Cron thread actions
     \/ CronSendReady
     \/ CronCheckDueTasks
     \/ CronCheckTermination
     \/ CronCheckChannel
+    \/ CronCheckChannelClosed
     \/ CronNoEvents
     \/ CronDrainTask
     \/ CronFinishDrain
     \/ CronExecuteTask
     \/ CronWakeUp
     \/ CronTerminateFromSleep
+    \/ CronTerminateClosedFromSleep
     \* Terminal state (avoids deadlock detection)
     \/ Done
 
 vars == <<cron_state, ready_signal_sent, ready_signal_received, terminating,
-          channel, task_queue, current_time, executed_tasks, panicked_tasks,
+          channel, channel_open, task_queue, current_time, executed_tasks, panicked_tasks,
           test_state, tasks_to_schedule, cron_spawned, next_task_id>>
 
 Spec == Init /\ [][Next]_vars
@@ -424,11 +506,13 @@ CronFairness ==
     /\ WF_vars(CronCheckDueTasks)
     /\ WF_vars(CronCheckTermination)
     /\ WF_vars(CronCheckChannel)
+    /\ WF_vars(CronCheckChannelClosed)
     /\ WF_vars(CronNoEvents)
     /\ WF_vars(CronDrainTask)
     /\ WF_vars(CronFinishDrain)
     /\ WF_vars(CronExecuteTask)
     /\ WF_vars(CronWakeUp)
+    /\ WF_vars(CronTerminateClosedFromSleep)
 
 \* Test thread actions are fair
 TestFairness ==
@@ -437,6 +521,7 @@ TestFairness ==
     /\ WF_vars(TestScheduleTask)
     /\ WF_vars(TestCheckTasksDone)
     /\ WF_vars(TestRequestShutdown)
+    /\ WF_vars(TestDropHandle)
     /\ WF_vars(TestJoin)
 
 FairSpec == Spec /\ CronFairness /\ TestFairness
@@ -465,10 +550,10 @@ TestCompletionRequiresExecution ==
     test_state = TestDone => 2 \in executed_tasks
 
 (*
- * Cron terminates only when termination is requested.
+ * Cron terminates only when termination is requested or the task channel closes.
  *)
 TerminationRequiresRequest ==
-    cron_state = Terminated => terminating = TRUE
+    cron_state = Terminated => (terminating = TRUE \/ channel_open = FALSE)
 
 (*
  * Combined safety invariant.

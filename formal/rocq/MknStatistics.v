@@ -448,10 +448,13 @@ Definition compute_d2_safe (n2 n3_raw y : Q) : Q :=
   2 - 3 * y * (n3 / n2).
 
 (**
- * Safe computation of D3+ with n4 clamped to minimum of 1.
- * Models: let n4 = counts.n4.max(1) as f64  (mkn.rs:204)
+ * Safe computation of D3+ with n3 and n4 clamped to minimum of 1.
+ * Models:
+ *   let n3 = counts.n3.max(1) as f64
+ *   let n4 = counts.n4.max(1) as f64
  *)
-Definition compute_d3_plus_safe (n3 n4_raw y : Q) : Q :=
+Definition compute_d3_plus_safe (n3_raw n4_raw y : Q) : Q :=
+  let n3 := Qmax 1 n3_raw in
   let n4 := Qmax 1 n4_raw in
   3 - 4 * y * (n4 / n3).
 
@@ -484,10 +487,9 @@ Qed.
  * Theorem: Safe D3+ computation is bounded after clamping.
  *)
 Theorem d3_plus_safe_clamped_bounded : forall n3 n4_raw y : Q,
-  0 < n3 ->
   0 <= clamped_d3_plus_safe n3 n4_raw y /\ clamped_d3_plus_safe n3 n4_raw y <= 3.
 Proof.
-  intros n3 n4_raw y Hn3.
+  intros n3 n4_raw y.
   unfold clamped_d3_plus_safe.
   apply clamp_bounds.
   lra.
@@ -531,13 +533,16 @@ Qed.
  * Theorem: When n4_raw >= 1, the safe computation equals the original.
  *)
 Theorem d3_plus_safe_equals_original_when_positive : forall n3 n4 y : Q,
-  0 < n3 -> 1 <= n4 ->
+  1 <= n3 -> 1 <= n4 ->
   compute_d3_plus_safe n3 n4 y == compute_d3_plus n3 n4 y.
 Proof.
   intros n3 n4 y Hn3 Hn4.
   unfold compute_d3_plus_safe, compute_d3_plus.
+  assert (Hmax3: Qmax 1 n3 == n3).
+  { apply Q.max_r. assumption. }
   assert (Hmax: Qmax 1 n4 == n4).
   { apply Q.max_r. assumption. }
+  rewrite Hmax3.
   rewrite Hmax.
   reflexivity.
 Qed.
@@ -594,6 +599,18 @@ Proof.
 Qed.
 
 (**
+ * Lemma: Qle_bool false gives the corresponding strict-side fact.
+ *)
+Lemma Qle_bool_false_not_le : forall x y : Q,
+  Qle_bool x y = false -> ~ x <= y.
+Proof.
+  intros x y H Hle.
+  apply Qle_bool_iff in Hle.
+  rewrite H in Hle.
+  discriminate.
+Qed.
+
+(**
  * Compute MKN discounts from frequency counts (safe version).
  * Returns None when n1 <= 0 or n2 <= 0 (caller should use defaults).
  * Models DiscountParams::from_counts() from mkn.rs:186-219.
@@ -609,14 +626,15 @@ Definition from_counts_safe (n1 n2 n3 n4 : Q) : option MknDiscounts :=
     Some (mk_mkn_discounts d1 d2 d3_plus y).
 
 (**
- * Theorem: from_counts_safe returns valid discounts when n1, n2 > 0 and n3 > 0.
+ * Theorem: from_counts_safe returns valid discounts when n1 and n2 are positive.
+ * n3 and n4 are safely clamped before division.
  *)
 Theorem from_counts_safe_valid : forall n1 n2 n3 n4 d,
-  0 < n1 -> 0 < n2 -> 0 < n3 ->
+  0 < n1 -> 0 < n2 ->
   from_counts_safe n1 n2 n3 n4 = Some d ->
   valid_mkn_discounts d.
 Proof.
-  intros n1 n2 n3 n4 d Hn1 Hn2 Hn3 Heq.
+  intros n1 n2 n3 n4 d Hn1 Hn2 Heq.
   unfold from_counts_safe in Heq.
   (* n1 > 0 means Qle_bool n1 0 = false *)
   assert (Hn1_bool: Qle_bool n1 0 = false).
@@ -648,6 +666,41 @@ Proof.
   - apply y_bounded; assumption.
   (* y upper bound *)
   - apply y_bounded; assumption.
+Qed.
+
+(**
+ * Rust-facing total function: DiscountParams::from_counts returns defaults
+ * rather than None when n1=0 or n2=0.
+ *)
+Definition from_counts_rust (n1 n2 n3 n4 : Q) : MknDiscounts :=
+  match from_counts_safe n1 n2 n3 n4 with
+  | Some d => d
+  | None => default_mkn_discounts
+  end.
+
+(**
+ * Theorem: from_counts_rust always returns valid discounts for non-negative
+ * frequency counts.
+ *)
+Theorem from_counts_rust_valid : forall n1 n2 n3 n4 : Q,
+  0 <= n1 -> 0 <= n2 ->
+  valid_mkn_discounts (from_counts_rust n1 n2 n3 n4).
+Proof.
+  intros n1 n2 n3 n4 Hn1_nonneg Hn2_nonneg.
+  unfold from_counts_rust.
+  destruct (from_counts_safe n1 n2 n3 n4) eqn:Hsafe.
+  - apply from_counts_safe_valid with (n1 := n1) (n2 := n2) (n3 := n3) (n4 := n4).
+    + unfold from_counts_safe in Hsafe.
+      destruct (Qle_bool n1 0) eqn:Hn1_bool; [discriminate|].
+      apply Qle_bool_false_not_le in Hn1_bool.
+      lra.
+    + unfold from_counts_safe in Hsafe.
+      destruct (Qle_bool n1 0) eqn:Hn1_bool; [discriminate|].
+      destruct (Qle_bool n2 0) eqn:Hn2_bool; [discriminate|].
+      apply Qle_bool_false_not_le in Hn2_bool.
+      lra.
+    + exact Hsafe.
+  - apply default_mkn_discounts_valid.
 Qed.
 
 (**

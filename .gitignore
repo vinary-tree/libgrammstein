@@ -89,10 +89,13 @@ formal/rocq/*.vok
 formal/rocq/*.glob
 formal/rocq/.*.aux
 formal/rocq/.lia.cache
+formal/rocq/.nra.cache
+.nra.cache
 formal/rocq/CoqMakefile
 formal/rocq/CoqMakefile.conf
 formal/rocq/.CoqMakefile.d
 
 # TLA+ model checker state files
 formal/tla/states/
+formal/tla/.tlacache/
 .aider*

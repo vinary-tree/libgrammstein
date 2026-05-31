@@ -52,6 +52,13 @@ Definition default_freq_counts : FrequencyCounts :=
   mk_freq_counts 0 0 0 0 0 0.
 
 (**
+ * Maximum value of Rust's u64. The executable code stores FrequencyCounts
+ * fields in u64, so the algebraic nat model applies directly only while
+ * these bounds are respected.
+ *)
+Definition u64_max : nat := 18446744073709551615.
+
+(**
  * Merge two FrequencyCounts by field-wise addition.
  * Corresponds to mkn.rs:98-107 (merge method).
  *
@@ -76,6 +83,30 @@ Definition freq_counts_eq (a b : FrequencyCounts) : Prop :=
   n4 a = n4 b /\
   total_unique a = total_unique b /\
   total_count a = total_count b.
+
+(**
+ * All fields fit in Rust's u64 representation.
+ *)
+Definition freq_counts_within_u64 (fc : FrequencyCounts) : Prop :=
+  n1 fc <= u64_max /\
+  n2 fc <= u64_max /\
+  n3 fc <= u64_max /\
+  n4 fc <= u64_max /\
+  total_unique fc <= u64_max /\
+  total_count fc <= u64_max.
+
+(**
+ * Field-wise merge precondition for u64 implementations: every addition must
+ * fit in u64. Under this precondition, Rust u64 addition agrees with the nat
+ * addition modeled by merge.
+ *)
+Definition merge_no_overflow (a b : FrequencyCounts) : Prop :=
+  n1 a + n1 b <= u64_max /\
+  n2 a + n2 b <= u64_max /\
+  n3 a + n3 b <= u64_max /\
+  n4 a + n4 b <= u64_max /\
+  total_unique a + total_unique b <= u64_max /\
+  total_count a + total_count b <= u64_max.
 
 (**
  * Decidable equality for FrequencyCounts.
@@ -207,6 +238,21 @@ Proof.
 Qed.
 
 (**
+ * Theorem: Merging preserves u64 representability when every field-wise sum
+ * fits in u64.
+ *)
+Theorem merge_preserves_u64_bounds : forall a b : FrequencyCounts,
+  merge_no_overflow a b ->
+  freq_counts_within_u64 (merge a b).
+Proof.
+  intros a b Hno.
+  unfold merge_no_overflow in Hno.
+  unfold freq_counts_within_u64, merge.
+  simpl.
+  assumption.
+Qed.
+
+(**
  * Theorem: Merged total_unique equals sum of inputs.
  *
  * This is important for verifying that no entries are lost during merging.
@@ -311,22 +357,50 @@ Definition observe (fc : FrequencyCounts) (count : nat) : FrequencyCounts :=
   end.
 
 (**
- * Theorem: Observing preserves validity when count is in [1,4].
+ * Theorem: Observing preserves validity for every count. Counts outside
+ * [1,4] increase total_unique but do not affect n1..n4, matching Rust's
+ * AtomicFrequencyCounts::observe behavior.
  *)
 Theorem observe_preserves_validity : forall fc count,
   freq_counts_valid fc ->
-  1 <= count <= 4 ->
   freq_counts_valid (observe fc count).
 Proof.
-  intros fc count Hvalid [Hlo Hhi].
+  intros fc count Hvalid.
   unfold freq_counts_valid, observe in *.
-  destruct count as [|[|[|[|[|n]]]]]; simpl.
-  - (* count = 0 - contradicts 1 <= count *) lia.
-  - (* count = 1 *) lia.
-  - (* count = 2 *) lia.
-  - (* count = 3 *) lia.
-  - (* count = 4 *) lia.
-  - (* count = 5+ - contradicts count <= 4 *) lia.
+  destruct count as [|[|[|[|[|n]]]]]; simpl; lia.
+Qed.
+
+(**
+ * Field-wise observe precondition for u64 implementations. Only the bucket
+ * matching count 1..4 is incremented, while total_unique and total_count are
+ * always updated.
+ *)
+Definition observe_no_overflow (fc : FrequencyCounts) (count : nat) : Prop :=
+  total_unique fc + 1 <= u64_max /\
+  total_count fc + count <= u64_max /\
+  match count with
+  | 1 => n1 fc + 1 <= u64_max
+  | 2 => n2 fc + 1 <= u64_max
+  | 3 => n3 fc + 1 <= u64_max
+  | 4 => n4 fc + 1 <= u64_max
+  | _ => True
+  end.
+
+(**
+ * Theorem: observe preserves u64 representability when the updated fields fit.
+ *)
+Theorem observe_preserves_u64_bounds : forall fc count,
+  freq_counts_within_u64 fc ->
+  observe_no_overflow fc count ->
+  freq_counts_within_u64 (observe fc count).
+Proof.
+  intros fc count Hbounds Hno.
+  unfold freq_counts_within_u64 in *.
+  unfold observe_no_overflow in Hno.
+  unfold observe.
+  destruct Hbounds as [Hn1 [Hn2 [Hn3 [Hn4 [Hunique Htotal]]]]].
+  destruct Hno as [Hunique' [Htotal' Hbucket]].
+  destruct count as [|[|[|[|[|n]]]]]; simpl; repeat split; try lia.
 Qed.
 
 (**
