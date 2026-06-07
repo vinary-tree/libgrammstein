@@ -200,10 +200,10 @@ impl ShardCoordinator {
             let key = entry.key().clone();
             let shard = entry.value();
 
-            // Use blocking write() to ensure all shards are checkpointed.
-            // This prevents the bug where locked shards are silently skipped,
-            // causing WAL replay to double n-gram counts on resume.
-            let mut guard = shard.write();
+            // Blocking `shard.read()`: coexists with lock-free writers but waits for
+            // any exclusive writer, so no shard is silently skipped (which would
+            // double-count on WAL replay at resume).
+            let guard = shard.read();
 
             // Update shard checkpoint
             if let Err(e) = guard.checkpoint() {

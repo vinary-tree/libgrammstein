@@ -950,7 +950,7 @@ impl ShardHandle {
     /// WAL `sync()` would not capture them. The former
     /// `merge_lockfree_values_to_persistent()` pre-step is obsolete (it rejects under
     /// the overlay) and has been removed.
-    pub fn sync(&mut self) -> ShardResult<()> {
+    pub fn sync(&self) -> ShardResult<()> {
         self.trie.checkpoint().map_err(|e| ShardError::Checkpoint {
             shard_key: self.key.to_string(),
             message: format!("sync failed: {}", e),
@@ -968,7 +968,7 @@ impl ShardHandle {
     ///
     /// Returns `Ok(true)` if sync was performed, `Ok(false)` if no sync needed
     /// (shard was clean or already syncing).
-    pub fn sync_tracked(&mut self) -> ShardResult<bool> {
+    pub fn sync_tracked(&self) -> ShardResult<bool> {
         // Try to start sync (CAS: Dirty -> Syncing)
         if !self.sync_coordinator.try_start_sync() {
             // Either clean (no sync needed) or already syncing
@@ -1111,7 +1111,7 @@ impl ShardHandle {
     /// lets the overlay reclaim memory. The obsolete `merge_lockfree_values_to_persistent`
     /// pre-step (which rejects under the overlay) has been removed; point lookups and
     /// iteration already read the overlay directly, so no pre-iteration flush is needed.
-    pub fn flush_lockfree(&mut self) -> ShardResult<()> {
+    pub fn flush_lockfree(&self) -> ShardResult<()> {
         self.trie.checkpoint().map_err(|e| ShardError::Checkpoint {
             shard_key: self.key.to_string(),
             message: format!("flush_lockfree failed: {}", e),
@@ -1123,7 +1123,7 @@ impl ShardHandle {
     /// Checkpoint the shard (persist to disk and truncate WAL).
     ///
     /// Uses sequential flush for optimized disk I/O (5-15% faster checkpoints).
-    pub fn checkpoint(&mut self) -> ShardResult<()> {
+    pub fn checkpoint(&self) -> ShardResult<()> {
         // Save checkpoint state to trie
         self.save_checkpoint_state()?;
 
@@ -1208,7 +1208,7 @@ impl ShardHandle {
     }
 
     /// Save checkpoint state to the trie.
-    fn save_checkpoint_state(&mut self) -> ShardResult<()> {
+    fn save_checkpoint_state(&self) -> ShardResult<()> {
         // Save n-grams processed count
         let ngrams_key = format!("{}ngrams_processed", Self::CHECKPOINT_PREFIX);
         self.trie
@@ -1252,7 +1252,7 @@ impl ShardHandle {
     ///
     /// Call this after marking a prefix as complete to ensure the state
     /// survives crashes. This writes to the WAL but doesn't truncate it.
-    pub fn persist_checkpoint_state(&mut self) -> ShardResult<()> {
+    pub fn persist_checkpoint_state(&self) -> ShardResult<()> {
         self.save_checkpoint_state()?;
         self.trie.sync().map_err(|e| ShardError::Checkpoint {
             shard_key: self.key.to_string(),
@@ -1908,7 +1908,7 @@ mod tests {
     fn test_lockfree_entry_count_resets_on_sync() {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("test_shard.artrie");
-        let mut shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
+        let shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
 
         shard.increment_lockfree(b"the|quick", 1).unwrap();
         shard.increment_lockfree(b"the|brown", 1).unwrap();
@@ -1926,7 +1926,7 @@ mod tests {
     fn test_lockfree_entry_count_resets_on_flush_lockfree() {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("test_shard.artrie");
-        let mut shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
+        let shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
 
         shard.increment_lockfree(b"the|quick", 1).unwrap();
         shard.increment_lockfree(b"the|brown", 1).unwrap();
@@ -1945,7 +1945,7 @@ mod tests {
     fn test_lockfree_entry_count_resets_on_checkpoint() {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("test_shard.artrie");
-        let mut shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
+        let shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
 
         shard.increment_lockfree(b"the|quick", 1).unwrap();
         assert_eq!(shard.lockfree_entry_count(), 1);

@@ -15,44 +15,21 @@ use super::super::shard::ShardSyncState;
 use super::{CheckpointHandle, CoordinatorError, CoordinatorResult, ShardCoordinator, ShardKey};
 
 impl ShardCoordinator {
-    /// Checkpoint all open shards.
-    /// Merge lock-free overlays into persistent tries for all open shards.
+    /// Checkpoint shards whose lock-free overlay exceeds the entry threshold.
     ///
-    /// Call this before operations that iterate shard data (merge, query, MKN)
-    /// to ensure they see values written via the lock-free path.
-    pub fn flush_all_lockfree(&self) -> CoordinatorResult<()> {
-        let mut errors = Vec::new();
-
-        for entry in self.shards.iter() {
-            let key = entry.key().clone();
-            let shard = entry.value();
-            let mut guard = shard.write();
-            if let Err(e) = guard.flush_lockfree() {
-                errors.push(format!("Shard {}: {}", key, e));
-            }
-        }
-
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(CoordinatorError::Checkpoint(errors.join("; ")))
-        }
-    }
-
-    /// Flush lock-free overlays for shards exceeding the entry threshold.
-    ///
-    /// Only acquires write locks on shards that actually need flushing,
-    /// allowing workers to continue on other shards. This bounds per-shard
-    /// lock-free memory usage during high-parallelism imports without
-    /// requiring a full checkpoint.
+    /// Bounds per-shard overlay memory during high-parallelism imports: a shard over
+    /// `threshold` is checkpointed (serializing its overlay snapshot to the on-disk
+    /// image, which also reclaims overlay memory). Under the overlay-default write
+    /// mode `flush_lockfree()` IS a `checkpoint()`, and it runs under a shared
+    /// `shard.read()` guard so it does not stall the lock-free `increment_cas` writers.
     ///
     /// # Arguments
     ///
-    /// * `threshold` - Maximum lock-free entries per shard before flushing.
+    /// * `threshold` - Maximum lock-free entries per shard before checkpointing.
     ///
     /// # Returns
     ///
-    /// The number of shards that were flushed.
+    /// The number of shards that were checkpointed.
     pub fn flush_lockfree_over_threshold(&self, threshold: u64) -> CoordinatorResult<usize> {
         let mut flushed = 0;
         let mut errors = Vec::new();
@@ -65,8 +42,9 @@ impl ShardCoordinator {
             let needs_flush = shard.read().lockfree_entry_count() > threshold;
 
             if needs_flush {
-                // Only acquire write lock for shards over threshold
-                let mut guard = shard.write();
+                // `flush_lockfree()` is `&self` (overlay checkpoint), so a shared read
+                // guard suffices — workers keep writing during the checkpoint.
+                let guard = shard.read();
                 if let Err(e) = guard.flush_lockfree() {
                     errors.push(format!("Shard {}: {}", key, e));
                 } else {
@@ -93,17 +71,14 @@ impl ShardCoordinator {
             .sum()
     }
 
-    /// Checkpoint all open shards (persist + truncate WAL).
+    /// Checkpoint all open shards (persist the overlay snapshot + retain WAL).
     ///
-    /// Mirrors `sync_all`'s blocking-write discipline: uses `shard.write()`
-    /// (not `try_write`) so that locked shards are awaited rather than
-    /// silently skipped. The prior `try_write`-and-skip variant could mark
-    /// a checkpoint as complete while leaving some shards' data still in
-    /// their WALs — on resume, the WAL would replay, double-counting any
-    /// uncheckpointed n-grams. This is the same class of bug as the
-    /// documented checkpoint-resume issue
-    /// (`docs/debugging/checkpoint-resume-bug.md`); fixing the asymmetry
-    /// closes that gap for the checkpoint path as well.
+    /// Uses a blocking `shard.read()`: it coexists with concurrent lock-free
+    /// `increment_cas` writers (the overlay snapshot is an immutable RCU point-in-time,
+    /// so checkpointing no longer stalls writers) yet still waits for any exclusive
+    /// writer rather than skipping a shard — a skipped shard would leave uncheckpointed
+    /// data only in its WAL and double-count on resume (the checkpoint-resume bug class,
+    /// `docs/debugging/checkpoint-resume-bug.md`).
     pub fn checkpoint_all(&self) -> CoordinatorResult<()> {
         let mut errors = Vec::new();
 
@@ -111,7 +86,7 @@ impl ShardCoordinator {
             let key = entry.key().clone();
             let shard = entry.value();
 
-            let mut guard = shard.write();
+            let guard = shard.read();
             if let Err(e) = guard.checkpoint() {
                 errors.push(format!("Shard {}: {}", key, e));
             }
@@ -124,7 +99,7 @@ impl ShardCoordinator {
         }
     }
 
-    /// Sync all open shards (flush WAL).
+    /// Sync all open shards (persist the overlay snapshot).
     pub fn sync_all(&self) -> CoordinatorResult<()> {
         let mut errors = Vec::new();
 
@@ -132,10 +107,10 @@ impl ShardCoordinator {
             let key = entry.key().clone();
             let shard = entry.value();
 
-            // Use blocking write() to ensure all shards are synced.
-            // This prevents the bug where locked shards are silently skipped,
-            // causing WAL replay to double n-gram counts on resume.
-            let mut guard = shard.write();
+            // Blocking `shard.read()`: coexists with lock-free writers but still waits
+            // for any exclusive writer, so no shard is silently skipped (which would
+            // double-count on WAL replay at resume).
+            let guard = shard.read();
             if let Err(e) = guard.sync() {
                 errors.push(format!("Shard {}: {}", key, e));
             }
@@ -249,8 +224,9 @@ impl ShardCoordinator {
                         }
                     }
 
-                    // Perform the actual sync with write lock
-                    let mut guard = shard.write();
+                    // Perform the actual sync (overlay snapshot; `sync()` is `&self`,
+                    // so a shared read guard suffices and workers keep writing).
+                    let guard = shard.read();
                     match guard.sync() {
                         Ok(()) => {
                             // Success: mark clean
@@ -481,10 +457,12 @@ impl ShardCoordinator {
                         };
 
                         let result = result.unwrap_or_else(|| {
-                            // Shard is dirty - need to checkpoint (requires write lock)
-                            let mut guard = shard.write();
+                            // Shard is dirty - checkpoint it. `checkpoint()` is `&self`
+                            // (overlay snapshot), so a shared read guard suffices and
+                            // workers keep writing during the checkpoint.
+                            let guard = shard.read();
 
-                            // Checkpoint (truncate WAL) - fast since data already synced
+                            // Checkpoint (retain WAL) - fast since data already synced
                             if let Err(e) = guard.checkpoint() {
                                 return Err(format!("Shard {}: {}", key, e));
                             }
@@ -603,10 +581,11 @@ impl ShardCoordinator {
             let key = entry.key().clone();
             let shard = entry.value();
 
-            // Acquire write lock for checkpoint (truncates WAL)
-            let mut guard = shard.write();
+            // `checkpoint()` is `&self` (overlay snapshot), so a shared read guard
+            // suffices and workers keep writing during the checkpoint.
+            let guard = shard.read();
 
-            // Checkpoint (truncate WAL) - this is fast since data is already synced
+            // Checkpoint (retain WAL) - this is fast since data is already synced
             if let Err(e) = guard.checkpoint() {
                 errors.push(format!("Shard {}: {}", key, e));
                 continue;

@@ -713,10 +713,10 @@ impl ShardCoordinator {
                     // Remove from active shards (flushes to disk via Drop)
                     if let Some((_, shard)) = self.shards.remove(&key) {
                         // CRITICAL: Block on checkpoint to ensure data is persisted before eviction.
-                        // Using try_write() could skip checkpoint if shard is busy, leading to data loss.
-                        // Blocking here is safe because we've already removed from the map,
-                        // so no new operations will start on this shard.
-                        let mut guard = shard.write();
+                        // `checkpoint()` is `&self` (overlay snapshot), so a shared read guard
+                        // suffices; it still waits for any in-flight exclusive writer. Safe because
+                        // we've already removed from the map, so no new operations will start.
+                        let guard = shard.read();
                         if let Err(e) = guard.checkpoint() {
                             log::error!(
                                 "Failed to checkpoint shard {} during eviction: {}",
