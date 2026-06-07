@@ -7,6 +7,12 @@ recovery. liblevenshtein adapter and query contracts are recorded in
 
 Dependency repository: `../libdictenstein`
 Verified revision recorded during planning: `02ec4d010109641247c1962465921d2560572f67`
+Re-pin pending: libdictenstein has since landed the lock-free overlay refactor
+(overlay-default writes, lock collapse `Arc<RwLock<T>>` → `Arc<T>`, overlay
+compaction, overlay-backed `DictionaryNode`). The verified-revision pin above and
+the `verify-formal-correspondence.sh` re-run below are the final reconciliation
+step; they will be refreshed to the post-refactor libdictenstein HEAD once its
+working tree is clean (it is mid-edit at the time of writing).
 Dependency tree status at latest verification: dirty with reviewed unsafe-ledger
 updates in `formal-verification/UNSAFE_INVENTORY.tsv` and
 `formal-verification/UNSAFE_CONTRACTS.tsv`
@@ -42,6 +48,8 @@ Miri and TLC sub-gates were not enabled in that default run.
 | `formal-verification/tla+/ConcurrentCheckpointPublication.tla` | Checkpoint publication does not lose visible mutations and does not truncate WAL records needed for recovery. |
 | `formal-verification/tla+/PersistentEndToEndTrace.tla` | Mutation, checkpoint publication, compaction rewrite, crash/reopen replay, and vocabulary bijection preservation compose into a recoverable trace. |
 | `formal-verification/tla+/PersistentTransactionIncrementRecovery.tla` | Increment aggregation and replay fail before publishing overflowed records; recovery stops at invalid arithmetic prefixes. |
+| `formal-verification/tla+/LockFreeCounterMergeAtomicity.tla` | Lock-free checked counter increments and the atomic overlay→persistent merge reject overflow without mutating the overlay, persistent map, or WAL; the u64 overlay counter and i64 WAL delta stay consistent. |
+| `formal-verification/tla+/LockFreeDurableCheckpoint.tla` | A lock-free checkpoint that captures the committed watermark loses no write: every visible term is either within the snapshot (≤ watermark) or retained in the WAL and replayed (> watermark), even though writers commit out of LSN order with no lock excluding the checkpoint. |
 | `formal-verification/rocq/Spec/PersistentWalAtomicitySpec.v` | Persistent mutation writes WAL records before making trie mutations visible, and committed transactions are atomic at the dependency boundary. |
 | `formal-verification/rocq/Spec/PersistentVocabWalAtomicitySpec.v` | Vocabulary insert and batch insert write WAL records before visible mutation and preserve stable index mappings. |
 | `formal-verification/rocq/Spec/PersistentVocabCheckpointSpec.v` | Vocabulary checkpoint/reopen preserves the term-index bijection, publishes sidecars consistently, and resumes WAL LSN allocation after the checkpoint. |
@@ -81,3 +89,28 @@ dependency contracts:
 The bridge intentionally stays at the importer/checkpoint composition layer.
 The WAL syscall, checkpoint publication, vocabulary, and replay internals remain
 owned by libdictenstein's formal verification suite.
+
+## Async Shard Sync Coordinator Delegation
+
+`formal/tla/AsyncShardSync.tla` models the `ShardSyncCoordinator` state machine
+(`src/sources/google_books/sharding/shard.rs`) under the lock-free overlay write
+path. After the overlay migration, worker writes (`increment_cas` + `mark_dirty`)
+proceed concurrently with an in-flight checkpoint sync; `mark_dirty` only
+transitions Clean → Dirty, so a write that lands while a shard is `Syncing`
+leaves the coordinator state unchanged and `complete_sync` returns the shard to
+`Clean`. AsyncShardSync deliberately does NOT model whether that during-sync
+overlay write is captured by the checkpoint's snapshot — that durability question
+is discharged by the two imported lock-free contracts above:
+
+- `LockFreeCounterMergeAtomicity.tla` covers the `increment_cas` counter write
+  abstracted by `WorkerProcessJob`: it is atomic and overflow-checked.
+- `LockFreeDurableCheckpoint.tla` covers the during-sync window: a write committed
+  after the captured watermark is retained in the WAL and replayed on reopen, so
+  marking the shard `Clean` after `complete_sync` cannot silently drop it.
+
+Thus AsyncShardSync's `AtMostOneSyncer` / `CheckpointAtomicity` (coordinator-level
+safety, machine-checked in `AsyncShardSyncProofs.tla`) compose with the two
+lock-free durability contracts to cover the full "writes during sync are safe and
+never lost" argument. This replaces the retired `ShardWriteToken.tla`
+defer-and-exclude model, whose write-token mechanism no longer exists in
+production.

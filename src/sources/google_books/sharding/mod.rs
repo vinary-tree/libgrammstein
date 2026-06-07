@@ -15,7 +15,7 @@
 //!     ┌───────┼───────┐───────┐
 //!     │       │       │       │
 //! ┌───┴───┐ ┌─┴─┐   ┌─┴─┐   ┌─┴─┐
-//! │Shard a│ │...│   │th │   │zz │  ← Each shard has exclusive writer
+//! │Shard a│ │...│   │th │   │zz │  ← Each shard written lock-free
 //! └───────┘ └───┘   └───┘   └───┘
 //! ```
 //!
@@ -33,7 +33,7 @@
 //!
 //! ```ignore
 //! use libgrammstein::sources::google_books::sharding::{
-//!     ShardCoordinator, ShardConfig, ShardGranularity,
+//!     MergeCoordinator, ShardConfig, ShardCoordinator, ShardGranularity,
 //! };
 //!
 //! // Create coordinator with adaptive sharding
@@ -41,15 +41,14 @@
 //!     .with_granularity(ShardGranularity::Adaptive)
 //!     .with_max_writers(8);
 //!
-//! let mut coordinator = ShardCoordinator::create(config)?;
+//! let coordinator = ShardCoordinator::create(config)?;
 //!
-//! // Workers can write to different shards in parallel
-//! let token = coordinator.acquire_writer("th", 0).await?;
-//! coordinator.store_ngram("the|quick|brown", 100, &token)?;
-//! coordinator.release_writer(token);
+//! // Workers write to different shards in parallel — the lock-free overlay
+//! // lets concurrent `store_ngram` calls proceed with no writer token or lock.
+//! coordinator.store_ngram("the|quick|brown", 100)?;
 //!
-//! // After import, merge shards into PathMap
-//! coordinator.merge_to_pathmap("/tmp/final.pathmap").await?;
+//! // After import, merge all shards into a single in-memory n-gram map.
+//! let merged = MergeCoordinator::new(&coordinator).merge_to_memory()?;
 //! ```
 //!
 //! # Checkpoint & Recovery
@@ -63,7 +62,7 @@
 //!
 //! 1. **Pairwise merge**: Merge adjacent shards in parallel
 //! 2. **Reduce**: Continue until single shard remains
-//! 3. **Export**: Convert to PathMap for production use
+//! 3. **Export**: Materialize as a byte-keyed trie (`merge_to_trie`) or in-memory map (`merge_to_memory`)
 
 pub mod checkpoint;
 pub mod config;
@@ -98,5 +97,4 @@ pub use routing::{
 };
 pub use shard::{
     PrefixTransaction, ShardError, ShardHandle, ShardResult, ShardStats, ShardSyncHandle,
-    WriteToken,
 };

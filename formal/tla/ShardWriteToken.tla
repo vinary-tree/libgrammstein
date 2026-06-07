@@ -1,5 +1,17 @@
 --------------------------- MODULE ShardWriteToken ---------------------------
 (*
+ * DEPRECATED / RETIRED (lock-free overlay migration).
+ *
+ * The production WriteToken mechanism this module specifies was removed from
+ * src/sources/google_books/sharding/shard.rs: shards are now written through the
+ * lock-free overlay (increment_cas), with NO exclusive per-shard token. This
+ * spec is retained for historical reference (per the no-deletion policy) but is
+ * no longer part of the formal gate (formal/Makefile) and no longer has a
+ * production counterpart. Its lock-free successor is formal/tla/AsyncShardSync.tla,
+ * whose AtMostOneSyncer invariant subsumes the single-writer guarantee below.
+ *
+ * ---------------------------------------------------------------------------
+ *
  * Formal verification of the WriteToken mechanism for exclusive shard access.
  *
  * This specification models the concurrency protocol from:

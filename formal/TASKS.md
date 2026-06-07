@@ -321,7 +321,17 @@ state explosion.
 
 ## Full Capped Formal Gate Evidence
 
-Status: passing
+Status: SUPERSEDED (pre-refactor run) — coupled re-run pending libdictenstein
+stabilization. See "Phase C re-verification" below.
+
+> ⚠ The lock-free overlay migration (Phase C) invalidated parts of this
+> pre-refactor evidence: `ShardWriteToken` was retired from the gate, and
+> `AsyncShardSync` was reworked to the lock-free model. The TLA-only portion for
+> the reworked spec was re-verified this session (see "Phase C re-verification"
+> below); the full coupled gate (`make complete-with-dependencies`, which runs
+> the dependency-contract refresh and the cargo correspondence/loom suites) must
+> be regenerated against the post-refactor libdictenstein once its working tree
+> is clean.
 
 Latest coupled command:
 
@@ -335,12 +345,10 @@ for Apalache, and a 120 second TLAPS timeout.
 
 Notable bounded stress results from the passing run:
 
-- Shard write-token stress: 971,177 generated states, 154,697 distinct states,
-  depth 149.
 - Checkpoint stress: 514,808 generated states, 69,151 distinct states, depth
   20.
-- Async shard sync stress: 234,087 generated states, 88,635 distinct states,
-  depth 27.
+- Async shard sync stress (pre-refactor; superseded by the Phase C re-run
+  below): 234,087 generated states, 88,635 distinct states, depth 27.
 - Cron stress: 6,292 generated states, 3,879 distinct states, depth 257.
 - Worker shutdown stress: 273,749 generated states, 67,032 distinct states,
   depth 30, temporal properties checked.
@@ -349,9 +357,12 @@ Notable bounded stress results from the passing run:
 - Query semantics bridge stress: 31 generated states, 6 distinct states, depth
   3.
 
-The passing TLAPS portion proved the local proof modules, including 214 shard,
-193 checkpoint, 305 async, 231 cron, 103 worker-shutdown, 157 importer
-lifecycle, 125 persistent-storage bridge, and 28 query bridge obligations.
+The passing TLAPS portion (pre-refactor) proved the local proof modules,
+including 193 checkpoint, 231 cron, 103 worker-shutdown, 157 importer lifecycle,
+125 persistent-storage bridge, and 28 query bridge obligations. The retired
+`ShardWriteTokenProofs` (214 obligations) is no longer in the gate; the reworked
+`AsyncShardSyncProofs` is now 249 obligations (was 305), re-verified this session
+(see below).
 
 The coupled gate also ran the dependency-contract refresh first:
 `../libdictenstein/scripts/verify-formal-correspondence.sh` and
@@ -371,6 +382,32 @@ with imported libdictenstein TLC checks, optional io_uring correspondence tests,
 and Miri unsafe-boundary checks. The imported TLC run stays capped at one worker,
 `-Xmx768m`, and 120 seconds per dependency model to avoid unconstrained state
 exploration on developer machines.
+
+### Phase C re-verification (lock-free overlay migration; TLA-only, this session)
+
+The lock-free `AsyncShardSync` rework and the `ShardWriteToken` retirement were
+re-verified with the libdictenstein-independent TLA tools (TLC, Apalache, TLAPS).
+These runs do not require a compiling libdictenstein and were reproduced with the
+Makefile defaults (one TLC worker, `-Xmx768m`, `-Xmx1536m` for Apalache):
+
+- `AsyncShardSync.cfg` TLC safety: 1,375,508 generated, 358,932 distinct, depth
+  31, no invariant violation (TypeOK, AtMostOneSyncer, CheckpointAtomicity,
+  SyncerConsistency, CleanMeansZeroDirty, WorkerStateJobConsistency, JobPartition).
+- `AsyncShardSync_Liveness.cfg` TLC liveness: 574 generated, 249 distinct, depth
+  18 — `CheckpointEventuallyCompletes` and `AllJobsEventuallyComplete` hold.
+- `AsyncShardSync_Stress.cfg` TLC stress: 205,152 generated, 77,799 distinct,
+  depth 27, no violation.
+- `AsyncShardSync.tla` Apalache typecheck: OK ("types are purrfect").
+- `AsyncShardSyncProofs.tla` TLAPS: all 249 obligations proved.
+- Full TLA gate (`make -C formal tla-safety tla-liveness apalache`): all 9 safety
+  + 5 liveness TLC runs and 7 Apalache typechecks pass with `ShardWriteToken`
+  removed — no collateral regression in the eight retained specs.
+
+Pending (blocked on libdictenstein going clean): the coupled
+`make complete-with-dependencies` re-run — dependency-contract refresh, the cargo
+`--lib --all-features` suite, the loom alignment tests, and the full stress +
+TLAPS sweep — plus the libdictenstein verified-revision re-pin in
+`dependencies/libdictenstein-contracts.md`.
 
 ## Source Alignment And Warning Hygiene
 

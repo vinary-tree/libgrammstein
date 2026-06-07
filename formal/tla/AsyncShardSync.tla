@@ -1,17 +1,32 @@
 --------------------------- MODULE AsyncShardSync ---------------------------
 (*
- * Formal verification of the Async Per-Shard WAL Flushing protocol.
+ * Formal verification of the lock-free per-shard sync coordinator.
  *
- * This specification models:
- *   1. Shard sync state machine (Clean/Dirty/Syncing/SyncFailed)
- *   2. Worker defer-and-continue pattern
- *   3. Parallel checkpoint coordination
+ * This specification models the ShardSyncCoordinator state machine in
+ * src/sources/google_books/sharding/shard.rs under the lock-free overlay write
+ * path, where worker `increment_cas` writes proceed CONCURRENTLY with an
+ * in-flight checkpoint sync. There is no defer-and-continue: workers never
+ * block or queue behind a syncing shard.
+ *
+ * State machine (mirrors the Rust coordinator one-for-one):
+ *   - mark_dirty      Clean   -> Dirty       (CAS; a NO-OP in any other state)
+ *   - try_start_sync  Dirty   -> Syncing     (CAS; establishes the single syncer)
+ *   - complete_sync   Syncing -> Clean       (unconditional)
+ *   - fail_sync       Syncing -> SyncFailed
+ *
+ * Because mark_dirty only fires Clean -> Dirty (shard.rs:212), a write that
+ * lands while a shard is Syncing leaves shard_state unchanged -- the resident
+ * overlay absorbs the write and the coordinator state machine does not register
+ * it. Whether that during-sync overlay write is captured by the checkpoint's
+ * RCU snapshot is NOT modeled here; it is delegated to libdictenstein's
+ * LockFreeDurableCheckpoint contract (formal/dependencies/libdictenstein-contracts.md).
  *
  * Key Properties to Verify:
- *   - AtMostOneSyncer: Only one sync operation per shard at a time
- *   - WorkersSafelyDefer: Workers never write to a syncing shard
- *   - CheckpointAtomicity: Global checkpoint only saved after all shards synced
- *   - NoDataLoss: Dirty data is eventually persisted
+ *   - AtMostOneSyncer:     Only one sync operation per shard at a time
+ *   - SyncerConsistency:   A shard is Syncing iff a syncer is assigned to it
+ *   - CheckpointAtomicity: Global checkpoint only saved after all targets synced
+ *   - CleanMeansZeroDirty: A Clean shard carries no pending dirty writes
+ *   - JobPartition:        Every job is queued, in-flight, or completed (no loss)
  *)
 
 EXTENDS Naturals, FiniteSets, Sequences, TLC
@@ -55,17 +70,9 @@ VARIABLES
     \* @type: Set(Str);
     job_queue,
 
-    \* Deferred job queue (jobs waiting for shard to finish syncing)
-    \* @type: Set(Str);
-    deferred_queue,
-
     \* Jobs that have completed processing
     \* @type: Set(Str);
     completed_jobs,
-
-    \* Sticky flag recording whether a worker ever wrote while its shard synced
-    \* @type: Bool;
-    unsafe_write_attempted,
 
     \* Job to shard mapping (which shard each job targets)
     \* @type: Str -> Str;
@@ -117,9 +124,7 @@ TypeOK ==
     /\ worker_state \in [Workers -> {Idle, Processing}]
     /\ worker_job \in [Workers -> Jobs \cup {NONE}]
     /\ job_queue \subseteq Jobs
-    /\ deferred_queue \subseteq Jobs
     /\ completed_jobs \subseteq Jobs
-    /\ unsafe_write_attempted \in BOOLEAN
     /\ job_shard \in [Jobs -> Shards]
     /\ checkpoint_state \in {CkptIdle, CkptSyncing, CkptCheckpointing, CkptSaving}
     /\ checkpoint_synced_shards \subseteq Shards
@@ -136,9 +141,7 @@ Init ==
     /\ worker_state = [w \in Workers |-> Idle]
     /\ worker_job = [w \in Workers |-> NONE]
     /\ job_queue = Jobs  \* All jobs start in queue
-    /\ deferred_queue = {}
     /\ completed_jobs = {}
-    /\ unsafe_write_attempted = FALSE
     /\ job_shard \in [Jobs -> Shards]  \* Non-deterministic assignment
     /\ checkpoint_state = CkptIdle
     /\ checkpoint_synced_shards = {}
@@ -162,8 +165,7 @@ WorkerPickJobBy(w, j) ==
     /\ job_queue' = job_queue \ {j}
     /\ worker_state' = [worker_state EXCEPT ![w] = Processing]
     /\ UNCHANGED <<shard_state, shard_dirty_count, shard_syncer,
-                   deferred_queue, completed_jobs, unsafe_write_attempted,
-                   job_shard, checkpoint_state,
+                   completed_jobs, job_shard, checkpoint_state,
                    checkpoint_synced_shards, checkpoint_target_shards,
                    last_saved_target_shards, last_saved_synced_shards,
                    global_checkpoint_saved>>
@@ -172,33 +174,12 @@ WorkerPickJob(w) ==
     \E j \in job_queue: WorkerPickJobBy(w, j)
 
 (*
- * Worker checks if target shard is syncing and defers if so.
- * This is the key "defer-and-continue" pattern.
- *)
-WorkerCheckAndDeferJob(w, j) ==
-    /\ worker_state[w] = Processing
-    /\ worker_job[w] = j
-    /\ j \in Jobs
-    /\ LET s == job_shard[j]
-       IN
-        /\ shard_state[s] = Syncing  \* Shard is being synced
-        \* Defer: put job in deferred queue, worker becomes idle
-        /\ deferred_queue' = deferred_queue \cup {j}
-        /\ worker_job' = [worker_job EXCEPT ![w] = NONE]
-        /\ worker_state' = [worker_state EXCEPT ![w] = Idle]
-    /\ UNCHANGED <<shard_state, shard_dirty_count, shard_syncer,
-                   job_queue, completed_jobs, unsafe_write_attempted,
-                   job_shard, checkpoint_state,
-                   checkpoint_synced_shards, checkpoint_target_shards,
-                   last_saved_target_shards, last_saved_synced_shards,
-                   global_checkpoint_saved>>
-
-WorkerCheckAndDefer(w) ==
-    \E j \in Jobs: WorkerCheckAndDeferJob(w, j)
-
-(*
- * Worker processes job (writes to shard).
- * Only allowed if shard is NOT syncing.
+ * Worker processes job (writes to its target shard via the lock-free overlay).
+ *
+ * Unlike the retired defer-and-continue model, this fires REGARDLESS of the
+ * shard's sync state: the overlay write proceeds concurrently with any
+ * in-flight sync. The shard-state effect mirrors mark_dirty exactly --
+ * Clean -> Dirty, and a NO-OP (state preserved) in Dirty / Syncing / SyncFailed.
  *)
 WorkerProcessJob(w, j) ==
     /\ worker_state[w] = Processing
@@ -206,39 +187,22 @@ WorkerProcessJob(w, j) ==
     /\ j \in Jobs
     /\ LET s == job_shard[j]
        IN
-        /\ shard_state[s] # Syncing  \* Must not be syncing
-        \* Write to shard: mark dirty, increment dirty count
-        /\ shard_state' = [shard_state EXCEPT ![s] = Dirty]
+        \* mark_dirty semantics: only Clean -> Dirty; otherwise leave as-is.
+        /\ shard_state' = [shard_state EXCEPT
+                            ![s] = IF @ = Clean THEN Dirty ELSE @]
         /\ shard_dirty_count' = [shard_dirty_count EXCEPT ![s] = @ + 1]
         \* Job complete, worker becomes idle
         /\ worker_job' = [worker_job EXCEPT ![w] = NONE]
         /\ worker_state' = [worker_state EXCEPT ![w] = Idle]
         /\ completed_jobs' = completed_jobs \cup {j}
-        /\ unsafe_write_attempted' = unsafe_write_attempted \/ (shard_state[s] = Syncing)
         /\ global_checkpoint_saved' = FALSE
-    /\ UNCHANGED <<shard_syncer, job_queue, deferred_queue, job_shard,
+    /\ UNCHANGED <<shard_syncer, job_queue, job_shard,
                    checkpoint_state, checkpoint_synced_shards,
                    checkpoint_target_shards, last_saved_target_shards,
                    last_saved_synced_shards>>
 
 WorkerProcess(w) ==
     \E j \in Jobs: WorkerProcessJob(w, j)
-
-(*
- * Deferred job returns to main queue (after shard sync completes).
- *)
-DeferredJobReturns(j) ==
-    /\ j \in deferred_queue
-    /\ LET s == job_shard[j]
-       IN shard_state[s] # Syncing  \* Shard no longer syncing
-    /\ deferred_queue' = deferred_queue \ {j}
-    /\ job_queue' = job_queue \cup {j}
-    /\ UNCHANGED <<shard_state, shard_dirty_count, shard_syncer,
-                   worker_state, worker_job, completed_jobs, unsafe_write_attempted,
-                   job_shard, checkpoint_state,
-                   checkpoint_synced_shards, checkpoint_target_shards,
-                   last_saved_target_shards, last_saved_synced_shards,
-                   global_checkpoint_saved>>
 
 (* ---------------------------------------------------------------------------
  * Checkpoint Actions (Parallel Sync)
@@ -253,8 +217,8 @@ CheckpointStart ==
     /\ checkpoint_synced_shards' = {}
     /\ checkpoint_target_shards' = {s \in Shards: shard_state[s] = Dirty}
     /\ UNCHANGED <<shard_state, shard_dirty_count, shard_syncer,
-                   worker_state, worker_job, job_queue, deferred_queue,
-                   completed_jobs, unsafe_write_attempted, job_shard, last_saved_target_shards,
+                   worker_state, worker_job, job_queue,
+                   completed_jobs, job_shard, last_saved_target_shards,
                    last_saved_synced_shards, global_checkpoint_saved>>
 
 (*
@@ -270,13 +234,18 @@ CheckpointStartShardSync(s) ==
     /\ shard_state' = [shard_state EXCEPT ![s] = Syncing]
     /\ shard_syncer' = [shard_syncer EXCEPT ![s] = "checkpoint"]
     /\ UNCHANGED <<shard_dirty_count, worker_state, worker_job,
-                   job_queue, deferred_queue, job_shard, checkpoint_state,
+                   job_queue, job_shard, checkpoint_state,
                    checkpoint_synced_shards, checkpoint_target_shards,
-                   completed_jobs, unsafe_write_attempted, last_saved_target_shards,
+                   completed_jobs, last_saved_target_shards,
                    last_saved_synced_shards, global_checkpoint_saved>>
 
 (*
  * Complete syncing a shard (WAL flushed to disk).
+ *
+ * Mirrors complete_sync: Syncing -> Clean UNCONDITIONALLY, dirty_count reset.
+ * A write that arrived while this shard was Syncing did not change shard_state
+ * (mark_dirty no-op), so it is subsumed here; its overlay durability is a
+ * libdictenstein LockFreeDurableCheckpoint concern, not a coordinator concern.
  *)
 CheckpointCompleteShardSync(s) ==
     /\ checkpoint_state = CkptSyncing
@@ -287,8 +256,8 @@ CheckpointCompleteShardSync(s) ==
     /\ shard_syncer' = [shard_syncer EXCEPT ![s] = NONE]
     /\ shard_dirty_count' = [shard_dirty_count EXCEPT ![s] = 0]
     /\ checkpoint_synced_shards' = checkpoint_synced_shards \cup {s}
-    /\ UNCHANGED <<worker_state, worker_job, job_queue, deferred_queue,
-                   completed_jobs, unsafe_write_attempted, job_shard, checkpoint_state,
+    /\ UNCHANGED <<worker_state, worker_job, job_queue,
+                   completed_jobs, job_shard, checkpoint_state,
                    checkpoint_target_shards, last_saved_target_shards,
                    last_saved_synced_shards, global_checkpoint_saved>>
 
@@ -303,9 +272,9 @@ CheckpointShardSyncFails(s) ==
     /\ shard_state' = [shard_state EXCEPT ![s] = SyncFailed]
     /\ shard_syncer' = [shard_syncer EXCEPT ![s] = NONE]
     /\ UNCHANGED <<shard_dirty_count, worker_state, worker_job,
-                   job_queue, deferred_queue, job_shard, checkpoint_state,
+                   job_queue, job_shard, checkpoint_state,
                    checkpoint_synced_shards, checkpoint_target_shards,
-                   completed_jobs, unsafe_write_attempted, last_saved_target_shards,
+                   completed_jobs, last_saved_target_shards,
                    last_saved_synced_shards, global_checkpoint_saved>>
 
 (*
@@ -321,8 +290,8 @@ CheckpointAllSynced ==
     /\ \A s \in checkpoint_target_shards: shard_state[s] # SyncFailed
     /\ checkpoint_state' = CkptCheckpointing
     /\ UNCHANGED <<shard_state, shard_dirty_count, shard_syncer,
-                   worker_state, worker_job, job_queue, deferred_queue,
-                   completed_jobs, unsafe_write_attempted, job_shard, checkpoint_synced_shards,
+                   worker_state, worker_job, job_queue,
+                   completed_jobs, job_shard, checkpoint_synced_shards,
                    checkpoint_target_shards, last_saved_target_shards,
                    last_saved_synced_shards, global_checkpoint_saved>>
 
@@ -340,7 +309,7 @@ CheckpointAbortOnFailure ==
     /\ checkpoint_synced_shards' = {}
     /\ checkpoint_target_shards' = {}
     /\ UNCHANGED <<shard_dirty_count, shard_syncer, worker_state, worker_job,
-                   job_queue, deferred_queue, completed_jobs, unsafe_write_attempted, job_shard,
+                   job_queue, completed_jobs, job_shard,
                    last_saved_target_shards, last_saved_synced_shards,
                    global_checkpoint_saved>>
 
@@ -354,8 +323,8 @@ CheckpointSaveGlobal ==
     /\ last_saved_target_shards' = checkpoint_target_shards
     /\ last_saved_synced_shards' = checkpoint_synced_shards
     /\ UNCHANGED <<shard_state, shard_dirty_count, shard_syncer,
-                   worker_state, worker_job, job_queue, deferred_queue,
-                   completed_jobs, unsafe_write_attempted, job_shard, checkpoint_synced_shards,
+                   worker_state, worker_job, job_queue,
+                   completed_jobs, job_shard, checkpoint_synced_shards,
                    checkpoint_target_shards>>
 
 (*
@@ -367,8 +336,8 @@ CheckpointComplete ==
     /\ checkpoint_synced_shards' = {}
     /\ checkpoint_target_shards' = {}
     /\ UNCHANGED <<shard_state, shard_dirty_count, shard_syncer,
-                   worker_state, worker_job, job_queue, deferred_queue,
-                   completed_jobs, unsafe_write_attempted, job_shard, last_saved_target_shards,
+                   worker_state, worker_job, job_queue,
+                   completed_jobs, job_shard, last_saved_target_shards,
                    last_saved_synced_shards, global_checkpoint_saved>>
 
 (* ---------------------------------------------------------------------------
@@ -377,9 +346,7 @@ CheckpointComplete ==
 
 Next ==
     \/ \E w \in Workers: WorkerPickJob(w)
-    \/ \E w \in Workers: WorkerCheckAndDefer(w)
     \/ \E w \in Workers: WorkerProcess(w)
-    \/ \E j \in Jobs: DeferredJobReturns(j)
     \/ CheckpointStart
     \/ \E s \in Shards: CheckpointStartShardSync(s)
     \/ \E s \in Shards: CheckpointCompleteShardSync(s)
@@ -390,8 +357,7 @@ Next ==
     \/ CheckpointComplete
 
 vars == <<shard_state, shard_dirty_count, shard_syncer, worker_state,
-          worker_job, job_queue, deferred_queue, completed_jobs,
-          unsafe_write_attempted, job_shard,
+          worker_job, job_queue, completed_jobs, job_shard,
           checkpoint_state, checkpoint_synced_shards, checkpoint_target_shards,
           last_saved_target_shards, last_saved_synced_shards,
           global_checkpoint_saved>>
@@ -399,10 +365,9 @@ vars == <<shard_state, shard_dirty_count, shard_syncer, worker_state,
 Spec == Init /\ [][Next]_vars
 
 \* Fairness specification for liveness properties
-\* Workers will eventually pick up and either process or defer jobs
+\* Workers will eventually pick up and process jobs (no defer step anymore).
 WorkerFairness ==
     /\ \A w \in Workers: WF_vars(WorkerPickJob(w))
-    /\ \A w \in Workers: WF_vars(WorkerCheckAndDefer(w))
     /\ \A w \in Workers: WF_vars(WorkerProcess(w))
 
 \* Checkpoint actions will eventually happen
@@ -417,11 +382,8 @@ CheckpointFairness ==
     /\ WF_vars(CheckpointSaveGlobal)
     /\ WF_vars(CheckpointComplete)
 
-\* Deferred jobs will eventually return when shard is no longer syncing
-DeferredFairness == \A j \in Jobs: SF_vars(DeferredJobReturns(j))
-
 \* Fair specification includes fairness constraints
-FairSpec == Spec /\ WorkerFairness /\ CheckpointFairness /\ DeferredFairness
+FairSpec == Spec /\ WorkerFairness /\ CheckpointFairness
 
 (* ---------------------------------------------------------------------------
  * Safety Invariants
@@ -433,14 +395,6 @@ FairSpec == Spec /\ WorkerFairness /\ CheckpointFairness /\ DeferredFairness
 AtMostOneSyncer ==
     \A s \in Shards:
         shard_state[s] = Syncing => shard_syncer[s] # NONE
-
-(*
- * CRITICAL: Workers never write to a shard that is syncing.
- * This is a sticky history invariant, so weakening WorkerProcess later will
- * be caught by TLC instead of making the property vacuous.
- *)
-WorkersSafelyDefer ==
-    unsafe_write_attempted = FALSE
 
 (*
  * CRITICAL: Global checkpoint only saved after all shards synced.
@@ -466,20 +420,16 @@ CleanMeansZeroDirty ==
 JobRepresented ==
     \A j \in Jobs:
         \/ j \in job_queue
-        \/ j \in deferred_queue
         \/ j \in completed_jobs
         \/ \E w \in Workers: worker_job[w] = j
 
 JobSetsDisjoint ==
-    /\ job_queue \cap deferred_queue = {}
-    /\ job_queue \cap completed_jobs = {}
-    /\ deferred_queue \cap completed_jobs = {}
+    job_queue \cap completed_jobs = {}
 
 WorkerJobsDisjointFromSets ==
     \A w \in Workers:
         worker_job[w] # NONE =>
             /\ worker_job[w] \notin job_queue
-            /\ worker_job[w] \notin deferred_queue
             /\ worker_job[w] \notin completed_jobs
 
 WorkerJobsUnique ==
@@ -518,7 +468,6 @@ CheckpointReadyToSave ==
 Safety ==
     /\ TypeOK
     /\ AtMostOneSyncer
-    /\ WorkersSafelyDefer
     /\ CheckpointAtomicity
     /\ SyncerConsistency
     /\ CleanMeansZeroDirty
@@ -529,13 +478,6 @@ Safety ==
 (* ---------------------------------------------------------------------------
  * Liveness Properties (under fairness)
  * --------------------------------------------------------------------------- *)
-
-(*
- * A deferred job eventually returns to the queue.
- *)
-DeferredEventuallyReturns ==
-    \A j \in Jobs:
-        (j \in deferred_queue) ~> (j \in job_queue \/ j \notin deferred_queue)
 
 (*
  * If checkpoint starts and no failures, it eventually completes.

@@ -5,6 +5,12 @@
  * Safety is proved inductively: initialization establishes Safety, every
  * action preserves Safety, stuttering preserves Safety, and PTL lifts the
  * local obligations to Spec => []Safety.
+ *
+ * This is the lock-free model: workers write regardless of a shard's sync
+ * state (WorkerProcessJob has no `# Syncing` guard), so there is no defer
+ * queue, no WorkersSafelyDefer invariant, and no DeferredJobReturns action.
+ * WorkerProcessJob's shard-state effect mirrors mark_dirty exactly --
+ * Clean -> Dirty, identity otherwise.
  *)
 
 EXTENDS AsyncShardSync, TLAPS
@@ -63,47 +69,37 @@ THEOREM InitImpliesTypeOK ==
       PROVE  job_queue \subseteq Jobs
   BY <1>6 DEF Init
 <1>7. ASSUME ModelConstantsOK, Init
-      PROVE  deferred_queue \subseteq Jobs
+      PROVE  completed_jobs \subseteq Jobs
   BY <1>7 DEF Init
 <1>8. ASSUME ModelConstantsOK, Init
-      PROVE  completed_jobs \subseteq Jobs
+      PROVE  job_shard \in [Jobs -> Shards]
   BY <1>8 DEF Init
 <1>9. ASSUME ModelConstantsOK, Init
-      PROVE  unsafe_write_attempted \in BOOLEAN
+      PROVE  checkpoint_state \in {CkptIdle, CkptSyncing, CkptCheckpointing, CkptSaving}
   BY <1>9 DEF Init
 <1>10. ASSUME ModelConstantsOK, Init
-       PROVE  job_shard \in [Jobs -> Shards]
+       PROVE  checkpoint_synced_shards \subseteq Shards
   BY <1>10 DEF Init
 <1>11. ASSUME ModelConstantsOK, Init
-       PROVE  checkpoint_state \in {CkptIdle, CkptSyncing, CkptCheckpointing, CkptSaving}
+       PROVE  checkpoint_target_shards \subseteq Shards
   BY <1>11 DEF Init
 <1>12. ASSUME ModelConstantsOK, Init
-       PROVE  checkpoint_synced_shards \subseteq Shards
+       PROVE  last_saved_target_shards \subseteq Shards
   BY <1>12 DEF Init
 <1>13. ASSUME ModelConstantsOK, Init
-       PROVE  checkpoint_target_shards \subseteq Shards
+       PROVE  last_saved_synced_shards \subseteq Shards
   BY <1>13 DEF Init
 <1>14. ASSUME ModelConstantsOK, Init
-       PROVE  last_saved_target_shards \subseteq Shards
-  BY <1>14 DEF Init
-<1>15. ASSUME ModelConstantsOK, Init
-       PROVE  last_saved_synced_shards \subseteq Shards
-  BY <1>15 DEF Init
-<1>16. ASSUME ModelConstantsOK, Init
        PROVE  global_checkpoint_saved \in BOOLEAN
-  BY <1>16 DEF Init
+  BY <1>14 DEF Init
 <1>. QED
   BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7, <1>8,
-     <1>9, <1>10, <1>11, <1>12, <1>13, <1>14, <1>15, <1>16
+     <1>9, <1>10, <1>11, <1>12, <1>13, <1>14
   DEF TypeOK
 
 THEOREM InitImpliesAtMostOneSyncer ==
     ModelConstantsOK /\ Init => AtMostOneSyncer
 BY SMT DEF ModelConstantsOK, Init, AtMostOneSyncer, Clean, Syncing, NONE
-
-THEOREM InitImpliesWorkersSafelyDefer ==
-    ModelConstantsOK /\ Init => WorkersSafelyDefer
-BY DEF Init, WorkersSafelyDefer
 
 THEOREM InitImpliesCheckpointAtomicity ==
     ModelConstantsOK /\ Init => CheckpointAtomicity
@@ -135,7 +131,6 @@ THEOREM InitImpliesSafety ==
     ModelConstantsOK /\ Init => Safety
 BY InitImpliesTypeOK,
    InitImpliesAtMostOneSyncer,
-   InitImpliesWorkersSafelyDefer,
    InitImpliesCheckpointAtomicity,
    InitImpliesSyncerConsistency,
    InitImpliesCleanMeansZeroDirty,
@@ -153,28 +148,26 @@ THEOREM WorkerPickJobByPreservesSafety ==
              Processing, NONE
 <1>2. AtMostOneSyncer'
   BY SMT DEF Safety, AtMostOneSyncer, WorkerPickJobBy
-<1>3. WorkersSafelyDefer'
-  BY SMT DEF Safety, WorkersSafelyDefer, WorkerPickJobBy
-<1>4. CheckpointAtomicity'
+<1>3. CheckpointAtomicity'
   BY SMT DEF Safety, CheckpointAtomicity, WorkerPickJobBy
-<1>5. SyncerConsistency'
+<1>4. SyncerConsistency'
   BY SMT DEF Safety, SyncerConsistency, WorkerPickJobBy
-<1>6. CleanMeansZeroDirty'
+<1>5. CleanMeansZeroDirty'
   BY SMT DEF Safety, CleanMeansZeroDirty, WorkerPickJobBy
-<1>7. WorkerStateJobConsistency'
+<1>6. WorkerStateJobConsistency'
   BY SMT, FunctionUpdateAt, FunctionUpdateOther
      DEF ModelConstantsOK, Safety, TypeOK, WorkerStateJobConsistency,
          ProcessingHasJob, IdleHasNoJob, WorkerPickJobBy, Idle, Processing,
          NONE
-<1>8. JobPartition'
+<1>7. JobPartition'
   BY SMT, FunctionUpdateAt, FunctionUpdateOther
      DEF ModelConstantsOK, Safety, TypeOK, JobPartition, JobRepresented,
          JobSetsDisjoint, WorkerJobsDisjointFromSets, WorkerJobsUnique,
          WorkerPickJobBy, NONE
-<1>9. CheckpointReadyToSave'
+<1>8. CheckpointReadyToSave'
   BY SMT DEF Safety, CheckpointReadyToSave, WorkerPickJobBy
 <1>. QED
-  BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7, <1>8, <1>9 DEF Safety
+  BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7, <1>8 DEF Safety
 
 THEOREM WorkerPickJobPreservesSafety ==
     ASSUME ModelConstantsOK, Safety, NEW w \in Workers, WorkerPickJob(w)
@@ -188,48 +181,6 @@ THEOREM WorkerPickJobPreservesSafety ==
 <1>. QED
   BY <1>3
 
-THEOREM WorkerCheckAndDeferJobPreservesSafety ==
-    ASSUME ModelConstantsOK, Safety, NEW w \in Workers, NEW j \in Jobs,
-           WorkerCheckAndDeferJob(w, j)
-    PROVE  Safety'
-<1>1. TypeOK'
-  BY SMT DEF ModelConstantsOK, Safety, TypeOK, WorkerCheckAndDeferJob, Idle,
-             Processing, NONE
-<1>2. AtMostOneSyncer'
-  BY SMT DEF Safety, AtMostOneSyncer, WorkerCheckAndDeferJob
-<1>3. WorkersSafelyDefer'
-  BY SMT DEF Safety, WorkersSafelyDefer, WorkerCheckAndDeferJob
-<1>4. CheckpointAtomicity'
-  BY SMT DEF Safety, CheckpointAtomicity, WorkerCheckAndDeferJob
-<1>5. SyncerConsistency'
-  BY SMT DEF Safety, SyncerConsistency, WorkerCheckAndDeferJob
-<1>6. CleanMeansZeroDirty'
-  BY SMT DEF Safety, CleanMeansZeroDirty, WorkerCheckAndDeferJob
-<1>7. WorkerStateJobConsistency'
-  BY SMT, FunctionUpdateAt, FunctionUpdateOther
-     DEF ModelConstantsOK, Safety, TypeOK, WorkerStateJobConsistency,
-         ProcessingHasJob, IdleHasNoJob, WorkerCheckAndDeferJob, Idle,
-         Processing, NONE
-<1>8. JobPartition'
-  BY SMT, FunctionUpdateAt, FunctionUpdateOther
-     DEF ModelConstantsOK, Safety, TypeOK, JobPartition, JobRepresented,
-         JobSetsDisjoint, WorkerJobsDisjointFromSets, WorkerJobsUnique,
-         WorkerCheckAndDeferJob, NONE
-<1>9. CheckpointReadyToSave'
-  BY SMT DEF Safety, CheckpointReadyToSave, WorkerCheckAndDeferJob
-<1>. QED
-  BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7, <1>8, <1>9 DEF Safety
-
-THEOREM WorkerCheckAndDeferPreservesSafety ==
-    ASSUME ModelConstantsOK, Safety, NEW w \in Workers, WorkerCheckAndDefer(w)
-    PROVE  Safety'
-<1>1. PICK j \in Jobs: WorkerCheckAndDeferJob(w, j)
-  BY DEF WorkerCheckAndDefer
-<1>2. Safety'
-  BY <1>1, WorkerCheckAndDeferJobPreservesSafety
-<1>. QED
-  BY <1>2
-
 THEOREM WorkerProcessJobPreservesSafety ==
     ASSUME ModelConstantsOK, Safety, NEW w \in Workers, NEW j \in Jobs,
            WorkerProcessJob(w, j)
@@ -238,9 +189,13 @@ THEOREM WorkerProcessJobPreservesSafety ==
   <2>1. job_shard[j] \in Shards
     BY SMT DEF Safety, TypeOK
   <2>2. shard_state' \in [Shards -> {Clean, Dirty, Syncing, SyncFailed}]
-    BY <2>1, SMT, FunctionUpdateTypeOK
-       DEF ModelConstantsOK, Safety, TypeOK, WorkerProcessJob, Clean, Dirty,
-           Syncing, SyncFailed
+    <3>1. shard_state \in [Shards -> {Clean, Dirty, Syncing, SyncFailed}]
+      BY DEF Safety, TypeOK
+    <3>2. (IF shard_state[job_shard[j]] = Clean THEN Dirty ELSE shard_state[job_shard[j]])
+            \in {Clean, Dirty, Syncing, SyncFailed}
+      BY <3>1, <2>1, SMT DEF Clean, Dirty, Syncing, SyncFailed
+    <3>. QED
+      BY <3>1, <3>2, <2>1, FunctionUpdateTypeOK DEF WorkerProcessJob
   <2>3. shard_dirty_count' \in [Shards -> Nat]
     BY <2>1, SMT, NatIncrementFunctionUpdateTypeOK
        DEF Safety, TypeOK, WorkerProcessJob
@@ -254,59 +209,53 @@ THEOREM WorkerProcessJobPreservesSafety ==
        DEF ModelConstantsOK, Safety, TypeOK, WorkerProcessJob, NONE
   <2>7. job_queue' \subseteq Jobs
     BY SMT DEF Safety, TypeOK, WorkerProcessJob
-  <2>8. deferred_queue' \subseteq Jobs
+  <2>8. completed_jobs' \subseteq Jobs
     BY SMT DEF Safety, TypeOK, WorkerProcessJob
-  <2>9. completed_jobs' \subseteq Jobs
+  <2>9. job_shard' \in [Jobs -> Shards]
     BY SMT DEF Safety, TypeOK, WorkerProcessJob
-  <2>10. unsafe_write_attempted' \in BOOLEAN
-    BY SMT DEF Safety, TypeOK, WorkerProcessJob, Syncing
-  <2>11. job_shard' \in [Jobs -> Shards]
-    BY SMT DEF Safety, TypeOK, WorkerProcessJob
-  <2>12. checkpoint_state' \in {CkptIdle, CkptSyncing, CkptCheckpointing, CkptSaving}
+  <2>10. checkpoint_state' \in {CkptIdle, CkptSyncing, CkptCheckpointing, CkptSaving}
     BY SMT DEF Safety, TypeOK, WorkerProcessJob, CkptIdle, CkptSyncing,
                CkptCheckpointing, CkptSaving
-  <2>13. checkpoint_synced_shards' \subseteq Shards
+  <2>11. checkpoint_synced_shards' \subseteq Shards
     BY SMT DEF Safety, TypeOK, WorkerProcessJob
-  <2>14. checkpoint_target_shards' \subseteq Shards
+  <2>12. checkpoint_target_shards' \subseteq Shards
     BY SMT DEF Safety, TypeOK, WorkerProcessJob
-  <2>15. last_saved_target_shards' \subseteq Shards
+  <2>13. last_saved_target_shards' \subseteq Shards
     BY SMT DEF Safety, TypeOK, WorkerProcessJob
-  <2>16. last_saved_synced_shards' \subseteq Shards
+  <2>14. last_saved_synced_shards' \subseteq Shards
     BY SMT DEF Safety, TypeOK, WorkerProcessJob
-  <2>17. global_checkpoint_saved' = FALSE
+  <2>15. global_checkpoint_saved' = FALSE
     BY SMT DEF WorkerProcessJob
-  <2>18. global_checkpoint_saved' \in BOOLEAN
-    BY <2>17
+  <2>16. global_checkpoint_saved' \in BOOLEAN
+    BY <2>15
   <2>. QED
     BY <2>2, <2>3, <2>4, <2>5, <2>6, <2>7, <2>8, <2>9,
-       <2>10, <2>11, <2>12, <2>13, <2>14, <2>15, <2>16, <2>18
+       <2>10, <2>11, <2>12, <2>13, <2>14, <2>16
     DEF TypeOK
 <1>2. AtMostOneSyncer'
-  BY SMT DEF Safety, AtMostOneSyncer, SyncerConsistency, WorkerProcessJob,
-             Dirty, Syncing
-<1>3. WorkersSafelyDefer'
-  BY SMT DEF Safety, WorkersSafelyDefer, WorkerProcessJob, Syncing
-<1>4. CheckpointAtomicity'
+  BY SMT DEF Safety, AtMostOneSyncer, WorkerProcessJob, Clean, Dirty, Syncing
+<1>3. CheckpointAtomicity'
   BY SMT DEF Safety, CheckpointAtomicity, WorkerProcessJob
-<1>5. SyncerConsistency'
-  BY SMT DEF Safety, SyncerConsistency, WorkerProcessJob, Dirty, Syncing
-<1>6. CleanMeansZeroDirty'
+<1>4. SyncerConsistency'
+  BY SMT DEF Safety, SyncerConsistency, WorkerProcessJob, Clean, Dirty, Syncing,
+             NONE
+<1>5. CleanMeansZeroDirty'
   BY SMT DEF ModelConstantsOK, Safety, TypeOK, CleanMeansZeroDirty,
              WorkerProcessJob, Clean, Dirty
-<1>7. WorkerStateJobConsistency'
+<1>6. WorkerStateJobConsistency'
   BY SMT, FunctionUpdateAt, FunctionUpdateOther
      DEF ModelConstantsOK, Safety, TypeOK, WorkerStateJobConsistency,
          ProcessingHasJob, IdleHasNoJob, WorkerProcessJob, Idle, Processing,
          NONE
-<1>8. JobPartition'
+<1>7. JobPartition'
   BY SMT, FunctionUpdateAt, FunctionUpdateOther
      DEF ModelConstantsOK, Safety, TypeOK, JobPartition, JobRepresented,
          JobSetsDisjoint, WorkerJobsDisjointFromSets, WorkerJobsUnique,
          WorkerProcessJob, NONE
-<1>9. CheckpointReadyToSave'
+<1>8. CheckpointReadyToSave'
   BY SMT DEF Safety, CheckpointReadyToSave, WorkerProcessJob
 <1>. QED
-  BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7, <1>8, <1>9 DEF Safety
+  BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7, <1>8 DEF Safety
 
 THEOREM WorkerProcessPreservesSafety ==
     ASSUME ModelConstantsOK, Safety, NEW w \in Workers, WorkerProcess(w)
@@ -318,22 +267,11 @@ THEOREM WorkerProcessPreservesSafety ==
 <1>. QED
   BY <1>2
 
-THEOREM DeferredJobReturnsPreservesSafety ==
-    ASSUME ModelConstantsOK, Safety, NEW j \in Jobs, DeferredJobReturns(j)
-    PROVE  Safety'
-BY SMT DEF ModelConstantsOK, Safety, TypeOK, AtMostOneSyncer,
-           WorkersSafelyDefer, CheckpointAtomicity, SyncerConsistency,
-           CleanMeansZeroDirty, WorkerStateJobConsistency, ProcessingHasJob,
-           IdleHasNoJob, JobPartition, JobRepresented, JobSetsDisjoint,
-           WorkerJobsDisjointFromSets, WorkerJobsUnique, CheckpointReadyToSave, DeferredJobReturns,
-           Clean, Dirty, Syncing, SyncFailed, Idle, Processing,
-           CkptIdle, CkptSyncing, CkptCheckpointing, CkptSaving, NONE
-
 THEOREM CheckpointStartPreservesSafety ==
     ASSUME ModelConstantsOK, Safety, CheckpointStart
     PROVE  Safety'
 BY SMT DEF ModelConstantsOK, Safety, TypeOK, AtMostOneSyncer,
-           WorkersSafelyDefer, CheckpointAtomicity, SyncerConsistency,
+           CheckpointAtomicity, SyncerConsistency,
            CleanMeansZeroDirty, WorkerStateJobConsistency, ProcessingHasJob,
            IdleHasNoJob, JobPartition, JobRepresented, JobSetsDisjoint,
            WorkerJobsDisjointFromSets, WorkerJobsUnique, CheckpointReadyToSave, CheckpointStart,
@@ -344,7 +282,7 @@ THEOREM CheckpointStartShardSyncPreservesSafety ==
     ASSUME ModelConstantsOK, Safety, NEW s \in Shards, CheckpointStartShardSync(s)
     PROVE  Safety'
 BY SMT DEF ModelConstantsOK, Safety, TypeOK, AtMostOneSyncer,
-           WorkersSafelyDefer, CheckpointAtomicity, SyncerConsistency,
+           CheckpointAtomicity, SyncerConsistency,
            CleanMeansZeroDirty, WorkerStateJobConsistency, ProcessingHasJob,
            IdleHasNoJob, JobPartition, JobRepresented, JobSetsDisjoint,
            WorkerJobsDisjointFromSets, WorkerJobsUnique, CheckpointReadyToSave,
@@ -356,7 +294,7 @@ THEOREM CheckpointCompleteShardSyncPreservesSafety ==
     ASSUME ModelConstantsOK, Safety, NEW s \in Shards, CheckpointCompleteShardSync(s)
     PROVE  Safety'
 BY SMT DEF ModelConstantsOK, Safety, TypeOK, AtMostOneSyncer,
-           WorkersSafelyDefer, CheckpointAtomicity, SyncerConsistency,
+           CheckpointAtomicity, SyncerConsistency,
            CleanMeansZeroDirty, WorkerStateJobConsistency, ProcessingHasJob,
            IdleHasNoJob, JobPartition, JobRepresented, JobSetsDisjoint,
            WorkerJobsDisjointFromSets, WorkerJobsUnique, CheckpointReadyToSave,
@@ -368,7 +306,7 @@ THEOREM CheckpointShardSyncFailsPreservesSafety ==
     ASSUME ModelConstantsOK, Safety, NEW s \in Shards, CheckpointShardSyncFails(s)
     PROVE  Safety'
 BY SMT DEF ModelConstantsOK, Safety, TypeOK, AtMostOneSyncer,
-           WorkersSafelyDefer, CheckpointAtomicity, SyncerConsistency,
+           CheckpointAtomicity, SyncerConsistency,
            CleanMeansZeroDirty, WorkerStateJobConsistency, ProcessingHasJob,
            IdleHasNoJob, JobPartition, JobRepresented, JobSetsDisjoint,
            WorkerJobsDisjointFromSets, WorkerJobsUnique, CheckpointReadyToSave,
@@ -380,7 +318,7 @@ THEOREM CheckpointAllSyncedPreservesSafety ==
     ASSUME ModelConstantsOK, Safety, CheckpointAllSynced
     PROVE  Safety'
 BY SMT DEF ModelConstantsOK, Safety, TypeOK, AtMostOneSyncer,
-           WorkersSafelyDefer, CheckpointAtomicity, SyncerConsistency,
+           CheckpointAtomicity, SyncerConsistency,
            CleanMeansZeroDirty, WorkerStateJobConsistency, ProcessingHasJob,
            IdleHasNoJob, JobPartition, JobRepresented, JobSetsDisjoint,
            WorkerJobsDisjointFromSets, WorkerJobsUnique, CheckpointReadyToSave, CheckpointAllSynced,
@@ -391,7 +329,7 @@ THEOREM CheckpointAbortOnFailurePreservesSafety ==
     ASSUME ModelConstantsOK, Safety, CheckpointAbortOnFailure
     PROVE  Safety'
 BY SMT DEF ModelConstantsOK, Safety, TypeOK, AtMostOneSyncer,
-           WorkersSafelyDefer, CheckpointAtomicity, SyncerConsistency,
+           CheckpointAtomicity, SyncerConsistency,
            CleanMeansZeroDirty, WorkerStateJobConsistency, ProcessingHasJob,
            IdleHasNoJob, JobPartition, JobRepresented, JobSetsDisjoint,
            WorkerJobsDisjointFromSets, WorkerJobsUnique, CheckpointReadyToSave,
@@ -403,7 +341,7 @@ THEOREM CheckpointSaveGlobalPreservesSafety ==
     ASSUME ModelConstantsOK, Safety, CheckpointSaveGlobal
     PROVE  Safety'
 BY SMT DEF ModelConstantsOK, Safety, TypeOK, AtMostOneSyncer,
-           WorkersSafelyDefer, CheckpointAtomicity, SyncerConsistency,
+           CheckpointAtomicity, SyncerConsistency,
            CleanMeansZeroDirty, WorkerStateJobConsistency, ProcessingHasJob,
            IdleHasNoJob, JobPartition, JobRepresented, JobSetsDisjoint,
            WorkerJobsDisjointFromSets, WorkerJobsUnique, CheckpointReadyToSave, CheckpointSaveGlobal,
@@ -414,7 +352,7 @@ THEOREM CheckpointCompletePreservesSafety ==
     ASSUME ModelConstantsOK, Safety, CheckpointComplete
     PROVE  Safety'
 BY SMT DEF ModelConstantsOK, Safety, TypeOK, AtMostOneSyncer,
-           WorkersSafelyDefer, CheckpointAtomicity, SyncerConsistency,
+           CheckpointAtomicity, SyncerConsistency,
            CleanMeansZeroDirty, WorkerStateJobConsistency, ProcessingHasJob,
            IdleHasNoJob, JobPartition, JobRepresented, JobSetsDisjoint,
            WorkerJobsDisjointFromSets, WorkerJobsUnique, CheckpointReadyToSave, CheckpointComplete,
@@ -424,9 +362,7 @@ BY SMT DEF ModelConstantsOK, Safety, TypeOK, AtMostOneSyncer,
 THEOREM NextPreservesSafety ==
     (ModelConstantsOK /\ Safety /\ Next) => Safety'
 BY WorkerPickJobPreservesSafety,
-   WorkerCheckAndDeferPreservesSafety,
    WorkerProcessPreservesSafety,
-   DeferredJobReturnsPreservesSafety,
    CheckpointStartPreservesSafety,
    CheckpointStartShardSyncPreservesSafety,
    CheckpointCompleteShardSyncPreservesSafety,
@@ -439,7 +375,7 @@ DEF Next
 
 THEOREM StutterPreservesSafety ==
     Safety /\ UNCHANGED vars => Safety'
-BY SMT DEF Safety, TypeOK, AtMostOneSyncer, WorkersSafelyDefer,
+BY SMT DEF Safety, TypeOK, AtMostOneSyncer,
            CheckpointAtomicity, SyncerConsistency, CleanMeansZeroDirty,
            WorkerStateJobConsistency, ProcessingHasJob, IdleHasNoJob,
            JobPartition, JobRepresented, JobSetsDisjoint, WorkerJobsDisjointFromSets,

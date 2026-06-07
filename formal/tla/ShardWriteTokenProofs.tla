@@ -1,5 +1,12 @@
 ------------------------ MODULE ShardWriteTokenProofs ------------------------
 (*
+ * DEPRECATED / RETIRED (lock-free overlay migration) -- see ShardWriteToken.tla.
+ * Retained for historical reference; no longer part of the TLAPS gate
+ * (removed from TLAPS_FILES in formal/Makefile). The lock-free successor and its
+ * machine-checked safety proof are AsyncShardSync.tla / AsyncShardSyncProofs.tla.
+ *
+ * ---------------------------------------------------------------------------
+ *
  * TLAPS proof obligations for ShardWriteToken.tla.
  *
  * These lemmas keep the deductive proof surface small: prove the initial state

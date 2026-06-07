@@ -9,45 +9,55 @@ const DIRTY: usize = 1;
 const SYNCING: usize = 2;
 const CLEAN_AFTER_SYNC: usize = 3;
 
-#[test]
-fn write_token_excludes_double_writer() {
-    loom::model(|| {
-        let locked = Arc::new(AtomicBool::new(false));
-        let generation = Arc::new(AtomicUsize::new(0));
-        let active_writers = Arc::new(AtomicUsize::new(0));
-
-        let mut handles = Vec::new();
-        for _ in 0..2 {
-            let locked = Arc::clone(&locked);
-            let generation = Arc::clone(&generation);
-            let active_writers = Arc::clone(&active_writers);
-
-            handles.push(thread::spawn(move || {
-                if locked
-                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    let token_generation = generation.load(Ordering::Relaxed) + 1;
-                    generation.store(token_generation, Ordering::Relaxed);
-
-                    let previous = active_writers.fetch_add(1, Ordering::SeqCst);
-                    assert_eq!(previous, 0, "two writers held the shard token");
-                    thread::yield_now();
-                    active_writers.fetch_sub(1, Ordering::SeqCst);
-
-                    assert_eq!(generation.load(Ordering::Relaxed), token_generation);
-                    locked.store(false, Ordering::Release);
-                }
-            }));
-        }
-
-        for handle in handles {
-            handle.join().expect("writer thread panicked");
-        }
-
-        assert_eq!(active_writers.load(Ordering::SeqCst), 0);
-    });
-}
+// RETIRED (lock-free overlay migration): the production write-token mechanism
+// (try_acquire_write / release_write / generation counter) was removed from
+// src/sources/google_books/sharding/shard.rs in favor of lock-free overlay
+// writes (increment_cas). With no exclusive per-shard token there is no
+// single-writer-exclusion property left to align against, so this loom model --
+// and its companion spec formal/tla/ShardWriteToken.tla -- are retired (kept,
+// not deleted, per the no-deletion policy). The lock-free replacement's safety
+// is covered by `async_shard_sync_has_at_most_one_syncer` below and by
+// formal/tla/AsyncShardSync.tla (single-syncer CAS, no writer token).
+//
+// #[test]
+// fn write_token_excludes_double_writer() {
+//     loom::model(|| {
+//         let locked = Arc::new(AtomicBool::new(false));
+//         let generation = Arc::new(AtomicUsize::new(0));
+//         let active_writers = Arc::new(AtomicUsize::new(0));
+//
+//         let mut handles = Vec::new();
+//         for _ in 0..2 {
+//             let locked = Arc::clone(&locked);
+//             let generation = Arc::clone(&generation);
+//             let active_writers = Arc::clone(&active_writers);
+//
+//             handles.push(thread::spawn(move || {
+//                 if locked
+//                     .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+//                     .is_ok()
+//                 {
+//                     let token_generation = generation.load(Ordering::Relaxed) + 1;
+//                     generation.store(token_generation, Ordering::Relaxed);
+//
+//                     let previous = active_writers.fetch_add(1, Ordering::SeqCst);
+//                     assert_eq!(previous, 0, "two writers held the shard token");
+//                     thread::yield_now();
+//                     active_writers.fetch_sub(1, Ordering::SeqCst);
+//
+//                     assert_eq!(generation.load(Ordering::Relaxed), token_generation);
+//                     locked.store(false, Ordering::Release);
+//                 }
+//             }));
+//         }
+//
+//         for handle in handles {
+//             handle.join().expect("writer thread panicked");
+//         }
+//
+//         assert_eq!(active_writers.load(Ordering::SeqCst), 0);
+//     });
+// }
 
 #[test]
 fn async_shard_sync_has_at_most_one_syncer() {
@@ -81,10 +91,11 @@ fn async_shard_sync_has_at_most_one_syncer() {
         }
 
         assert_eq!(active_syncers.load(Ordering::SeqCst), 0);
-        assert!(matches!(
-            state.load(Ordering::Acquire),
-            DIRTY | CLEAN_AFTER_SYNC
-        ));
+        // Exactly one thread wins the DIRTY -> SYNCING CAS and stores
+        // CLEAN_AFTER_SYNC; the loser no-ops. CLEAN_AFTER_SYNC is the only
+        // reachable terminal (DIRTY would require no thread winning, which the
+        // initial `state.store(DIRTY)` rules out).
+        assert_eq!(state.load(Ordering::Acquire), CLEAN_AFTER_SYNC);
     });
 }
 

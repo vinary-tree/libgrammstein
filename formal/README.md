@@ -26,11 +26,11 @@ formal/
 │   └── liblevenshtein-contracts.md
 ├── Makefile
 ├── tla/
-│   ├── ShardWriteToken.tla
-│   ├── ShardWriteTokenProofs.tla
-│   ├── MC_ShardWriteToken.cfg
-│   ├── MC_ShardWriteToken_Liveness.cfg
-│   ├── MC_ShardWriteToken_Stress.cfg
+│   ├── ShardWriteToken.tla             # deprecated (retired with WriteToken)
+│   ├── ShardWriteTokenProofs.tla       # deprecated
+│   ├── MC_ShardWriteToken.cfg          # deprecated
+│   ├── MC_ShardWriteToken_Liveness.cfg # deprecated
+│   ├── MC_ShardWriteToken_Stress.cfg   # deprecated
 │   ├── CheckpointStateMachine.tla
 │   ├── CheckpointStateMachineProofs.tla
 │   ├── MC_CheckpointStateMachine.cfg
@@ -193,7 +193,6 @@ Run TLA+ safety checks:
 
 ```bash
 cd formal/tla
-TLC_JAVA_OPTS="-XX:+UseParallelGC -Xmx768m" timeout 60s tlc -workers 1 -metadir /tmp/tlc-shard -config MC_ShardWriteToken.cfg ShardWriteToken.tla
 TLC_JAVA_OPTS="-XX:+UseParallelGC -Xmx768m" timeout 60s tlc -workers 1 -metadir /tmp/tlc-checkpoint -config MC_CheckpointStateMachine.cfg CheckpointStateMachine.tla
 TLC_JAVA_OPTS="-XX:+UseParallelGC -Xmx768m" timeout 60s tlc -workers 1 -metadir /tmp/tlc-async -config AsyncShardSync.cfg AsyncShardSync.tla
 TLC_JAVA_OPTS="-XX:+UseParallelGC -Xmx768m" timeout 60s tlc -workers 1 -metadir /tmp/tlc-cron -config CronStateMachine.cfg CronStateMachine.tla
@@ -209,7 +208,6 @@ Run TLA+ liveness checks:
 
 ```bash
 cd formal/tla
-TLC_JAVA_OPTS="-XX:+UseParallelGC -Xmx768m" timeout 60s tlc -workers 1 -metadir /tmp/tlc-shard-live -config MC_ShardWriteToken_Liveness.cfg ShardWriteToken.tla
 TLC_JAVA_OPTS="-XX:+UseParallelGC -Xmx768m" timeout 60s tlc -workers 1 -metadir /tmp/tlc-checkpoint-live -config MC_CheckpointStateMachine_Liveness.cfg CheckpointStateMachine.tla
 TLC_JAVA_OPTS="-XX:+UseParallelGC -Xmx768m" timeout 60s tlc -workers 1 -metadir /tmp/tlc-async-live -config AsyncShardSync_Liveness.cfg AsyncShardSync.tla
 TLC_JAVA_OPTS="-XX:+UseParallelGC -Xmx768m" timeout 60s tlc -workers 1 -metadir /tmp/tlc-cron-live -config CronStateMachine_Liveness.cfg CronStateMachine.tla
@@ -221,7 +219,6 @@ Run Apalache typechecks:
 
 ```bash
 cd formal/tla
-JVM_ARGS=-Xmx1536m apalache-mc --features=no-rows --out-dir=/tmp/apalache-shard typecheck ShardWriteToken.tla
 JVM_ARGS=-Xmx1536m apalache-mc --features=no-rows --out-dir=/tmp/apalache-checkpoint typecheck CheckpointStateMachine.tla
 JVM_ARGS=-Xmx1536m apalache-mc --features=no-rows --out-dir=/tmp/apalache-async typecheck AsyncShardSync.tla
 JVM_ARGS=-Xmx1536m apalache-mc --features=no-rows --out-dir=/tmp/apalache-cron typecheck CronStateMachine.tla
@@ -258,6 +255,13 @@ cargo test --features loom-tests --test loom_formal_alignment
 ## TLA+ Models
 
 ### ShardWriteToken.tla
+
+**DEPRECATED / RETIRED (lock-free overlay migration).** The WriteToken mechanism
+this models was removed from `shard.rs` in favor of lock-free overlay writes
+(`increment_cas`); the spec and `ShardWriteTokenProofs.tla` are retained for
+historical reference but are no longer part of the formal gate. Its successor is
+`AsyncShardSync.tla` (below), whose `AtMostOneSyncer` invariant subsumes the
+single-writer guarantee. The original description follows.
 
 Target: `src/sources/google_books/sharding/shard.rs`
 
@@ -322,46 +326,48 @@ prefix, same-order unaffected prefixes, and unaffected orders.
 
 ### AsyncShardSync.tla
 
-Target: `src/sources/google_books/sharding/shard.rs`,
-`src/sources/google_books/sharding/coordinator/sync.rs`, and
-`src/sources/google_books/importer/worker_pool.rs`
+Target: `src/sources/google_books/sharding/shard.rs` (the `ShardSyncCoordinator`
+state machine) and `src/sources/google_books/sharding/coordinator/sync.rs`.
 
-Models dirty shard tracking, checkpoint target capture, shard sync, failed sync
-abort, deferred jobs, and global checkpoint save.
+Models the lock-free overlay write path: dirty shard tracking, checkpoint target
+capture, per-shard sync, failed-sync abort, and global checkpoint save. After the
+overlay migration there is no defer-and-continue — workers issue `increment_cas`
+writes that proceed concurrently with an in-flight sync. `WorkerProcessJob` fires
+regardless of sync state, and its shard-state effect mirrors `mark_dirty` exactly:
+Clean → Dirty, identity in Dirty/Syncing/SyncFailed.
 
 Safety properties:
 
+- `AtMostOneSyncer`
+- `SyncerConsistency`
 - `CheckpointAtomicity`
-- `JobRepresented`
-- `JobSetsDisjoint`
-- `WorkerJobsDisjointFromSets`
-- `WorkerJobsUnique`
 - `CleanMeansZeroDirty`
-- `WorkersSafelyDefer`
+- `JobRepresented`, `JobSetsDisjoint`, `WorkerJobsDisjointFromSets`,
+  `WorkerJobsUnique` (composed as `JobPartition`)
 - `WorkerStateJobConsistency`
 - `CheckpointReadyToSave`
 
 Liveness properties require scheduler and retry fairness:
 
 - queued jobs eventually complete
+- the checkpoint eventually completes (or surfaces a `SyncFailed` shard)
 - shard sync completion is strongly fair
-- deferred jobs eventually return
-- failed checkpoints eventually abort
 - checkpoint start and per-shard sync are weakly fair
 
-The Rust implementation uses transactions/write locks that make a worker
-already past the pre-check safe even if a checkpoint starts before commit. The
-model conservatively represents that as a processing job that must finish before
-the target shard is synced.
+Because `mark_dirty` only transitions Clean → Dirty, a write that lands while a
+shard is `Syncing` leaves the coordinator state unchanged and `complete_sync`
+returns the shard to `Clean`. Whether that during-sync overlay write is in the
+checkpoint's snapshot is deliberately out of scope here; its durability is
+discharged by the imported libdictenstein contracts `LockFreeDurableCheckpoint.tla`
+(committed-watermark capture loses no write) and `LockFreeCounterMergeAtomicity.tla`
+(atomic, overflow-checked `increment_cas`). See
+`dependencies/libdictenstein-contracts.md`.
 
-`WorkersSafelyDefer` is checked with a sticky history flag
-`unsafe_write_attempted`, so weakening the worker write precondition later will
-turn into an invariant failure instead of a vacuous pass.
-
-`AsyncShardSyncProofs.tla` proves unbounded inductive safety with TLAPS. The
-proof decomposes worker job-pick/check/defer/process actions and replaces
-cardinality-heavy partition reasoning with small set-disjointness and
-representation lemmas, which keeps both TLAPS and TLC tractable.
+`AsyncShardSyncProofs.tla` proves unbounded inductive safety with TLAPS
+(249 obligations). The proof decomposes worker pick/process and the checkpoint
+actions into helper theorems for function updates and per-action preservation
+lemmas, replacing cardinality-heavy partition reasoning with small
+set-disjointness and representation lemmas so both TLAPS and TLC stay tractable.
 
 ### CronStateMachine.tla
 

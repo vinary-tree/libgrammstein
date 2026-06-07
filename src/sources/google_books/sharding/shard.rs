@@ -1,7 +1,8 @@
 //! Individual shard wrapper around PersistentARTrie.
 //!
 //! Each shard manages a subset of n-grams based on prefix routing.
-//! Shards provide exclusive write access via WriteToken.
+//! Shards are written concurrently via the lock-free overlay (`increment_cas`),
+//! so workers need no exclusive write lock.
 
 use super::routing::ShardKey;
 use libdictenstein::persistent_artrie::wal::SyncHandle;
@@ -10,11 +11,10 @@ use libdictenstein::persistent_artrie::{DocumentTransaction, PersistentARTrie};
 use liblevenshtein::dictionary::Dictionary;
 use parking_lot::{Condvar, Mutex};
 use std::collections::HashSet;
-use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use thiserror::Error;
 
 /// Error type for shard operations.
@@ -364,61 +364,6 @@ impl ShardSyncCoordinator {
     }
 }
 
-/// Write token for exclusive shard access.
-///
-/// Ensures single-writer constraint per shard. A worker must hold
-/// a WriteToken to perform write operations on a shard.
-///
-/// # Thread Safety
-///
-/// `WriteToken` is intentionally `!Send` (via `PhantomData<*const ()>`).
-/// This compile-time constraint ensures tokens cannot be passed between
-/// threads, which allows the use of `Relaxed` ordering when reading
-/// `write_generation` in `release_write()`. Since the token can only be
-/// used on the thread that acquired it, program order guarantees visibility
-/// of the generation counter without explicit synchronization.
-///
-/// This design is formally verified in `formal/tla/ShardWriteToken.tla`.
-#[derive(Debug)]
-pub struct WriteToken {
-    /// The shard this token grants access to.
-    pub shard_key: ShardKey,
-
-    /// When the token was acquired.
-    pub acquired_at: Instant,
-
-    /// ID of the worker holding this token.
-    pub worker_id: usize,
-
-    /// Generation counter to detect stale tokens.
-    generation: u64,
-
-    /// Marker to make WriteToken `!Send`.
-    ///
-    /// This ensures `Relaxed` ordering on `write_generation` reads is correct
-    /// because tokens cannot be passed between threads. Within a single thread,
-    /// program order ensures visibility of the generation counter.
-    _not_send: PhantomData<*const ()>,
-}
-
-impl WriteToken {
-    /// Create a new write token.
-    fn new(shard_key: ShardKey, worker_id: usize, generation: u64) -> Self {
-        Self {
-            shard_key,
-            acquired_at: Instant::now(),
-            worker_id,
-            generation,
-            _not_send: PhantomData,
-        }
-    }
-
-    /// Check if this token is valid for the given shard and generation.
-    fn is_valid(&self, shard_key: &ShardKey, current_generation: u64) -> bool {
-        &self.shard_key == shard_key && self.generation == current_generation
-    }
-}
-
 /// Per-shard checkpoint state.
 ///
 /// Stored within the shard's trie using reserved key prefixes.
@@ -580,15 +525,6 @@ pub struct ShardHandle {
     /// Checkpoint state for this shard.
     checkpoint_state: ShardCheckpointState,
 
-    /// Write lock: true if a writer holds the lock.
-    write_locked: AtomicBool,
-
-    /// ID of the worker holding the write lock (if any).
-    write_holder: AtomicUsize,
-
-    /// Generation counter for write tokens.
-    write_generation: AtomicU64,
-
     /// Shard statistics.
     stats: ShardStats,
 
@@ -636,9 +572,6 @@ impl ShardHandle {
             trie,
             path,
             checkpoint_state: ShardCheckpointState::default(),
-            write_locked: AtomicBool::new(false),
-            write_holder: AtomicUsize::new(usize::MAX),
-            write_generation: AtomicU64::new(0),
             stats: ShardStats::default(),
             sync_coordinator: ShardSyncCoordinator::new(),
             lockfree_entries: AtomicU64::new(0),
@@ -681,9 +614,6 @@ impl ShardHandle {
             trie,
             path,
             checkpoint_state: ShardCheckpointState::default(),
-            write_locked: AtomicBool::new(false),
-            write_holder: AtomicUsize::new(usize::MAX),
-            write_generation: AtomicU64::new(0),
             stats: ShardStats::default(),
             sync_coordinator: ShardSyncCoordinator::new(),
             lockfree_entries: AtomicU64::new(0),
@@ -773,119 +703,11 @@ impl ShardHandle {
         &self.stats
     }
 
-    /// Try to acquire exclusive write access.
-    ///
-    /// Returns `Some(WriteToken)` if successful, `None` if another worker
-    /// holds the lock.
-    pub fn try_acquire_write(&self, worker_id: usize) -> Option<WriteToken> {
-        // Try to set write_locked from false to true
-        if self
-            .write_locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
-            // We got the lock. Refuse to wrap the generation counter: stale-token
-            // detection relies on generations never repeating.
-            let generation = self.write_generation.load(Ordering::Relaxed);
-            let Some(next_generation) = generation.checked_add(1) else {
-                self.write_holder.store(usize::MAX, Ordering::Relaxed);
-                self.write_locked.store(false, Ordering::Release);
-                return None;
-            };
-
-            self.write_holder.store(worker_id, Ordering::Relaxed);
-            self.write_generation
-                .store(next_generation, Ordering::Relaxed);
-            Some(WriteToken::new(
-                self.key.clone(),
-                worker_id,
-                next_generation,
-            ))
-        } else {
-            None
-        }
-    }
-
-    /// Release exclusive write access.
-    ///
-    /// Returns `true` if the token was valid and the lock was released.
-    ///
-    /// # Memory Ordering
-    ///
-    /// Uses `Relaxed` ordering for loading the generation counter. This is safe
-    /// because `WriteToken` is `!Send`:
-    ///
-    /// 1. The token can only be used on the thread that acquired it
-    /// 2. Within a single thread, program order ensures the generation read
-    ///    sees the value written during `try_acquire_write()`
-    /// 3. The subsequent `Release` store on `write_locked` publishes all writes
-    ///    to the next acquirer via the Acquire-Release pair on the CAS
-    ///
-    /// This optimization is formally verified in `formal/tla/ShardWriteToken.tla`.
-    pub fn release_write(&self, token: WriteToken) -> bool {
-        // Relaxed is safe because WriteToken is !Send (PhantomData<*const ()>).
-        // The token cannot be passed between threads, so program order guarantees
-        // we see the generation value from our own try_acquire_write() call.
-        let current_gen = self.write_generation.load(Ordering::Relaxed);
-        if token.is_valid(&self.key, current_gen) {
-            self.write_holder.store(usize::MAX, Ordering::Relaxed);
-            self.write_locked.store(false, Ordering::Release);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Check if the shard is currently write-locked.
-    pub fn is_write_locked(&self) -> bool {
-        self.write_locked.load(Ordering::Relaxed)
-    }
-
-    /// Get the worker ID holding the write lock (if any).
-    pub fn write_holder(&self) -> Option<usize> {
-        if self.is_write_locked() {
-            let holder = self.write_holder.load(Ordering::Relaxed);
-            if holder != usize::MAX {
-                return Some(holder);
-            }
-        }
-        None
-    }
-
-    /// Increment an n-gram count (requires write token).
-    ///
-    /// The caller must hold a valid WriteToken for this shard.
-    pub fn increment(
-        &mut self,
-        ngram: &[u8],
-        count: u64,
-        _token: &WriteToken,
-    ) -> ShardResult<bool> {
-        let was_new = self.trie.get_value_bytes(ngram).is_none();
-
-        self.trie
-            .increment_bytes(ngram, count as i64)
-            .map_err(|e| ShardError::Write {
-                shard_key: self.key.to_string(),
-                message: e.to_string(),
-            })?;
-
-        self.stats.record_write();
-        if was_new {
-            self.stats.add_entries(1);
-        }
-
-        // Mark shard as dirty after write
-        self.sync_coordinator.mark_dirty();
-
-        Ok(was_new)
-    }
-
     /// Lock-free increment using CAS. Only needs `&self` (shared access).
     ///
-    /// Uses the lock-free overlay's `increment_cas` — no WriteToken or
-    /// exclusive RwLock required, so multiple workers can increment the
-    /// same shard concurrently without serialization.
+    /// Uses the lock-free overlay's `increment_cas` — no exclusive write lock
+    /// required, so multiple workers can increment the same shard concurrently
+    /// without serialization.
     pub fn increment_lockfree(&self, ngram: &[u8], count: u64) -> ShardResult<bool> {
         // Single overlay read: under the overlay-default write mode `get_value_bytes`
         // and `get_lockfree` observe the same overlay leaf, so one read is the source
@@ -1503,69 +1325,22 @@ mod tests {
         let path = dir.path().join("test_shard.artrie");
         let key = ShardKey::new("th");
 
-        let mut shard = ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
+        let shard = ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
 
-        // Acquire write token
-        let token = shard.try_acquire_write(0).expect("Failed to acquire write");
-
-        // Write some data
+        // Write some data via the lock-free path.
         let was_new = shard
-            .increment(b"the|quick", 5, &token)
+            .increment_lockfree(b"the|quick", 5)
             .expect("Failed to increment");
         assert!(was_new);
 
         let was_new = shard
-            .increment(b"the|quick", 3, &token)
+            .increment_lockfree(b"the|quick", 3)
             .expect("Failed to increment");
         assert!(!was_new);
 
         // Read back
         assert_eq!(shard.get(b"the|quick"), Some(8));
         assert_eq!(shard.len(), 1);
-
-        // Release token
-        assert!(shard.release_write(token));
-    }
-
-    #[test]
-    fn test_write_token_exclusivity() {
-        let dir = TempDir::new().expect("Failed to create temp dir");
-        let path = dir.path().join("test_shard.artrie");
-        let key = ShardKey::new("th");
-
-        let shard = ShardHandle::create(key, &path).expect("Failed to create shard");
-
-        // First worker acquires
-        let token1 = shard.try_acquire_write(0).expect("Failed to acquire");
-        assert!(shard.is_write_locked());
-        assert_eq!(shard.write_holder(), Some(0));
-
-        // Second worker cannot acquire
-        assert!(shard.try_acquire_write(1).is_none());
-
-        // Release
-        assert!(shard.release_write(token1));
-        assert!(!shard.is_write_locked());
-
-        // Now second worker can acquire
-        let token2 = shard.try_acquire_write(1).expect("Failed to acquire");
-        assert_eq!(shard.write_holder(), Some(1));
-        shard.release_write(token2);
-    }
-
-    #[test]
-    fn test_write_token_generation_does_not_wrap() {
-        let dir = TempDir::new().expect("Failed to create temp dir");
-        let path = dir.path().join("test_shard.artrie");
-        let key = ShardKey::new("th");
-
-        let shard = ShardHandle::create(key, &path).expect("Failed to create shard");
-        shard.write_generation.store(u64::MAX, Ordering::Relaxed);
-
-        assert!(shard.try_acquire_write(0).is_none());
-        assert!(!shard.is_write_locked());
-        assert_eq!(shard.write_holder(), None);
-        assert_eq!(shard.write_generation.load(Ordering::Relaxed), u64::MAX);
     }
 
     #[test]
@@ -1576,12 +1351,9 @@ mod tests {
 
         // Create and write
         {
-            let mut shard =
-                ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
-            let token = shard.try_acquire_write(0).unwrap();
-            shard.increment(b"the|quick", 10, &token).unwrap();
+            let shard = ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
+            shard.increment_lockfree(b"the|quick", 10).unwrap();
             shard.sync().unwrap();
-            shard.release_write(token);
         }
 
         // Reopen and verify
@@ -1599,15 +1371,13 @@ mod tests {
 
         // File doesn't exist - should create
         assert!(!path.exists());
-        let mut shard = ShardHandle::open_or_create(key.clone(), &path)
+        let shard = ShardHandle::open_or_create(key.clone(), &path)
             .expect("Failed to open_or_create shard");
         assert!(path.exists());
 
-        // Write data
-        let token = shard.try_acquire_write(0).unwrap();
-        shard.increment(b"apple|pie", 5, &token).unwrap();
+        // Write data via the lock-free path.
+        shard.increment_lockfree(b"apple|pie", 5).unwrap();
         shard.sync().unwrap();
-        shard.release_write(token);
 
         assert_eq!(shard.get(b"apple|pie"), Some(5));
     }
@@ -1620,12 +1390,9 @@ mod tests {
 
         // Create initial shard with data
         {
-            let mut shard =
-                ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
-            let token = shard.try_acquire_write(0).unwrap();
-            shard.increment(b"cat|dog", 7, &token).unwrap();
+            let shard = ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
+            shard.increment_lockfree(b"cat|dog", 7).unwrap();
             shard.sync().unwrap();
-            shard.release_write(token);
         }
 
         // open_or_create should open existing shard
@@ -1706,18 +1473,16 @@ mod tests {
         let path = dir.path().join("test_shard.artrie");
         let key = ShardKey::new("th");
 
-        let mut shard = ShardHandle::create(key, &path).expect("Failed to create shard");
+        let shard = ShardHandle::create(key, &path).expect("Failed to create shard");
 
         // Initially clean
         assert_eq!(shard.sync_state(), ShardSyncState::Clean);
 
-        // Write marks dirty
-        let token = shard.try_acquire_write(0).expect("Failed to acquire write");
+        // Lock-free write marks dirty
         shard
-            .increment(b"the|quick", 5, &token)
+            .increment_lockfree(b"the|quick", 5)
             .expect("Failed to increment");
         assert_eq!(shard.sync_state(), ShardSyncState::Dirty);
-        shard.release_write(token);
 
         // sync_tracked transitions through Syncing to Clean
         assert!(shard.sync_tracked().expect("sync_tracked failed"));

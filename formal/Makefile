@@ -58,7 +58,10 @@ DEPENDENCY_TLC_RUN = TLC_JAVA_OPTS="$(TLC_JAVA_OPTS)" TLC_OPTS="$(TLC_OPTS)" $(T
 APALACHE_RUN = JVM_ARGS="$(APALACHE_JVM_ARGS)" $(TIMEOUT) $(APALACHE_TIMEOUT) $(APALACHE)
 TLAPS_RUN = $(TIMEOUT) $(TLAPS_TIMEOUT) $(TLAPM)
 
-TLAPS_FILES := ShardWriteTokenProofs.tla CheckpointStateMachineProofs.tla \
+# ShardWriteTokenProofs.tla retired with the WriteToken mechanism (lock-free
+# overlay migration); see the DEPRECATED banner in ShardWriteToken.tla. Its
+# successor AsyncShardSyncProofs.tla remains in the gate below.
+TLAPS_FILES := CheckpointStateMachineProofs.tla \
 	AsyncShardSyncProofs.tla CronStateMachineProofs.tla WorkerShutdownProofs.tla \
 	ImporterLifecycleProofs.tla PersistentStorageBridgeProofs.tla \
 	QuerySemanticsBridgeProofs.tla
@@ -158,7 +161,6 @@ tlaps:
 	done
 
 tla-safety:
-	cd $(TLA_DIR) && $(TLC_RUN) -metadir $(TLC_METADIR)/shard-safety -config MC_ShardWriteToken.cfg ShardWriteToken.tla
 	cd $(TLA_DIR) && $(TLC_RUN) -metadir $(TLC_METADIR)/checkpoint-safety -config MC_CheckpointStateMachine.cfg CheckpointStateMachine.tla
 	cd $(TLA_DIR) && $(TLC_RUN) -metadir $(TLC_METADIR)/async-safety -config AsyncShardSync.cfg AsyncShardSync.tla
 	cd $(TLA_DIR) && $(TLC_RUN) -metadir $(TLC_METADIR)/cron-safety -config CronStateMachine.cfg CronStateMachine.tla
@@ -170,7 +172,6 @@ tla-safety:
 	cd $(TLA_DIR) && $(TLC_RUN) -metadir $(TLC_METADIR)/query-semantics-bridge-no-metadata-safety -config QuerySemanticsBridge_NoMetadata.cfg QuerySemanticsBridge.tla
 
 tla-liveness:
-	cd $(TLA_DIR) && $(TLC_RUN) -metadir $(TLC_METADIR)/shard-liveness -config MC_ShardWriteToken_Liveness.cfg ShardWriteToken.tla
 	cd $(TLA_DIR) && $(TLC_RUN) -metadir $(TLC_METADIR)/checkpoint-liveness -config MC_CheckpointStateMachine_Liveness.cfg CheckpointStateMachine.tla
 	cd $(TLA_DIR) && $(TLC_RUN) -metadir $(TLC_METADIR)/async-liveness -config AsyncShardSync_Liveness.cfg AsyncShardSync.tla
 	cd $(TLA_DIR) && $(TLC_RUN) -metadir $(TLC_METADIR)/cron-liveness -config CronStateMachine_Liveness.cfg CronStateMachine.tla
@@ -178,7 +179,6 @@ tla-liveness:
 	cd $(TLA_DIR) && $(TLC_RUN) -metadir $(TLC_METADIR)/importer-lifecycle-liveness -config ImporterLifecycle_Liveness.cfg ImporterLifecycle.tla
 
 apalache:
-	cd $(TLA_DIR) && $(APALACHE_RUN) --features=no-rows --out-dir=$(APALACHE_OUT)/shard typecheck ShardWriteToken.tla
 	cd $(TLA_DIR) && $(APALACHE_RUN) --features=no-rows --out-dir=$(APALACHE_OUT)/checkpoint typecheck CheckpointStateMachine.tla
 	cd $(TLA_DIR) && $(APALACHE_RUN) --features=no-rows --out-dir=$(APALACHE_OUT)/async typecheck AsyncShardSync.tla
 	cd $(TLA_DIR) && $(APALACHE_RUN) --features=no-rows --out-dir=$(APALACHE_OUT)/cron typecheck CronStateMachine.tla
@@ -188,7 +188,7 @@ apalache:
 	cd $(TLA_DIR) && $(APALACHE_RUN) --features=no-rows --out-dir=$(APALACHE_OUT)/query-semantics-bridge typecheck QuerySemanticsBridge.tla
 
 rust-alignment:
-	$(CARGO) test --features google-books sources::google_books::sharding::shard::tests::test_write_token_generation_does_not_wrap
+	$(CARGO) test --features google-books sources::google_books::sharding::shard::tests::test_sync_tracked_marks_dirty
 	$(CARGO) test --features google-books sources::google_books::sharding::mkn
 	$(CARGO) test --features google-books sources::google_books::importer::tests::shutdown_checkpoint_safety
 	$(CARGO) test --features google-books persistent_storage_bridge
@@ -238,7 +238,6 @@ local-warning-hygiene:
 	rm -f "$$tmp"
 
 stress:
-	cd $(TLA_DIR) && $(TLC_STRESS_RUN) -metadir $(TLC_METADIR)/shard-stress -config MC_ShardWriteToken_Stress.cfg ShardWriteToken.tla
 	cd $(TLA_DIR) && $(TLC_STRESS_RUN) -metadir $(TLC_METADIR)/checkpoint-stress -config MC_CheckpointStateMachine_Stress.cfg CheckpointStateMachine.tla
 	cd $(TLA_DIR) && $(TLC_STRESS_RUN) -metadir $(TLC_METADIR)/async-stress -config AsyncShardSync_Stress.cfg AsyncShardSync.tla
 	cd $(TLA_DIR) && $(TLC_STRESS_RUN) -metadir $(TLC_METADIR)/cron-stress -config CronStateMachine_Stress.cfg CronStateMachine.tla
