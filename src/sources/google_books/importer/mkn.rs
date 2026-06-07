@@ -28,7 +28,8 @@ use super::super::sharding::MknAggregator;
 use super::{GoogleBooksImporter, ImportError};
 
 impl GoogleBooksImporter {
-    /// Compute Modified Kneser-Ney smoothing statistics as a post-processing step.
+    /// Compute Modified Kneser-Ney smoothing statistics as a post-processing
+    /// step, with optional event emission for TUI progress.
     ///
     /// This function computes MKN statistics differently based on storage mode:
     /// - **Single-trie**: Iterates over the trie and stores stats inline with special keys
@@ -40,7 +41,6 @@ impl GoogleBooksImporter {
     ///
     /// These statistics are used by MKN smoothing to estimate probabilities
     /// for unseen n-grams based on lower-order distributions.
-    /// Compute MKN stats with optional event emission for TUI progress.
     pub(super) fn compute_mkn_stats_with_events(
         &mut self,
         event_tx: Option<&tokio::sync::broadcast::Sender<ImportEvent>>,

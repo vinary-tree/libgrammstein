@@ -337,9 +337,9 @@ fn test_task_ordering() {
     });
 
     // Should pop in ascending order (earliest first)
-    assert_eq!(heap.pop().unwrap().scheduled_time_ms, 100);
-    assert_eq!(heap.pop().unwrap().scheduled_time_ms, 200);
-    assert_eq!(heap.pop().unwrap().scheduled_time_ms, 300);
+    assert_eq!(heap.pop().expect("task 1").scheduled_time_ms, 100);
+    assert_eq!(heap.pop().expect("task 2").scheduled_time_ms, 200);
+    assert_eq!(heap.pop().expect("task 3").scheduled_time_ms, 300);
 }
 
 /// Test that the scheduler execution path consumes the earliest queued task.
@@ -357,7 +357,7 @@ fn test_execute_one_task_uses_earliest_due_task() {
             scheduled_time_ms,
             metadata: TaskMetadata::OneShot,
             task: Box::new(move || {
-                executed.lock().unwrap().push(scheduled_time_ms);
+                executed.lock().expect("lock").push(scheduled_time_ms);
                 true
             }),
         });
@@ -367,7 +367,7 @@ fn test_execute_one_task_uses_earliest_due_task() {
     sm.execute_one_task();
     sm.execute_one_task();
 
-    let observed = executed.lock().unwrap().clone();
+    let observed = executed.lock().expect("lock").clone();
     assert_eq!(observed, vec![100, 200, 300]);
 }
 

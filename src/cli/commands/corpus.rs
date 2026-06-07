@@ -1027,7 +1027,7 @@ mod tests {
 
     #[test]
     fn wikipedia_download_url_uses_language_dump() {
-        let url = corpus_download_url(CorpusSource::Wikipedia, "de").unwrap();
+        let url = corpus_download_url(CorpusSource::Wikipedia, "de").expect("dump url");
         assert_eq!(
             url,
             "https://dumps.wikimedia.org/dewiki/latest/dewiki-latest-pages-articles.xml.bz2"
@@ -1042,7 +1042,7 @@ mod tests {
             "https://dumps.wikimedia.org/enwiki/latest/enwiki-latest-pages-articles.xml.bz2",
             false,
         )
-        .unwrap();
+        .expect("download path");
 
         assert_eq!(path, dir.join("enwiki-latest-pages-articles.xml.bz2"));
     }
@@ -1050,7 +1050,8 @@ mod tests {
     #[test]
     fn corpus_sample_download_path_is_distinct() {
         let dir = Path::new("/tmp/cache");
-        let path = corpus_download_path(dir, "https://example.test/corpus.xml.bz2", true).unwrap();
+        let path = corpus_download_path(dir, "https://example.test/corpus.xml.bz2", true)
+            .expect("sample path");
 
         assert_eq!(path, dir.join("corpus.xml.bz2.sample"));
     }
@@ -1069,7 +1070,7 @@ mod tests {
         let mut input = std::io::Cursor::new(b"abcdef".as_slice());
         let mut output = Vec::new();
 
-        let copied = copy_limited(&mut input, &mut output, 3).unwrap();
+        let copied = copy_limited(&mut input, &mut output, 3).expect("copy within limit");
 
         assert_eq!(copied, 3);
         assert_eq!(output, b"abc");

@@ -334,10 +334,12 @@ where
 
     fn len(&self) -> Option<usize> {
         let backend_len = self.backend.len()?;
-        if self.backend.root().has_edge(METADATA_PREFIX) {
-            Some(count_visible_finals(self.root()))
-        } else {
-            Some(backend_len)
+        // The reserved METADATA_PREFIX subtree (MKN / vocab metadata) is included
+        // in `backend_len` but is not a visible term. It is tiny, so subtract its
+        // final count rather than walking the entire visible trie.
+        match self.backend.root().transition(METADATA_PREFIX) {
+            Some(meta_subtree) => Some(backend_len.saturating_sub(count_finals(meta_subtree))),
+            None => Some(backend_len),
         }
     }
 
@@ -346,8 +348,10 @@ where
             return true;
         }
 
+        // Non-empty backend: visible-empty only if every final is hidden metadata.
+        // Probe for the first visible final instead of counting all of them.
         if self.backend.root().has_edge(METADATA_PREFIX) {
-            count_visible_finals(self.root()) == 0
+            !has_visible_final(self.root())
         } else {
             false
         }
@@ -503,12 +507,38 @@ impl<N: MappedDictionaryNode<Unit = char>> MappedDictionaryNode for VocabularyIn
     }
 }
 
-fn count_visible_finals<N>(root: VocabularyIndexedNode<N>) -> usize
+/// Existence-only DFS over the metadata-filtered view: returns `true` as soon as
+/// the first visible final is reached, so `is_empty()` need not walk the whole
+/// visible trie.
+fn has_visible_final<N>(root: VocabularyIndexedNode<N>) -> bool
+where
+    N: DictionaryNode<Unit = char>,
+{
+    let mut stack = vec![root];
+
+    while let Some(node) = stack.pop() {
+        if node.is_final() {
+            return true;
+        }
+
+        for (_, child) in node.edges() {
+            stack.push(child);
+        }
+    }
+
+    false
+}
+
+/// Count final nodes in a raw backend subtree. Used on the small
+/// `METADATA_PREFIX` subtree so `len()` can subtract the hidden metadata finals
+/// from `backend.len()` instead of walking the entire visible trie. Operates on
+/// backend nodes directly because here we deliberately count the metadata finals.
+fn count_finals<N>(node: N) -> usize
 where
     N: DictionaryNode<Unit = char>,
 {
     let mut count = 0;
-    let mut stack = vec![root];
+    let mut stack = vec![node];
 
     while let Some(node) = stack.pop() {
         if node.is_final() {
@@ -522,6 +552,30 @@ where
 
     count
 }
+
+// Superseded by `has_visible_final` + `count_finals` (Tier B efficiency: avoids a
+// full visible-trie DFS in `len()`/`is_empty()` when a METADATA_PREFIX edge is
+// present). Retained, commented out, per the no-deletion policy.
+//
+// fn count_visible_finals<N>(root: VocabularyIndexedNode<N>) -> usize
+// where
+//     N: DictionaryNode<Unit = char>,
+// {
+//     let mut count = 0;
+//     let mut stack = vec![root];
+//
+//     while let Some(node) = stack.pop() {
+//         if node.is_final() {
+//             count += 1;
+//         }
+//
+//         for (_, child) in node.edges() {
+//             stack.push(child);
+//         }
+//     }
+//
+//     count
+// }
 
 // ============================================================================
 // Zipper Support
@@ -756,6 +810,31 @@ mod tests {
             Some(1),
             "Dictionary::len should count visible query terms only"
         );
+    }
+
+    #[test]
+    fn vocabulary_query_is_empty_filters_metadata() {
+        let (_dir, dict) = create_test_dict();
+
+        // A fresh dictionary is empty.
+        assert!(dict.is_empty(), "fresh dictionary should be empty");
+
+        // A dictionary holding ONLY metadata has no visible terms, so it must
+        // still report empty (has_visible_final finds nothing past the filter).
+        dict.backend().insert_with_value("\x00__meta__", 999);
+        assert!(
+            dict.is_empty(),
+            "metadata-only dictionary must report visible-empty"
+        );
+
+        // Once a real term is present the dictionary is non-empty, and len()
+        // counts only that visible term (backend_len - metadata finals).
+        dict.insert_ngram(&["hello"], 1);
+        assert!(
+            !dict.is_empty(),
+            "dictionary with a visible term must not report empty"
+        );
+        assert_eq!(dict.len(), Some(1), "only the visible term is counted");
     }
 
     #[test]

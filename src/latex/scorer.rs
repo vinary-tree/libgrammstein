@@ -788,10 +788,9 @@ mod tests {
         let fluent = scorer.score(&tokenizer.tokenize(r"\frac{a}{b}"));
         let abrupt = scorer.score(&tokenizer.tokenize(r"\frac \alpha \beta"));
 
-        assert!(
-            fluent.component("ngram").unwrap().normalized_score
-                > abrupt.component("ngram").unwrap().normalized_score
-        );
+        let fluent_score = fluent.component("ngram").expect("ngram");
+        let abrupt_score = abrupt.component("ngram").expect("ngram");
+        assert!(fluent_score.normalized_score > abrupt_score.normalized_score);
     }
 
     #[test]
@@ -815,9 +814,8 @@ mod tests {
         ));
         let noisy = scorer.score(&noisy_tokens);
 
-        assert!(
-            coherent.component("embedding").unwrap().normalized_score
-                > noisy.component("embedding").unwrap().normalized_score
-        );
+        let coherent_score = coherent.component("embedding").expect("embedding");
+        let noisy_score = noisy.component("embedding").expect("embedding");
+        assert!(coherent_score.normalized_score > noisy_score.normalized_score);
     }
 }

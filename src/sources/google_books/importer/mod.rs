@@ -567,7 +567,6 @@ impl GoogleBooksImporter {
         }
 
         let checkpoint_path = config.output_path.with_extension("checkpoint.json");
-        let _output_path = &config.output_path;
 
         // Estimate n-gram count based on language and orders
         // For English 1-3 grams, expect ~500M n-grams; 1-5 grams ~2B

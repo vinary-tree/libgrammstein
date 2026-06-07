@@ -2187,7 +2187,7 @@ mod tests {
             original_indices, reopened_indices,
             "vocabulary indices must be stable across reopen — the documented \
              checkpoint-resume bug arose when re-insertion assigned new \
-            indices, orphaning previously-encoded n-grams"
+             indices, orphaning previously-encoded n-grams"
         );
     }
 

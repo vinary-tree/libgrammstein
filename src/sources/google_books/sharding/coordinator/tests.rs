@@ -372,6 +372,73 @@ fn test_parallel_checkpoint() {
     assert_eq!(coordinator.get("zebra|crossing"), Some(3));
 }
 
+#[test]
+fn test_checkpoint_coexists_with_concurrent_writers() {
+    // B1 regression: checkpoint/sync hold shard.read() (not write()), so they run
+    // concurrently with lock-free increment_cas writers on the SAME shard without
+    // deadlock or lost writes. Every writer key is unique, so each final per-key
+    // count is deterministically 1 regardless of how the threads interleave.
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let config =
+        ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
+    let coordinator = std::sync::Arc::new(
+        ShardCoordinator::new_with_checkpoints(config).expect("Failed to create coordinator"),
+    );
+
+    // Seed shard "th" so it exists before the writer/checkpoint race begins.
+    coordinator.store_ngram("th|seed", 1).expect("seed store");
+
+    const WRITERS: usize = 3;
+    const PER_WRITER: usize = 30;
+
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|w| {
+            let coord = std::sync::Arc::clone(&coordinator);
+            std::thread::spawn(move || {
+                for i in 0..PER_WRITER {
+                    coord
+                        .store_ngram(&format!("th|w{}_{}", w, i), 1)
+                        .expect("concurrent store");
+                }
+            })
+        })
+        .collect();
+
+    let checkpointer = {
+        let coord = std::sync::Arc::clone(&coordinator);
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                coord
+                    .coordinated_checkpoint_parallel(4)
+                    .expect("concurrent checkpoint");
+            }
+        })
+    };
+
+    for writer in writers {
+        writer.join().expect("writer thread panicked");
+    }
+    checkpointer.join().expect("checkpoint thread panicked");
+
+    // Final checkpoint, then verify no write was lost across the concurrent run.
+    coordinator
+        .coordinated_checkpoint_parallel(4)
+        .expect("final checkpoint");
+
+    assert_eq!(coordinator.get("th|seed"), Some(1));
+    for w in 0..WRITERS {
+        for i in 0..PER_WRITER {
+            let key = format!("th|w{}_{}", w, i);
+            assert_eq!(
+                coordinator.get(&key),
+                Some(1),
+                "write {} lost under concurrent checkpoint",
+                key
+            );
+        }
+    }
+}
+
 // ---- Lock-free overlay flush threshold ----
 
 #[test]
