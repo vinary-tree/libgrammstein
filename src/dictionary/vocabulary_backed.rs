@@ -12,7 +12,7 @@
 //! - **Always consistent**: Dictionary is always in sync with n-gram model
 //! - **Efficient**: No separate extraction or building step required
 
-use crate::ngram::vocabulary::{encode_ngram_key, open_or_create_vocabulary, SharedVocabARTrie};
+use crate::ngram::vocabulary::{encode_ngram_key, SharedVocabARTrie};
 use crate::sources::google_books::NgramStorage;
 
 /// A dictionary backed by shared vocabulary and n-gram storage.
@@ -111,7 +111,9 @@ impl<'a> VocabularyDictionary<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ngram::vocabulary::create_concurrent_vocabulary_lockfree;
+    use crate::ngram::vocabulary::{
+        create_concurrent_vocabulary_lockfree, open_or_create_vocabulary,
+    };
     use crate::sources::google_books::NgramStorage;
     use tempfile::TempDir;
 
@@ -165,6 +167,46 @@ mod tests {
         // Check length
         assert_eq!(dict.len(), 3);
         assert!(!dict.is_empty());
+    }
+
+    #[test]
+    fn vocabulary_query_frequency_requires_vocabulary_and_storage_count() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let vocab_path = dir.path().join("vocab.artrie");
+        let trie_path = dir.path().join("ngrams.artrie");
+
+        let vocabulary =
+            open_or_create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
+        let concurrent = create_concurrent_vocabulary_lockfree(vocabulary.clone());
+
+        let storage =
+            NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(concurrent))
+                .expect("Failed to create storage");
+
+        storage
+            .store_tokens(&["known"], 11)
+            .expect("Failed to store unigram");
+        storage
+            .sync_vocabulary()
+            .expect("Failed to sync vocabulary");
+
+        vocabulary
+            .write()
+            .insert("vocab_only")
+            .expect("Failed to insert vocabulary-only word");
+
+        let dict = VocabularyDictionary::new(vocabulary, &storage);
+
+        assert!(dict.contains("known"));
+        assert_eq!(dict.frequency("known"), Some(11));
+        assert!(dict.contains("vocab_only"));
+        assert_eq!(
+            dict.frequency("vocab_only"),
+            None,
+            "frequency requires both vocabulary membership and a unigram count"
+        );
+        assert!(!dict.contains("missing"));
+        assert_eq!(dict.frequency("missing"), None);
     }
 
     #[test]

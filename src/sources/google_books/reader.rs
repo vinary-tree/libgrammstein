@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use flate2::read::GzDecoder;
 
 use super::aggregator::AggregatedNgram;
-use super::parser::{parse_ngram_line, parse_ngram_line_ref, NgramRecord, ParseError};
+use super::parser::{parse_ngram_line, NgramRecord, ParseError};
 #[cfg(feature = "google-books")]
 use super::task_manager::RetryAfter;
 
@@ -33,7 +33,9 @@ pub enum ReaderError {
     /// Parse error.
     #[error("Parse error at line {line}: {error}")]
     Parse {
+        /// One-indexed line number where parsing failed.
         line: u64,
+        /// Parser error returned for the line.
         #[source]
         error: ParseError,
     },
@@ -155,9 +157,6 @@ pub struct FileNgramReader {
     /// Current line number (1-indexed).
     current_line: u64,
 
-    /// Compressed bytes read (for progress tracking).
-    compressed_bytes_read: u64,
-
     /// Total compressed size (if known).
     total_compressed_size: Option<u64>,
 
@@ -194,7 +193,6 @@ impl FileNgramReader {
             reader,
             line_buffer: String::with_capacity(256),
             current_line: 0,
-            compressed_bytes_read: 0,
             total_compressed_size,
             path: path.to_path_buf(),
             skip_pos_tags,
@@ -414,9 +412,6 @@ pub struct HttpNgramReader {
     /// Source URL.
     url: String,
 
-    /// Lines read.
-    lines_read: u64,
-
     /// Content length (if known).
     content_length: Option<u64>,
 
@@ -425,19 +420,6 @@ pub struct HttpNgramReader {
 
     /// Minimum count.
     min_count: u64,
-
-    /// Internal state for async iteration.
-    _state: HttpReaderState,
-}
-
-/// Internal state for HTTP reader (placeholder for async implementation).
-enum HttpReaderState {
-    /// Not yet started.
-    Pending,
-    /// Currently reading.
-    Reading,
-    /// Finished.
-    Done,
 }
 
 impl HttpNgramReader {
@@ -448,11 +430,9 @@ impl HttpNgramReader {
     pub fn new(url: &str) -> Self {
         Self {
             url: url.to_string(),
-            lines_read: 0,
             content_length: None,
             skip_pos_tags: false,
             min_count: 0,
-            _state: HttpReaderState::Pending,
         }
     }
 
@@ -460,11 +440,9 @@ impl HttpNgramReader {
     pub fn with_options(url: &str, skip_pos_tags: bool, min_count: u64) -> Self {
         Self {
             url: url.to_string(),
-            lines_read: 0,
             content_length: None,
             skip_pos_tags,
             min_count,
-            _state: HttpReaderState::Pending,
         }
     }
 
@@ -1142,28 +1120,6 @@ pub fn stream_aggregated_from_cached_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    fn create_test_gzip_file(content: &str) -> NamedTempFile {
-        use flate2::write::GzEncoder;
-        use flate2::Compression;
-
-        let file = NamedTempFile::new().expect("Failed to create temp file");
-        let path = file.path().to_owned();
-
-        {
-            let file = File::create(&path).expect("Failed to create file");
-            let mut encoder = GzEncoder::new(file, Compression::default());
-            encoder
-                .write_all(content.as_bytes())
-                .expect("Failed to write");
-            encoder.finish().expect("Failed to finish compression");
-        }
-
-        // Reopen so the tempfile handle points to the written file
-        NamedTempFile::new().expect("Failed to create temp file")
-    }
 
     #[test]
     fn test_reader_builder() {

@@ -90,7 +90,7 @@ pub enum LaTeXTokenKind {
     Comment(String),
     /// Whitespace (if preserved).
     Whitespace(String),
-    /// Parameter placeholder: #1, #2, etc.
+    /// Macro parameter token: #1, #2, etc.
     Parameter(u8),
     /// Subscript operator: _
     Subscript,
@@ -237,7 +237,6 @@ impl LaTeXTokenizer {
 
     /// Tokenize and return an iterator over tokens.
     pub fn tokenize_iter<'a>(&'a self, input: &'a str) -> impl Iterator<Item = LaTeXToken> + 'a {
-        let lexer = Lexer::new(input, &self.config);
         let preserve_whitespace = self.config.preserve_whitespace;
         let preserve_comments = self.config.preserve_comments;
 
@@ -272,7 +271,6 @@ impl Default for LaTeXTokenizer {
 
 /// Internal lexer state machine.
 struct Lexer<'a> {
-    input: &'a str,
     chars: Peekable<Chars<'a>>,
     pos: usize,
     config: &'a TokenizerConfig,
@@ -287,7 +285,6 @@ struct Lexer<'a> {
 impl<'a> Lexer<'a> {
     fn new(input: &'a str, config: &'a TokenizerConfig) -> Self {
         Self {
-            input,
             chars: input.chars().peekable(),
             pos: 0,
             config,

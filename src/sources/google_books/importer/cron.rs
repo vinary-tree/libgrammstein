@@ -149,14 +149,14 @@ impl CheckpointState {
 /// ```
 #[cfg(feature = "google-books")]
 pub async fn run_import_with_periodic_checkpoints<F>(
-    mut importer: GoogleBooksImporter,
+    importer: GoogleBooksImporter,
     progress: F,
     checkpoint_interval_ms: u64,
 ) -> Result<ImportStats, ImportError>
 where
     F: FnMut(ImportProgress) + Send + 'static,
 {
-    use crate::util::cron::{spawn_cron_with_interval, TaskMetadata};
+    use crate::util::cron::spawn_cron_with_interval;
     use std::sync::atomic::Ordering as AtomicOrdering;
 
     let terminating = Arc::new(AtomicBool::new(false));

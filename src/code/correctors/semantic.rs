@@ -482,7 +482,7 @@ mod tests {
             "Mock"
         }
         fn tree_sitter_language(&self) -> tree_sitter::Language {
-            panic!("Not implemented for tests")
+            tree_sitter_rust::LANGUAGE.into()
         }
         fn keywords(&self) -> &[&str] {
             &[]

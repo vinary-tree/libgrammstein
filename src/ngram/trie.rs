@@ -17,7 +17,8 @@
 //! New code should use vocabulary-indexed encoding via [`crate::ngram::vocabulary`].
 
 use super::entry::NgramEntry;
-use liblevenshtein::dictionary::MutableMappedDictionary;
+use libdictenstein::persistent_artrie::SharedTrieAccess;
+use liblevenshtein::dictionary::{MappedDictionaryNode, MutableMappedDictionary};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -47,16 +48,16 @@ impl IterableDictionary for liblevenshtein::dictionary::pathmap::PathMapDictiona
 }
 
 // Implement IterableDictionary for the disk-backed char ARTrie (shared handle).
-// `SharedCharARTrie<V> = Arc<RwLock<PersistentARTrieChar<V>>>` already implements
-// `MutableMappedDictionary<Value = NgramEntry>` (libdictenstein
-// persistent_artrie_char/mod.rs:718), so the supertrait holds; this adds the
-// portable-serialization iteration hook so the type can back HybridLanguageModel /
-// NgramModel / TrainerBuilder.
+// `SharedCharARTrie<V> = Arc<PersistentARTrieChar<V>>` (F4 lock-collapse) already
+// implements `MutableMappedDictionary<Value = NgramEntry>`, so the supertrait holds;
+// this adds the portable-serialization iteration hook so the type can back
+// HybridLanguageModel / NgramModel / TrainerBuilder.
 impl IterableDictionary for libdictenstein::persistent_artrie_char::SharedCharARTrie<NgramEntry> {
     fn iter_all(&self) -> Box<dyn Iterator<Item = (String, NgramEntry)> + '_> {
-        // `iter_with_values()` borrows the RwLock read guard; materialize into an
-        // owned Vec so the returned iterator does not borrow a dropped guard. The
-        // collect is load-bearing (lifetime detach), not a `needless_collect`.
+        // `iter_with_values()` borrows the lock-free `SharedTrieAccess` read guard;
+        // materialize into an owned Vec so the returned iterator does not borrow a
+        // dropped guard. The collect is load-bearing (lifetime detach), not a
+        // `needless_collect`.
         let entries: Vec<(String, NgramEntry)> = self.read().iter_with_values().collect();
         Box::new(entries.into_iter())
     }
@@ -71,6 +72,7 @@ impl IterableDictionary for libdictenstein::persistent_artrie_char::SharedCharAR
 impl<D> IterableDictionary for super::vocabulary_indexed::VocabularyIndexedDictionary<D>
 where
     D: IterableDictionary,
+    D::Node: MappedDictionaryNode<Unit = char>,
 {
     fn iter_all(&self) -> Box<dyn Iterator<Item = (String, NgramEntry)> + '_> {
         let delimiter = self.delimiter().to_string();
@@ -491,14 +493,13 @@ mod tests {
     #[test]
     fn iter_all_shared_char_artrie_roundtrip() {
         use libdictenstein::persistent_artrie_char::{PersistentARTrieChar, SharedCharARTrie};
-        use parking_lot::RwLock;
         use std::collections::HashMap;
         use std::sync::Arc;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let trie = PersistentARTrieChar::<NgramEntry>::create(dir.path().join("c.artrie"))
             .expect("create counts trie");
-        let backend: SharedCharARTrie<NgramEntry> = Arc::new(RwLock::new(trie));
+        let backend: SharedCharARTrie<NgramEntry> = Arc::new(trie);
         backend.insert_with_value("ab", NgramEntry::new(3));
         backend.insert_with_value("cd", NgramEntry::with_stats(5, 2, 1));
 
@@ -513,16 +514,15 @@ mod tests {
         use crate::ngram::vocabulary::create_vocabulary;
         use crate::ngram::vocabulary_indexed::VocabularyIndexedDictionary;
         use libdictenstein::persistent_artrie_char::{PersistentARTrieChar, SharedCharARTrie};
-        use parking_lot::RwLock;
         use std::collections::HashMap;
         use std::sync::Arc;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let vocab = create_vocabulary(&dir.path().join("v.artrie")).expect("vocab");
-        let counts: SharedCharARTrie<NgramEntry> = Arc::new(RwLock::new(
+        let counts: SharedCharARTrie<NgramEntry> = Arc::new(
             PersistentARTrieChar::<NgramEntry>::create(dir.path().join("c.artrie"))
                 .expect("counts"),
-        ));
+        );
         let dict = VocabularyIndexedDictionary::with_delimiter(counts, vocab, '|');
 
         // Insert via the MutableMappedDictionary surface (splits on '|' →
@@ -548,15 +548,14 @@ mod tests {
             decode_key_to_indices, VocabularyIndexedDictionary,
         };
         use libdictenstein::persistent_artrie_char::{PersistentARTrieChar, SharedCharARTrie};
-        use parking_lot::RwLock;
         use std::sync::Arc;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let vocab = create_vocabulary(&dir.path().join("v.artrie")).expect("vocab");
-        let counts: SharedCharARTrie<NgramEntry> = Arc::new(RwLock::new(
+        let counts: SharedCharARTrie<NgramEntry> = Arc::new(
             PersistentARTrieChar::<NgramEntry>::create(dir.path().join("c.artrie"))
                 .expect("counts"),
-        ));
+        );
         let dict = VocabularyIndexedDictionary::with_delimiter(counts.clone(), vocab, '|');
 
         // One valid n-gram (assigns vocab ids 1,2), …

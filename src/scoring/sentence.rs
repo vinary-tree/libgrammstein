@@ -65,10 +65,3 @@ where
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Tests will be added once NgramModel training is complete
-}

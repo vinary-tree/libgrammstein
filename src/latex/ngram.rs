@@ -116,22 +116,46 @@ impl ModeDetector {
         let mut command_count = 0;
         let mut math_count = 0;
         let mut text_count = 0;
+        let mut command_run = 0;
+        let mut math_run = 0;
+        let mut max_command_run = 0;
+        let mut max_math_run = 0;
 
         for token in tokens {
             match self.token_mode(token) {
-                LaTeXMode::Command => command_count += 1,
-                LaTeXMode::Math => math_count += 1,
-                LaTeXMode::Text => text_count += 1,
-                LaTeXMode::Mixed => {}
+                LaTeXMode::Command => {
+                    command_count += 1;
+                    command_run += 1;
+                    math_run = 0;
+                    max_command_run = max_command_run.max(command_run);
+                }
+                LaTeXMode::Math => {
+                    math_count += 1;
+                    math_run += 1;
+                    command_run = 0;
+                    max_math_run = max_math_run.max(math_run);
+                }
+                LaTeXMode::Text => {
+                    text_count += 1;
+                    command_run = 0;
+                    math_run = 0;
+                }
+                LaTeXMode::Mixed => {
+                    command_run = 0;
+                    math_run = 0;
+                }
             }
         }
 
         let total = tokens.len();
         let threshold = total / 2;
 
-        if math_count > threshold || tokens.iter().any(|t| t.in_math) {
+        if max_math_run >= self.math_threshold
+            || math_count > threshold
+            || tokens.iter().any(|t| t.in_math)
+        {
             LaTeXMode::Math
-        } else if command_count > threshold {
+        } else if max_command_run >= self.command_threshold || command_count > threshold {
             LaTeXMode::Command
         } else if text_count > threshold {
             LaTeXMode::Text
@@ -401,6 +425,11 @@ where
             self.text_buffer.len(),
             self.combined_buffer.len(),
         )
+    }
+
+    /// Get the trainer configuration.
+    pub fn config(&self) -> &NgramConfig {
+        &self.config
     }
 }
 

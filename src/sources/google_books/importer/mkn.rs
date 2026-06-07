@@ -23,7 +23,7 @@ use parking_lot::RwLock;
 use crate::ngram::vocabulary::{decode_ngram_key_bytes, encode_indices_to_key_bytes};
 
 use super::super::checkpoint::MknPhase;
-use super::super::events::{ImportEvent, LogLevel};
+use super::super::events::ImportEvent;
 use super::super::sharding::MknAggregator;
 use super::{GoogleBooksImporter, ImportError};
 
@@ -40,10 +40,6 @@ impl GoogleBooksImporter {
     ///
     /// These statistics are used by MKN smoothing to estimate probabilities
     /// for unseen n-grams based on lower-order distributions.
-    fn compute_mkn_stats(&mut self) -> Result<(), ImportError> {
-        self.compute_mkn_stats_with_events(None)
-    }
-
     /// Compute MKN stats with optional event emission for TUI progress.
     pub(super) fn compute_mkn_stats_with_events(
         &mut self,
@@ -123,11 +119,6 @@ impl GoogleBooksImporter {
         }
     }
 
-    /// Compute MKN stats for sharded storage using MknAggregator.
-    fn compute_mkn_stats_sharded(&self) -> Result<(), ImportError> {
-        self.compute_mkn_stats_sharded_with_events(None).map(|_| ())
-    }
-
     /// Compute MKN stats for sharded storage with optional event emission.
     ///
     /// Returns (continuation_entries, frequency_entries) counts on success.
@@ -180,7 +171,7 @@ impl GoogleBooksImporter {
         let mut frequency_entries = 0u64;
 
         {
-            let mut trie = mkn_trie.write();
+            let trie = mkn_trie.write();
 
             // Store frequency counts for each order
             for (order, counts) in mkn_stats.frequency_counts.iter().enumerate() {
@@ -250,12 +241,6 @@ impl GoogleBooksImporter {
         );
 
         Ok((continuation_entries, frequency_entries))
-    }
-
-    /// Compute MKN stats for single-trie storage (original behavior).
-    fn compute_mkn_stats_single_trie(&self) -> Result<(), ImportError> {
-        self.compute_mkn_stats_single_trie_with_events(None)
-            .map(|_| ())
     }
 
     /// Compute MKN stats for single-trie storage with optional event emission.
@@ -388,7 +373,7 @@ impl GoogleBooksImporter {
             // Single-trie MKN writes to the data trie (same as checkpoint
             // trie in single-trie mode).
             let trie_arc = self.storage.checkpoint_trie();
-            let mut trie = trie_arc.write();
+            let trie = trie_arc.write();
 
             // Count unique prefixes per suffix (N1+(suffix))
             let mut suffix_counts: std::collections::HashMap<Vec<u8>, u64> =
@@ -453,7 +438,7 @@ impl GoogleBooksImporter {
         let mut frequency_entries = 0u64;
         {
             let trie_arc = self.storage.checkpoint_trie();
-            let mut trie = trie_arc.write();
+            let trie = trie_arc.write();
 
             trie.upsert_bytes(b"\x00mkn\x00n1", n1)
                 .map_err(|e| ImportError::Trie(format!("Failed to write MKN n1: {}", e)))?;

@@ -109,11 +109,21 @@ pub enum TopicError {
 
     /// Not enough documents for topic extraction.
     #[error("Not enough documents: need at least {minimum}, have {actual}")]
-    InsufficientDocuments { minimum: usize, actual: usize },
+    InsufficientDocuments {
+        /// Minimum number of documents required.
+        minimum: usize,
+        /// Actual number of documents supplied.
+        actual: usize,
+    },
 
     /// Embedding dimension mismatch.
     #[error("Embedding dimension mismatch: expected {expected}, got {actual}")]
-    DimensionMismatch { expected: usize, actual: usize },
+    DimensionMismatch {
+        /// Expected embedding dimension.
+        expected: usize,
+        /// Actual embedding dimension.
+        actual: usize,
+    },
 
     /// Invalid configuration.
     #[error("Invalid configuration: {0}")]

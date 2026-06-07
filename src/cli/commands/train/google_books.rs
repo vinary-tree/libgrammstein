@@ -2,12 +2,8 @@
 
 #![cfg(feature = "google-books")]
 
-use std::sync::Arc;
-
-use console::style;
-
 use crate::cli::args::ImportGoogleBooksArgs;
-use crate::cli::error::{print_success, CliError, CliResult};
+use crate::cli::error::{CliError, CliResult};
 
 pub(super) fn import_google_books(
     args: ImportGoogleBooksArgs,

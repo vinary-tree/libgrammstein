@@ -38,16 +38,14 @@ fn main() {
 /// and Rust's log crate only allows one global logger. If env_logger
 /// is initialized first, the TUI's LogTracer cannot take over, causing
 /// log output to corrupt the TUI display.
-fn should_skip_env_logger(cli: &Cli) -> bool {
-    use libgrammstein::cli::Commands;
-
+fn should_skip_env_logger(_cli: &Cli) -> bool {
     // Import-google-books uses TUI unless --quiet or --no-progress is set
     #[cfg(feature = "google-books")]
-    if let Commands::Train(ref train) = cli.command {
+    if let libgrammstein::cli::Commands::Train(ref train) = _cli.command {
         use libgrammstein::cli::args::TrainCommands;
         if let TrainCommands::ImportGoogleBooks(ref args) = train {
             // TUI is active when not quiet and progress is enabled
-            return !cli.quiet && !args.resources.no_progress;
+            return !_cli.quiet && !args.resources.no_progress;
         }
     }
 

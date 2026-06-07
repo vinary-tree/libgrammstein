@@ -424,7 +424,6 @@ fn test_correction_apply_multiple() {
 #[cfg(test)]
 mod ensemble_tests {
     use super::*;
-    use libgrammstein::code::correctors::EnsembleCorrector;
 
     #[test]
     fn test_ensemble_lexical_only() {

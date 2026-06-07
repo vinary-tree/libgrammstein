@@ -4,7 +4,8 @@
  *
  * This specification models the worker lifecycle and graceful shutdown
  * protocol from:
- *   src/sources/google_books/importer.rs
+ *   src/sources/google_books/importer/import_ops.rs
+ *   src/sources/google_books/importer/worker_pool.rs
  *
  * Worker States:
  *   - Idle: No job, waiting to poll queue
@@ -19,18 +20,19 @@
  *   2. NoJobLost: Every started job sends a result before worker exits
  *   3. CheckpointAfterDrain: Checkpoint happens only after result channel drained
  *   4. ProcessingHasJob: Worker in Processing state always has a job
+ *   5. ForceQuitSkipsCheckpoint: Force quit aborts without checkpointing
  *
  * Spec-to-Code Traceability:
  *
  * TLA+ Variable            | Rust Implementation                  | Location
  * -------------------------|--------------------------------------|----------
- * shutdown_signaled        | shutdown_rx (watch channel)          | importer.rs:638
- * worker_state             | worker_task loop state               | importer.rs:646
- * worker_job               | Job from job_rx.recv()               | importer.rs:663
- * job_queue                | async_channel<Job>                   | importer.rs:636-637
- * results_channel          | mpsc::channel<JobResult>             | importer.rs:2624-2625
- * results_received         | results_received counter             | importer.rs:2756
- * checkpoint_state         | Implicit in main loop control        | importer.rs:2877-2908
+ * shutdown_signaled        | shutdown_rx (watch channel)          | worker_pool.rs
+ * worker_state             | worker_task loop state               | worker_pool.rs
+ * worker_job               | Job from job_rx.recv()               | worker_pool.rs
+ * job_queue                | async_channel<Job>                   | import_ops.rs
+ * results_channel          | mpsc::channel<JobResult>             | import_ops.rs
+ * results_received         | results_received counter             | import_ops.rs
+ * checkpoint_state         | cancellation/checkpoint control      | import_ops.rs
  *
  * TLA+ Action              | Rust Location                        | Lines
  * -------------------------|--------------------------------------|------
@@ -39,12 +41,14 @@
  * WorkerPickJob                 | job_rx.recv()                   | 663
  * WorkerFinishProcessing        | process_single_attempt() return | 799-800
  * WorkerSendResult              | result_tx.send(job_result)      | 820
- * SignalShutdown                | signal_all_shutdown()           | 2881
- * ReceiveResult                 | result_rx.recv() in drain loop  | 2892
- * StartCheckpoint               | After drain loop exits          | 2900
+ * SignalShutdown                | signal_all_shutdown()
+ * ReceiveResult                 | result_rx.recv() in drain loop
+ * StartCheckpoint               | after all workers exit
+ * ForceQuit                     | ForceQuit command path
+ * AbortDrainWithoutCheckpoint   | worker-exit tracking failure path
  *)
 
-EXTENDS Naturals, FiniteSets, Sequences, TLC
+EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
     \* @type: Set(Str);
@@ -65,9 +69,10 @@ VARIABLES
     \* @type: Str -> Str;
     worker_job,         \* Worker -> Job | NONE (current job being processed)
 
-    \* Job queue
-    \* @type: Seq(Str);
-    job_queue,          \* Sequence of jobs waiting to be processed
+    \* Job queue abstraction. FIFO ordering is irrelevant to the shutdown
+    \* safety and liveness properties verified here.
+    \* @type: Set(Str);
+    job_queue,          \* Set of jobs waiting to be processed
 
     \* Result channel
     \* @type: Set(Str);
@@ -81,7 +86,8 @@ VARIABLES
 
     \* Checkpoint state
     \* @type: Str;
-    checkpoint_state    \* {NotStarted, Draining, Checkpointing, Done}
+    checkpoint_state    \* {NotStarted, Draining, Checkpointing, Done,
+                            \* ForceQuitAborted, DrainAborted}
 
 (* State constants *)
 Idle == "Idle"
@@ -97,42 +103,25 @@ NotStarted == "NotStarted"
 Draining == "Draining"
 Checkpointing == "Checkpointing"
 Done == "Done"
-
-(* Helper functions *)
-QueueContains(q, j) == \E i \in 1..Len(q): q[i] = j
-
-RemoveFromQueue(q, j) ==
-    SelectSeq(q, LAMBDA x: x # j)
-
-UniqueSeq(q) ==
-    \A i, k \in 1..Len(q): q[i] = q[k] => i = k
+ForceQuitAborted == "ForceQuitAborted"
+DrainAborted == "DrainAborted"
 
 (* Type invariant *)
 TypeOK ==
     /\ worker_state \in [Workers -> {Idle, PollingQueue, Processing, SendingResult, Exiting, Exited}]
     /\ worker_job \in [Workers -> Jobs \cup {NONE}]
-    /\ job_queue \in Seq(Jobs)
+    /\ job_queue \subseteq Jobs
     /\ results_pending \subseteq Jobs
     /\ results_received \subseteq Jobs
     /\ shutdown_signaled \in BOOLEAN
-    /\ checkpoint_state \in {NotStarted, Draining, Checkpointing, Done}
-
-(*
- * Set of all permutations of a set for initial queue state.
- * This allows TLC to enumerate possible initial orderings.
- *)
-RECURSIVE Perms(_)
-Perms(S) ==
-    IF S = {} THEN {<<>>}
-    ELSE UNION {
-        {<<x>> \o rest: rest \in Perms(S \ {x})}: x \in S
-    }
+    /\ checkpoint_state \in {NotStarted, Draining, Checkpointing, Done,
+                             ForceQuitAborted, DrainAborted}
 
 (* Initial state: all workers idle, jobs queued, no shutdown *)
 Init ==
     /\ worker_state = [w \in Workers |-> Idle]
     /\ worker_job = [w \in Workers |-> NONE]
-    /\ job_queue \in Perms(Jobs)
+    /\ job_queue = Jobs
     /\ results_pending = {}
     /\ results_received = {}
     /\ shutdown_signaled = FALSE
@@ -183,12 +172,11 @@ WorkerShutdownWhileWaiting(w) ==
  *)
 WorkerPickJob(w) ==
     /\ worker_state[w] = PollingQueue
-    /\ Len(job_queue) > 0
-    /\ LET job == Head(job_queue)
-       IN
-           /\ worker_state' = [worker_state EXCEPT ![w] = Processing]
-           /\ worker_job' = [worker_job EXCEPT ![w] = job]
-           /\ job_queue' = Tail(job_queue)
+    /\ job_queue # {}
+    /\ \E job \in job_queue:
+        /\ worker_state' = [worker_state EXCEPT ![w] = Processing]
+        /\ worker_job' = [worker_job EXCEPT ![w] = job]
+        /\ job_queue' = job_queue \ {job}
     /\ UNCHANGED <<results_pending, results_received, shutdown_signaled, checkpoint_state>>
 
 (*
@@ -197,7 +185,7 @@ WorkerPickJob(w) ==
  *)
 WorkerQueueEmpty(w) ==
     /\ worker_state[w] = PollingQueue
-    /\ Len(job_queue) = 0
+    /\ job_queue = {}
     /\ ~shutdown_signaled  \* If shutdown, WorkerShutdownWhileWaiting takes priority
     /\ worker_state' = [worker_state EXCEPT ![w] = Exiting]
     /\ UNCHANGED <<worker_job, job_queue, results_pending, results_received,
@@ -245,7 +233,7 @@ WorkerExit(w) ==
 
 (*
  * Main task signals shutdown to all workers.
- * Models: importer.rs:2925 (signal_all_shutdown)
+ * Models: signal_all_shutdown().
  *)
 SignalShutdown ==
     /\ ~shutdown_signaled
@@ -255,7 +243,7 @@ SignalShutdown ==
 
 (*
  * Main task receives a result during drain phase.
- * Models: importer.rs:2936-2942 (result_rx.recv() in drain loop)
+ * Models: result_rx.recv() in the cancellation drain loop.
  *)
 ReceiveResult ==
     /\ checkpoint_state = Draining
@@ -267,7 +255,7 @@ ReceiveResult ==
 
 (*
  * Main task starts checkpoint after all results drained.
- * Models: importer.rs:2944-2947 (after drain loop, before save_checkpoint)
+ * Models: after cancellation observes every worker exit, before save_checkpoint.
  *
  * Precondition: No results pending AND all workers have exited.
  * This ensures no more results will be produced.
@@ -282,11 +270,33 @@ StartCheckpoint ==
 
 (*
  * Checkpoint completes.
- * Models: importer.rs:2947 (save_checkpoint() returns)
+ * Models: save_checkpoint() returns.
  *)
 CompleteCheckpoint ==
     /\ checkpoint_state = Checkpointing
     /\ checkpoint_state' = Done
+    /\ UNCHANGED <<worker_state, worker_job, job_queue, results_pending,
+                   results_received, shutdown_signaled>>
+
+(*
+ * Force quit interrupts without writing a checkpoint. It still signals workers
+ * to stop, but the main task returns before waiting for checkpoint safety.
+ *)
+ForceQuit ==
+    /\ checkpoint_state \in {NotStarted, Draining}
+    /\ shutdown_signaled' = TRUE
+    /\ checkpoint_state' = ForceQuitAborted
+    /\ UNCHANGED <<worker_state, worker_job, job_queue, results_pending,
+                   results_received>>
+
+(*
+ * If worker-exit tracking fails during graceful cancellation, the main task
+ * aborts rather than checkpointing from an unproved worker state.
+ *)
+AbortDrainWithoutCheckpoint ==
+    /\ checkpoint_state = Draining
+    /\ shutdown_signaled
+    /\ checkpoint_state' = DrainAborted
     /\ UNCHANGED <<worker_state, worker_job, job_queue, results_pending,
                    results_received, shutdown_signaled>>
 
@@ -308,6 +318,8 @@ Next ==
     \/ ReceiveResult
     \/ StartCheckpoint
     \/ CompleteCheckpoint
+    \/ ForceQuit
+    \/ AbortDrainWithoutCheckpoint
 
 (* Fairness: all enabled actions eventually happen *)
 vars == <<worker_state, worker_job, job_queue, results_pending, results_received,
@@ -372,13 +384,21 @@ CheckpointAfterDrain ==
         /\ results_pending = {}
         /\ \A w \in Workers: worker_state[w] = Exited
 
+CheckpointRequiresShutdown ==
+    checkpoint_state \in {Draining, Checkpointing, Done,
+                          ForceQuitAborted, DrainAborted} => shutdown_signaled
+
+AbortStatesDoNotCheckpoint ==
+    checkpoint_state \in {ForceQuitAborted, DrainAborted} =>
+        checkpoint_state \notin {Checkpointing, Done}
+
 (*
  * No job is lost: a job that was picked up has its result in pending or received.
  * More precisely: jobs not in queue must have their result somewhere.
  *)
 NoJobLost ==
     \A j \in Jobs:
-        (~QueueContains(job_queue, j) /\ ~(\E w \in Workers: worker_job[w] = j)) =>
+        (j \notin job_queue /\ ~(\E w \in Workers: worker_job[w] = j)) =>
             (j \in results_pending \/ j \in results_received)
 
 (*
@@ -387,13 +407,15 @@ NoJobLost ==
  * same job concurrently.
  *)
 JobUniqueOwnership ==
-    /\ UniqueSeq(job_queue)
-    /\ \A j \in Jobs:
-        Cardinality({loc \in {"queue", "pending", "received"}:
-            (loc = "queue" /\ QueueContains(job_queue, j)) \/
-            (loc = "pending" /\ j \in results_pending) \/
-            (loc = "received" /\ j \in results_received)})
-        + Cardinality({w \in Workers: worker_job[w] = j}) <= 1
+    /\ job_queue \cap results_pending = {}
+    /\ job_queue \cap results_received = {}
+    /\ \A w \in Workers:
+        worker_job[w] # NONE =>
+            /\ worker_job[w] \notin job_queue
+            /\ worker_job[w] \notin results_pending
+            /\ worker_job[w] \notin results_received
+    /\ \A w1, w2 \in Workers:
+        worker_job[w1] # NONE /\ worker_job[w1] = worker_job[w2] => w1 = w2
 
 (*
  * Combined safety invariant.
@@ -405,6 +427,8 @@ Safety ==
     /\ IdleNoJob
     /\ ResultsDisjoint
     /\ CheckpointAfterDrain
+    /\ CheckpointRequiresShutdown
+    /\ AbortStatesDoNotCheckpoint
     /\ NoJobLost
     /\ JobUniqueOwnership
 
@@ -427,10 +451,12 @@ ProcessingEventuallySendsResult ==
             (worker_state[w] \in {Idle, Exiting, Exited})
 
 (*
- * Checkpoint eventually completes after shutdown.
+ * Checkpoint eventually either completes after graceful shutdown or reaches an
+ * explicit no-checkpoint abort state after force quit / drain failure.
  *)
 CheckpointEventuallyCompletes ==
-    shutdown_signaled ~> checkpoint_state = Done
+    shutdown_signaled ~>
+        checkpoint_state \in {Done, ForceQuitAborted, DrainAborted}
 
 (*
  * All jobs eventually complete (result received).
@@ -452,6 +478,6 @@ JobsInFlight == Cardinality({w \in Workers: worker_job[w] # NONE})
  *)
 Quiescent ==
     /\ \A w \in Workers: worker_state[w] \in {Idle, Exited}
-    /\ Len(job_queue) = 0
+    /\ job_queue = {}
 
 =============================================================================

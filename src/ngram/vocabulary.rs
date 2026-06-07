@@ -975,7 +975,10 @@ mod tests {
         // Insert enough words to test multi-byte varint
         // Indices start at 1, so word0 gets index 1, word199 gets index 200
         for i in 0..200 {
-            vocab.write().insert(&format!("word{}", i));
+            vocab
+                .write()
+                .insert(&format!("word{}", i))
+                .expect("insert word");
         }
 
         // Encode an n-gram with indices that span single and multi-byte varints

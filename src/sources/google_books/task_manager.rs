@@ -444,8 +444,6 @@ pub struct MetricsSnapshot {
 pub struct TaskManager {
     /// Receiver for the regular (FIFO) queue.
     regular_rx: Mutex<mpsc::Receiver<Job>>,
-    /// Sender for the regular queue (kept for requeuing if needed).
-    regular_tx: mpsc::Sender<Job>,
     /// Priority queue for retry tasks.
     retry_queue: Mutex<RetryQueue>,
     /// Shutdown signal receiver.
@@ -480,7 +478,6 @@ impl TaskManager {
 
         let manager = Self {
             regular_rx: Mutex::new(regular_rx),
-            regular_tx: regular_tx.clone(),
             retry_queue: Mutex::new(RetryQueue::new()),
             shutdown,
             metrics: Arc::clone(&metrics),

@@ -48,7 +48,12 @@ pub enum CheckpointError {
 
     /// Checkpoint version mismatch.
     #[error("Checkpoint version mismatch: expected {expected}, found {found}")]
-    VersionMismatch { expected: u32, found: u32 },
+    VersionMismatch {
+        /// Version expected by this library.
+        expected: u32,
+        /// Version found in the checkpoint file.
+        found: u32,
+    },
 
     /// Checkpoint integrity error.
     #[error("Checkpoint integrity error: {0}")]
@@ -56,7 +61,12 @@ pub enum CheckpointError {
 
     /// Shard state inconsistency.
     #[error("Shard {shard_key} state inconsistency: {message}")]
-    ShardInconsistency { shard_key: String, message: String },
+    ShardInconsistency {
+        /// Shard key whose checkpoint state was inconsistent.
+        shard_key: String,
+        /// Human-readable description of the inconsistency.
+        message: String,
+    },
 }
 
 /// Result type for checkpoint operations.

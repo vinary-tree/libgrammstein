@@ -98,6 +98,11 @@ impl TopicExtractor {
         self
     }
 
+    /// Get the checkpoint loaded by [`TopicExtractor::resume`], if any.
+    pub fn checkpoint(&self) -> Option<&TopicExtractionCheckpoint> {
+        self.checkpoint.as_ref()
+    }
+
     /// Extract topics from embeddings and document texts.
     ///
     /// # Arguments
@@ -146,7 +151,7 @@ impl TopicExtractor {
         let clustering_result = self.run_clustering(embeddings, &mut checkpoint)?;
 
         // Phase 2: Build vocabulary and extract keywords
-        let (keywords_per_topic, vocabulary) = self.run_keyword_extraction(
+        let (keywords_per_topic, _vocabulary) = self.run_keyword_extraction(
             documents,
             &clustering_result.assignments,
             &mut checkpoint,

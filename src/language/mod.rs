@@ -8,7 +8,7 @@ mod registry;
 mod tag;
 mod tokenizer;
 
-pub use detection::{detect_language, LanguageDetectionError};
+pub use detection::{detect_from_sentences, detect_language, LanguageDetectionError};
 pub use registry::{ModelEntry, ModelRegistry};
-pub use tag::{LanguageTag, LanguageTagError};
-pub use tokenizer::{create_tokenizer, Tokenizer, WhitespaceTokenizer};
+pub use tag::{wikipedia_dump_url, LanguageTag, LanguageTagError, WIKIPEDIA_URLS};
+pub use tokenizer::{create_tokenizer, CharacterTokenizer, Tokenizer, WhitespaceTokenizer};

@@ -6,7 +6,6 @@ use chrono::Utc;
 use console::style;
 
 use crate::cli::args::TrainEmbeddingArgs;
-use crate::cli::checkpoint::{CheckpointManager, EmbeddingCheckpoint, EmbeddingCheckpointConfig};
 use crate::cli::error::{print_success, CliError, CliResult};
 use crate::cli::progress::{setup_interrupt_handler, TrainingProgress, TrainingStats};
 use crate::corpus::CorpusReader;

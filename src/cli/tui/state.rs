@@ -25,6 +25,7 @@ pub struct TuiState {
 
     /// N-gram orders being imported (e.g., 1..=5).
     pub min_order: u8,
+    /// Maximum n-gram order being imported.
     pub max_order: u8,
 
     /// Current n-gram order being processed.
@@ -239,7 +240,12 @@ pub enum WorkerStatus {
     Completed,
 
     /// Worker is retrying after an error.
-    Retrying { attempt: u32, max_attempts: u32 },
+    Retrying {
+        /// Current retry attempt.
+        attempt: u32,
+        /// Maximum retry attempts before failure.
+        max_attempts: u32,
+    },
 }
 
 /// A log entry for the TUI log panel.

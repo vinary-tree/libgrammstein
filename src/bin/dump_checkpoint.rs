@@ -92,18 +92,14 @@ fn looks_like_vocab(path: &Path) -> Result<bool, Box<dyn std::error::Error>> {
 const CHECKPOINT_KEY_PREFIX: &str = "\x00__ckpt__";
 const CHECKPOINT_VERSION_KEY: &str = "\x00__ckpt__:version";
 const CHECKPOINT_MKN_PHASE_KEY: &str = "\x00__ckpt__:mkn_phase";
-const CHECKPOINT_BYTE_OFFSET_KEY: &str = "\x00__ckpt__:byte_offset";
 const CHECKPOINT_TIMESTAMP_KEY: &str = "\x00__ckpt__:timestamp";
 const CHECKPOINT_NGRAMS_PROCESSED_KEY: &str = "\x00__ckpt__:ngrams_processed";
 const CHECKPOINT_UNIQUE_NGRAMS_KEY: &str = "\x00__ckpt__:unique_ngrams";
 const CHECKPOINT_FILES_PROCESSED_KEY: &str = "\x00__ckpt__:files_processed";
-const CHECKPOINT_BYTES_DOWNLOADED_KEY: &str = "\x00__ckpt__:bytes_downloaded";
-const CHECKPOINT_ELAPSED_KEY: &str = "\x00__ckpt__:elapsed_seconds";
 const CHECKPOINT_NGRAMS_BY_ORDER_PREFIX: &str = "\x00__ckpt__:ngrams_by_order:";
 const CHECKPOINT_PREFIX_KEY_PREFIX: &str = "\x00__ckpt__:prefix:";
 const CHECKPOINT_ORDER_COMPLETE_PREFIX: &str = "\x00__ckpt__:order_complete:";
 const CHECKPOINT_BITMAP_PREFIX: &str = "\x00__ckpt__:bitmap:";
-const CHECKPOINT_ORDER_NGRAMS_PREFIX: &str = "\x00__ckpt__:order_ngrams:";
 
 /// Prefix status codes
 const STATUS_COMPLETED: u64 = 1;

@@ -573,9 +573,7 @@ mod tests {
 
     #[test]
     fn test_clear_topic_model() {
-        use crate::topic::{
-            ClusteringConfig, CtfidfConfig, Topic, TopicConfig, TopicId, TopicModel,
-        };
+        use crate::topic::{Topic, TopicId};
 
         let config = RagIndexConfig {
             embedding_dim: 3,
@@ -587,7 +585,6 @@ mod tests {
         index.add_document(doc).unwrap();
 
         // Manually set a topic model
-        let topic_config = TopicConfig::default();
         let topic = Topic::new(TopicId::new(0)).with_document_count(1);
         let mut topics = std::collections::HashMap::new();
         topics.insert(TopicId::new(0), topic);

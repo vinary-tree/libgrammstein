@@ -154,13 +154,13 @@ Init ==
 (*
  * Worker picks up a job from the queue.
  *)
-WorkerPickJob(w) ==
+WorkerPickJobBy(w, j) ==
     /\ worker_state[w] = Idle
-    /\ job_queue # {}
-    /\ \E j \in job_queue:
-        /\ worker_job' = [worker_job EXCEPT ![w] = j]
-        /\ job_queue' = job_queue \ {j}
-        /\ worker_state' = [worker_state EXCEPT ![w] = Processing]
+    /\ worker_job[w] = NONE
+    /\ j \in job_queue
+    /\ worker_job' = [worker_job EXCEPT ![w] = j]
+    /\ job_queue' = job_queue \ {j}
+    /\ worker_state' = [worker_state EXCEPT ![w] = Processing]
     /\ UNCHANGED <<shard_state, shard_dirty_count, shard_syncer,
                    deferred_queue, completed_jobs, unsafe_write_attempted,
                    job_shard, checkpoint_state,
@@ -168,14 +168,18 @@ WorkerPickJob(w) ==
                    last_saved_target_shards, last_saved_synced_shards,
                    global_checkpoint_saved>>
 
+WorkerPickJob(w) ==
+    \E j \in job_queue: WorkerPickJobBy(w, j)
+
 (*
  * Worker checks if target shard is syncing and defers if so.
  * This is the key "defer-and-continue" pattern.
  *)
-WorkerCheckAndDefer(w) ==
+WorkerCheckAndDeferJob(w, j) ==
     /\ worker_state[w] = Processing
-    /\ LET j == worker_job[w]
-           s == job_shard[j]
+    /\ worker_job[w] = j
+    /\ j \in Jobs
+    /\ LET s == job_shard[j]
        IN
         /\ shard_state[s] = Syncing  \* Shard is being synced
         \* Defer: put job in deferred queue, worker becomes idle
@@ -189,14 +193,18 @@ WorkerCheckAndDefer(w) ==
                    last_saved_target_shards, last_saved_synced_shards,
                    global_checkpoint_saved>>
 
+WorkerCheckAndDefer(w) ==
+    \E j \in Jobs: WorkerCheckAndDeferJob(w, j)
+
 (*
  * Worker processes job (writes to shard).
  * Only allowed if shard is NOT syncing.
  *)
-WorkerProcess(w) ==
+WorkerProcessJob(w, j) ==
     /\ worker_state[w] = Processing
-    /\ LET j == worker_job[w]
-           s == job_shard[j]
+    /\ worker_job[w] = j
+    /\ j \in Jobs
+    /\ LET s == job_shard[j]
        IN
         /\ shard_state[s] # Syncing  \* Must not be syncing
         \* Write to shard: mark dirty, increment dirty count
@@ -212,6 +220,9 @@ WorkerProcess(w) ==
                    checkpoint_state, checkpoint_synced_shards,
                    checkpoint_target_shards, last_saved_target_shards,
                    last_saved_synced_shards>>
+
+WorkerProcess(w) ==
+    \E j \in Jobs: WorkerProcessJob(w, j)
 
 (*
  * Deferred job returns to main queue (after shard sync completes).
@@ -452,15 +463,54 @@ CleanMeansZeroDirty ==
     \A s \in Shards:
         shard_state[s] = Clean => shard_dirty_count[s] = 0
 
-JobLocations(j) ==
-    Cardinality({loc \in {"queue", "deferred", "completed"}:
-        (loc = "queue" /\ j \in job_queue) \/
-        (loc = "deferred" /\ j \in deferred_queue) \/
-        (loc = "completed" /\ j \in completed_jobs)})
-    + Cardinality({w \in Workers: worker_job[w] = j})
+JobRepresented ==
+    \A j \in Jobs:
+        \/ j \in job_queue
+        \/ j \in deferred_queue
+        \/ j \in completed_jobs
+        \/ \E w \in Workers: worker_job[w] = j
+
+JobSetsDisjoint ==
+    /\ job_queue \cap deferred_queue = {}
+    /\ job_queue \cap completed_jobs = {}
+    /\ deferred_queue \cap completed_jobs = {}
+
+WorkerJobsDisjointFromSets ==
+    \A w \in Workers:
+        worker_job[w] # NONE =>
+            /\ worker_job[w] \notin job_queue
+            /\ worker_job[w] \notin deferred_queue
+            /\ worker_job[w] \notin completed_jobs
+
+WorkerJobsUnique ==
+    \A w1, w2 \in Workers:
+        worker_job[w1] # NONE /\ worker_job[w1] = worker_job[w2] => w1 = w2
+
+ProcessingHasJob ==
+    \A w \in Workers:
+        worker_state[w] = Processing => worker_job[w] # NONE
+
+IdleHasNoJob ==
+    \A w \in Workers:
+        worker_state[w] = Idle => worker_job[w] = NONE
+
+WorkerStateJobConsistency ==
+    /\ ProcessingHasJob
+    /\ IdleHasNoJob
 
 JobPartition ==
-    \A j \in Jobs: JobLocations(j) = 1
+    /\ JobRepresented
+    /\ JobSetsDisjoint
+    /\ WorkerJobsDisjointFromSets
+    /\ WorkerJobsUnique
+
+(*
+ * Once the checkpoint reaches the metadata-save phases, every shard captured
+ * at checkpoint start has successfully synced.
+ *)
+CheckpointReadyToSave ==
+    checkpoint_state \in {CkptCheckpointing, CkptSaving} =>
+        checkpoint_target_shards \subseteq checkpoint_synced_shards
 
 (*
  * Combined safety invariant.
@@ -472,7 +522,9 @@ Safety ==
     /\ CheckpointAtomicity
     /\ SyncerConsistency
     /\ CleanMeansZeroDirty
+    /\ WorkerStateJobConsistency
     /\ JobPartition
+    /\ CheckpointReadyToSave
 
 (* ---------------------------------------------------------------------------
  * Liveness Properties (under fairness)

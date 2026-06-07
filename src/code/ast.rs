@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tree_sitter::{Node, Parser, Point, Tree};
 
+const MAX_PARSE_CACHE_ENTRIES: usize = 16;
+
 /// Converts a byte offset to (line, column) position in source text.
 ///
 /// Line and column are 0-indexed to match tree-sitter conventions.
@@ -57,7 +59,12 @@ pub enum AstError {
     /// Parsing failed completely (no tree produced)
     ParseFailed,
     /// Language mismatch
-    LanguageMismatch { expected: String, got: String },
+    LanguageMismatch {
+        /// Expected language name.
+        expected: String,
+        /// Actual language name.
+        got: String,
+    },
 }
 
 impl std::fmt::Display for AstError {
@@ -238,7 +245,7 @@ pub struct CodeParser<L: CodeLanguage> {
     language: Arc<L>,
     parser: Parser,
     /// Cache of previously parsed trees for incremental parsing
-    tree_cache: HashMap<u64, Tree>,
+    tree_cache: HashMap<u64, (String, Tree)>,
 }
 
 impl<L: CodeLanguage> CodeParser<L> {
@@ -258,7 +265,20 @@ impl<L: CodeLanguage> CodeParser<L> {
 
     /// Parses source code into an AST.
     pub fn parse(&mut self, source: &str) -> Result<ParsedCode, AstError> {
-        self.parse_with_old_tree(source, None)
+        let cache_key = crate::util::hash::safe_hash(source.as_bytes());
+        if let Some((cached_source, tree)) = self.tree_cache.get(&cache_key) {
+            if cached_source == source {
+                return self.parsed_code_from_tree(tree.clone(), source);
+            }
+        }
+
+        let parsed = self.parse_with_old_tree(source, None)?;
+        if self.tree_cache.len() >= MAX_PARSE_CACHE_ENTRIES {
+            self.tree_cache.clear();
+        }
+        self.tree_cache
+            .insert(cache_key, (source.to_string(), parsed.tree.clone()));
+        Ok(parsed)
     }
 
     /// Parses source code with an optional old tree for incremental parsing.
@@ -272,6 +292,10 @@ impl<L: CodeLanguage> CodeParser<L> {
             .parse(source, old_tree)
             .ok_or(AstError::ParseFailed)?;
 
+        self.parsed_code_from_tree(tree, source)
+    }
+
+    fn parsed_code_from_tree(&self, tree: Tree, source: &str) -> Result<ParsedCode, AstError> {
         let has_errors = tree.root_node().has_error();
         let error_ranges = if has_errors {
             self.collect_errors(&tree, source)

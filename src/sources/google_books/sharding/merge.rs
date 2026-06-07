@@ -251,10 +251,9 @@ impl<'a> MergeCoordinator<'a> {
                         shard_key: key.to_string(),
                         message: e.to_string(),
                     })?;
-            let mut guard = shard.write();
-            guard
-                .flush_lockfree()
-                .map_err(|e| MergeError::Trie(format!("Shard {} flush failed: {}", key, e)))?;
+            // Overlay-default: iteration reads the overlay directly (no pre-iteration
+            // flush needed); a shared read guard suffices.
+            let guard = shard.read();
 
             let iter = guard
                 .iter_with_counts()
@@ -328,10 +327,7 @@ impl<'a> MergeCoordinator<'a> {
                         message: e.to_string(),
                     }
                 })?;
-                let mut guard = shard.write();
-                guard
-                    .flush_lockfree()
-                    .map_err(|e| MergeError::Trie(format!("Shard {} flush failed: {}", key, e)))?;
+                let guard = shard.read();
                 let iter = guard.iter_with_counts().map_err(|e| {
                     MergeError::Trie(format!("Shard {} iteration failed: {}", key, e))
                 })?;
@@ -383,10 +379,7 @@ impl<'a> MergeCoordinator<'a> {
                         shard_key: key.to_string(),
                         message: e.to_string(),
                     })?;
-            let mut guard = shard.write();
-            guard
-                .flush_lockfree()
-                .map_err(|e| MergeError::Trie(format!("Shard {} flush failed: {}", key, e)))?;
+            let guard = shard.read();
             let iter = guard
                 .iter_with_counts()
                 .map_err(|e| MergeError::Trie(format!("Shard {} iteration failed: {}", key, e)))?;

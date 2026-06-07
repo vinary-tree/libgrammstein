@@ -5,14 +5,12 @@
 //! incremental grammar checking and can suggest insertions/deletions
 //! based on grammar constraints.
 
-use crate::code::constrained_decoding::{
-    ConstrainedDecodingConfig, EarleyParser, GrammarConstraint,
-};
+use crate::code::constrained_decoding::{ConstrainedDecodingConfig, GrammarConstraint};
 use crate::code::correction::{CodeCorrector, Correction, CorrectionKind, CorrectionSource};
 use crate::code::language::{CodeLanguage, TokenContext, TokenType};
-use crate::code::pcfg::{Production, Symbol, WeightedCFG};
+use crate::code::pcfg::{Symbol, WeightedCFG};
 use crate::code::tokenizer::CodeToken;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Configuration for the grammar corrector.
@@ -55,23 +53,15 @@ pub struct GrammarCorrector<L: CodeLanguage> {
     language: Arc<L>,
     config: GrammarCorrectorConfig,
     grammar: WeightedCFG,
-    /// Parser for grammar-constrained decoding
-    parser: EarleyParser,
-    /// Cache of valid next tokens per state
-    completion_cache: HashMap<String, Vec<(String, f64)>>,
 }
 
 impl<L: CodeLanguage> GrammarCorrector<L> {
     /// Creates a new grammar corrector with a pre-trained grammar.
     pub fn new(language: Arc<L>, grammar: WeightedCFG, config: GrammarCorrectorConfig) -> Self {
-        let parser = EarleyParser::new(grammar.clone());
-
         Self {
             language,
             config,
             grammar,
-            parser,
-            completion_cache: HashMap::new(),
         }
     }
 
@@ -364,6 +354,9 @@ impl<L: CodeLanguage + Send + Sync> CodeCorrector for GrammarCorrector<L> {
 
             // Suggest deletions
             corrections.extend(self.suggest_deletions(token, &valid_tokens));
+
+            // Suggest inserting an expected token before the unexpected token.
+            corrections.extend(self.suggest_insertions(0, &[], "", token.byte_offset));
         }
 
         corrections
@@ -452,6 +445,7 @@ impl SyntaxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::code::pcfg::Production;
 
     fn create_test_grammar() -> WeightedCFG {
         let mut cfg = WeightedCFG::new("stmt");
@@ -538,7 +532,7 @@ mod tests {
             "Mock"
         }
         fn tree_sitter_language(&self) -> tree_sitter::Language {
-            panic!("Not implemented for tests")
+            tree_sitter_rust::LANGUAGE.into()
         }
         fn keywords(&self) -> &[&str] {
             &["if", "else", "while", "return"]
@@ -570,7 +564,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Requires full Earley parser integration - test grammar constraint separately"]
     fn test_grammar_corrector_valid_tokens() {
         let lang = Arc::new(MockLanguage);
         let grammar = create_test_grammar();
@@ -582,7 +575,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Requires full Earley parser integration - test grammar constraint separately"]
     fn test_grammar_corrector_completions() {
         let lang = Arc::new(MockLanguage);
         let grammar = create_test_grammar();

@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -16,6 +18,9 @@ use crate::cli::args::{
 use crate::cli::error::{CliError, CliResult};
 use crate::cli::output;
 use crate::corpus::{CorpusReader, GutenbergReader, PlaintextReader, Tokenizer, WikipediaReader};
+use crate::language::wikipedia_dump_url;
+
+const SAMPLE_DOWNLOAD_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Run the corpus command.
 pub fn run(cmd: CorpusCommands, verbose: bool) -> CliResult<()> {
@@ -254,65 +259,176 @@ fn corpus_download(args: CorpusDownloadArgs, verbose: bool) -> CliResult<()> {
         }
     }
 
-    // Get the download URL based on source and language
-    let url = match args.source {
-        CorpusSource::Wikipedia => wikipedia_dump_url(&args.language),
-        CorpusSource::Gutenberg => {
-            return Err(CliError::unsupported(
-                "Gutenberg download not yet implemented. Visit https://www.gutenberg.org/",
-            ));
-        }
-        CorpusSource::Oscar => {
-            return Err(CliError::unsupported(
-                "OSCAR download not yet implemented. Visit https://oscar-project.github.io/documentation/",
-            ));
-        }
-    };
+    let url = corpus_download_url(args.source, &args.language)?;
+    let output_dir = args
+        .output
+        .unwrap_or_else(|| CorpusCache::cache_dir().join("corpora"));
+    fs::create_dir_all(&output_dir)
+        .map_err(|e| CliError::io(format!("{}: {}", output_dir.display(), e)))?;
 
-    // For now, provide instructions for manual download
+    let output_path = corpus_download_path(&output_dir, &url, args.sample)?;
+    let bytes_downloaded = download_http_file(&url, &output_path, args.resume, args.sample)?;
+
+    let mut cache = CorpusCache::load()?;
+    cache.register(CacheEntry::new(
+        args.source,
+        output_path.clone(),
+        bytes_downloaded,
+        Some(args.language.clone()),
+    ));
+    cache.save()?;
+
     println!("{}", style("Corpus Download").bold().underlined());
     println!();
     println!("Language: {}", style(&args.language).cyan());
     println!("Source:   {:?}", args.source);
+    println!("URL:      {}", style(&url).green());
+    println!("Output:   {}", output_path.display());
+    println!("Size:     {}", format_bytes(bytes_downloaded));
     println!();
-    println!("{}", style("Download URL:").bold());
-    println!("  {}", style(&url).green());
-    println!();
-    println!("{}", style("Manual download instructions:").bold());
-    println!("  1. Download the file using wget or curl:");
-    println!("     wget -c \"{}\"", url);
-    println!();
-    println!("  2. The file is bz2-compressed XML. You can use it directly with:");
     println!(
-        "     grammstein train ngram {} model.bin --format wikipedia",
-        url.split('/').last().unwrap_or("dump.xml.bz2")
+        "{} {}",
+        style("success:").green().bold(),
+        if args.sample {
+            "sample corpus cached"
+        } else {
+            "corpus cached"
+        }
     );
-    println!();
 
-    if args.sample {
-        println!(
-            "{}: Sample download (--sample) is not yet implemented.",
-            style("note").yellow()
-        );
-    }
-
-    if args.resume {
-        println!(
-            "{}: Resume download (--resume) is not yet implemented.",
-            style("note").yellow()
-        );
-    }
-
-    // Return Ok since we provided useful information
     Ok(())
 }
 
-/// Get Wikipedia dump URL for a language.
-fn wikipedia_dump_url(lang: &str) -> String {
-    format!(
-        "https://dumps.wikimedia.org/{}wiki/latest/{}wiki-latest-pages-articles.xml.bz2",
-        lang, lang
-    )
+fn corpus_download_url(source: CorpusSource, language: &str) -> CliResult<String> {
+    match source {
+        CorpusSource::Wikipedia => Ok(wikipedia_dump_url(language)),
+        CorpusSource::Gutenberg => Err(CliError::unsupported(
+            "Project Gutenberg does not publish a stable language-specific bulk text archive; download text files from https://www.gutenberg.org/ and use --format gutenberg",
+        )),
+        CorpusSource::Oscar => Err(CliError::unsupported(
+            "OSCAR distributions are published through dataset hosting workflows; download the desired language split from https://oscar-project.github.io/documentation/ and use --format plaintext",
+        )),
+    }
+}
+
+fn corpus_download_path(output_dir: &Path, url: &str, sample: bool) -> CliResult<PathBuf> {
+    let filename = url
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| CliError::invalid_argument(format!("URL has no filename: {}", url)))?;
+
+    let filename = if sample {
+        format!("{}.sample", filename)
+    } else {
+        filename.to_string()
+    };
+
+    Ok(output_dir.join(filename))
+}
+
+fn download_http_file(url: &str, output_path: &Path, resume: bool, sample: bool) -> CliResult<u64> {
+    if output_path.exists() {
+        let size = fs::metadata(output_path)
+            .map_err(|e| CliError::io(format!("{}: {}", output_path.display(), e)))?
+            .len();
+        return Ok(size);
+    }
+
+    let part_path = partial_download_path(output_path);
+    let mut start = if resume && part_path.exists() {
+        fs::metadata(&part_path)
+            .map_err(|e| CliError::io(format!("{}: {}", part_path.display(), e)))?
+            .len()
+    } else {
+        0
+    };
+
+    if sample && start >= SAMPLE_DOWNLOAD_BYTES {
+        fs::rename(&part_path, output_path).map_err(|e| {
+            CliError::io(format!(
+                "rename {} -> {}: {}",
+                part_path.display(),
+                output_path.display(),
+                e
+            ))
+        })?;
+        return Ok(SAMPLE_DOWNLOAD_BYTES);
+    }
+
+    let response = match request_download(url, start, sample) {
+        Ok(response) => response,
+        Err(ureq::Error::Status(416, _)) if start > 0 => {
+            fs::remove_file(&part_path)
+                .map_err(|e| CliError::io(format!("{}: {}", part_path.display(), e)))?;
+            start = 0;
+            request_download(url, start, sample)
+                .map_err(|e| CliError::io(format!("download {}: {}", url, e)))?
+        }
+        Err(e) => return Err(CliError::io(format!("download {}: {}", url, e))),
+    };
+
+    let append = start > 0 && response.status() == 206;
+    if start > 0 && !append {
+        start = 0;
+    }
+
+    let mut output = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(&part_path)
+        .map_err(|e| CliError::io(format!("{}: {}", part_path.display(), e)))?;
+
+    let mut reader = response.into_reader();
+    let copied = if sample {
+        let remaining = SAMPLE_DOWNLOAD_BYTES.saturating_sub(start);
+        copy_limited(&mut reader, &mut output, remaining)?
+    } else {
+        io::copy(&mut reader, &mut output)
+            .map_err(|e| CliError::io(format!("write {}: {}", part_path.display(), e)))?
+    };
+    output
+        .flush()
+        .map_err(|e| CliError::io(format!("flush {}: {}", part_path.display(), e)))?;
+
+    fs::rename(&part_path, output_path).map_err(|e| {
+        CliError::io(format!(
+            "rename {} -> {}: {}",
+            part_path.display(),
+            output_path.display(),
+            e
+        ))
+    })?;
+
+    Ok(start + copied)
+}
+
+fn request_download(url: &str, start: u64, sample: bool) -> Result<ureq::Response, ureq::Error> {
+    let mut request = ureq::get(url);
+
+    if sample {
+        let end = SAMPLE_DOWNLOAD_BYTES.saturating_sub(1);
+        request = request.set("Range", &format!("bytes={}-{}", start, end));
+    } else if start > 0 {
+        request = request.set("Range", &format!("bytes={}-", start));
+    }
+
+    request.call()
+}
+
+fn copy_limited<R: Read, W: Write>(reader: &mut R, writer: &mut W, limit: u64) -> CliResult<u64> {
+    let mut limited = reader.take(limit);
+    io::copy(&mut limited, writer).map_err(|e| CliError::io(format!("copy response body: {}", e)))
+}
+
+fn partial_download_path(path: &Path) -> PathBuf {
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "download".into());
+    path.with_file_name(format!("{}.part", filename))
 }
 
 /// Detect corpus language.
@@ -416,7 +532,7 @@ fn lang_to_code(lang: whatlang::Lang) -> &'static str {
         Ita => "it",
         Nld => "nl",
         Rus => "ru",
-        Zho => "zh",
+        Cmn => "zh",
         Jpn => "ja",
         Kor => "ko",
         Ara => "ar",
@@ -463,7 +579,7 @@ fn lang_name(lang: whatlang::Lang) -> &'static str {
         Ita => "Italian",
         Nld => "Dutch",
         Rus => "Russian",
-        Zho => "Chinese",
+        Cmn => "Chinese",
         Jpn => "Japanese",
         Kor => "Korean",
         Ara => "Arabic",
@@ -903,4 +1019,59 @@ fn corpus_clean(args: CorpusCleanArgs, verbose: bool) -> CliResult<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wikipedia_download_url_uses_language_dump() {
+        let url = corpus_download_url(CorpusSource::Wikipedia, "de").unwrap();
+        assert_eq!(
+            url,
+            "https://dumps.wikimedia.org/dewiki/latest/dewiki-latest-pages-articles.xml.bz2"
+        );
+    }
+
+    #[test]
+    fn corpus_download_path_preserves_remote_filename() {
+        let dir = Path::new("/tmp/cache");
+        let path = corpus_download_path(
+            dir,
+            "https://dumps.wikimedia.org/enwiki/latest/enwiki-latest-pages-articles.xml.bz2",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(path, dir.join("enwiki-latest-pages-articles.xml.bz2"));
+    }
+
+    #[test]
+    fn corpus_sample_download_path_is_distinct() {
+        let dir = Path::new("/tmp/cache");
+        let path = corpus_download_path(dir, "https://example.test/corpus.xml.bz2", true).unwrap();
+
+        assert_eq!(path, dir.join("corpus.xml.bz2.sample"));
+    }
+
+    #[test]
+    fn partial_download_path_keeps_final_path_separate() {
+        let path = Path::new("/tmp/cache/corpus.xml.bz2");
+        assert_eq!(
+            partial_download_path(path),
+            PathBuf::from("/tmp/cache/corpus.xml.bz2.part")
+        );
+    }
+
+    #[test]
+    fn copy_limited_stops_at_limit() {
+        let mut input = std::io::Cursor::new(b"abcdef".as_slice());
+        let mut output = Vec::new();
+
+        let copied = copy_limited(&mut input, &mut output, 3).unwrap();
+
+        assert_eq!(copied, 3);
+        assert_eq!(output, b"abc");
+    }
 }

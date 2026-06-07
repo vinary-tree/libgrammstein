@@ -321,6 +321,12 @@ fn bench_hash_with_seed(c: &mut Criterion) {
             |b, bytes| b.iter(|| black_box(hash_current_hybrid_with_seed(black_box(bytes), seed))),
         );
 
+        group.bench_with_input(
+            BenchmarkId::new("proposed_hybrid_seeded", label),
+            input,
+            |b, bytes| b.iter(|| black_box(hash_proposed_hybrid_with_seed(black_box(bytes), seed))),
+        );
+
         group.bench_with_input(BenchmarkId::new("xxh3_seeded", label), input, |b, bytes| {
             b.iter(|| black_box(hash_xxh3_with_seed(black_box(bytes), seed)))
         });

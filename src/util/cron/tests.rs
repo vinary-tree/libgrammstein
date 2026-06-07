@@ -240,11 +240,15 @@ fn test_channel_disconnect_with_tasks() {
     // Drop handle immediately (disconnects channel)
     drop(handle);
 
-    // Wait for the delayed task to execute
-    std::thread::sleep(Duration::from_millis(200));
-
-    // Scheduler should terminate after task completes
-    terminating.store(true, AtomicOrdering::Release);
+    // Scheduler should terminate after the delayed task completes and the
+    // already-disconnected channel is observed with an empty queue.
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    while !thread.is_finished() {
+        if std::time::Instant::now() > deadline {
+            panic!("Timeout waiting for cron thread to terminate after draining tasks");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     thread.join().expect("Cron thread panicked");
 
     let count = counter.load(Ordering::Relaxed);
@@ -336,6 +340,35 @@ fn test_task_ordering() {
     assert_eq!(heap.pop().unwrap().scheduled_time_ms, 100);
     assert_eq!(heap.pop().unwrap().scheduled_time_ms, 200);
     assert_eq!(heap.pop().unwrap().scheduled_time_ms, 300);
+}
+
+/// Test that the scheduler execution path consumes the earliest queued task.
+#[test]
+fn test_execute_one_task_uses_earliest_due_task() {
+    let (_, rx) = unbounded::<ScheduledTask>();
+    let terminating = Arc::new(AtomicBool::new(false));
+    let stats = Arc::new(CronStats::default());
+    let mut sm = CronStateMachine::new(rx, terminating, stats, 100, None);
+    let executed = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    for scheduled_time_ms in [300, 100, 200] {
+        let executed = Arc::clone(&executed);
+        sm.queue.push(ScheduledTask {
+            scheduled_time_ms,
+            metadata: TaskMetadata::OneShot,
+            task: Box::new(move || {
+                executed.lock().unwrap().push(scheduled_time_ms);
+                true
+            }),
+        });
+    }
+
+    sm.execute_one_task();
+    sm.execute_one_task();
+    sm.execute_one_task();
+
+    let observed = executed.lock().unwrap().clone();
+    assert_eq!(observed, vec![100, 200, 300]);
 }
 
 /// Test handle cloning and concurrent use.

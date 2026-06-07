@@ -4,27 +4,21 @@
 //! with checkpoint/resume support for long-running imports.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use libdictenstein::persistent_artrie::PersistentARTrie;
 use parking_lot::RwLock;
 
-use super::sharding::{MergeCoordinator, MknAggregator};
-use super::storage::{NgramStorage, StoragePrefixTx};
-use crate::ngram::vocabulary::{
-    decode_ngram_key_bytes, encode_indices_to_key_bytes,
-    open_or_create_concurrent_vocabulary_lockfree_with_capacity,
-};
+use super::storage::NgramStorage;
+use crate::ngram::vocabulary::open_or_create_concurrent_vocabulary_lockfree_with_capacity;
 
 use super::aggregator::YearAggregator;
-use super::checkpoint::{CheckpointError, ImportCheckpoint, MknPhase, TrieCheckpointStorage};
+use super::checkpoint::{CheckpointError, ImportCheckpoint, TrieCheckpointStorage};
 use super::config::GoogleBooksConfig;
-use super::events::{ImportCommand, ImportEvent, LogLevel};
-use super::languages::{get_file_url, get_metadata, get_prefixes, is_supported};
+use super::languages::{get_prefixes, is_supported};
 use super::reader::{FileNgramReader, ReaderError};
-use super::state_machine::CleanupResources;
 #[cfg(feature = "google-books")]
 use super::task_manager::RetryAfter;
 
@@ -187,12 +181,6 @@ fn extract_retry_after(error: &ImportError) -> Option<RetryAfter> {
         ImportError::Reader(ReaderError::RateLimited { retry_after, .. }) => retry_after.clone(),
         _ => None,
     }
-}
-
-/// Check if an error is specifically a rate limit error (HTTP 429).
-#[cfg(feature = "google-books")]
-fn is_rate_limit_error(error: &ImportError) -> bool {
-    matches!(error, ImportError::Reader(ReaderError::RateLimited { .. }))
 }
 
 /// Result of storing an n-gram, with counter deltas for batched updates.
@@ -579,7 +567,7 @@ impl GoogleBooksImporter {
         }
 
         let checkpoint_path = config.output_path.with_extension("checkpoint.json");
-        let output_path = &config.output_path;
+        let _output_path = &config.output_path;
 
         // Estimate n-gram count based on language and orders
         // For English 1-3 grams, expect ~500M n-grams; 1-5 grams ~2B
@@ -1229,11 +1217,6 @@ mod import_ops;
 mod mkn;
 #[cfg(feature = "google-books")]
 mod worker_pool;
-#[cfg(feature = "google-books")]
-use worker_pool::{
-    process_prefix_file, worker_task, Job, JobOutcome, JobResult, PrefixOutcome,
-    PrefixProcessingContext, WorkerSharedState, INITIAL_BACKOFF_MS, MAX_RETRIES,
-};
 
 // Cache-file download/cleanup helpers used by `--cache-files` mode.
 #[cfg(feature = "google-books")]

@@ -294,6 +294,10 @@ pub const WIKIPEDIA_URLS: &[(&str, &str)] = &[
 
 /// Get the Wikipedia dump URL for a language.
 pub fn wikipedia_dump_url(lang: &str) -> String {
+    if let Some((_, url)) = WIKIPEDIA_URLS.iter().find(|(code, _)| *code == lang) {
+        return (*url).to_string();
+    }
+
     format!(
         "https://dumps.wikimedia.org/{}wiki/latest/{}wiki-latest-pages-articles.xml.bz2",
         lang, lang

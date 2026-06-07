@@ -196,13 +196,15 @@ pub struct GrammarConstraint {
 impl GrammarConstraint {
     /// Creates a new grammar constraint checker.
     pub fn new(grammar: WeightedCFG, config: ConstrainedDecodingConfig) -> Self {
-        Self {
+        let mut constraint = Self {
             parser: EarleyParser::new(grammar),
             config,
             chart: EarleyChart::new(0),
             position: 0,
             valid_tokens_cache: None,
-        }
+        };
+        constraint.initialize();
+        constraint
     }
 
     /// Creates a constraint checker with default configuration.

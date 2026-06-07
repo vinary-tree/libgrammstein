@@ -537,6 +537,10 @@ impl MappedDictionaryNode for AggregatedDictionaryNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ngram::vocabulary::create_vocabulary;
+    use crate::sources::google_books::sharding::{ShardConfig, ShardGranularity};
+    use liblevenshtein::dictionary::{Dictionary, MappedDictionary};
+    use tempfile::TempDir;
 
     // Note: Full integration tests require setting up ShardCoordinator and SharedVocabulary
     // with actual file paths. Unit tests here focus on the vocabulary provider trait.
@@ -562,15 +566,53 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregated_node_is_placeholder() {
+    fn test_aggregated_node_is_empty_traversal_adapter() {
         let node = AggregatedDictionaryNode {
             _phantom: std::marker::PhantomData,
         };
 
-        // Aggregated node is a placeholder
+        // Aggregated node intentionally exposes no character-level traversal.
         assert!(!node.is_final());
         assert!(node.transition('a').is_none());
         assert_eq!(node.edges().count(), 0);
         assert!(node.value().is_none());
+    }
+
+    #[test]
+    fn vocabulary_query_aggregated_dictionary_routes_and_reads_exact_values() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let vocab_path = dir.path().join("vocab.artrie");
+        let shard_dir = dir.path().join("shards");
+        let vocabulary = create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
+        let config = ShardConfig::new(shard_dir)
+            .with_granularity(ShardGranularity::TwoChar)
+            .with_max_open_shards(8);
+        let coordinator =
+            Arc::new(ShardCoordinator::new(config).expect("Failed to create coordinator"));
+        let dict = AggregatedLanguageModelDictionary::new(coordinator.clone(), vocabulary.clone());
+
+        assert_eq!(dict.get_ngram(&["missing"]), None);
+        assert_eq!(
+            vocabulary.read().len(),
+            0,
+            "read-only aggregated queries must not allocate vocabulary indices"
+        );
+
+        assert!(dict
+            .insert_ngram(&["the", "quick"], 7)
+            .expect("insert the quick"));
+        assert!(dict.insert_ngram(&["apple"], 3).expect("insert apple"));
+
+        assert!(dict.contains_ngram(&["the", "quick"]));
+        assert_eq!(dict.get_ngram(&["the", "quick"]), Some(7));
+        assert_eq!(dict.get_value("the quick"), Some(7));
+        assert!(dict.contains("apple"));
+        assert_eq!(dict.get_value("apple"), Some(3));
+        assert_eq!(dict.get_ngram(&["the", "slow"]), None);
+
+        let the_key = coordinator.route_tokens(&["the", "quick"]);
+        let apple_key = coordinator.route_tokens(&["apple"]);
+        assert_eq!(the_key.prefix, "th");
+        assert_eq!(apple_key.prefix, "ap");
     }
 }

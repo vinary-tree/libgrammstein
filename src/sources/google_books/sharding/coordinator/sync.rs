@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
-use super::super::checkpoint::CheckpointError;
 use super::super::shard::ShardSyncState;
 use super::{CheckpointHandle, CoordinatorError, CoordinatorResult, ShardCoordinator, ShardKey};
 

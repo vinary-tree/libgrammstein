@@ -37,7 +37,7 @@ mod subword;
 pub use dedup::{DeduplicationMode, DeduplicationStats, Deduplicator, DeduplicatorBuilder};
 pub use gutenberg::GutenbergReader;
 pub use normalizer::Normalizer;
-pub use plaintext::PlaintextReader;
+pub use plaintext::{LineIterator, PlaintextReader};
 pub use prefetch::{PrefetchBatchIterator, PrefetchConfig, PrefetchingReader};
 pub use preprocessing::{
     tokens, PreprocessingPipeline, PreprocessingPipelineBuilder, TextPreprocessor,

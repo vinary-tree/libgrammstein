@@ -546,7 +546,8 @@ mod tests {
         );
     }
 
-    /// Helper to compare probabilities that may be -inf
+    /// Helper to compare probabilities that may be -inf.
+    #[cfg(feature = "serde-extras")]
     fn probs_equal(a: f64, b: f64) -> bool {
         if a.is_infinite() && b.is_infinite() {
             a.signum() == b.signum() // Both -inf or both +inf

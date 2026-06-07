@@ -72,7 +72,7 @@ mod storage;
 pub mod task_manager;
 mod translator;
 
-pub use aggregator::YearAggregator;
+pub use aggregator::{AggregateExt, AggregatingIterator, YearAggregator};
 pub use checkpoint::{ImportCheckpoint, MknPhase, PrefixState};
 pub use checkpoint_decoder::{decode_checkpoint, decode_checkpoint_summary};
 pub use config::{GoogleBooksConfig, ShardingGranularity, ShardingMode, ShardingOptions};
@@ -86,8 +86,12 @@ pub use importer::{
     run_import_with_shutdown, shutdown_signal, GoogleBooksImporter, ImportPhase, ImportProgress,
     ImportStats, WorkerUpdate,
 };
-pub use languages::{is_valid_prefix, LanguageInfo, LanguageMetadata, SUPPORTED_LANGUAGES};
-pub use parser::{parse_ngram_line, NgramRecord};
+pub use languages::{
+    get_order_urls, is_valid_prefix, list_languages, LanguageInfo, LanguageMetadata,
+    SUPPORTED_LANGUAGES,
+};
+pub use parser::{parse_ngram_line, parse_ngram_lines, NgramRecord};
+pub use reader::{AggregateReaderExt, AggregatingReaderIterator, ReaderBuilder};
 pub use reader::{FileNgramReader, HttpNgramReader, NgramReader, ReaderError};
 pub use storage::{NgramStorage, StorageError, StorageResult, StorageStats};
 #[cfg(feature = "google-books")]

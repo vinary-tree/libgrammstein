@@ -171,21 +171,17 @@ impl<L: CodeLanguage + Clone> EnsembleCorrector<L> {
         c
     }
 
-    /// Checks if two corrections are similar enough to merge.
-    fn are_similar(&self, a: &Correction, b: &Correction) -> bool {
-        if a.replacement != b.replacement {
-            return false;
-        }
-        if a.start_byte != b.start_byte || a.end_byte != b.end_byte {
-            return false;
-        }
-        true
-    }
-
     /// Merges similar corrections, boosting confidence when sources agree.
     fn merge_corrections(&self, corrections: Vec<(Correction, f64)>) -> Vec<Correction> {
         if corrections.is_empty() {
             return vec![];
+        }
+
+        if !self.config.deduplicate {
+            return corrections
+                .into_iter()
+                .map(|(c, weight)| Self::apply_weight(&c, weight))
+                .collect();
         }
 
         // Group by (replacement, position). Pre-size both collections to
@@ -207,9 +203,7 @@ impl<L: CodeLanguage + Clone> EnsembleCorrector<L> {
             if group.len() == 1 {
                 // Single source
                 let (c, weight) = group.into_iter().next().unwrap();
-                let mut correction = c;
-                correction.confidence *= weight;
-                merged.push(correction);
+                merged.push(Self::apply_weight(&c, weight));
             } else {
                 // Multiple sources agree - merge and boost
                 let sources: Vec<CorrectionSource> = group.iter().map(|(c, _)| c.source).collect();
@@ -456,7 +450,7 @@ mod tests {
             "Mock"
         }
         fn tree_sitter_language(&self) -> tree_sitter::Language {
-            panic!("Not implemented for tests")
+            tree_sitter_rust::LANGUAGE.into()
         }
         fn keywords(&self) -> &[&str] {
             &["if", "else", "while", "for", "return", "function"]

@@ -7,20 +7,17 @@
 //! - Checkpoint coordination across all shards
 //! - Query fanout for read operations
 
-use super::checkpoint::{CheckpointManager, ImportPhase, ImportState};
-use super::config::{ShardConfig, ShardGranularity};
-use super::routing::{compute_shard_key, compute_shard_key_from_token, ngram_order, ShardKey};
-use super::shard::{PrefixTransaction, ShardError, ShardHandle, ShardSyncHandle, ShardSyncState};
+use super::checkpoint::CheckpointManager;
+use super::config::ShardConfig;
+use super::routing::ShardKey;
+use super::shard::{PrefixTransaction, ShardError, ShardHandle, ShardSyncHandle};
 
 use dashmap::DashMap;
 use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
-use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use thiserror::Error;
 
 /// Error type for coordinator operations.

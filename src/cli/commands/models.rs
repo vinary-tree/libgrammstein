@@ -18,22 +18,9 @@ pub fn run(cmd: ModelsCommands, verbose: bool) -> CliResult<()> {
 
 /// Detected model type with metadata.
 enum DetectedModel {
-    Hybrid {
-        ngram_order: usize,
-        ngram_vocab_size: usize,
-        embedding_vocab_size: usize,
-        embedding_dim: usize,
-    },
-    Ngram {
-        order: usize,
-        vocab_size: usize,
-        ngram_count: usize,
-        total_count: u64,
-    },
-    Embedding {
-        vocab_size: usize,
-        dim: usize,
-    },
+    Hybrid { ngram_vocab_size: usize },
+    Ngram { vocab_size: usize },
+    Embedding { vocab_size: usize },
     Unknown,
 }
 
@@ -70,20 +57,14 @@ fn detect_model(path: &Path) -> DetectedModel {
     if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new)
     {
         return DetectedModel::Hybrid {
-            ngram_order: model.ngram_model().order(),
             ngram_vocab_size: model.ngram_model().vocab_size(),
-            embedding_vocab_size: model.embedding_model().vocab_size(),
-            embedding_dim: model.embedding_model().dim(),
         };
     }
 
     // Try n-gram model
     if let Ok(model) = NgramModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new) {
         return DetectedModel::Ngram {
-            order: model.order(),
             vocab_size: model.vocab_size(),
-            ngram_count: model.ngram_count(),
-            total_count: model.total_count(),
         };
     }
 
@@ -91,7 +72,6 @@ fn detect_model(path: &Path) -> DetectedModel {
     if let Ok(model) = SubwordEmbedding::load(path) {
         return DetectedModel::Embedding {
             vocab_size: model.vocab_size(),
-            dim: model.dim(),
         };
     }
 

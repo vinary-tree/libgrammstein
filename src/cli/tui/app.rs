@@ -431,7 +431,10 @@ impl ImportTui {
         let unique_ngrams_str = format_count(self.state.unique_ngrams);
         // Use derived total to stay in sync with Order Progress display
         let files_completed_str = format!("{}", self.state.total_files_completed());
-        let rate_str = format!("{:.0}/s", self.state.ngrams_per_second);
+        let rate_str = format!(
+            "{}/s",
+            widgets::format_si(self.state.ngrams_per_second.round() as u64)
+        );
         let elapsed_str = format_duration(self.state.elapsed);
         let workers_str = format!("{}", self.state.parallel_downloads);
         let warnings_str = self.state.prefix_warnings_summary().unwrap_or_default();

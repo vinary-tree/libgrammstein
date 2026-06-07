@@ -17,7 +17,7 @@ use crate::code::ast::{byte_offset_to_position, CodeParser, ParsedCode};
 use crate::code::correction::{CodeCorrector, Correction, CorrectionCandidates};
 use crate::code::correctors::EnsembleCorrector;
 use crate::code::cpg::CodePropertyGraph;
-use crate::code::language::{CodeLanguage, TokenContext, TokenType};
+use crate::code::language::{CodeLanguage, TokenContext};
 use crate::code::pcfg::WeightedCFG;
 use crate::code::tokenizer::{CodeToken, CodeTokenizer};
 use std::cmp::Ordering;
@@ -411,33 +411,6 @@ impl<L: CodeLanguage + Clone + Send + Sync> CorrectionPipeline<L> {
         diagnostics
     }
 
-    /// Ranks and deduplicates corrections.
-    fn rank_corrections(&self, mut corrections: Vec<Correction>) -> CorrectionCandidates {
-        // Filter by confidence
-        corrections.retain(|c| c.confidence >= self.config.min_confidence);
-
-        // Sort by confidence descending
-        corrections.sort_by(|a, b| {
-            b.confidence
-                .partial_cmp(&a.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // Deduplicate by position and replacement
-        let mut seen = std::collections::HashSet::new();
-        corrections.retain(|c| {
-            let key = (c.start_byte, c.end_byte, c.replacement.clone());
-            seen.insert(key)
-        });
-
-        // Truncate to max
-        corrections.truncate(self.config.max_corrections);
-
-        let mut candidates = CorrectionCandidates::new(self.config.max_corrections);
-        candidates.add_all(corrections);
-        candidates
-    }
-
     /// Applies corrections to source code.
     pub fn apply_corrections(&self, source: &str, corrections: &[Correction]) -> String {
         if corrections.is_empty() {
@@ -516,51 +489,6 @@ impl From<std::io::Error> for PipelineError {
 mod tests {
     use super::*;
 
-    // Mock language for testing
-    #[derive(Debug, Clone, Default)]
-    struct MockLanguage;
-
-    impl CodeLanguage for MockLanguage {
-        fn name(&self) -> &str {
-            "mock"
-        }
-        fn display_name(&self) -> &str {
-            "Mock"
-        }
-        fn tree_sitter_language(&self) -> tree_sitter::Language {
-            // Return a real tree-sitter language for testing
-            // In practice, this would be the actual language
-            panic!("Not implemented for tests")
-        }
-        fn keywords(&self) -> &[&str] {
-            &["if", "else", "while", "for", "return", "function"]
-        }
-        fn special_tokens(&self) -> &[&str] {
-            &[]
-        }
-        fn file_extensions(&self) -> &[&str] {
-            &["mock"]
-        }
-        fn classify_token(&self, _token: &str, _node_kind: &str) -> TokenType {
-            TokenType::Unknown
-        }
-        fn is_valid_identifier(&self, s: &str) -> bool {
-            !s.is_empty() && s.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false)
-        }
-        fn builtin_types(&self) -> &[&str] {
-            &["int", "string", "bool"]
-        }
-        fn stdlib_functions(&self) -> &[&str] {
-            &["print", "read"]
-        }
-        fn comment_syntax(&self) -> crate::code::language::CommentSyntax {
-            crate::code::language::CommentSyntax::default()
-        }
-        fn is_whitespace_significant(&self) -> bool {
-            false
-        }
-    }
-
     #[test]
     fn test_pipeline_config_default() {
         let config = PipelineConfig::default();
@@ -573,18 +501,10 @@ mod tests {
 
     #[test]
     fn test_apply_corrections() {
-        let lang = Arc::new(MockLanguage);
         // We can't actually create the pipeline without a real tree-sitter language,
         // but we can test apply_corrections directly since it's a simple string operation.
 
         let source = "funtion foo() { return 42; }";
-        let corrections = vec![Correction::new(
-            crate::code::correction::CorrectionKind::Spelling,
-            0,
-            7,
-            "funtion",
-            "function",
-        )];
 
         // Test apply_corrections logic manually
         let mut result = source.to_string();

@@ -240,22 +240,37 @@ let sim_matrix = awe.all_pairwise_similarities();
 
 ## Custom Encoder
 
-The default `LinearEncoder` is simple. For better quality, implement `AcousticEncoder`:
+The default `LinearEncoder` is simple. For domain-specific behavior, implement
+`AcousticEncoder` with the sequence model or deterministic transform you need:
 
 ```rust
 use libgrammstein::embedding::AcousticEncoder;
 
-pub struct BiLSTMEncoder {
+pub struct WindowedMeanEncoder {
     hidden_dim: usize,
     feature_dim: usize,
-    // LSTM weights...
+    radius: usize,
 }
 
-impl AcousticEncoder for BiLSTMEncoder {
+impl AcousticEncoder for WindowedMeanEncoder {
     fn encode_frames(&self, frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        // Run bidirectional LSTM over frames
-        // Return hidden states [T, hidden_dim]
-        unimplemented!("Real implementation would use LSTM")
+        (0..frames.len())
+            .map(|i| {
+                let start = i.saturating_sub(self.radius);
+                let end = (i + self.radius + 1).min(frames.len());
+                let mut output = vec![0.0; self.hidden_dim];
+                let count = (end - start) as f32;
+
+                for frame in &frames[start..end] {
+                    for dim in 0..self.hidden_dim {
+                        let source_dim = dim % self.feature_dim;
+                        output[dim] += frame.get(source_dim).copied().unwrap_or(0.0) / count;
+                    }
+                }
+
+                output
+            })
+            .collect()
     }
 
     fn hidden_dim(&self) -> usize {
@@ -269,7 +284,11 @@ impl AcousticEncoder for BiLSTMEncoder {
 
 // Use custom encoder
 use std::sync::Arc;
-let encoder = Arc::new(BiLSTMEncoder { hidden_dim: 256, feature_dim: 40 });
+let encoder = Arc::new(WindowedMeanEncoder {
+    hidden_dim: 256,
+    feature_dim: 40,
+    radius: 2,
+});
 let awe = AcousticWordEmbedding::with_encoder(encoder, config);
 ```
 

@@ -3,6 +3,7 @@
 //! This module provides a unified scoring interface that combines multiple
 //! scoring components for comprehensive LaTeX sequence evaluation.
 
+use crate::latex::embedding::CommandCategory;
 use crate::latex::ngram::{LaTeXMode, ModeDetector};
 use crate::latex::tokenizer::{LaTeXToken, LaTeXTokenKind};
 use std::collections::HashMap;
@@ -239,14 +240,14 @@ impl LaTeXScorer {
                 .with_normalized(structural),
         );
 
-        // N-gram score (placeholder - would use actual n-gram model)
-        let ngram = self.compute_ngram_placeholder(tokens);
+        // Local token fluency score.
+        let ngram = self.compute_local_fluency_score(tokens);
         components.push(
             ComponentScore::new("ngram", ngram, self.config.ngram_weight).with_normalized(ngram),
         );
 
-        // Embedding score (placeholder)
-        let embedding = self.compute_embedding_placeholder(tokens);
+        // Semantic coherence score.
+        let embedding = self.compute_semantic_coherence_score(tokens);
         components.push(
             ComponentScore::new("embedding", embedding, self.config.embedding_weight)
                 .with_normalized(embedding),
@@ -362,43 +363,101 @@ impl LaTeXScorer {
         score
     }
 
-    /// Placeholder n-gram score (would use actual model in production).
-    fn compute_ngram_placeholder(&self, tokens: &[LaTeXToken]) -> f64 {
+    /// Compute local token fluency from adjacent LaTeX token transitions.
+    fn compute_local_fluency_score(&self, tokens: &[LaTeXToken]) -> f64 {
         if tokens.is_empty() {
             return 0.0;
         }
 
-        // Simple heuristic: favor sequences with known command patterns
-        let command_count = tokens
+        if tokens.len() == 1 {
+            return match tokens[0].kind {
+                LaTeXTokenKind::Unknown(_) => 0.25,
+                _ => 0.70,
+            };
+        }
+
+        let mut total = 0.0;
+        let mut transitions = 0usize;
+        for pair in tokens.windows(2) {
+            total += self.transition_fluency(&pair[0], &pair[1]);
+            transitions += 1;
+        }
+
+        let transition_score = total / transitions as f64;
+        let command_ratio = tokens
             .iter()
-            .filter(|t| matches!(&t.kind, LaTeXTokenKind::Command(_)))
-            .count();
+            .filter(|t| matches!(t.kind, LaTeXTokenKind::Command(_)))
+            .count() as f64
+            / tokens.len() as f64;
+        let density_score = (1.0 - (command_ratio - 0.20).abs() * 1.5).clamp(0.35, 1.0);
 
-        let total = tokens.len() as f64;
-        let command_ratio = command_count as f64 / total;
-
-        // Reasonable command density is around 10-30%
-        let optimal_ratio = 0.2;
-        let deviation = (command_ratio - optimal_ratio).abs();
-
-        (1.0 - deviation * 2.0).clamp(0.0, 1.0)
+        (transition_score * 0.85 + density_score * 0.15).clamp(0.0, 1.0)
     }
 
-    /// Placeholder embedding score (would use actual embeddings in production).
-    fn compute_embedding_placeholder(&self, tokens: &[LaTeXToken]) -> f64 {
+    fn transition_fluency(&self, previous: &LaTeXToken, current: &LaTeXToken) -> f64 {
+        use LaTeXTokenKind::*;
+
+        match (&previous.kind, &current.kind) {
+            (Command(cmd), OpenBrace(_)) if command_takes_group(cmd) => 1.0,
+            (Command(cmd), _) if command_takes_group(cmd) => 0.45,
+            (OpenBrace(_), CloseBrace(_)) => 0.55,
+            (OpenBrace(_), _) | (_, CloseBrace(_)) => 0.85,
+            (MathOpen(_), MathClose(_)) => 0.40,
+            (MathOpen(_), _) | (_, MathClose(_)) => 0.95,
+            (Identifier(_), Operator(_)) | (Number(_), Operator(_)) => 0.95,
+            (Operator(_), Identifier(_)) | (Operator(_), Number(_)) | (Operator(_), Command(_)) => {
+                0.95
+            }
+            (Subscript | Superscript, Identifier(_))
+            | (Subscript | Superscript, Number(_))
+            | (Subscript | Superscript, Command(_))
+            | (Subscript | Superscript, OpenBrace(_)) => 0.95,
+            (Subscript | Superscript, _) => 0.35,
+            (Command(left), Command(right)) => command_pair_fluency(left, right),
+            (Unknown(_), _) | (_, Unknown(_)) => 0.20,
+            (Text(_), Text(_)) | (Identifier(_), Identifier(_)) => 0.75,
+            _ => 0.70,
+        }
+    }
+
+    /// Compute semantic coherence from token modes and command categories.
+    fn compute_semantic_coherence_score(&self, tokens: &[LaTeXToken]) -> f64 {
         if tokens.is_empty() {
             return 0.0;
         }
 
-        // Simple heuristic: consistent token types suggest coherent sequence
         let mode = self.mode_detector.sequence_mode(tokens);
-
-        let mode_matches: usize = tokens
+        let mode_matches = tokens
             .iter()
             .filter(|t| self.mode_detector.token_mode(t) == mode)
             .count();
+        let mode_score = mode_matches as f64 / tokens.len() as f64;
 
-        mode_matches as f64 / tokens.len() as f64
+        let command_categories: Vec<CommandCategory> = tokens
+            .iter()
+            .filter_map(|token| match &token.kind {
+                LaTeXTokenKind::Command(command) => Some(CommandCategory::from_command(command)),
+                _ => None,
+            })
+            .collect();
+
+        let category_score = if command_categories.len() < 2 {
+            1.0
+        } else {
+            let coherent_pairs = command_categories
+                .windows(2)
+                .filter(|pair| command_categories_are_compatible(pair[0], pair[1]))
+                .count();
+            coherent_pairs as f64 / (command_categories.len() - 1) as f64
+        };
+
+        let unknown_penalty = tokens
+            .iter()
+            .filter(|token| matches!(token.kind, LaTeXTokenKind::Unknown(_)))
+            .count() as f64
+            / tokens.len() as f64;
+
+        (mode_score * 0.55 + category_score * 0.45 - unknown_penalty * 0.35).clamp(0.0, 1.0)
     }
 
     /// Combine component scores according to weights.
@@ -530,6 +589,69 @@ fn tokens_to_string(tokens: &[LaTeXToken]) -> String {
     tokens.iter().map(|t| t.text()).collect::<Vec<_>>().join("")
 }
 
+fn command_takes_group(command: &str) -> bool {
+    matches!(
+        command,
+        "frac"
+            | "sqrt"
+            | "binom"
+            | "overline"
+            | "underline"
+            | "hat"
+            | "bar"
+            | "vec"
+            | "text"
+            | "textbf"
+            | "textit"
+            | "emph"
+            | "section"
+            | "subsection"
+            | "subsubsection"
+            | "begin"
+            | "end"
+    )
+}
+
+fn command_pair_fluency(left: &str, right: &str) -> f64 {
+    match (left, right) {
+        ("left", "right") | ("begin", "end") => 0.20,
+        ("left", _) | (_, "right") => 0.60,
+        _ => {
+            let left_category = CommandCategory::from_command(left);
+            let right_category = CommandCategory::from_command(right);
+            if command_categories_are_compatible(left_category, right_category) {
+                0.85
+            } else {
+                0.55
+            }
+        }
+    }
+}
+
+fn command_categories_are_compatible(left: CommandCategory, right: CommandCategory) -> bool {
+    use CommandCategory::*;
+
+    matches!(
+        (left, right),
+        (GreekLetter, GreekLetter)
+            | (Operator, GreekLetter)
+            | (Operator, Function)
+            | (Function, GreekLetter)
+            | (Function, Operator)
+            | (Relation, GreekLetter)
+            | (Relation, Function)
+            | (Accent, GreekLetter)
+            | (Accent, Function)
+            | (Delimiter, Delimiter)
+            | (Environment, Environment)
+            | (Formatting, Formatting)
+            | (Structure, Structure)
+            | (Arrow, Arrow)
+            | (Spacing, _)
+            | (_, Spacing)
+    ) || left == right
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,5 +772,52 @@ mod tests {
         assert!(result.component("structural").is_some());
         assert!(result.component("ngram").is_some());
         assert!(result.component("embedding").is_some());
+    }
+
+    #[test]
+    fn test_local_fluency_rewards_latex_argument_structure() {
+        let tokenizer = LaTeXTokenizer::new();
+        let mut scorer = LaTeXScorer::builder()
+            .ngram_weight(1.0)
+            .embedding_weight(0.0)
+            .neural_weight(0.0)
+            .structural_weight(0.0)
+            .rag_weight(0.0)
+            .build();
+
+        let fluent = scorer.score(&tokenizer.tokenize(r"\frac{a}{b}"));
+        let abrupt = scorer.score(&tokenizer.tokenize(r"\frac \alpha \beta"));
+
+        assert!(
+            fluent.component("ngram").unwrap().normalized_score
+                > abrupt.component("ngram").unwrap().normalized_score
+        );
+    }
+
+    #[test]
+    fn test_semantic_coherence_penalizes_unknown_tokens() {
+        let tokenizer = LaTeXTokenizer::new();
+        let mut scorer = LaTeXScorer::builder()
+            .ngram_weight(0.0)
+            .embedding_weight(1.0)
+            .neural_weight(0.0)
+            .structural_weight(0.0)
+            .rag_weight(0.0)
+            .build();
+
+        let coherent = scorer.score(&tokenizer.tokenize(r"\alpha + \beta"));
+        let mut noisy_tokens = tokenizer.tokenize(r"\alpha + \beta");
+        noisy_tokens.push(LaTeXToken::new(
+            LaTeXTokenKind::Unknown("@@".to_string()),
+            0,
+            2,
+            false,
+        ));
+        let noisy = scorer.score(&noisy_tokens);
+
+        assert!(
+            coherent.component("embedding").unwrap().normalized_score
+                > noisy.component("embedding").unwrap().normalized_score
+        );
     }
 }

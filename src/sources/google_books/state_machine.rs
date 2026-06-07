@@ -55,14 +55,19 @@ pub enum PipelinePhase {
 
     /// Actively downloading and processing n-gram files.
     Downloading {
+        /// Number of workers currently active.
         active_workers: usize,
+        /// Number of worker results received.
         results_received: u64,
+        /// Total results expected for this import phase.
         total_pending: u64,
     },
 
     /// Paused by user request. Workers complete current job then idle.
     Paused {
+        /// Number of worker results received before pausing.
         results_received: u64,
+        /// Total results expected for this import phase.
         total_pending: u64,
     },
 
@@ -71,7 +76,9 @@ pub enum PipelinePhase {
 
     /// Merging shards into final output.
     Merging {
+        /// Number of shards merged so far.
         shards_processed: usize,
+        /// Total shards scheduled for merge.
         total_shards: usize,
     },
 
@@ -80,7 +87,9 @@ pub enum PipelinePhase {
 
     /// Import completed successfully.
     Completed {
+        /// Total n-grams processed.
         total_ngrams: u64,
+        /// Total wall-clock duration.
         duration: Duration,
     },
 
@@ -91,7 +100,10 @@ pub enum PipelinePhase {
     ForceQuit,
 
     /// Import failed with error.
-    Failed { error: String },
+    Failed {
+        /// Human-readable failure reason.
+        error: String,
+    },
 }
 
 impl PipelinePhase {
@@ -127,7 +139,10 @@ impl PipelinePhase {
 #[derive(Debug)]
 pub enum ImportTrigger {
     /// Initialization complete, ready to start downloading.
-    InitComplete { total_pending: u64 },
+    InitComplete {
+        /// Total worker results expected for the import phase.
+        total_pending: u64,
+    },
 
     /// A job result was received from a worker.
     JobResult {
@@ -548,7 +563,7 @@ impl ImportContext {
             // Downloading -> various states
             (
                 PipelinePhase::Downloading { total_pending, .. },
-                ImportTrigger::JobResult { ngrams, .. },
+                ImportTrigger::JobResult { ngrams: _, .. },
             ) => {
                 self.results_received += 1;
                 PipelinePhase::Downloading {

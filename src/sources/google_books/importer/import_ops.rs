@@ -13,12 +13,10 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use super::super::checkpoint::MknPhase;
-use super::super::config::GoogleBooksConfig;
 use super::super::events::{ImportCommand, ImportEvent, LogLevel};
-use super::super::languages::{get_file_url, get_metadata, get_prefixes, is_supported};
+use super::super::languages::{get_file_url, get_metadata};
 use super::super::state_machine::CleanupResources;
 use super::worker_pool::{
     process_prefix_file, worker_task, Job, JobOutcome, JobResult, PrefixOutcome,
@@ -27,6 +25,102 @@ use super::worker_pool::{
 use super::{
     GoogleBooksImporter, ImportError, ImportPhase, ImportProgress, ImportStats, WorkerUpdate,
 };
+
+pub(super) async fn wait_for_worker_exits_before_checkpoint(
+    active_workers: &mut usize,
+    results_received: &mut u64,
+    worker_handles: &mut std::collections::HashMap<usize, tokio::task::JoinHandle<()>>,
+    worker_shutdown_txs: &mut std::collections::HashMap<usize, tokio::sync::watch::Sender<bool>>,
+    worker_exit_rx: &mut tokio::sync::mpsc::Receiver<usize>,
+    result_rx: &mut tokio::sync::mpsc::Receiver<JobResult>,
+    force_quit: &AtomicBool,
+) -> Result<(), ImportError> {
+    let mut result_rx_closed = false;
+    let mut force_quit_poll = tokio::time::interval(Duration::from_millis(100));
+
+    while *active_workers > 0 {
+        if force_quit.load(Ordering::SeqCst) {
+            return Err(ImportError::Interrupted);
+        }
+
+        tokio::select! {
+            biased;
+
+            maybe_exited_worker_id = worker_exit_rx.recv() => {
+                let Some(exited_worker_id) = maybe_exited_worker_id else {
+                    log::error!(
+                        "Worker exit channel closed with {} workers still active; \
+                         refusing to checkpoint",
+                        *active_workers
+                    );
+                    return Err(ImportError::Interrupted);
+                };
+
+                *active_workers = (*active_workers).saturating_sub(1);
+                worker_handles.remove(&exited_worker_id);
+                worker_shutdown_txs.remove(&exited_worker_id);
+                log::debug!(
+                    "Cancellation: worker {} exited, {} remaining",
+                    exited_worker_id,
+                    *active_workers
+                );
+            }
+
+            maybe_job_result = result_rx.recv(), if !result_rx_closed => {
+                if maybe_job_result.is_some() {
+                    *results_received += 1;
+                } else {
+                    result_rx_closed = true;
+                }
+            }
+
+            _ = force_quit_poll.tick() => {
+                if force_quit.load(Ordering::SeqCst) {
+                    return Err(ImportError::Interrupted);
+                }
+            }
+        }
+    }
+
+    // Result and exit notifications use separate channels. A worker sends its
+    // result before its exit notice, but the biased select can observe the exit
+    // first once both messages are ready.
+    while result_rx.try_recv().is_ok() {
+        *results_received += 1;
+    }
+
+    Ok(())
+}
+
+async fn cleanup_reactive_import_resources(
+    worker_handles: std::collections::HashMap<usize, tokio::task::JoinHandle<()>>,
+    worker_shutdown_txs: std::collections::HashMap<usize, tokio::sync::watch::Sender<bool>>,
+    shared_state: Arc<WorkerSharedState>,
+    result_tx: tokio::sync::mpsc::Sender<JobResult>,
+    worker_exit_tx: tokio::sync::mpsc::Sender<usize>,
+    worker_converter: tokio::task::JoinHandle<()>,
+    stats_task: tokio::task::JoinHandle<()>,
+    command_handler: tokio::task::JoinHandle<()>,
+    abort_workers: bool,
+) {
+    if abort_workers {
+        for handle in worker_handles.values() {
+            handle.abort();
+        }
+    }
+
+    let cleanup_resources = CleanupResources::new()
+        .with_worker_handles(worker_handles)
+        .with_worker_shutdown_txs(worker_shutdown_txs)
+        .with_shared_state(shared_state)
+        .with_result_tx(result_tx)
+        .with_worker_exit_tx(worker_exit_tx)
+        .with_worker_converter(worker_converter)
+        .with_stats_task(stats_task)
+        .with_command_handler(command_handler);
+
+    cleanup_resources.into_cleanup_guard().cleanup().await;
+}
 
 impl GoogleBooksImporter {
     /// Import from local gzip files.
@@ -397,7 +491,6 @@ impl GoogleBooksImporter {
                         order: o,
                         attempt,
                         backoff_ms,
-                        error: _,
                     } => {
                         // Collect deferred item for retry later (Arc<str> is cheap to store)
                         deferred_items.push((url, prefix, o, attempt, backoff_ms));
@@ -524,7 +617,6 @@ impl GoogleBooksImporter {
                             order: o,
                             attempt,
                             backoff_ms,
-                            error: _,
                         } => {
                             // Re-defer for another pass (Arc<str> is cheap to clone)
                             deferred_items.push((url, prefix, o, attempt, backoff_ms));
@@ -618,7 +710,6 @@ impl GoogleBooksImporter {
         mut command_rx: tokio::sync::mpsc::Receiver<ImportCommand>,
         keep_shards: bool,
     ) -> Result<ImportStats, ImportError> {
-        use futures::stream::StreamExt;
         use std::time::{Duration, Instant};
 
         let parallel_downloads = self.config.parallel_downloads;
@@ -1221,15 +1312,30 @@ impl GoogleBooksImporter {
                         total_pending - results_received
                     ),
                 });
-                // Save checkpoint before breaking to preserve progress
-                if let Err(e) = self.save_checkpoint() {
+                let terminal_result = if let Err(e) = self.save_checkpoint() {
                     log::error!("Failed to save checkpoint on worker exit: {}", e);
+                    Err(e)
                 } else {
                     let _ = event_tx.send(ImportEvent::CheckpointSaved {
                         prefix: "emergency".to_string(),
                     });
-                }
-                break;
+                    Err(ImportError::Interrupted)
+                };
+
+                cleanup_reactive_import_resources(
+                    worker_handles,
+                    worker_shutdown_txs,
+                    shared_state,
+                    result_tx,
+                    worker_exit_tx,
+                    worker_converter,
+                    stats_task,
+                    command_handler,
+                    false,
+                )
+                .await;
+
+                return terminal_result;
             }
 
             // Use tokio::select! to race between result, parallelism change, and worker exit
@@ -1241,8 +1347,19 @@ impl GoogleBooksImporter {
                 // Check for cancellation first (highest priority)
                 _ = async {}, if force_quit.load(Ordering::SeqCst) => {
                     drop(parallelism_rx);
-                    signal_all_shutdown(&worker_shutdown_txs);
                     let _ = event_tx.send(ImportEvent::ImportCancelled);
+                    cleanup_reactive_import_resources(
+                        worker_handles,
+                        worker_shutdown_txs,
+                        shared_state,
+                        result_tx,
+                        worker_exit_tx,
+                        worker_converter,
+                        stats_task,
+                        command_handler,
+                        true,
+                    )
+                    .await;
                     return Err(ImportError::Interrupted);
                 }
 
@@ -1264,48 +1381,64 @@ impl GoogleBooksImporter {
                         active_workers
                     );
 
-                    while active_workers > 0 {
-                        tokio::select! {
-                            biased;
-
-                            // Track worker exits (highest priority)
-                            Some(exited_worker_id) = worker_exit_rx.recv() => {
-                                active_workers = active_workers.saturating_sub(1);
-                                worker_handles.remove(&exited_worker_id);
-                                worker_shutdown_txs.remove(&exited_worker_id);
-                                log::debug!(
-                                    "Cancellation: worker {} exited, {} remaining",
-                                    exited_worker_id,
-                                    active_workers
-                                );
-                            }
-
-                            // Drain results concurrently to prevent channel backpressure
-                            Some(_job_result) = result_rx.recv() => {
-                                results_received += 1;
-                            }
-
-                            // Timeout safety net (shouldn't happen in normal operation)
-                            _ = tokio::time::sleep(Duration::from_secs(30)) => {
-                                log::error!(
-                                    "Cancellation: timeout waiting for {} workers to exit, \
-                                     proceeding with checkpoint anyway",
-                                    active_workers
-                                );
-                                break;
-                            }
-                        }
+                    if let Err(err) = wait_for_worker_exits_before_checkpoint(
+                        &mut active_workers,
+                        &mut results_received,
+                        &mut worker_handles,
+                        &mut worker_shutdown_txs,
+                        &mut worker_exit_rx,
+                        &mut result_rx,
+                        &force_quit,
+                    )
+                    .await
+                    {
+                        let _ = event_tx.send(ImportEvent::ImportCancelled);
+                        cleanup_reactive_import_resources(
+                            worker_handles,
+                            worker_shutdown_txs,
+                            shared_state,
+                            result_tx,
+                            worker_exit_tx,
+                            worker_converter,
+                            stats_task,
+                            command_handler,
+                            true,
+                        )
+                        .await;
+                        return Err(err);
                     }
 
                     log::info!("Cancellation: all workers exited, saving checkpoint");
 
                     // NOW safe to checkpoint - no more vocabulary writes can occur
-                    self.save_checkpoint()?;
-                    let _ = event_tx.send(ImportEvent::CheckpointSaved {
-                        prefix: "all".to_string(),
-                    });
+                    let terminal_result = match self.save_checkpoint() {
+                        Ok(()) => {
+                            let _ = event_tx.send(ImportEvent::CheckpointSaved {
+                                prefix: "all".to_string(),
+                            });
+                            Err(ImportError::Interrupted)
+                        }
+                        Err(err) => {
+                            let _ = event_tx.send(ImportEvent::Error {
+                                message: format!("Checkpoint failed during cancellation: {}", err),
+                            });
+                            Err(err)
+                        }
+                    };
                     let _ = event_tx.send(ImportEvent::ImportCancelled);
-                    return Err(ImportError::Interrupted);
+                    cleanup_reactive_import_resources(
+                        worker_handles,
+                        worker_shutdown_txs,
+                        shared_state,
+                        result_tx,
+                        worker_exit_tx,
+                        worker_converter,
+                        stats_task,
+                        command_handler,
+                        false,
+                    )
+                    .await;
+                    return terminal_result;
                 }
 
                 // Check for worker exits (high priority - track active workers)
@@ -1589,19 +1722,18 @@ impl GoogleBooksImporter {
             phase: "Cleaning Up".to_string(),
         });
 
-        // Build cleanup resources and execute cleanup guard (LIFO order guaranteed)
-        let cleanup_resources = CleanupResources::new()
-            .with_worker_handles(worker_handles)
-            .with_worker_shutdown_txs(worker_shutdown_txs)
-            .with_shared_state(shared_state)
-            .with_result_tx(result_tx)
-            .with_worker_exit_tx(worker_exit_tx)
-            .with_worker_converter(worker_converter)
-            .with_stats_task(stats_task)
-            .with_command_handler(command_handler);
-
-        let cleanup_guard = cleanup_resources.into_cleanup_guard();
-        cleanup_guard.cleanup().await;
+        cleanup_reactive_import_resources(
+            worker_handles,
+            worker_shutdown_txs,
+            shared_state,
+            result_tx,
+            worker_exit_tx,
+            worker_converter,
+            stats_task,
+            command_handler,
+            false,
+        )
+        .await;
 
         // Allow TUI to catch up with cleanup events before sending post-cleanup phases
         // This prevents broadcast channel lagging from dropping PhaseChanged events

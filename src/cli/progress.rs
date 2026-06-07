@@ -18,8 +18,11 @@ pub enum ProgressUpdate {
     Bytes(u64),
     /// Update with all statistics.
     Stats {
+        /// Number of processed sentences.
         sentences: u64,
+        /// Number of processed tokens.
         tokens: u64,
+        /// Number of bytes read.
         bytes: u64,
     },
     /// Update message.

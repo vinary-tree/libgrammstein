@@ -222,7 +222,7 @@ impl EmbedderBackend {
                 model,
                 tokenizer,
                 device,
-                hidden_size: _,
+                hidden_size,
             } => {
                 // Tokenize
                 let encoding = tokenizer.encode(text, true).map_err(|e| {
@@ -253,9 +253,19 @@ impl EmbedderBackend {
                     .i((0, 0))
                     .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))?;
 
-                cls_embedding
+                let embedding = cls_embedding
                     .to_vec1()
-                    .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))
+                    .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))?;
+
+                if embedding.len() != *hidden_size {
+                    return Err(CodeEmbedderError::Embedding(format!(
+                        "BERT embedding dimension mismatch: expected {}, got {}",
+                        hidden_size,
+                        embedding.len()
+                    )));
+                }
+
+                Ok(embedding)
             }
         }
     }
@@ -270,7 +280,7 @@ impl EmbedderBackend {
                 model,
                 tokenizer,
                 device,
-                hidden_size: _,
+                hidden_size,
             } => {
                 if texts.is_empty() {
                     return Ok(vec![]);
@@ -316,6 +326,13 @@ impl EmbedderBackend {
                     let vec: Vec<f32> = cls
                         .to_vec1()
                         .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))?;
+                    if vec.len() != *hidden_size {
+                        return Err(CodeEmbedderError::Embedding(format!(
+                            "BERT embedding dimension mismatch: expected {}, got {}",
+                            hidden_size,
+                            vec.len()
+                        )));
+                    }
                     embeddings.push(vec);
                 }
 
@@ -440,7 +457,10 @@ impl CodeEmbedder {
     ///
     /// For full ONNX support with code-specific models like UniXcoder or GraphCodeBERT,
     /// consider using `crate::neural::code::UniXcoderEmbedder` directly.
-    fn load_onnx_model(path: &Path, config: CodeEmbedderConfig) -> Result<Self, CodeEmbedderError> {
+    fn load_onnx_model(
+        path: &Path,
+        _config: CodeEmbedderConfig,
+    ) -> Result<Self, CodeEmbedderError> {
         // ONNX models require the code-neural feature and ort runtime
         // For now, we provide a helpful error message directing users to the specialized embedders
         //
@@ -766,6 +786,11 @@ impl CodeEmbedder {
     /// Returns the model being used.
     pub fn model(&self) -> EmbeddingModel {
         self.config.model
+    }
+
+    /// Returns the detected model architecture.
+    pub fn architecture(&self) -> ModelArchitecture {
+        self.architecture
     }
 }
 

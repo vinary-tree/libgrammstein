@@ -993,9 +993,9 @@ mod tests {
         let vocab = create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
 
         // Pre-populate the vocabulary
-        vocab.write().insert("pre");
-        vocab.write().insert("populated");
-        vocab.write().insert("words");
+        vocab.write().insert("pre").expect("insert pre");
+        vocab.write().insert("populated").expect("insert populated");
+        vocab.write().insert("words").expect("insert words");
 
         let corpus_path = create_test_corpus(dir.path(), "pre populated words are here");
         let reader = PlaintextReader::from_file(&corpus_path).expect("Failed to create reader");

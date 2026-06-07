@@ -24,8 +24,8 @@ use super::checkpoint::{CheckpointError, ImportCheckpoint};
 use super::config::GoogleBooksConfig;
 use super::sharding::{CheckpointHandle, ShardCoordinator, ShardKey};
 use crate::ngram::vocabulary::{
-    encode_ngram_key_lockfree_bytes, try_encode_ngram_key_lockfree_bytes,
-    with_encoded_ngram_key_lockfree, SharedConcurrentVocab, VocabularyError,
+    try_encode_ngram_key_lockfree_bytes, with_encoded_ngram_key_lockfree, SharedConcurrentVocab,
+    VocabularyError,
 };
 use libdictenstein::persistent_artrie::PersistentARTrie;
 use liblevenshtein::dictionary::Dictionary;
@@ -414,9 +414,8 @@ impl NgramStorage {
                 let guard = trie.read();
                 // Zero-alloc path via thread-local buffer
                 let is_new = with_encoded_ngram_key_lockfree(tokens, vocab, |encoded_key| {
-                    let lockfree_exists = guard.get_lockfree(encoded_key).is_some();
-                    let persistent_exists = guard.get_value_bytes(encoded_key).is_some();
-                    let is_new = !lockfree_exists && !persistent_exists;
+                    // Single overlay read (overlay-default single source of truth).
+                    let is_new = guard.get_value_bytes(encoded_key).is_none();
                     guard.increment_cas(encoded_key, count);
                     is_new
                 });
@@ -502,9 +501,8 @@ impl NgramStorage {
         match self {
             Self::SingleTrie { trie, stats, .. } => {
                 let guard = trie.read();
-                let lockfree_exists = guard.get_lockfree(ngram_bytes).is_some();
-                let persistent_exists = guard.get_value_bytes(ngram_bytes).is_some();
-                let is_new = !lockfree_exists && !persistent_exists;
+                // Single overlay read (overlay-default single source of truth).
+                let is_new = guard.get_value_bytes(ngram_bytes).is_none();
                 guard.increment_cas(ngram_bytes, count);
 
                 stats.record(count, if is_new { 1 } else { 0 });
@@ -544,9 +542,8 @@ impl NgramStorage {
                 let mut total_count = 0u64;
 
                 for (ngram, count) in ngrams {
-                    let lockfree_exists = guard.get_lockfree(ngram).is_some();
-                    let persistent_exists = guard.get_value_bytes(ngram).is_some();
-                    let is_new = !lockfree_exists && !persistent_exists;
+                    // Single overlay read (overlay-default single source of truth).
+                    let is_new = guard.get_value_bytes(ngram).is_none();
                     guard.increment_cas(ngram, count);
 
                     if is_new {
@@ -589,13 +586,11 @@ impl NgramStorage {
         match self {
             Self::SingleTrie { trie, .. } => {
                 let guard = trie.read();
-                let lockfree_val = guard.get_lockfree(ngram_bytes).unwrap_or(0);
-                let persistent_val = guard.get_value_bytes(ngram_bytes).unwrap_or(0);
-                let total = lockfree_val + persistent_val;
-                if total > 0 {
-                    Some(total)
-                } else {
-                    None
+                // Single overlay read (overlay-default single source of truth); the
+                // prior get_lockfree + get_value_bytes sum read the same leaf twice.
+                match guard.get_value_bytes(ngram_bytes).unwrap_or(0) {
+                    0 => None,
+                    total => Some(total),
                 }
             }
             Self::Sharded { coordinator, .. } => coordinator.get(ngram),
@@ -607,7 +602,7 @@ impl NgramStorage {
     /// This encodes the tokens to a varint key and routes based on the original tokens,
     /// ensuring correct shard routing for vocabulary-indexed storage.
     ///
-    /// For single-trie mode, checks both lock-free and persistent layers and sums.
+    /// For single-trie mode, reads the overlay (the single source of truth).
     ///
     /// # Arguments
     ///
@@ -618,13 +613,10 @@ impl NgramStorage {
         match self {
             Self::SingleTrie { trie, .. } => {
                 let guard = trie.read();
-                let lockfree_val = guard.get_lockfree(&encoded_key).unwrap_or(0);
-                let persistent_val = guard.get_value_bytes(&encoded_key).unwrap_or(0);
-                let total = lockfree_val + persistent_val;
-                if total > 0 {
-                    Some(total)
-                } else {
-                    None
+                // Single overlay read (overlay-default single source of truth).
+                match guard.get_value_bytes(&encoded_key).unwrap_or(0) {
+                    0 => None,
+                    total => Some(total),
                 }
             }
             Self::Sharded { coordinator, .. } => {
@@ -646,17 +638,14 @@ impl NgramStorage {
 
     /// Checkpoint the storage.
     ///
-    /// For single-trie mode, first merges accumulated lock-free values into
-    /// the persistent layer, then checkpoints to disk. This requires an
-    /// exclusive write lock, which briefly blocks workers during checkpoint.
+    /// For single-trie mode, `checkpoint()` serializes the lock-free overlay snapshot
+    /// (the durable production state under the overlay-default write mode) into the
+    /// on-disk image. The obsolete `merge_lockfree_values_to_persistent` pre-step has
+    /// been removed.
     pub fn checkpoint(&self) -> StorageResult<()> {
         match self {
             Self::SingleTrie { trie, .. } => {
-                let mut guard = trie.write();
-                // Merge lock-free accumulated values into persistent layer
-                guard
-                    .merge_lockfree_values_to_persistent()
-                    .map_err(|e| StorageError::Trie(format!("Lock-free merge failed: {}", e)))?;
+                let guard = trie.write();
                 guard
                     .checkpoint()
                     .map_err(|e| StorageError::Trie(format!("Checkpoint failed: {}", e)))
@@ -668,16 +657,15 @@ impl NgramStorage {
         }
     }
 
-    /// Sync to disk (WAL flush).
+    /// Persist to disk.
     ///
-    /// For single-trie mode, merges lock-free values then checkpoints.
+    /// For single-trie mode, `checkpoint()` serializes the overlay snapshot (the
+    /// durable state under overlay-default) — a bare WAL sync would not capture the
+    /// lock-free `increment_cas` counts. The obsolete merge pre-step has been removed.
     pub fn sync(&self) -> StorageResult<()> {
         match self {
             Self::SingleTrie { trie, .. } => {
-                let mut guard = trie.write();
-                guard
-                    .merge_lockfree_values_to_persistent()
-                    .map_err(|e| StorageError::Trie(format!("Lock-free merge failed: {}", e)))?;
+                let guard = trie.write();
                 guard
                     .checkpoint()
                     .map_err(|e| StorageError::Trie(format!("Sync failed: {}", e)))
@@ -706,14 +694,14 @@ impl NgramStorage {
     pub fn flush_lockfree_over_threshold(&self, threshold: u64) -> StorageResult<usize> {
         match self {
             Self::SingleTrie { trie, .. } => {
-                // Single trie: flush if it has any lock-free data
-                // (We don't track per-entry counts on the single trie, so
-                //  we always flush when this is called, which is fine since
+                // Single trie: checkpoint to persist the overlay and reclaim its
+                // memory. (We don't track per-entry counts on the single trie, so we
+                //  always checkpoint when this is called, which is fine since
                 //  single-trie mode is not the OOM-prone path.)
-                let mut guard = trie.write();
+                let guard = trie.write();
                 guard
-                    .merge_lockfree_values_to_persistent()
-                    .map_err(|e| StorageError::Trie(format!("Lock-free merge failed: {}", e)))?;
+                    .checkpoint()
+                    .map_err(|e| StorageError::Trie(format!("Lock-free flush failed: {}", e)))?;
                 Ok(1)
             }
             Self::Sharded { coordinator, .. } => coordinator
@@ -914,10 +902,7 @@ impl NgramStorage {
     pub fn sync_parallel(&self, max_concurrent: usize) -> StorageResult<usize> {
         match self {
             Self::SingleTrie { trie, .. } => {
-                let mut guard = trie.write();
-                guard
-                    .merge_lockfree_values_to_persistent()
-                    .map_err(|e| StorageError::Trie(format!("Lock-free merge failed: {}", e)))?;
+                let guard = trie.write();
                 guard
                     .checkpoint()
                     .map_err(|e| StorageError::Trie(format!("Sync failed: {}", e)))?;
@@ -949,10 +934,7 @@ impl NgramStorage {
     pub fn checkpoint_parallel(&self, max_concurrent_syncs: usize) -> StorageResult<()> {
         match self {
             Self::SingleTrie { trie, .. } => {
-                let mut guard = trie.write();
-                guard
-                    .merge_lockfree_values_to_persistent()
-                    .map_err(|e| StorageError::Trie(format!("Lock-free merge failed: {}", e)))?;
+                let guard = trie.write();
                 guard
                     .checkpoint()
                     .map_err(|e| StorageError::Trie(format!("Checkpoint failed: {}", e)))
@@ -987,11 +969,9 @@ impl NgramStorage {
     pub fn checkpoint_async(&self) -> StorageResult<CheckpointHandle> {
         match self {
             Self::SingleTrie { trie, .. } => {
-                // Single trie: merge lock-free values then checkpoint synchronously
-                let mut guard = trie.write();
-                guard
-                    .merge_lockfree_values_to_persistent()
-                    .map_err(|e| StorageError::Trie(format!("Lock-free merge failed: {}", e)))?;
+                // Single trie: checkpoint synchronously (the overlay snapshot is the
+                // durable state; the obsolete merge pre-step has been removed)
+                let guard = trie.write();
                 guard
                     .checkpoint()
                     .map_err(|e| StorageError::Trie(format!("Checkpoint failed: {}", e)))?;
@@ -1044,14 +1024,11 @@ impl NgramStorage {
         }
     }
 
-    /// Close the storage (merge lock-free values, checkpoint, and release resources).
+    /// Close the storage (checkpoint and release resources).
     pub fn close(&self) -> StorageResult<()> {
         match self {
             Self::SingleTrie { trie, .. } => {
-                let mut guard = trie.write();
-                guard.merge_lockfree_values_to_persistent().map_err(|e| {
-                    StorageError::Trie(format!("Lock-free merge on close failed: {}", e))
-                })?;
+                let guard = trie.write();
                 guard
                     .checkpoint()
                     .map_err(|e| StorageError::Trie(format!("Close checkpoint failed: {}", e)))
@@ -1992,12 +1969,8 @@ mod tests {
         let path = dir.path().join("test.artrie");
         let storage = NgramStorage::create_single_trie(&path).expect("create_single_trie");
 
-        // begin_prefix_tx returns None in single-trie mode, so we have to
-        // fabricate a tx-shaped placeholder. Easier: just call the method via
-        // the sharded path's StoragePrefixTx wrapper and verify the error.
-        //
-        // Instead: just check that begin_prefix_tx itself returns None for
-        // single-trie mode, which is the upstream invariant that prevents
+        // begin_prefix_tx itself returns None for single-trie mode, which is
+        // the upstream invariant that prevents
         // anyone from constructing a StoragePrefixTx against single-trie
         // storage in the first place.
         let result = storage
@@ -2214,7 +2187,252 @@ mod tests {
             original_indices, reopened_indices,
             "vocabulary indices must be stable across reopen — the documented \
              checkpoint-resume bug arose when re-insertion assigned new \
-             indices, orphaning previously-encoded n-grams"
+            indices, orphaning previously-encoded n-grams"
+        );
+    }
+
+    fn persistent_storage_bridge_sharded_config(dir: &TempDir) -> GoogleBooksConfig {
+        GoogleBooksConfig {
+            output_path: dir.path().join("bridge.artrie"),
+            sharding: ShardingMode::Enabled(super::super::config::ShardingOptions {
+                granularity: super::super::config::ShardingGranularity::TwoChar,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn persistent_storage_bridge_checkpoint(order: u8, prefix: &str) -> ImportCheckpoint {
+        let mut checkpoint = ImportCheckpoint::new();
+        checkpoint.complete_prefix(order, prefix);
+        checkpoint.add_ngrams(order, 1);
+        checkpoint
+    }
+
+    fn assert_persistent_storage_bridge_completed(
+        checkpoint: &ImportCheckpoint,
+        order: u8,
+        prefix: &str,
+    ) {
+        assert!(
+            !checkpoint.needs_prefix(order, prefix),
+            "completed prefix should not need processing after checkpoint reopen"
+        );
+    }
+
+    #[test]
+    fn persistent_storage_bridge_single_trie_checkpoint_metadata_reopens() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("single.artrie");
+
+        {
+            let storage = NgramStorage::create_single_trie(&path).expect("create single storage");
+            storage.store("the quick", 7).expect("store data");
+            storage.checkpoint().expect("checkpoint data");
+
+            let checkpoint = persistent_storage_bridge_checkpoint(2, "th");
+            storage
+                .save_import_checkpoint(&checkpoint)
+                .expect("save durable checkpoint metadata");
+        }
+
+        let reopened = NgramStorage::create_single_trie(&path).expect("reopen single storage");
+        assert_eq!(
+            reopened.get("the quick"),
+            Some(7),
+            "single-trie data should recover with checkpoint metadata"
+        );
+
+        let loaded = reopened
+            .load_import_checkpoint()
+            .expect("load checkpoint metadata")
+            .expect("checkpoint metadata should exist");
+        assert_persistent_storage_bridge_completed(&loaded, 2, "th");
+    }
+
+    #[test]
+    fn persistent_storage_bridge_sharded_checkpoint_metadata_reopens() {
+        let dir = TempDir::new().expect("tempdir");
+        let config = persistent_storage_bridge_sharded_config(&dir);
+
+        {
+            let storage = NgramStorage::create_sharded(&config).expect("create sharded storage");
+            storage.store("the quick", 11).expect("store data");
+            storage.sync().expect("sync sharded data");
+            storage.checkpoint().expect("checkpoint sharded data");
+
+            let checkpoint = persistent_storage_bridge_checkpoint(2, "th");
+            storage
+                .save_import_checkpoint(&checkpoint)
+                .expect("save sharded checkpoint metadata");
+        }
+
+        let reopened =
+            NgramStorage::resume_or_start(&config, 1_000_000).expect("reopen sharded storage");
+        assert_eq!(
+            reopened.get("the quick"),
+            Some(11),
+            "sharded data should recover with auxiliary checkpoint metadata"
+        );
+
+        let loaded = reopened
+            .load_import_checkpoint()
+            .expect("load sharded checkpoint metadata")
+            .expect("checkpoint metadata should exist");
+        assert_persistent_storage_bridge_completed(&loaded, 2, "th");
+    }
+
+    #[test]
+    fn persistent_storage_bridge_completed_prefix_data_and_metadata_recover() {
+        let dir = TempDir::new().expect("tempdir");
+        let config = persistent_storage_bridge_sharded_config(&dir);
+        let vocab_path = dir.path().join("vocab.artrie");
+
+        {
+            let vocabulary = open_or_create_vocabulary(&vocab_path).expect("vocab create");
+            let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+            let storage = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocabulary))
+                .expect("create sharded storage with vocabulary");
+
+            let mut tx = storage
+                .begin_prefix_tx("th", 2)
+                .expect("begin prefix tx")
+                .expect("prefix-based sharding should support prefix tx");
+            storage
+                .tx_insert_ngram(&mut tx, "the quick", 13)
+                .expect("insert prefix n-gram");
+            assert_eq!(storage.commit_prefix_tx(tx).expect("commit prefix tx"), 1);
+
+            storage
+                .merge_and_rotate_vocabulary_wal()
+                .expect("durable vocabulary evidence");
+            storage.sync().expect("sync shard data");
+            storage.checkpoint().expect("checkpoint shard data");
+
+            let checkpoint = persistent_storage_bridge_checkpoint(2, "th");
+            storage
+                .save_import_checkpoint(&checkpoint)
+                .expect("save checkpoint claim after data durability");
+        }
+
+        let vocabulary = open_or_create_vocabulary(&vocab_path).expect("vocab reopen");
+        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+        let reopened = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocabulary))
+            .expect("reopen sharded storage with vocabulary");
+
+        assert_eq!(
+            reopened.get_tokens(&["the", "quick"]),
+            Some(13),
+            "completed prefix data should recover through stable vocabulary keys"
+        );
+        assert!(
+            reopened.is_prefix_completed("th"),
+            "shard prefix completion should survive checkpoint/reopen"
+        );
+
+        let loaded = reopened
+            .load_import_checkpoint()
+            .expect("load checkpoint metadata")
+            .expect("checkpoint metadata should exist");
+        assert_persistent_storage_bridge_completed(&loaded, 2, "th");
+    }
+
+    #[test]
+    fn persistent_storage_bridge_graceful_cancel_checkpoint_recoverable() {
+        let dir = TempDir::new().expect("tempdir");
+        let config = persistent_storage_bridge_sharded_config(&dir);
+
+        {
+            let storage = NgramStorage::create_sharded(&config).expect("create sharded storage");
+            storage.store("cancel path", 5).expect("store data");
+            storage.sync().expect("sync data before graceful cancel");
+            storage.checkpoint().expect("checkpoint data before cancel");
+
+            let mut checkpoint = persistent_storage_bridge_checkpoint(2, "ca");
+            checkpoint.current_prefix = None;
+            storage
+                .save_import_checkpoint(&checkpoint)
+                .expect("save graceful-cancel checkpoint");
+        }
+
+        let reopened =
+            NgramStorage::resume_or_start(&config, 1_000_000).expect("reopen sharded storage");
+        assert_eq!(
+            reopened.get("cancel path"),
+            Some(5),
+            "graceful cancel checkpoint should recover drained data"
+        );
+
+        let loaded = reopened
+            .load_import_checkpoint()
+            .expect("load graceful-cancel checkpoint")
+            .expect("checkpoint metadata should exist");
+        assert_persistent_storage_bridge_completed(&loaded, 2, "ca");
+    }
+
+    #[test]
+    fn persistent_storage_bridge_force_quit_does_not_publish_new_claim() {
+        let dir = TempDir::new().expect("tempdir");
+        let config = persistent_storage_bridge_sharded_config(&dir);
+
+        {
+            let storage = NgramStorage::create_sharded(&config).expect("create sharded storage");
+            let old_checkpoint = persistent_storage_bridge_checkpoint(2, "aa");
+            storage
+                .save_import_checkpoint(&old_checkpoint)
+                .expect("save pre-existing checkpoint");
+
+            storage.store("the quick", 17).expect("store later data");
+            storage.sync().expect("sync later data");
+            storage.checkpoint().expect("checkpoint later data");
+        }
+
+        let reopened =
+            NgramStorage::resume_or_start(&config, 1_000_000).expect("reopen sharded storage");
+        assert_eq!(
+            reopened.get("the quick"),
+            Some(17),
+            "force-quit path may leave durable data without publishing a checkpoint claim"
+        );
+
+        let loaded = reopened
+            .load_import_checkpoint()
+            .expect("load checkpoint metadata")
+            .expect("old checkpoint metadata should remain");
+        assert_persistent_storage_bridge_completed(&loaded, 2, "aa");
+        assert!(
+            loaded.needs_prefix(2, "th"),
+            "later force-quit data must not appear as a new checkpoint claim"
+        );
+    }
+
+    #[test]
+    fn persistent_storage_bridge_vocabulary_indices_stable_across_reopen() {
+        let dir = TempDir::new().expect("tempdir");
+        let vocab_path = dir.path().join("vocab.artrie");
+        let terms = ["the", "quick", "bridge", "recover"];
+        let first_indices: Vec<u64>;
+
+        {
+            let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab create");
+            let mut guard = vocab.write();
+            first_indices = terms
+                .iter()
+                .map(|term| guard.insert(term).expect("insert vocab term"))
+                .collect();
+            guard.checkpoint().expect("checkpoint vocabulary");
+        }
+
+        let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab reopen");
+        let mut guard = vocab.write();
+        let reopened_indices: Vec<u64> = terms
+            .iter()
+            .map(|term| guard.insert(term).expect("reinsert vocab term"))
+            .collect();
+
+        assert_eq!(
+            first_indices, reopened_indices,
+            "vocabulary term indices should remain stable after checkpoint/reopen"
         );
     }
 }

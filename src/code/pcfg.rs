@@ -265,6 +265,11 @@ impl<'a, L: CodeLanguage> PcfgTrainer<'a, L> {
         self
     }
 
+    /// Returns the language used to parse training inputs.
+    pub fn language(&self) -> &L {
+        self.language
+    }
+
     /// Trains the PCFG from a single parsed file.
     pub fn train_from_parsed(&mut self, parsed: &ParsedCode) {
         let ast = AstNode::from_ts_node(parsed.root(), &parsed.source);

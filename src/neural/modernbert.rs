@@ -309,41 +309,47 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "requires model download"]
-    fn test_load_model() {
+    fn test_config_default() {
         let config = ModernBertConfig::default();
-        let model = ModernBertModel::load(config).expect("Failed to load model");
-        assert_eq!(model.hidden_size(), 768);
+
+        assert_eq!(config.model_id, "answerdotai/ModernBERT-base");
+        assert!(matches!(config.device, Device::Cpu));
+        assert_eq!(config.dtype, DType::F32);
+        assert_eq!(config.max_seq_len, 8192);
     }
 
     #[test]
-    #[ignore = "requires model download"]
-    fn test_embed_text() {
-        let config = ModernBertConfig::default();
-        let model = ModernBertModel::load(config).expect("Failed to load model");
+    fn test_cpu_device_conversion() {
+        let device = Device::Cpu.to_candle().expect("CPU device should exist");
 
-        let text = "The quick brown fox jumps over the lazy dog.";
-        let embedding = model.embed(text).expect("Failed to embed");
-
-        assert_eq!(embedding.len(), 768);
+        assert!(matches!(device, CandleDevice::Cpu));
     }
 
     #[test]
-    #[ignore = "requires model download"]
-    fn test_batch_embed() {
-        let config = ModernBertConfig::default();
-        let model = ModernBertModel::load(config).expect("Failed to load model");
+    fn test_load_from_files_rejects_invalid_config_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model_path = dir.path().join("model.safetensors");
+        let config_path = dir.path().join("config.json");
+        let tokenizer_path = dir.path().join("tokenizer.json");
 
-        let texts = vec![
-            "Hello world!",
-            "The quick brown fox.",
-            "A longer sentence with more tokens to test padding behavior.",
-        ];
-        let embeddings = model.embed_batch(&texts).expect("Failed to batch embed");
+        std::fs::write(&model_path, b"").expect("empty model fixture");
+        std::fs::write(&config_path, b"not json").expect("invalid config");
+        std::fs::write(&tokenizer_path, b"{}").expect("minimal tokenizer fixture");
 
-        assert_eq!(embeddings.len(), 3);
-        for embedding in &embeddings {
-            assert_eq!(embedding.len(), 768);
+        let err = ModernBertModel::load_from_files(
+            &model_path,
+            &config_path,
+            &tokenizer_path,
+            ModernBertConfig::default(),
+            CandleDevice::Cpu,
+        )
+        .expect_err("invalid config should be rejected before loading weights");
+
+        match err {
+            NeuralError::ModelLoad(message) => {
+                assert!(message.contains("Invalid config"));
+            }
+            other => panic!("expected ModelLoad error, got {other:?}"),
         }
     }
 }

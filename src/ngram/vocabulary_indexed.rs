@@ -61,6 +61,7 @@
 //! - **Read operations**: Return `None`/`false` for OOV words without modifying vocabulary
 //! - **Write operations**: Acquire new vocabulary indices for unknown words
 
+use super::metadata_filtering_zipper::{MetadataFilteringZipper, METADATA_PREFIX};
 use super::vocabulary::{decode_varint, encode_varint, SharedVocabARTrie};
 use liblevenshtein::dictionary::{
     Dictionary, DictionaryNode, MappedDictionary, MappedDictionaryNode, MutableMappedDictionary,
@@ -312,12 +313,14 @@ where
 impl<D> Dictionary for VocabularyIndexedDictionary<D>
 where
     D: Dictionary,
+    D::Node: DictionaryNode<Unit = char>,
 {
     type Node = VocabularyIndexedNode<D::Node>;
 
     fn root(&self) -> Self::Node {
         VocabularyIndexedNode {
             inner: self.backend.root(),
+            at_root: true,
         }
     }
 
@@ -330,11 +333,24 @@ where
     }
 
     fn len(&self) -> Option<usize> {
-        self.backend.len()
+        let backend_len = self.backend.len()?;
+        if self.backend.root().has_edge(METADATA_PREFIX) {
+            Some(count_visible_finals(self.root()))
+        } else {
+            Some(backend_len)
+        }
     }
 
     fn is_empty(&self) -> bool {
-        self.backend.is_empty()
+        if self.backend.is_empty() {
+            return true;
+        }
+
+        if self.backend.root().has_edge(METADATA_PREFIX) {
+            count_visible_finals(self.root()) == 0
+        } else {
+            false
+        }
     }
 
     fn sync_strategy(&self) -> SyncStrategy {
@@ -349,6 +365,7 @@ where
 impl<D> MappedDictionary for VocabularyIndexedDictionary<D>
 where
     D: MappedDictionary,
+    D::Node: MappedDictionaryNode<Unit = char>,
 {
     type Value = D::Value;
 
@@ -376,6 +393,7 @@ where
 impl<D> MutableMappedDictionary for VocabularyIndexedDictionary<D>
 where
     D: MutableMappedDictionary,
+    D::Node: MappedDictionaryNode<Unit = char>,
 {
     fn insert_with_value(&self, term: &str, value: Self::Value) -> bool {
         let words: Vec<&str> = self.split_term(term).collect();
@@ -420,32 +438,51 @@ where
 #[derive(Clone)]
 pub struct VocabularyIndexedNode<N> {
     inner: N,
+    at_root: bool,
 }
 
 impl<N: std::fmt::Debug> std::fmt::Debug for VocabularyIndexedNode<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VocabularyIndexedNode")
             .field("inner", &self.inner)
+            .field("at_root", &self.at_root)
             .finish()
     }
 }
 
-impl<N: DictionaryNode> DictionaryNode for VocabularyIndexedNode<N> {
-    type Unit = N::Unit;
+impl<N: DictionaryNode<Unit = char>> DictionaryNode for VocabularyIndexedNode<N> {
+    type Unit = char;
 
     fn is_final(&self) -> bool {
         self.inner.is_final()
     }
 
     fn transition(&self, label: Self::Unit) -> Option<Self> {
-        self.inner.transition(label).map(|inner| Self { inner })
+        if self.at_root && label == METADATA_PREFIX {
+            return None;
+        }
+
+        self.inner.transition(label).map(|inner| Self {
+            inner,
+            at_root: false,
+        })
     }
 
     fn edges(&self) -> Box<dyn Iterator<Item = (Self::Unit, Self)> + '_> {
+        let at_root = self.at_root;
         Box::new(
             self.inner
                 .edges()
-                .map(|(label, inner)| (label, Self { inner })),
+                .filter(move |(label, _)| !at_root || *label != METADATA_PREFIX)
+                .map(|(label, inner)| {
+                    (
+                        label,
+                        Self {
+                            inner,
+                            at_root: false,
+                        },
+                    )
+                }),
         )
     }
 
@@ -458,7 +495,7 @@ impl<N: DictionaryNode> DictionaryNode for VocabularyIndexedNode<N> {
     }
 }
 
-impl<N: MappedDictionaryNode> MappedDictionaryNode for VocabularyIndexedNode<N> {
+impl<N: MappedDictionaryNode<Unit = char>> MappedDictionaryNode for VocabularyIndexedNode<N> {
     type Value = N::Value;
 
     fn value(&self) -> Option<Self::Value> {
@@ -466,11 +503,30 @@ impl<N: MappedDictionaryNode> MappedDictionaryNode for VocabularyIndexedNode<N> 
     }
 }
 
+fn count_visible_finals<N>(root: VocabularyIndexedNode<N>) -> usize
+where
+    N: DictionaryNode<Unit = char>,
+{
+    let mut count = 0;
+    let mut stack = vec![root];
+
+    while let Some(node) = stack.pop() {
+        if node.is_final() {
+            count += 1;
+        }
+
+        for (_, child) in node.edges() {
+            stack.push(child);
+        }
+    }
+
+    count
+}
+
 // ============================================================================
 // Zipper Support
 // ============================================================================
 
-use super::metadata_filtering_zipper::MetadataFilteringZipper;
 use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
 use liblevenshtein::dictionary::dynamic_dawg_char_zipper::DynamicDawgCharZipper;
 use liblevenshtein::dictionary::value::DictionaryValue;
@@ -674,6 +730,83 @@ mod tests {
     }
 
     #[test]
+    fn vocabulary_query_root_traversal_filters_metadata() {
+        let (_dir, dict) = create_test_dict();
+
+        dict.insert_ngram(&["hello"], 1);
+        dict.backend().insert_with_value("\x00__meta__", 999);
+
+        let root = dict.root();
+        assert!(
+            root.transition(METADATA_PREFIX).is_none(),
+            "root traversal must not expose metadata keys"
+        );
+
+        let children: Vec<char> = root.edges().map(|(label, _)| label).collect();
+        assert!(
+            !children.contains(&METADATA_PREFIX),
+            "root edges must filter metadata keys"
+        );
+        assert!(
+            !children.is_empty(),
+            "data edges should remain visible after metadata filtering"
+        );
+        assert_eq!(
+            dict.len(),
+            Some(1),
+            "Dictionary::len should count visible query terms only"
+        );
+    }
+
+    #[test]
+    fn vocabulary_query_value_traversal_never_emits_root_metadata() {
+        fn collect_values<N>(node: N, values: &mut Vec<u64>)
+        where
+            N: MappedDictionaryNode<Unit = char, Value = u64> + Clone,
+        {
+            if let Some(value) = node.value() {
+                values.push(value);
+            }
+
+            for (_, child) in node.edges() {
+                collect_values(child, values);
+            }
+        }
+
+        let (_dir, dict) = create_test_dict();
+
+        dict.insert_ngram(&["hello"], 1);
+        dict.insert_ngram(&["world"], 2);
+        dict.backend().insert_with_value("\x00__meta__", 999);
+
+        let mut values = Vec::new();
+        collect_values(dict.root(), &mut values);
+
+        values.sort_unstable();
+        assert_eq!(values, vec![1, 2]);
+        assert!(
+            !values.contains(&999),
+            "value-yielding traversal must not emit metadata values"
+        );
+    }
+
+    #[test]
+    fn vocabulary_query_oov_reads_do_not_mutate_vocabulary() {
+        let (_dir, dict) = create_test_dict();
+
+        dict.insert_ngram(&["known"], 7);
+        let len_before = dict.vocabulary().read().len();
+
+        assert!(dict.get_ngram(&["missing"]).is_none());
+        assert!(!dict.contains_ngram(&["known", "missing"]));
+        assert_eq!(
+            dict.vocabulary().read().len(),
+            len_before,
+            "read-only query paths must not allocate vocabulary indices"
+        );
+    }
+
+    #[test]
     fn test_large_vocabulary_indices() {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let vocab_path = dir.path().join("vocab.artrie");
@@ -685,7 +818,7 @@ mod tests {
         {
             let mut guard = vocab.write();
             for i in 0..200 {
-                guard.insert(&format!("word{}", i));
+                guard.insert(&format!("word{}", i)).expect("insert word");
             }
         }
 

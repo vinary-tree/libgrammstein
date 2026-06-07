@@ -68,6 +68,11 @@ impl ExactCosineBackend {
         &self.doc_ids
     }
 
+    /// Get the configured pre-allocation capacity.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// Get the index of a document by ID.
     fn index_of(&self, id: DocumentId) -> Option<usize> {
         self.doc_ids.iter().position(|&d| d == id)
@@ -252,6 +257,7 @@ impl std::fmt::Debug for ExactCosineBackend {
         f.debug_struct("ExactCosineBackend")
             .field("num_documents", &self.len())
             .field("embedding_dim", &self.embedding_dim)
+            .field("capacity", &self.capacity)
             .finish()
     }
 }

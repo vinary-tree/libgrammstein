@@ -25,40 +25,62 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 pub enum ImportEvent {
     /// Import started for a specific n-gram order.
-    OrderStarted { order: u8, total_files: u64 },
+    OrderStarted {
+        /// N-gram order being imported.
+        order: u8,
+        /// Total number of files scheduled for the order.
+        total_files: u64,
+    },
 
     /// An order completed successfully.
     OrderCompleted {
+        /// N-gram order that completed.
         order: u8,
+        /// Number of n-grams processed for the order.
         ngram_count: u64,
+        /// Wall-clock duration for the order.
         duration: Duration,
     },
 
     /// Worker began downloading a prefix file.
     WorkerStarted {
+        /// Worker ID that started the job.
         worker_id: usize,
         /// N-gram order being processed (1-5).
         order: u8,
+        /// Prefix assigned to the worker.
         prefix: String,
     },
 
     /// Worker download progress (bytes received).
     WorkerProgress {
+        /// Worker ID reporting progress.
         worker_id: usize,
+        /// Bytes downloaded so far.
         bytes_downloaded: u64,
+        /// Total compressed bytes if the server reported a content length.
         total_bytes: Option<u64>,
     },
 
     /// Worker n-gram processing progress (periodic update).
-    WorkerNgramProgress { worker_id: usize, ngram_count: u64 },
+    WorkerNgramProgress {
+        /// Worker ID reporting progress.
+        worker_id: usize,
+        /// Number of n-grams processed by the worker.
+        ngram_count: u64,
+    },
 
     /// Worker finished processing a file.
     WorkerFinished {
+        /// Worker ID that completed the job.
         worker_id: usize,
         /// N-gram order that was processed (1-5).
         order: u8,
+        /// Prefix that was processed.
         prefix: String,
+        /// Number of n-grams processed.
         ngram_count: u64,
+        /// Wall-clock duration for the job.
         duration: Duration,
     },
 
@@ -85,10 +107,15 @@ pub enum ImportEvent {
 
     /// Worker is retrying after transient error.
     WorkerRetrying {
+        /// Worker ID retrying the job.
         worker_id: usize,
+        /// Prefix being retried.
         prefix: String,
+        /// Current retry attempt.
         attempt: u32,
+        /// Maximum retry attempts before the prefix is marked failed.
         max_attempts: u32,
+        /// Human-readable retry reason.
         error: String,
     },
 
@@ -96,20 +123,32 @@ pub enum ImportEvent {
     ///
     /// Emitted when a worker task exits, either because it received a shutdown
     /// signal (parallelism decreased) or because the job queue is empty.
-    WorkerExited { worker_id: usize },
+    WorkerExited {
+        /// Worker ID that exited.
+        worker_id: usize,
+    },
 
     /// Periodic statistics update.
     StatsSnapshot {
+        /// Number of files completed across active orders.
         files_completed: u64,
+        /// Total number of files scheduled.
         total_files: u64,
+        /// Total n-grams processed.
         total_ngrams: u64,
+        /// Unique n-grams seen so far.
         unique_ngrams: u64,
+        /// Current processing throughput.
         ngrams_per_second: f64,
+        /// Elapsed import duration.
         elapsed: Duration,
     },
 
     /// Checkpoint saved.
-    CheckpointSaved { prefix: String },
+    CheckpointSaved {
+        /// Prefix whose checkpoint was persisted.
+        prefix: String,
+    },
 
     /// Checkpoint progress update.
     ///
@@ -126,7 +165,9 @@ pub enum ImportEvent {
 
     /// Import completed (all orders).
     ImportCompleted {
+        /// Total n-grams processed across all orders.
         total_ngrams: u64,
+        /// Total wall-clock duration for the import.
         duration: Duration,
     },
 
@@ -150,7 +191,12 @@ pub enum ImportEvent {
     },
 
     /// Log message (for debugging/info).
-    Log { level: LogLevel, message: String },
+    Log {
+        /// Severity level for the log message.
+        level: LogLevel,
+        /// Human-readable log text.
+        message: String,
+    },
 
     /// A prefix file failed after exhausting all retries.
     ///
@@ -356,9 +402,13 @@ pub enum ImportEvent {
 /// Log level for log events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogLevel {
+    /// Debug-level diagnostic message.
     Debug,
+    /// Informational message.
     Info,
+    /// Warning message.
     Warn,
+    /// Error message.
     Error,
 }
 

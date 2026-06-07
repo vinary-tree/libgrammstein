@@ -151,8 +151,8 @@ impl fmt::Display for ShardKey {
 pub fn compute_shard_key(ngram: &str, order: u8, granularity: &ShardGranularity) -> ShardKey {
     // Handle hash-based routing
     if let ShardGranularity::CpuProportional {
-        multiplier,
-        minimum,
+        multiplier: _,
+        minimum: _,
     } = granularity
     {
         let num_shards = granularity.num_shards();

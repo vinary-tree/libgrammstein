@@ -391,7 +391,6 @@ struct TransformerLayer {
     norm1_bias: Tensor,
     norm2_weight: Tensor,
     norm2_bias: Tensor,
-    hidden_dim: usize,
 }
 
 impl TransformerLayer {
@@ -415,7 +414,6 @@ impl TransformerLayer {
             norm1_bias,
             norm2_weight,
             norm2_bias,
-            hidden_dim,
         })
     }
 

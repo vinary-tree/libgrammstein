@@ -209,7 +209,7 @@ impl NgramAccumulator {
     ///
     /// Returns `None` if the n-gram has never been seen.
     pub fn get(&self, ngram: &str) -> Option<i64> {
-        self.trie.get(ngram).copied()
+        self.trie.get(ngram)
     }
 
     /// Check if an n-gram exists in the accumulator.

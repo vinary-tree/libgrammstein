@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_layer_cache() {
-        let mut cache = LayerCache::new();
+        let cache = LayerCache::new();
         assert!(cache.is_empty());
 
         // Would need tensors to test update - skipping for unit test

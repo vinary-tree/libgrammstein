@@ -32,5 +32,6 @@
 mod pattern;
 mod treeminer;
 
+pub use pattern::encoding::{decode_pattern, encode_pattern, pattern_hash};
 pub use pattern::{FlatNode, FlatTree, PatternNode, SubtreePattern};
 pub use treeminer::{MiningResult, TreeminerConfig, TreeminerD};

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rayon::prelude::*;
 
-use super::pattern::{encoding, FlatNode, FlatTree, PatternNode, SubtreePattern};
+use super::pattern::{encoding, FlatTree, PatternNode, SubtreePattern};
 
 /// Configuration for the TreeminerD algorithm.
 #[derive(Debug, Clone)]
@@ -228,22 +228,6 @@ impl TreeminerD {
         patterns
     }
 
-    /// Extend patterns by one node (sequential version).
-    ///
-    /// **Note:** Prefer using `extend_patterns_with_lookup` to avoid
-    /// rebuilding the tree_map for each extension level.
-    fn extend_patterns(
-        &self,
-        patterns: &[SubtreePattern],
-        trees: &[FlatTree],
-        min_support: usize,
-        total_trees: usize,
-    ) -> (Vec<SubtreePattern>, usize, usize) {
-        // Build tree lookup (per-call overhead - prefer _with_lookup variant)
-        let tree_map: HashMap<u64, &FlatTree> = trees.iter().map(|t| (t.tree_id, t)).collect();
-        self.extend_patterns_with_lookup(patterns, &tree_map, min_support, total_trees)
-    }
-
     /// Extend patterns by one node using a pre-built tree lookup.
     ///
     /// This avoids rebuilding the tree_map HashMap for each extension level,
@@ -302,22 +286,6 @@ impl TreeminerD {
         }
 
         (result, generated, pruned)
-    }
-
-    /// Extend patterns by one node (parallel version).
-    ///
-    /// **Note:** Prefer using `extend_patterns_parallel_with_lookup` to avoid
-    /// rebuilding the tree_map for each extension level.
-    fn extend_patterns_parallel(
-        &self,
-        patterns: &[SubtreePattern],
-        trees: &[FlatTree],
-        min_support: usize,
-        total_trees: usize,
-    ) -> (Vec<SubtreePattern>, usize, usize) {
-        // Build tree lookup (per-call overhead - prefer _with_lookup variant)
-        let tree_map: HashMap<u64, &FlatTree> = trees.iter().map(|t| (t.tree_id, t)).collect();
-        self.extend_patterns_parallel_with_lookup(patterns, &tree_map, min_support, total_trees)
     }
 
     /// Extend patterns by one node in parallel using a pre-built tree lookup.
@@ -493,6 +461,7 @@ impl Default for TreeminerD {
 
 #[cfg(test)]
 mod tests {
+    use super::super::pattern::FlatNode;
     use super::*;
 
     fn make_simple_tree(labels: &[(&str, usize)], tree_id: u64) -> FlatTree {

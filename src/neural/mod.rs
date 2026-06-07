@@ -39,11 +39,11 @@ mod summarizer;
 #[cfg(feature = "code-neural")]
 pub mod code;
 
-pub use cache::{CacheConfig, KvCache};
-pub use embedder::{EmbeddingConfig, ModernBertEmbedder};
+pub use cache::{CacheConfig, EmbeddingCache, KvCache, LayerCache, SlidingWindowCache};
+pub use embedder::{BatchDocumentEmbedder, DocumentEmbedding, EmbeddingConfig, ModernBertEmbedder};
 pub use modernbert::{Device, ModernBertConfig, ModernBertModel};
-pub use rescorer::{ModernBertRescorer, RescoringConfig, ScoredPath};
-pub use summarizer::{Summarizer, SummarizerConfig, Synopsis, SynopsisSource};
+pub use rescorer::{ModernBertRescorer, RankedPath, RescoringConfig, RescoringResult, ScoredPath};
+pub use summarizer::{ScoredSentence, Summarizer, SummarizerConfig, Synopsis, SynopsisSource};
 
 /// Result type for neural module operations.
 pub type Result<T> = std::result::Result<T, NeuralError>;

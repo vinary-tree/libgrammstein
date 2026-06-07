@@ -95,11 +95,9 @@ impl<'a> ShardedTrieView<'a> {
     /// Search for prefix in a specific shard.
     fn prefix_search_shard(&self, key: &ShardKey, prefix: &[u8]) -> Vec<(Vec<u8>, u64)> {
         if let Ok(shard) = self.coordinator.get_or_create_shard(key) {
-            let mut guard = shard.write();
-            if let Err(e) = guard.flush_lockfree() {
-                log::warn!("Failed to flush shard {}: {}", key, e);
-                return Vec::new();
-            }
+            // Overlay-default: iteration reads the overlay directly, so no
+            // pre-iteration flush is needed and a shared read guard suffices.
+            let guard = shard.read();
             match guard.iter_with_counts() {
                 Ok(entries) => entries
                     .into_iter()
@@ -121,11 +119,7 @@ impl<'a> ShardedTrieView<'a> {
 
         for key in self.coordinator.open_shard_keys() {
             if let Ok(shard) = self.coordinator.get_or_create_shard(&key) {
-                let mut guard = shard.write();
-                if let Err(e) = guard.flush_lockfree() {
-                    log::warn!("Failed to flush shard {}: {}", key, e);
-                    continue;
-                }
+                let guard = shard.read();
                 match guard.iter_with_counts() {
                     Ok(iter) => {
                         for (ngram, count) in iter {
@@ -196,11 +190,7 @@ impl<'a> ShardedTrieView<'a> {
 
         keys.into_iter().flat_map(move |key| {
             if let Ok(shard) = self.coordinator.get_or_create_shard(&key) {
-                let mut guard = shard.write();
-                if let Err(e) = guard.flush_lockfree() {
-                    log::warn!("Failed to flush shard {}: {}", key, e);
-                    return Vec::new();
-                }
+                let guard = shard.read();
                 match guard.iter_with_counts() {
                     Ok(entries) => entries,
                     Err(e) => {

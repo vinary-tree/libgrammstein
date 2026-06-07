@@ -10,7 +10,6 @@ use std::sync::atomic::Ordering;
 
 use super::super::checkpoint::ImportCheckpoint;
 use super::super::events as gb_events;
-use super::super::events::{ImportEvent, LogLevel};
 use super::{GoogleBooksImporter, ImportError};
 
 impl GoogleBooksImporter {

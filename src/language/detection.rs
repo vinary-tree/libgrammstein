@@ -18,7 +18,12 @@ pub enum LanguageDetectionError {
 
     /// Detection confidence too low.
     #[error("Low confidence detection: {confidence:.2}% (minimum: {minimum:.2}%)")]
-    LowConfidence { confidence: f64, minimum: f64 },
+    LowConfidence {
+        /// Observed detection confidence.
+        confidence: f64,
+        /// Minimum confidence required by the caller.
+        minimum: f64,
+    },
 }
 
 /// Detect the language of the given text.
@@ -150,7 +155,13 @@ pub fn detect_from_sentences<'a, I>(
 where
     I: Iterator<Item = &'a str>,
 {
-    let sample: String = sentences.take(max_samples).collect::<Vec<_>>().join(" ");
+    let mut sample = String::new();
+    for sentence in sentences.take(max_samples) {
+        if !sample.is_empty() {
+            sample.push(' ');
+        }
+        sample.push_str(sentence);
+    }
 
     if sample.is_empty() {
         return Err(LanguageDetectionError::InsufficientText);

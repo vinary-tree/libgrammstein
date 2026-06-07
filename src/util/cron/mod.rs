@@ -431,6 +431,10 @@ impl CronStateMachine {
             return CronEvent::TerminationRequested;
         }
 
+        if self.channel_disconnected && self.queue.is_empty() {
+            return CronEvent::ChannelDisconnected;
+        }
+
         // Check channel (non-blocking)
         match self.task_rx.try_recv() {
             Ok(task) => {

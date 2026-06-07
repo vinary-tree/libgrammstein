@@ -372,21 +372,56 @@ impl QualityFilter {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RejectionReason {
     /// Sentence has too few words.
-    TooFewWords { count: usize, minimum: usize },
+    TooFewWords {
+        /// Number of words found in the sentence.
+        count: usize,
+        /// Minimum configured word count.
+        minimum: usize,
+    },
     /// Sentence has too many words.
-    TooManyWords { count: usize, maximum: usize },
+    TooManyWords {
+        /// Number of words found in the sentence.
+        count: usize,
+        /// Maximum configured word count.
+        maximum: usize,
+    },
     /// Excessive word repetition.
-    ExcessiveRepetition { ratio: f32, maximum: f32 },
+    ExcessiveRepetition {
+        /// Observed repetition ratio.
+        ratio: f32,
+        /// Maximum allowed repetition ratio.
+        maximum: f32,
+    },
     /// Missing terminal punctuation.
     MissingTerminalPunct,
     /// Character entropy too low.
-    LowEntropy { entropy: f32, minimum: f32 },
+    LowEntropy {
+        /// Observed character entropy.
+        entropy: f32,
+        /// Minimum allowed character entropy.
+        minimum: f32,
+    },
     /// Alphabetic character ratio too low.
-    LowAlphaRatio { ratio: f32, minimum: f32 },
+    LowAlphaRatio {
+        /// Observed alphabetic character ratio.
+        ratio: f32,
+        /// Minimum allowed alphabetic character ratio.
+        minimum: f32,
+    },
     /// Average word length too short.
-    ShortWords { avg_length: f32, minimum: f32 },
+    ShortWords {
+        /// Observed average word length.
+        avg_length: f32,
+        /// Minimum allowed average word length.
+        minimum: f32,
+    },
     /// Average word length too long.
-    LongWords { avg_length: f32, maximum: f32 },
+    LongWords {
+        /// Observed average word length.
+        avg_length: f32,
+        /// Maximum allowed average word length.
+        maximum: f32,
+    },
 }
 
 impl std::fmt::Display for RejectionReason {

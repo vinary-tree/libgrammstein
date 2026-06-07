@@ -233,7 +233,8 @@ pub struct ImportCheckpoint {
 /// it's automatically migrated to v2 format.
 #[derive(Clone, Debug, Deserialize)]
 struct ImportCheckpointV1 {
-    pub version: u32,
+    #[serde(rename = "version")]
+    pub _version: u32,
     pub completed_orders: Vec<u8>,
     pub current_order: u8,
     pub completed_prefixes: Vec<String>,

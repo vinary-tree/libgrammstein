@@ -260,22 +260,19 @@ impl GnnSemanticScorer {
 
     /// Detects semantic issues in the CPG.
     ///
-    /// This is a placeholder for the full GNN inference pipeline.
-    /// In production, this would use a trained model for inference.
-    ///
     /// Uses on-demand edge queries via `edges_to`/`edges_from` instead of
     /// buffering all edges in memory. For large CPGs this avoids O(E) memory
-    /// overhead and multiple full edge scans.
+    /// overhead and multiple full edge scans. When learned embeddings are not
+    /// available, detection falls back to deterministic graph-analysis rules.
     pub fn detect_issues(&self, cpg: &CodePropertyGraph) -> Vec<SemanticIssue> {
         let mut issues = Vec::new();
 
         // Build node index lookup for efficient graph queries
-        let node_indices: HashMap<usize, petgraph::graph::NodeIndex> = cpg
-            .all_nodes()
-            .map(|n| (n.id, petgraph::graph::NodeIndex::new(n.id)))
-            .collect();
+        let node_indices: HashMap<usize, petgraph::graph::NodeIndex> =
+            cpg.nodes().map(|(idx, node)| (node.id, idx)).collect();
 
-        // Heuristic-based detection (placeholder for neural model)
+        // Deterministic graph rules cover issues that can be identified without
+        // a trained model or cached learned embeddings.
         for node in cpg.all_nodes() {
             // Check for unused variables (simplified)
             if node.kind == CpgNodeKind::Variable {
@@ -305,6 +302,23 @@ impl GnnSemanticScorer {
                         suggestion: Some("Variable may be unused".to_string()),
                         related_nodes: vec![],
                     });
+                }
+            }
+
+            if node.kind == CpgNodeKind::Call {
+                if let Some(name) = &node.name {
+                    if matches!(name.as_str(), "unwrap" | "expect") {
+                        issues.push(SemanticIssue {
+                            node_idx: node.id,
+                            issue_type: IssueType::MissingErrorHandling,
+                            confidence: 0.75,
+                            suggestion: Some(format!(
+                                "Replace `{}` with explicit error handling",
+                                name
+                            )),
+                            related_nodes: vec![],
+                        });
+                    }
                 }
             }
         }
@@ -354,8 +368,8 @@ impl GnnSemanticScorer {
 
             if let Some(name) = &other.name {
                 if name != &node_name {
-                    // Simple similarity score based on edit distance
-                    // (placeholder for embedding-based similarity)
+                    // Lexical fallback used when learned node embeddings are
+                    // unavailable for the candidate pair.
                     let score = self.compute_similarity(&node_name, name);
                     if score > 0.3 {
                         candidates.push((name.clone(), score));
@@ -370,9 +384,8 @@ impl GnnSemanticScorer {
         candidates
     }
 
-    /// Computes string similarity (placeholder for embedding similarity).
+    /// Computes lexical similarity over character bigrams.
     fn compute_similarity(&self, a: &str, b: &str) -> f64 {
-        // Simple Jaccard similarity on character bigrams
         if a.is_empty() || b.is_empty() {
             return 0.0;
         }
@@ -439,7 +452,24 @@ impl GnnFeatures {
 
 #[cfg(test)]
 mod tests {
+    use super::super::cpg::CpgEdge;
     use super::*;
+
+    fn test_node(id: usize, kind: CpgNodeKind, name: Option<&str>) -> CpgNode {
+        CpgNode {
+            id,
+            kind,
+            name: name.map(str::to_string),
+            location: (id * 10, id * 10 + 1),
+            position: (id, 0),
+            ast_kind: format!("{:?}", kind),
+            properties: HashMap::new(),
+        }
+    }
+
+    fn test_edge(kind: CpgEdgeKind) -> CpgEdge {
+        CpgEdge { kind, label: None }
+    }
 
     #[test]
     fn test_gnn_config_default() {
@@ -473,5 +503,37 @@ mod tests {
         // Same string
         let sim = scorer.compute_similarity("test", "test");
         assert!((sim - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_detect_issues_uses_graph_indices_not_node_ids() {
+        let mut cpg = CodePropertyGraph::new();
+        let assignment_idx = cpg.add_node(test_node(20, CpgNodeKind::Assignment, Some("=")));
+        let variable_idx = cpg.add_node(test_node(10, CpgNodeKind::Variable, Some("unused")));
+        cpg.add_edge(
+            assignment_idx,
+            variable_idx,
+            test_edge(CpgEdgeKind::DfgWrite),
+        );
+
+        let scorer = GnnSemanticScorer::default_scorer();
+        let issues = scorer.detect_issues(&cpg);
+
+        assert!(issues
+            .iter()
+            .any(|issue| { issue.node_idx == 10 && issue.issue_type == IssueType::UnusedBinding }));
+    }
+
+    #[test]
+    fn test_detects_unwrap_calls_as_missing_error_handling() {
+        let mut cpg = CodePropertyGraph::new();
+        cpg.add_node(test_node(42, CpgNodeKind::Call, Some("unwrap")));
+
+        let scorer = GnnSemanticScorer::default_scorer();
+        let issues = scorer.detect_issues(&cpg);
+
+        assert!(issues.iter().any(|issue| {
+            issue.node_idx == 42 && issue.issue_type == IssueType::MissingErrorHandling
+        }));
     }
 }

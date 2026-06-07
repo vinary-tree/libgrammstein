@@ -196,29 +196,25 @@ impl<'a, L: CodeLanguage> CodeTokenizer<'a, L> {
 }
 
 /// Iterator over tokens in source code.
-pub struct TokenIterator<'a, L: CodeLanguage> {
-    tokenizer: CodeTokenizer<'a, L>,
-    tree: Tree,
-    source: String,
+pub struct TokenIterator<L: CodeLanguage> {
     tokens: Vec<CodeToken>,
     position: usize,
+    _marker: std::marker::PhantomData<L>,
 }
 
-impl<'a, L: CodeLanguage> TokenIterator<'a, L> {
+impl<'a, L: CodeLanguage> TokenIterator<L> {
     /// Creates a new token iterator.
     pub fn new(tokenizer: CodeTokenizer<'a, L>, tree: Tree, source: String) -> Self {
         let tokens = tokenizer.tokenize(&tree, &source);
         Self {
-            tokenizer,
-            tree,
-            source,
             tokens,
             position: 0,
+            _marker: std::marker::PhantomData,
         }
     }
 }
 
-impl<L: CodeLanguage> Iterator for TokenIterator<'_, L> {
+impl<L: CodeLanguage> Iterator for TokenIterator<L> {
     type Item = CodeToken;
 
     fn next(&mut self) -> Option<Self::Item> {

@@ -763,7 +763,7 @@ mod tests {
     #[test]
     fn test_to_wfst_has_transitions() {
         let model = create_test_model();
-        let (wfst, vocab): (VectorWfst<WordId, LogWeight>, _) = model.to_wfst();
+        let (wfst, _vocab): (VectorWfst<WordId, LogWeight>, _) = model.to_wfst();
 
         // Start state should have transitions
         let start = wfst.start();

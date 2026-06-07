@@ -18,23 +18,40 @@ pub enum CliError {
 
     /// File not found.
     #[error("File not found: {path}")]
-    FileNotFound { path: PathBuf },
+    FileNotFound {
+        /// Missing file path.
+        path: PathBuf,
+    },
 
     /// Invalid argument.
     #[error("Invalid argument: {message}")]
-    InvalidArgument { message: String },
+    InvalidArgument {
+        /// Human-readable validation failure.
+        message: String,
+    },
 
     /// Model loading error.
     #[error("Failed to load model from {path}: {reason}")]
-    ModelLoad { path: PathBuf, reason: String },
+    ModelLoad {
+        /// Model path that failed to load.
+        path: PathBuf,
+        /// Loading failure reason.
+        reason: String,
+    },
 
     /// Corpus error.
     #[error("Corpus error: {message}")]
-    Corpus { message: String },
+    Corpus {
+        /// Corpus failure details.
+        message: String,
+    },
 
     /// Checkpoint error.
     #[error("Checkpoint error: {message}")]
-    Checkpoint { message: String },
+    Checkpoint {
+        /// Checkpoint failure details.
+        message: String,
+    },
 
     /// Training interrupted.
     #[error("Training interrupted")]
@@ -42,15 +59,24 @@ pub enum CliError {
 
     /// Training error.
     #[error("Training error: {message}")]
-    Training { message: String },
+    Training {
+        /// Training failure details.
+        message: String,
+    },
 
     /// Generic I/O error with context.
     #[error("I/O error: {message}")]
-    IoError { message: String },
+    IoError {
+        /// I/O failure details.
+        message: String,
+    },
 
     /// REPL error.
     #[error("REPL error: {message}")]
-    Repl { message: String },
+    Repl {
+        /// REPL failure details.
+        message: String,
+    },
 
     /// Serialization error.
     #[error("Serialization error: {0}")]
@@ -58,11 +84,17 @@ pub enum CliError {
 
     /// Language detection error.
     #[error("Language detection error: {message}")]
-    LanguageDetection { message: String },
+    LanguageDetection {
+        /// Language detection failure details.
+        message: String,
+    },
 
     /// Unsupported operation.
     #[error("Unsupported: {message}")]
-    Unsupported { message: String },
+    Unsupported {
+        /// Unsupported-operation details.
+        message: String,
+    },
 }
 
 /// Result type for CLI operations.

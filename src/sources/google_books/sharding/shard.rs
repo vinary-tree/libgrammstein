@@ -22,35 +22,71 @@ use thiserror::Error;
 pub enum ShardError {
     /// Failed to create or open the shard file.
     #[error("Failed to create/open shard at {path}: {message}")]
-    Open { path: PathBuf, message: String },
+    Open {
+        /// Filesystem path for the shard.
+        path: PathBuf,
+        /// Human-readable error context.
+        message: String,
+    },
 
     /// Read operation failed.
     #[error("Read failed for shard {shard_key}: {message}")]
-    Read { shard_key: String, message: String },
+    Read {
+        /// Shard key being read.
+        shard_key: String,
+        /// Human-readable error context.
+        message: String,
+    },
 
     /// Write operation failed.
     #[error("Write failed for shard {shard_key}: {message}")]
-    Write { shard_key: String, message: String },
+    Write {
+        /// Shard key being written.
+        shard_key: String,
+        /// Human-readable error context.
+        message: String,
+    },
 
     /// Checkpoint operation failed.
     #[error("Checkpoint failed for shard {shard_key}: {message}")]
-    Checkpoint { shard_key: String, message: String },
+    Checkpoint {
+        /// Shard key being checkpointed.
+        shard_key: String,
+        /// Human-readable error context.
+        message: String,
+    },
 
     /// Shard is locked by another writer.
     #[error("Shard {shard_key} is locked by worker {holder}")]
-    Locked { shard_key: String, holder: usize },
+    Locked {
+        /// Shard key that is currently locked.
+        shard_key: String,
+        /// Worker ID holding the active write token.
+        holder: usize,
+    },
 
     /// Writer token is invalid or expired.
     #[error("Invalid write token for shard {shard_key}")]
-    InvalidToken { shard_key: String },
+    InvalidToken {
+        /// Shard key whose write token was rejected.
+        shard_key: String,
+    },
 
     /// Sync operation failed.
     #[error("Sync failed for shard {shard_key}: {message}")]
-    Sync { shard_key: String, message: String },
+    Sync {
+        /// Shard key being synchronized.
+        shard_key: String,
+        /// Human-readable error context.
+        message: String,
+    },
 
     /// Sync operation timed out.
     #[error("Sync timed out for shard {shard_key}")]
-    SyncTimeout { shard_key: String },
+    SyncTimeout {
+        /// Shard key whose sync timed out.
+        shard_key: String,
+    },
 }
 
 /// Result type for shard operations.
@@ -851,9 +887,10 @@ impl ShardHandle {
     /// exclusive RwLock required, so multiple workers can increment the
     /// same shard concurrently without serialization.
     pub fn increment_lockfree(&self, ngram: &[u8], count: u64) -> ShardResult<bool> {
-        let lockfree_exists = self.trie.get_lockfree(ngram).is_some();
-        let persistent_exists = self.trie.get_value_bytes(ngram).is_some();
-        let was_new = !lockfree_exists && !persistent_exists;
+        // Single overlay read: under the overlay-default write mode `get_value_bytes`
+        // and `get_lockfree` observe the same overlay leaf, so one read is the source
+        // of truth (summing them would double-count).
+        let was_new = self.trie.get_value_bytes(ngram).is_none();
 
         self.trie.increment_cas(ngram, count);
 
@@ -868,22 +905,21 @@ impl ShardHandle {
         Ok(was_new)
     }
 
-    /// Get the count for an n-gram (dual-layer: lock-free overlay + persistent).
+    /// Get the count for an n-gram (overlay-default: single source of truth).
     pub fn get(&self, ngram: &[u8]) -> Option<u64> {
         self.stats.record_read();
-        let lockfree_val = self.trie.get_lockfree(ngram).unwrap_or(0);
-        let persistent_val = self.trie.get_value_bytes(ngram).unwrap_or(0);
-        let total = lockfree_val + persistent_val;
-        if total > 0 {
-            Some(total)
-        } else {
-            None
+        // `get_value_bytes` is the single source of truth under the overlay-default
+        // write mode; the prior `get_lockfree + get_value_bytes` sum read the same
+        // overlay leaf twice and double-counted.
+        match self.trie.get_value_bytes(ngram).unwrap_or(0) {
+            0 => None,
+            total => Some(total),
         }
     }
 
-    /// Check if an n-gram exists (dual-layer: lock-free overlay + persistent).
+    /// Check if an n-gram exists (overlay-default: `contains_bytes` routes to the overlay).
     pub fn contains(&self, ngram: &[u8]) -> bool {
-        self.trie.get_lockfree(ngram).is_some() || self.trie.contains_bytes(ngram)
+        self.trie.contains_bytes(ngram)
     }
 
     /// Iterate over all n-grams with their counts.
@@ -906,19 +942,21 @@ impl ShardHandle {
         }
     }
 
-    /// Sync WAL to disk (merges lock-free overlay first).
+    /// Persist the shard to disk.
+    ///
+    /// Under the overlay-default write mode the lock-free overlay IS the durable
+    /// production state, so `checkpoint()` (which serializes the overlay snapshot into
+    /// the on-disk image) is what makes `increment_cas` counts crash-durable — a bare
+    /// WAL `sync()` would not capture them. The former
+    /// `merge_lockfree_values_to_persistent()` pre-step is obsolete (it rejects under
+    /// the overlay) and has been removed.
     pub fn sync(&mut self) -> ShardResult<()> {
-        self.trie
-            .merge_lockfree_values_to_persistent()
-            .map_err(|e| ShardError::Checkpoint {
-                shard_key: self.key.to_string(),
-                message: format!("merge before sync failed: {}", e),
-            })?;
-        self.lockfree_entries.store(0, Ordering::Relaxed);
         self.trie.checkpoint().map_err(|e| ShardError::Checkpoint {
             shard_key: self.key.to_string(),
             message: format!("sync failed: {}", e),
-        })
+        })?;
+        self.lockfree_entries.store(0, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Sync WAL to disk with state tracking for parallel checkpoints.
@@ -937,21 +975,13 @@ impl ShardHandle {
             return Ok(false);
         }
 
-        // Merge lock-free overlay into persistent trie before syncing
-        if let Err(e) = self.trie.merge_lockfree_values_to_persistent() {
-            let error_msg = format!("merge before sync failed: {}", e);
-            self.sync_coordinator.fail_sync(&error_msg);
-            return Err(ShardError::Sync {
-                shard_key: self.key.to_string(),
-                message: error_msg,
-            });
-        }
-        self.lockfree_entries.store(0, Ordering::Relaxed);
-
-        // Perform the actual sync
-        match self.trie.sync() {
+        // Persist the overlay to disk. Under the overlay-default write mode only a
+        // `checkpoint()` makes the lock-free `increment_cas` counts crash-durable (a
+        // bare WAL `sync()` does not capture the overlay); the obsolete
+        // `merge_lockfree_values_to_persistent()` pre-step has been removed.
+        match self.trie.checkpoint() {
             Ok(()) => {
-                // Success: mark clean and notify waiters
+                self.lockfree_entries.store(0, Ordering::Relaxed);
                 // Use actual synced LSN from the ARTrie WAL
                 let lsn = self.trie.synced_lsn().unwrap_or(0);
                 self.sync_coordinator.complete_sync(lsn);
@@ -1074,18 +1104,18 @@ impl ShardHandle {
         self.trie.synced_lsn()
     }
 
-    /// Merge the lock-free overlay into the persistent trie.
+    /// Persist the lock-free overlay to disk and reclaim its resident memory.
     ///
-    /// Call this before operations that iterate the persistent trie
-    /// (e.g., merge, query, MKN computation) to ensure they see all data.
-    /// Point lookups (`get`, `contains`) already check both layers.
+    /// Under the overlay-default write mode the overlay IS the durable state, so a
+    /// `checkpoint()` (overlay snapshot → on-disk image) both persists the counts and
+    /// lets the overlay reclaim memory. The obsolete `merge_lockfree_values_to_persistent`
+    /// pre-step (which rejects under the overlay) has been removed; point lookups and
+    /// iteration already read the overlay directly, so no pre-iteration flush is needed.
     pub fn flush_lockfree(&mut self) -> ShardResult<()> {
-        self.trie
-            .merge_lockfree_values_to_persistent()
-            .map_err(|e| ShardError::Checkpoint {
-                shard_key: self.key.to_string(),
-                message: format!("flush_lockfree failed: {}", e),
-            })?;
+        self.trie.checkpoint().map_err(|e| ShardError::Checkpoint {
+            shard_key: self.key.to_string(),
+            message: format!("flush_lockfree failed: {}", e),
+        })?;
         self.lockfree_entries.store(0, Ordering::Relaxed);
         Ok(())
     }
@@ -1094,15 +1124,6 @@ impl ShardHandle {
     ///
     /// Uses sequential flush for optimized disk I/O (5-15% faster checkpoints).
     pub fn checkpoint(&mut self) -> ShardResult<()> {
-        // Merge lock-free overlay into persistent trie before checkpointing
-        self.trie
-            .merge_lockfree_values_to_persistent()
-            .map_err(|e| ShardError::Checkpoint {
-                shard_key: self.key.to_string(),
-                message: format!("merge before checkpoint failed: {}", e),
-            })?;
-        self.lockfree_entries.store(0, Ordering::Relaxed);
-
         // Save checkpoint state to trie
         self.save_checkpoint_state()?;
 
@@ -1114,11 +1135,15 @@ impl ShardHandle {
                 message: format!("flush_sequential failed: {}", e),
             })?;
 
-        // Checkpoint the trie
+        // Checkpoint the trie. Under the overlay-default write mode this serializes the
+        // overlay snapshot (the durable production state) into the on-disk image — the
+        // obsolete `merge_lockfree_values_to_persistent` pre-step has been removed.
         self.trie.checkpoint().map_err(|e| ShardError::Checkpoint {
             shard_key: self.key.to_string(),
             message: e.to_string(),
-        })
+        })?;
+        self.lockfree_entries.store(0, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Mark a prefix as completed in this shard.
@@ -1844,8 +1869,7 @@ mod tests {
         let key = ShardKey::new("th");
 
         {
-            let mut shard =
-                ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
+            let shard = ShardHandle::create(key.clone(), &path).expect("Failed to create shard");
 
             // Begin and abort a transaction
             let mut tx = shard.begin_prefix("th").expect("Failed to begin prefix");

@@ -8,7 +8,7 @@ use console::style;
 
 use crate::cli::args::{CorpusFormat, EvalCommands, EvalCompareArgs, EvalPerplexityArgs};
 use crate::cli::error::{print_success, CliError, CliResult};
-use crate::corpus::{CorpusReader, PlaintextReader, Tokenizer};
+use crate::corpus::{CorpusReader, GutenbergReader, PlaintextReader, Tokenizer, WikipediaReader};
 
 /// Run the eval command.
 pub fn run(cmd: EvalCommands, verbose: bool, quiet: bool) -> CliResult<()> {
@@ -484,11 +484,40 @@ fn create_corpus_reader(path: &str, format: CorpusFormat) -> CliResult<Box<dyn C
                 Err(CliError::file_not_found(path))
             }
         }
-        CorpusFormat::Wikipedia => Err(CliError::unsupported(
-            "Wikipedia corpus format not yet implemented for evaluation",
-        )),
-        CorpusFormat::Gutenberg => Err(CliError::unsupported(
-            "Gutenberg corpus format not yet implemented for evaluation",
-        )),
+        CorpusFormat::Wikipedia => {
+            #[cfg(feature = "http-corpus")]
+            if path
+                .to_str()
+                .is_some_and(|p| p.starts_with("http://") || p.starts_with("https://"))
+            {
+                return Ok(Box::new(
+                    WikipediaReader::from_url(path.to_string_lossy().as_ref(), Default::default())
+                        .map_err(|e| CliError::corpus(e.to_string()))?,
+                ));
+            }
+
+            if path.exists() {
+                Ok(Box::new(
+                    WikipediaReader::new(path).map_err(|e| CliError::corpus(e.to_string()))?,
+                ))
+            } else {
+                Err(CliError::file_not_found(path))
+            }
+        }
+        CorpusFormat::Gutenberg => {
+            if path.is_dir() {
+                Ok(Box::new(
+                    GutenbergReader::from_directory(path)
+                        .map_err(|e| CliError::corpus(e.to_string()))?,
+                ))
+            } else if path.exists() {
+                Ok(Box::new(
+                    GutenbergReader::from_file(path)
+                        .map_err(|e| CliError::corpus(e.to_string()))?,
+                ))
+            } else {
+                Err(CliError::file_not_found(path))
+            }
+        }
     }
 }

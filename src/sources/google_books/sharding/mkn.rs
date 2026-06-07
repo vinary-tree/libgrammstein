@@ -154,11 +154,17 @@ impl FrequencyCounts {
 /// Atomic version of FrequencyCounts for parallel aggregation.
 #[derive(Debug, Default)]
 pub struct AtomicFrequencyCounts {
+    /// Number of n-grams observed exactly once.
     pub n1: AtomicU64,
+    /// Number of n-grams observed exactly twice.
     pub n2: AtomicU64,
+    /// Number of n-grams observed exactly three times.
     pub n3: AtomicU64,
+    /// Number of n-grams observed exactly four or more times.
     pub n4: AtomicU64,
+    /// Total number of unique n-grams observed.
     pub total_unique: AtomicU64,
+    /// Sum of all observed n-gram counts.
     pub total_count: AtomicU64,
 }
 
@@ -414,11 +420,7 @@ impl<'a> MknAggregator<'a> {
             }
 
             if let Ok(shard) = self.coordinator.get_or_create_shard(key) {
-                let mut guard = shard.write();
-                if let Err(e) = guard.flush_lockfree() {
-                    log::warn!("Failed to flush shard {}: {}", key, e);
-                    return;
-                }
+                let guard = shard.read();
                 match guard.iter_with_counts() {
                     Ok(iter) => {
                         for (ngram, count) in iter {
@@ -506,11 +508,7 @@ impl<'a> MknAggregator<'a> {
             }
 
             if let Ok(shard) = self.coordinator.get_or_create_shard(key) {
-                let mut guard = shard.write();
-                if let Err(e) = guard.flush_lockfree() {
-                    log::warn!("Failed to flush shard {}: {}", key, e);
-                    continue;
-                }
+                let guard = shard.read();
                 let iter = match guard.iter_with_counts() {
                     Ok(iter) => iter,
                     Err(e) => {

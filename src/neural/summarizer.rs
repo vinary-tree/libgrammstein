@@ -410,7 +410,6 @@ mod tests {
 
     #[test]
     fn test_abbreviations() {
-        let config = SummarizerConfig::default();
         // We can't test is_abbreviation directly without an embedder,
         // but we can verify the abbreviations list is reasonable
         let abbreviations = ["Dr.", "Mr.", "etc.", "e.g."];

@@ -8,11 +8,7 @@
 //! 3. Optionally delete the per-shard files if the caller requested cleanup.
 //! 4. Persist the final checkpoint and build the user-facing `ImportStats`.
 
-use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
-
-use crate::ngram::vocabulary::open_or_create_concurrent_vocabulary_lockfree_with_capacity;
 
 use super::super::events::ImportEvent;
 use super::super::sharding::MergeCoordinator;

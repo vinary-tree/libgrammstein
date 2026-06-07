@@ -1,5 +1,6 @@
 //! Unit tests for the shard coordinator.
 
+use super::super::{ImportState, ShardGranularity};
 use super::*;
 use tempfile::TempDir;
 

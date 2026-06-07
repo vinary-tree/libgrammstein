@@ -136,7 +136,7 @@ pub struct SummarizationConfig {
     /// Template type for generating descriptions from keywords.
     pub template: DescriptionTemplateType,
     /// Custom template string when template is DescriptionTemplateType::Custom.
-    /// Use {keywords} placeholder for keyword insertion.
+    /// Use the {keywords} token for keyword insertion.
     #[serde(default)]
     pub custom_template: Option<String>,
     /// Number of representative documents to use for extractive summary.

@@ -1,6 +1,5 @@
 //! `train ngram` command: persistent checkpointed n-gram training.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;

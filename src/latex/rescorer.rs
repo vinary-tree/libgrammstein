@@ -216,7 +216,7 @@ impl LaTeXRescorer {
         #[cfg(feature = "neural-rescore")]
         if let Some(ref _model) = self.neural_model {
             // Convert tokens to text for neural model
-            let text = tokens_to_string(tokens);
+            let _text = tokens_to_string(tokens);
 
             // Neural model scoring would be:
             // let score = model.score_sequence(&text)?;
@@ -481,9 +481,11 @@ impl BatchRescorer {
     ) -> Vec<(RescoreCandidate, RescoreResult)> {
         let mut results = Vec::with_capacity(candidates.len());
 
-        for candidate in candidates {
-            let result = self.rescorer.rescore(&candidate.tokens);
-            results.push((candidate.clone(), result));
+        for chunk in candidates.chunks(self.max_batch_size.max(1)) {
+            for candidate in chunk {
+                let result = self.rescorer.rescore(&candidate.tokens);
+                results.push((candidate.clone(), result));
+            }
         }
 
         // Sort by combined score (prior + neural)

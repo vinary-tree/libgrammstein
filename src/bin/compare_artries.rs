@@ -313,7 +313,7 @@ fn compare_ngrams_streaming(
                 Some(key2) => {
                     // Lookup in trie2 (on-disk, lazy loaded)
                     match trie2.get(&key2) {
-                        Some(&value2) => {
+                        Some(value2) => {
                             if value2 != value1 {
                                 if result.count_mismatches.len() < max_to_track {
                                     result.count_mismatches.push(CountMismatch {

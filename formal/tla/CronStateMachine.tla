@@ -16,7 +16,7 @@
  *   - ReadySignalCorrectness: Tasks scheduled after ready signal are processed
  *)
 
-EXTENDS Naturals, FiniteSets, Sequences, TLC
+EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
     \* @type: Int;
@@ -61,9 +61,10 @@ VARIABLES
     \* @type: Bool;
     terminating,
 
-    \* Channel: sequence of tasks waiting to be received
+    \* Channel abstraction: set of tasks waiting to be received.
+    \* FIFO ordering is irrelevant to the verified safety/liveness properties.
     \* Each task is a record [id: Nat, type: {NORMAL, PANICKING}, due_time: Nat]
-    \* @type: Seq([id: Int, type: Str, due_time: Int]);
+    \* @type: Set([id: Int, type: Str, due_time: Int]);
     channel,
 
     \* Whether the sender side of the task channel is still open
@@ -90,8 +91,8 @@ VARIABLES
     \* @type: Str;
     test_state,
 
-    \* Tasks the test wants to schedule: sequence of [id, type, due_time]
-    \* @type: Seq([id: Int, type: Str, due_time: Int]);
+    \* Tasks the test wants to schedule: set of [id, type, due_time]
+    \* @type: Set([id: Int, type: Str, due_time: Int]);
     tasks_to_schedule,
 
     \* Whether the cron thread has been spawned
@@ -111,33 +112,32 @@ TypeOK ==
     /\ ready_signal_received \in BOOLEAN
     /\ terminating \in BOOLEAN
     /\ channel_open \in BOOLEAN
-    /\ channel \in Seq(TaskUniverse)
+    /\ channel \subseteq TaskUniverse
     /\ task_queue \subseteq TaskUniverse
     /\ current_time \in 0..MaxTime
     /\ executed_tasks \subseteq 1..MaxTasks
     /\ panicked_tasks \subseteq 1..MaxTasks
     /\ test_state \in {TestInit, TestWaitingReady, TestScheduling,
                        TestWaitingTasks, TestRequestingShutdown, TestJoining, TestDone}
-    /\ tasks_to_schedule \in Seq(TaskUniverse)
+    /\ tasks_to_schedule \subseteq TaskUniverse
     /\ cron_spawned \in BOOLEAN
     /\ next_task_id \in 1..(MaxTasks + 1)
-
-(* Helper: Get minimum due time from task queue *)
-\* @type: Set([id: Int, type: Str, due_time: Int]) => Int;
-MinDueTime(queue) ==
-    IF queue = {} THEN MaxTime + 1
-    ELSE LET task == CHOOSE t \in queue: \A t2 \in queue: t.due_time <= t2.due_time
-         IN task.due_time
-
-(* Helper: Get earliest due task from queue *)
-\* @type: Set([id: Int, type: Str, due_time: Int]) => [id: Int, type: Str, due_time: Int];
-EarliestTask(queue) ==
-    CHOOSE t \in queue: \A t2 \in queue: t.due_time <= t2.due_time
 
 (* Helper: Check if any task is due *)
 \* @type: (Set([id: Int, type: Str, due_time: Int]), Int) => Bool;
 HasDueTask(queue, time) ==
     \E t \in queue: t.due_time <= time
+
+\* @type: ([id: Int, type: Str, due_time: Int]) => Bool;
+EarliestPendingTask(task) ==
+    \A other \in tasks_to_schedule: task.due_time <= other.due_time
+
+\* @type: ([id: Int, type: Str, due_time: Int]) => Bool;
+EarliestDueTask(task) ==
+    /\ task \in task_queue
+    /\ task.due_time <= current_time
+    /\ \A other \in task_queue:
+        (other.due_time <= current_time) => task.due_time <= other.due_time
 
 (* Initial state *)
 Init ==
@@ -145,14 +145,14 @@ Init ==
     /\ ready_signal_sent = FALSE
     /\ ready_signal_received = FALSE
     /\ terminating = FALSE
-    /\ channel = <<>>
+    /\ channel = {}
     /\ channel_open = TRUE
     /\ task_queue = {}
     /\ current_time = 0
     /\ executed_tasks = {}
     /\ panicked_tasks = {}
     /\ test_state = TestInit
-    /\ tasks_to_schedule = <<>>
+    /\ tasks_to_schedule = {}
     /\ cron_spawned = FALSE
     /\ next_task_id = 1
 
@@ -181,8 +181,8 @@ TestReceiveReady ==
     /\ ready_signal_received' = TRUE
     /\ test_state' = TestScheduling
     \* Set up tasks to schedule: panicking task at time 0, normal task at time 50
-    /\ tasks_to_schedule' = <<[id |-> 1, type |-> PANICKING, due_time |-> 0],
-                               [id |-> 2, type |-> NORMAL, due_time |-> 50]>>
+    /\ tasks_to_schedule' = {[id |-> 1, type |-> PANICKING, due_time |-> 0],
+                              [id |-> 2, type |-> NORMAL, due_time |-> 50]}
     /\ next_task_id' = 3
     /\ UNCHANGED <<cron_state, ready_signal_sent, terminating, channel, channel_open,
                    task_queue, current_time, executed_tasks, panicked_tasks, cron_spawned>>
@@ -192,14 +192,16 @@ TestReceiveReady ==
  *)
 TestScheduleTask ==
     /\ test_state = TestScheduling
-    /\ Len(tasks_to_schedule) > 0
+    /\ tasks_to_schedule # {}
     /\ channel_open = TRUE
-    /\ LET task == Head(tasks_to_schedule)
-       IN channel' = Append(channel, task)
-    /\ tasks_to_schedule' = Tail(tasks_to_schedule)
-    /\ IF Len(tasks_to_schedule) = 1  \* Was last task
-       THEN test_state' = TestWaitingTasks
-       ELSE test_state' = TestScheduling
+    /\ \E task \in tasks_to_schedule:
+        /\ EarliestPendingTask(task)
+        /\ channel' = channel \cup {task}
+        /\ tasks_to_schedule' = tasks_to_schedule \ {task}
+        /\ test_state' =
+            IF tasks_to_schedule \ {task} = {}
+            THEN TestWaitingTasks
+            ELSE TestScheduling
     /\ UNCHANGED <<cron_state, ready_signal_sent, ready_signal_received,
                    terminating, channel_open, task_queue, current_time, executed_tasks,
                    panicked_tasks, cron_spawned, next_task_id>>
@@ -318,7 +320,7 @@ CronCheckChannel ==
     /\ cron_state = CheckEvents
     /\ ~HasDueTask(task_queue, current_time)
     /\ terminating = FALSE
-    /\ Len(channel) > 0
+    /\ channel # {}
     /\ cron_state' = DrainChannel
     /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
                    channel, channel_open, task_queue, current_time, executed_tasks,
@@ -335,7 +337,7 @@ CronCheckChannelClosed ==
     /\ ~HasDueTask(task_queue, current_time)
     /\ terminating = FALSE
     /\ channel_open = FALSE
-    /\ Len(channel) = 0
+    /\ channel = {}
     /\ task_queue = {}
     /\ cron_state' = Terminated
     /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
@@ -352,7 +354,7 @@ CronNoEvents ==
     /\ cron_state = CheckEvents
     /\ ~HasDueTask(task_queue, current_time)
     /\ terminating = FALSE
-    /\ Len(channel) = 0
+    /\ channel = {}
     /\ (channel_open = TRUE \/ task_queue # {})
     /\ cron_state' = Sleeping
     /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
@@ -366,10 +368,10 @@ CronNoEvents ==
 CronDrainTask ==
     /\ cron_spawned = TRUE
     /\ cron_state = DrainChannel
-    /\ Len(channel) > 0
-    /\ LET task == Head(channel)
-       IN task_queue' = task_queue \cup {task}
-    /\ channel' = Tail(channel)
+    /\ channel # {}
+    /\ \E task \in channel:
+        /\ task_queue' = task_queue \cup {task}
+        /\ channel' = channel \ {task}
     /\ UNCHANGED <<cron_state, ready_signal_sent, ready_signal_received,
                    terminating, channel_open, current_time, executed_tasks, panicked_tasks,
                    test_state, tasks_to_schedule, cron_spawned, next_task_id>>
@@ -380,7 +382,7 @@ CronDrainTask ==
 CronFinishDrain ==
     /\ cron_spawned = TRUE
     /\ cron_state = DrainChannel
-    /\ Len(channel) = 0
+    /\ channel = {}
     /\ IF HasDueTask(task_queue, current_time)
        THEN cron_state' = ExecutingTask
        ELSE cron_state' = Sleeping
@@ -392,23 +394,42 @@ CronFinishDrain ==
 (*
  * Cron executes a due task.
  *)
-CronExecuteTask ==
+CronExecutePanickingTask(task) ==
     /\ cron_spawned = TRUE
     /\ cron_state = ExecutingTask
-    /\ task_queue # {}
-    /\ HasDueTask(task_queue, current_time)
-    /\ LET task == EarliestTask(task_queue)
-       IN
-        /\ task_queue' = task_queue \ {task}
-        /\ IF task.type = PANICKING
-           THEN /\ panicked_tasks' = panicked_tasks \cup {task.id}
-                /\ UNCHANGED executed_tasks
-           ELSE /\ executed_tasks' = executed_tasks \cup {task.id}
-                /\ UNCHANGED panicked_tasks
+    /\ EarliestDueTask(task)
+    /\ task.id \in 1..MaxTasks
+    /\ task.type = PANICKING
+    /\ task_queue' = task_queue \ {task}
+    /\ task.id \notin executed_tasks
+    /\ panicked_tasks' = panicked_tasks \cup {task.id}
+    /\ UNCHANGED executed_tasks
     /\ cron_state' = CheckEvents
     /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
                    channel, channel_open, current_time, test_state, tasks_to_schedule,
                    cron_spawned, next_task_id>>
+
+CronExecuteNormalTask(task) ==
+    /\ cron_spawned = TRUE
+    /\ cron_state = ExecutingTask
+    /\ EarliestDueTask(task)
+    /\ task.id \in 1..MaxTasks
+    /\ task.type = NORMAL
+    /\ task_queue' = task_queue \ {task}
+    /\ task.id \notin panicked_tasks
+    /\ executed_tasks' = executed_tasks \cup {task.id}
+    /\ UNCHANGED panicked_tasks
+    /\ cron_state' = CheckEvents
+    /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
+                   channel, channel_open, current_time, test_state, tasks_to_schedule,
+                   cron_spawned, next_task_id>>
+
+CronExecuteTaskBy(task) ==
+    \/ CronExecutePanickingTask(task)
+    \/ CronExecuteNormalTask(task)
+
+CronExecuteTask ==
+    \E task \in task_queue: CronExecuteTaskBy(task)
 
 (*
  * Cron wakes from sleep - time advances.
@@ -416,15 +437,11 @@ CronExecuteTask ==
 CronWakeUp ==
     /\ cron_spawned = TRUE
     /\ cron_state = Sleeping
-    /\ (channel_open = TRUE \/ task_queue # {})
-    \* Advance time to next event (next due task or small increment)
-    /\ LET next_due == MinDueTime(task_queue)
-           advance == IF next_due <= MaxTime
-                      THEN (IF next_due > current_time THEN next_due - current_time ELSE 1)
-                      ELSE 10
-       IN current_time' = IF current_time + advance > MaxTime
-                          THEN MaxTime
-                          ELSE current_time + advance
+    /\ (channel_open = TRUE \/ channel # {} \/ task_queue # {})
+    /\ current_time' =
+        IF current_time < MaxTime
+        THEN current_time + 1
+        ELSE MaxTime
     /\ cron_state' = CheckEvents
     /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
                    channel, channel_open, task_queue, executed_tasks, panicked_tasks,
@@ -453,7 +470,7 @@ CronTerminateClosedFromSleep ==
     /\ cron_state = Sleeping
     /\ terminating = FALSE
     /\ channel_open = FALSE
-    /\ Len(channel) = 0
+    /\ channel = {}
     /\ task_queue = {}
     /\ cron_state' = Terminated
     /\ UNCHANGED <<ready_signal_sent, ready_signal_received, terminating,
@@ -512,6 +529,7 @@ CronFairness ==
     /\ WF_vars(CronFinishDrain)
     /\ WF_vars(CronExecuteTask)
     /\ WF_vars(CronWakeUp)
+    /\ WF_vars(CronTerminateFromSleep)
     /\ WF_vars(CronTerminateClosedFromSleep)
 
 \* Test thread actions are fair
@@ -543,6 +561,22 @@ ReadySignalSafety ==
 PanicIsolation ==
     executed_tasks \cap panicked_tasks = {}
 
+PendingTasks ==
+    channel \cup task_queue \cup tasks_to_schedule
+
+PendingTasksConsistentWithResults ==
+    \A task \in PendingTasks:
+        /\ task.type = NORMAL => task.id \notin panicked_tasks
+        /\ task.type = PANICKING => task.id \notin executed_tasks
+
+PendingTaskIdsTypeConsistent ==
+    \A t1, t2 \in PendingTasks:
+        t1.id = t2.id => t1.type = t2.type
+
+TaskIdConsistency ==
+    /\ PendingTasksConsistentWithResults
+    /\ PendingTaskIdsTypeConsistent
+
 (*
  * Test completes only after normal task has executed.
  *)
@@ -550,10 +584,21 @@ TestCompletionRequiresExecution ==
     test_state = TestDone => 2 \in executed_tasks
 
 (*
+ * Once the test has observed task completion and moves into shutdown/join,
+ * task 2 remains recorded as executed.
+ *)
+TestProgressRequiresExecution ==
+    test_state \in {TestRequestingShutdown, TestJoining, TestDone} =>
+        2 \in executed_tasks
+
+(*
  * Cron terminates only when termination is requested or the task channel closes.
  *)
 TerminationRequiresRequest ==
     cron_state = Terminated => (terminating = TRUE \/ channel_open = FALSE)
+
+NormalTaskWaitsForEarlierPanic ==
+    2 \in executed_tasks => 1 \in panicked_tasks
 
 (*
  * Combined safety invariant.
@@ -563,6 +608,7 @@ Safety ==
     /\ ReadySignalSafety
     /\ PanicIsolation
     /\ TestCompletionRequiresExecution
+    /\ TestProgressRequiresExecution
     /\ TerminationRequiresRequest
 
 (* ---------------------------------------------------------------------------

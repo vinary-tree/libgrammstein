@@ -7,7 +7,11 @@
 //! `PersistentARTrie` for n-gram shards and `PersistentVocabARTrie` for
 //! vocabularies.
 
-#![cfg(feature = "google-books")]
+// The `dump_checkpoint` binary these tests spawn has
+// `required-features = ["cli", "google-books"]`, so gate the tests on the same set —
+// otherwise `cargo test --features google-books` (without `cli`) compiles the tests but
+// not the binary, and they fail to spawn it.
+#![cfg(all(feature = "cli", feature = "google-books"))]
 
 use libdictenstein::persistent_artrie::PersistentARTrie;
 use libdictenstein::persistent_vocab_artrie::PersistentVocabARTrie;
@@ -31,7 +35,7 @@ fn dump_checkpoint_bin() -> &'static str {
 /// `open()` replays the WAL on next load, so synced data is durable.
 fn make_byte_checkpoint(dir: &Path) {
     let path = dir.join("english.checkpoint.artrie");
-    let mut trie = PersistentARTrie::<u64>::create(&path).expect("PersistentARTrie::create failed");
+    let trie = PersistentARTrie::<u64>::create(&path).expect("PersistentARTrie::create failed");
     trie.insert_with_value(VERSION_KEY, 3);
     trie.insert_with_value(NGRAMS_PROCESSED_KEY, 1_234_567);
     trie.insert_with_value(MKN_PHASE_KEY, 200);
@@ -43,9 +47,9 @@ fn make_vocab(dir: &Path) {
     let path = dir.join("english.vocab.artrie");
     let mut vocab = PersistentVocabARTrie::create_with_start_index(&path, 1)
         .expect("PersistentVocabARTrie::create_with_start_index failed");
-    vocab.insert("hello");
-    vocab.insert("world");
-    vocab.insert("ngram");
+    vocab.insert("hello").expect("insert hello");
+    vocab.insert("world").expect("insert world");
+    vocab.insert("ngram").expect("insert ngram");
     vocab.checkpoint().expect("vocab checkpoint failed");
 }
 
@@ -143,7 +147,7 @@ fn roundtrip_save_then_dump_byte_checkpoint() {
     let path = tmp.path().join("english.checkpoint.artrie");
 
     {
-        let mut trie = PersistentARTrie::<u64>::create(&path).expect("PersistentARTrie::create");
+        let trie = PersistentARTrie::<u64>::create(&path).expect("PersistentARTrie::create");
         trie.insert_with_value(VERSION_KEY, 4);
         trie.insert_with_value(NGRAMS_PROCESSED_KEY, 42_000_000);
         trie.insert_with_value(MKN_PHASE_KEY, 200);

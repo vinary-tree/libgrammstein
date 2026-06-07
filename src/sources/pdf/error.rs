@@ -24,19 +24,37 @@ pub enum PdfError {
 
     /// Backend not available (not installed or not in PATH).
     #[error("Backend '{backend}' not available: {reason}")]
-    BackendNotAvailable { backend: String, reason: String },
+    BackendNotAvailable {
+        /// Backend identifier.
+        backend: String,
+        /// Availability failure reason.
+        reason: String,
+    },
 
     /// Backend execution failed.
     #[error("Backend '{backend}' failed: {message}")]
-    BackendFailed { backend: String, message: String },
+    BackendFailed {
+        /// Backend identifier.
+        backend: String,
+        /// Backend failure message.
+        message: String,
+    },
 
     /// Backend returned invalid output.
     #[error("Backend '{backend}' returned invalid output: {reason}")]
-    InvalidOutput { backend: String, reason: String },
+    InvalidOutput {
+        /// Backend identifier.
+        backend: String,
+        /// Invalid-output reason.
+        reason: String,
+    },
 
     /// Timeout during extraction.
     #[error("Extraction timed out after {seconds}s")]
-    Timeout { seconds: u64 },
+    Timeout {
+        /// Timeout duration in seconds.
+        seconds: u64,
+    },
 
     /// Configuration error.
     #[error("Configuration error: {0}")]
@@ -60,7 +78,10 @@ pub enum PdfError {
 
     /// Page extraction failed for specific pages.
     #[error("Failed to extract pages: {pages:?}")]
-    PageExtractionFailed { pages: Vec<usize> },
+    PageExtractionFailed {
+        /// Pages that failed extraction.
+        pages: Vec<usize>,
+    },
 
     /// Unsupported PDF feature.
     #[error("Unsupported PDF feature: {0}")]

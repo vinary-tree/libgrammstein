@@ -279,6 +279,143 @@ fn test_checkpoint_save_and_load() {
     assert!(loaded.completed_orders().is_empty()); // No orders completed yet
 }
 
+#[cfg(feature = "google-books")]
+mod shutdown_checkpoint_safety {
+    use super::super::import_ops::wait_for_worker_exits_before_checkpoint;
+    use super::super::worker_pool::{JobOutcome, JobResult};
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn successful_job_result() -> JobResult {
+        JobResult {
+            order: 1,
+            prefix: Arc::from("a"),
+            outcome: JobOutcome::Success { ngram_count: 1 },
+        }
+    }
+
+    #[tokio::test]
+    async fn graceful_cancel_waits_for_worker_exit_before_checkpoint() {
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::channel::<JobResult>(1);
+        let (worker_exit_tx, mut worker_exit_rx) = tokio::sync::mpsc::channel::<usize>(1);
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let mut active_workers = 1usize;
+        let mut results_received = 0u64;
+        let mut worker_shutdown_txs = HashMap::from([(7usize, shutdown_tx)]);
+        let mut worker_handles = HashMap::from([(7usize, tokio::spawn(async {}))]);
+        let force_quit = AtomicBool::new(false);
+
+        result_tx
+            .send(successful_job_result())
+            .await
+            .expect("result receiver should be open");
+
+        {
+            let wait = wait_for_worker_exits_before_checkpoint(
+                &mut active_workers,
+                &mut results_received,
+                &mut worker_handles,
+                &mut worker_shutdown_txs,
+                &mut worker_exit_rx,
+                &mut result_rx,
+                &force_quit,
+            );
+            tokio::pin!(wait);
+
+            tokio::select! {
+                result = &mut wait => {
+                    panic!("checkpoint wait completed before worker exit: {:?}", result);
+                }
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+            }
+
+            worker_exit_tx
+                .send(7)
+                .await
+                .expect("worker exit receiver should be open");
+            wait.await.expect("worker exit should permit checkpointing");
+        }
+
+        assert_eq!(active_workers, 0);
+        assert_eq!(results_received, 1);
+        assert!(worker_handles.is_empty());
+        assert!(worker_shutdown_txs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn graceful_cancel_drains_result_when_exit_wins_select() {
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::channel::<JobResult>(1);
+        let (worker_exit_tx, mut worker_exit_rx) = tokio::sync::mpsc::channel::<usize>(1);
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let mut active_workers = 1usize;
+        let mut results_received = 0u64;
+        let mut worker_shutdown_txs = HashMap::from([(7usize, shutdown_tx)]);
+        let mut worker_handles = HashMap::from([(7usize, tokio::spawn(async {}))]);
+        let force_quit = AtomicBool::new(false);
+
+        result_tx
+            .send(successful_job_result())
+            .await
+            .expect("result receiver should be open");
+        worker_exit_tx
+            .send(7)
+            .await
+            .expect("worker exit receiver should be open");
+
+        wait_for_worker_exits_before_checkpoint(
+            &mut active_workers,
+            &mut results_received,
+            &mut worker_handles,
+            &mut worker_shutdown_txs,
+            &mut worker_exit_rx,
+            &mut result_rx,
+            &force_quit,
+        )
+        .await
+        .expect("worker exit should permit checkpointing");
+
+        assert_eq!(active_workers, 0);
+        assert_eq!(results_received, 1);
+        assert!(worker_handles.is_empty());
+        assert!(worker_shutdown_txs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn force_quit_during_graceful_cancel_prevents_checkpoint() {
+        let (_result_tx, mut result_rx) = tokio::sync::mpsc::channel::<JobResult>(1);
+        let (_worker_exit_tx, mut worker_exit_rx) = tokio::sync::mpsc::channel::<usize>(1);
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let mut active_workers = 1usize;
+        let mut results_received = 0u64;
+        let mut worker_shutdown_txs = HashMap::from([(7usize, shutdown_tx)]);
+        let mut worker_handles = HashMap::from([(7usize, tokio::spawn(async {}))]);
+        let force_quit = AtomicBool::new(true);
+
+        let result = wait_for_worker_exits_before_checkpoint(
+            &mut active_workers,
+            &mut results_received,
+            &mut worker_handles,
+            &mut worker_shutdown_txs,
+            &mut worker_exit_rx,
+            &mut result_rx,
+            &force_quit,
+        )
+        .await;
+
+        assert!(matches!(result, Err(ImportError::Interrupted)));
+        assert_eq!(active_workers, 1);
+        assert_eq!(results_received, 0);
+        assert!(worker_handles.contains_key(&7));
+        assert!(worker_shutdown_txs.contains_key(&7));
+    }
+}
+
 // ---- download_to_cache and cleanup_cache_file ----
 //
 // These tests exercise the HTTP download path used by the `--cache-files`
@@ -289,8 +426,8 @@ fn test_checkpoint_save_and_load() {
 #[cfg(feature = "google-books")]
 mod cache_files {
     use super::*;
-    use wiremock::matchers::{any, header_exists, method};
-    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+    use wiremock::matchers::{header_exists, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn build_client() -> reqwest::Client {
         reqwest::Client::builder()
@@ -434,7 +571,7 @@ mod cache_files {
 
     #[tokio::test]
     async fn cleanup_cache_file_removes_both() {
-        // Both the final .gz and an unfinished .gz.downloading should be
+        // Both the final .gz and a partial .gz.downloading should be
         // removed when cleanup is called.
         let tmp = tempdir().expect("tempdir");
         let cache_path = tmp.path().join("test.gz");

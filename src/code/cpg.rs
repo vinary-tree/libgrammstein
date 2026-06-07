@@ -512,8 +512,50 @@ impl CodePropertyGraph {
                         }
                     }
                     CpgNodeKind::Loop => {
-                        // Add back edge placeholder
-                        // Full implementation would track loop body and create proper back edges
+                        let children: Vec<NodeIndex> = self
+                            .graph
+                            .edges(idx)
+                            .filter(|e| e.weight().kind == CpgEdgeKind::AstChild)
+                            .map(|e| e.target())
+                            .collect();
+                        let next_sibling = self
+                            .graph
+                            .edges(idx)
+                            .find(|e| e.weight().kind == CpgEdgeKind::AstSibling)
+                            .map(|e| e.target());
+
+                        if let Some(&body_entry) = children.first() {
+                            self.add_edge(
+                                idx,
+                                body_entry,
+                                CpgEdge {
+                                    kind: CpgEdgeKind::CfgTrue,
+                                    label: Some("body".to_string()),
+                                },
+                            );
+                        }
+
+                        if let Some(&body_exit) = children.last() {
+                            self.add_edge(
+                                body_exit,
+                                idx,
+                                CpgEdge {
+                                    kind: CpgEdgeKind::CfgBack,
+                                    label: Some("loop".to_string()),
+                                },
+                            );
+                        }
+
+                        if let Some(exit_idx) = next_sibling {
+                            self.add_edge(
+                                idx,
+                                exit_idx,
+                                CpgEdge {
+                                    kind: CpgEdgeKind::CfgFalse,
+                                    label: Some("exit".to_string()),
+                                },
+                            );
+                        }
                     }
                     _ => {}
                 }
@@ -596,6 +638,22 @@ impl Default for CodePropertyGraph {
 mod tests {
     use super::*;
 
+    fn test_node(id: usize, kind: CpgNodeKind, name: Option<&str>) -> CpgNode {
+        CpgNode {
+            id,
+            kind,
+            name: name.map(str::to_string),
+            location: (id * 10, id * 10 + 1),
+            position: (id, 0),
+            ast_kind: format!("{:?}", kind),
+            properties: HashMap::new(),
+        }
+    }
+
+    fn test_edge(kind: CpgEdgeKind) -> CpgEdge {
+        CpgEdge { kind, label: None }
+    }
+
     #[test]
     fn test_cpg_basic_operations() {
         let mut cpg = CodePropertyGraph::new();
@@ -637,5 +695,24 @@ mod tests {
 
         let functions = cpg.find_by_kind(CpgNodeKind::Function);
         assert_eq!(functions.len(), 1);
+    }
+
+    #[test]
+    fn test_loop_cfg_has_body_back_and_exit_edges() {
+        let mut cpg = CodePropertyGraph::new();
+        let loop_idx = cpg.add_node(test_node(100, CpgNodeKind::Loop, Some("while")));
+        let body_idx = cpg.add_node(test_node(200, CpgNodeKind::Block, Some("body")));
+        let exit_idx = cpg.add_node(test_node(300, CpgNodeKind::Return, Some("return")));
+
+        cpg.add_edge(loop_idx, body_idx, test_edge(CpgEdgeKind::AstChild));
+        cpg.add_edge(loop_idx, exit_idx, test_edge(CpgEdgeKind::AstSibling));
+
+        cpg.build_cfg();
+
+        let loop_successors = cpg.cfg_successors(loop_idx);
+        assert!(loop_successors.contains(&body_idx));
+        assert!(loop_successors.contains(&exit_idx));
+        assert!(cpg.cfg_successors(body_idx).contains(&loop_idx));
+        assert!(cpg.cfg_predecessors(loop_idx).contains(&body_idx));
     }
 }

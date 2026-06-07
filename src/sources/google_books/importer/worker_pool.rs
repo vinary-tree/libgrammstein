@@ -19,24 +19,17 @@
 
 #![cfg(feature = "google-books")]
 
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::ngram::vocabulary::{decode_ngram_key_bytes, encode_indices_to_key_bytes};
-
-use super::super::aggregator::YearAggregator;
-use super::super::checkpoint::ImportCheckpoint;
 use super::super::config::GoogleBooksConfig;
-use super::super::events::{ImportEvent, LogLevel};
-use super::super::reader::{FileNgramReader, ReaderError};
+use super::super::reader::ReaderError;
 use super::super::storage::{NgramStorage, StoragePrefixTx};
 use super::super::task_manager::RetryAfter;
 use super::{
-    cleanup_cache_file, download_to_cache, extract_retry_after, is_rate_limit_error,
-    is_retryable_error, store_ngram_shared, ImportError, ImportProgress, WorkerUpdate,
-    COUNTER_BATCH_SIZE,
+    cleanup_cache_file, download_to_cache, extract_retry_after, is_retryable_error,
+    store_ngram_shared, ImportError, WorkerUpdate, COUNTER_BATCH_SIZE,
 };
 
 /// Maximum retry attempts for transient failures.
@@ -80,20 +73,6 @@ impl Job {
         }
     }
 
-    /// Create a retry job with incremented attempt, doubled backoff, and ready_at set.
-    /// Arc<str> cloning is cheap (just a pointer increment).
-    fn with_retry(&self) -> Self {
-        let new_backoff = self.backoff_ms.saturating_mul(2);
-        Self {
-            url: Arc::clone(&self.url),
-            prefix: Arc::clone(&self.prefix),
-            order: self.order,
-            attempt: self.attempt + 1,
-            backoff_ms: new_backoff,
-            ready_at: Some(std::time::Instant::now() + Duration::from_millis(new_backoff)),
-        }
-    }
-
     /// Create a retry job using the Retry-After header value if available.
     ///
     /// If `retry_after` is `Some`, uses that duration for the retry delay.
@@ -128,12 +107,6 @@ impl Job {
         self.ready_at
             .map(|t| t <= std::time::Instant::now())
             .unwrap_or(true)
-    }
-
-    /// Get the duration until this job is ready, or None if already ready.
-    fn time_until_ready(&self) -> Option<Duration> {
-        self.ready_at
-            .and_then(|t| t.checked_duration_since(std::time::Instant::now()))
     }
 }
 
@@ -188,8 +161,6 @@ struct RequestDebugInfo {
     url: String,
     /// HTTP status code (if available).
     status_code: Option<u16>,
-    /// Relevant response headers.
-    headers: Vec<(String, String)>,
     /// Time taken for the request in milliseconds.
     response_time_ms: u64,
     /// Error message.
@@ -200,12 +171,11 @@ struct RequestDebugInfo {
 impl RequestDebugInfo {
     /// Create debug info from an error and request timing.
     fn from_error(url: &str, error: &ImportError, response_time: Duration) -> Self {
-        // Extract status code and headers if available from the error
-        let (status_code, headers) = match error {
+        let status_code = match error {
             ImportError::Reader(e) => {
                 // Try to extract HTTP info from the error message
                 let msg = e.to_string();
-                let status = if msg.contains("404") {
+                if msg.contains("404") {
                     Some(404)
                 } else if msg.contains("429") {
                     Some(429)
@@ -215,16 +185,14 @@ impl RequestDebugInfo {
                     Some(503)
                 } else {
                     None
-                };
-                (status, vec![])
+                }
             }
-            _ => (None, vec![]),
+            _ => None,
         };
 
         Self {
             url: url.to_string(),
             status_code,
-            headers,
             response_time_ms: response_time.as_millis() as u64,
             error_message: error.to_string(),
         }
@@ -256,8 +224,6 @@ pub(super) enum PrefixOutcome {
         attempt: u8,
         /// Backoff duration in ms for next retry.
         backoff_ms: u64,
-        /// The error that triggered the retry.
-        error: ImportError,
     },
     /// Failed permanently (non-retryable error or max retries exceeded).
     Failed {
@@ -1382,7 +1348,6 @@ pub(super) async fn process_prefix_file(
                 order,
                 attempt: attempt + 1,
                 backoff_ms: next_backoff_ms,
-                error: e,
             }
         }
         Err(e) => {
@@ -1469,7 +1434,6 @@ pub(super) async fn process_prefix_file_cached(
                 order,
                 attempt: attempt + 1,
                 backoff_ms: next_backoff_ms,
-                error: e,
             };
         }
         return PrefixOutcome::Failed {
@@ -1584,7 +1548,6 @@ pub(super) async fn process_prefix_file_cached(
                 order,
                 attempt: attempt + 1,
                 backoff_ms: next_backoff_ms,
-                error: e,
             }
         }
         Err(e) => PrefixOutcome::Failed {

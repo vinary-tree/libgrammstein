@@ -41,7 +41,12 @@ pub enum GpuError {
     /// Buffer operation error.
     BufferError(String),
     /// Dimension mismatch.
-    DimensionMismatch { expected: usize, got: usize },
+    DimensionMismatch {
+        /// Expected vector dimension.
+        expected: usize,
+        /// Actual vector dimension.
+        got: usize,
+    },
     /// GPU operation timeout.
     Timeout,
 }
