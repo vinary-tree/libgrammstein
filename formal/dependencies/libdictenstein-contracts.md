@@ -6,16 +6,16 @@ recovery. liblevenshtein adapter and query contracts are recorded in
 `formal/dependencies/liblevenshtein-contracts.md`.
 
 Dependency repository: `../libdictenstein`
-Verified revision recorded during planning: `02ec4d010109641247c1962465921d2560572f67`
-Re-pin pending: libdictenstein has since landed the lock-free overlay refactor
-(overlay-default writes, lock collapse `Arc<RwLock<T>>` → `Arc<T>`, overlay
-compaction, overlay-backed `DictionaryNode`). The verified-revision pin above and
-the `verify-formal-correspondence.sh` re-run below are the final reconciliation
-step; they will be refreshed to the post-refactor libdictenstein HEAD once its
-working tree is clean (it is mid-edit at the time of writing).
-Dependency tree status at latest verification: dirty with reviewed unsafe-ledger
-updates in `formal-verification/UNSAFE_INVENTORY.tsv` and
-`formal-verification/UNSAFE_CONTRACTS.tsv`
+Verified revision: `a46d9c1aa3f1c921214ca68f41d05260741daeaf` (post lock-free
+overlay refactor: overlay-default writes, lock collapse `Arc<RwLock<T>>` →
+`Arc<T>`, overlay compaction, overlay-backed `DictionaryNode`, and the production
+overlay-heap eviction in `checkpoint()` — task #39). Re-pinned from the
+planning-era `02ec4d010109641247c1962465921d2560572f67` after the overlay
+migration; `scripts/verify-formal-correspondence.sh` passed against this revision
+on a clean tree.
+Dependency tree status at latest verification: clean (`git status` empty at
+`a46d9c1`); the unsafe-ledger files `formal-verification/UNSAFE_INVENTORY.tsv` and
+`formal-verification/UNSAFE_CONTRACTS.tsv` are committed.
 
 ## Verification Command
 
@@ -32,10 +32,10 @@ script includes the persistent ARTrie, WAL atomicity, public durability policy,
 checkpoint publication, recovery replay, vocabulary checkpoint, and persistent
 end-to-end trace correspondence tests used by this bridge.
 
-Latest local result: the unsafe-boundary ledger was refreshed for the current
-`persistent_artrie_char` reclaim, eviction-registry, walk-guard, and disk-I/O
-unsafe surface, and `scripts/verify-formal-correspondence.sh` passed. Optional
-Miri and TLC sub-gates were not enabled in that default run.
+Latest local result: `scripts/verify-formal-correspondence.sh` passed against
+libdictenstein `a46d9c1` (clean tree) — Rust correspondence tests, Rocq proofs,
+and TLA+ syntax all green. The default run skipped the optional bounded TLC
+sub-gate (set `RUN_TLC=1` to enable) and Miri.
 
 ## Imported Contracts
 

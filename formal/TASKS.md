@@ -403,11 +403,14 @@ Makefile defaults (one TLC worker, `-Xmx768m`, `-Xmx1536m` for Apalache):
   + 5 liveness TLC runs and 7 Apalache typechecks pass with `ShardWriteToken`
   removed — no collateral regression in the eight retained specs.
 
-Pending (blocked on libdictenstein going clean): the coupled
-`make complete-with-dependencies` re-run — dependency-contract refresh, the cargo
-`--lib --all-features` suite, the loom alignment tests, and the full stress +
-TLAPS sweep — plus the libdictenstein verified-revision re-pin in
-`dependencies/libdictenstein-contracts.md`.
+Reconciliation against the repaired libdictenstein `a46d9c1` (post overlay
+refactor + production overlay-heap eviction) is COMPLETE: the verified-revision
+re-pin landed in `dependencies/libdictenstein-contracts.md`
+(`verify-formal-correspondence.sh` passed on a clean tree); the cargo
+`--all-features` suite is green (969 passed / 0 failed); `make -C formal check`
+is green (rustfmt + rocq + 14 TLC + 7 Apalache + rust-alignment); the loom
+alignment tests pass (3/3). The optional `RUN_TLC=1` dependency-imported-TLC
+sub-gate and Miri were not run.
 
 ## Source Alignment And Warning Hygiene
 
