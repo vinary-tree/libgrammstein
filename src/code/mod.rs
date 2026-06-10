@@ -116,13 +116,6 @@ pub use languages::Rust;
 #[cfg(feature = "code-javascript")]
 pub use languages::JavaScript;
 
-// Domain-specific languages
-#[cfg(feature = "code-rholang")]
-pub use languages::Rholang;
-
-#[cfg(feature = "code-metta")]
-pub use languages::MeTTa;
-
 // Re-export WFST types when integration is enabled
 #[cfg(feature = "lling-llang-integration")]
 pub use wfst_export::{PcfgScorer, PcfgWfstConfig, SymbolVocabulary};

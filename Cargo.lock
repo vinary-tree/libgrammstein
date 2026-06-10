@@ -3077,7 +3077,6 @@ dependencies = [
  "realfft",
  "regex",
  "reqwest",
- "rholang-tree-sitter",
  "rustfft",
  "rustyline",
  "serde",
@@ -3099,7 +3098,6 @@ dependencies = [
  "tracing-subscriber",
  "tree-sitter",
  "tree-sitter-javascript",
- "tree-sitter-metta",
  "tree-sitter-python",
  "tree-sitter-rust",
  "unic-langid",
@@ -4785,14 +4783,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c6a884d2998352bb4daf0183589aec883f16a6da1f4dde84d8e2e9a5409a1ce"
 
 [[package]]
-name = "rholang-tree-sitter"
-version = "0.1.2"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5971,14 +5961,6 @@ name = "tree-sitter-language"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ae62f7eae5eb549c71b76658648b72cc6111f2d87d24a1e31fa907f4943e3ce"
-
-[[package]]
-name = "tree-sitter-metta"
-version = "0.1.0"
-dependencies = [
- "cc",
- "tree-sitter",
-]
 
 [[package]]
 name = "tree-sitter-python"

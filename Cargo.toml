@@ -121,9 +121,6 @@ tree-sitter-python = { version = "0.23", optional = true }
 tree-sitter-rust = { version = "0.23", optional = true }
 tree-sitter-javascript = { version = "0.23", optional = true }
 
-# Domain-specific language tree-sitter grammars (local paths)
-rholang-tree-sitter = { path = "../rholang-rs/rholang-tree-sitter", optional = true }
-tree-sitter-metta = { path = "../MeTTa-Compiler/tree-sitter-metta", optional = true }
 
 # Graph data structures for Code Property Graphs
 petgraph = { version = "0.6", optional = true }
@@ -305,18 +302,14 @@ code-python = ["code", "dep:tree-sitter-python"]
 code-rust = ["code", "dep:tree-sitter-rust"]
 code-javascript = ["code", "dep:tree-sitter-javascript"]
 
-# Domain-specific languages
-code-rholang = ["code", "dep:rholang-tree-sitter"]
-code-metta = ["code", "dep:tree-sitter-metta"]
 
 # All mainstream languages (Python, Rust, JavaScript)
 code-mainstream = ["code-python", "code-rust", "code-javascript"]
 
 # All domain-specific languages (Rholang, MeTTa)
-code-dsl = ["code-rholang", "code-metta"]
 
 # Full code module with all languages and neural
-code-full = ["code-neural", "code-mainstream", "code-dsl"]
+code-full = ["code-neural", "code-mainstream"]
 
 # LaTeX statistical/neural scoring
 # Provides mode-aware n-gram models, command embeddings, neural rescoring, and equation RAG

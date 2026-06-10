@@ -256,12 +256,6 @@ pub mod prelude {
     #[cfg(feature = "code-javascript")]
     pub use crate::code::JavaScript;
 
-    #[cfg(feature = "code-rholang")]
-    pub use crate::code::Rholang;
-
-    #[cfg(feature = "code-metta")]
-    pub use crate::code::MeTTa;
-
     // LaTeX module exports
     #[cfg(feature = "latex")]
     pub use crate::latex::{
