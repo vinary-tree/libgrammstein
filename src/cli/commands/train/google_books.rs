@@ -95,6 +95,11 @@ pub(super) fn import_google_books(
         tx_chunk_size: args.tx_chunk_size,
         prefix: args.prefix.clone(),
         cache_files: args.cache_files,
+        overlay_budget_bytes: if args.overlay_budget_gib == 0 {
+            None
+        } else {
+            Some(args.overlay_budget_gib as usize * 1024 * 1024 * 1024)
+        },
     };
 
     // Create importer (resume from checkpoint if one exists)

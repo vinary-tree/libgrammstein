@@ -125,6 +125,13 @@ pub struct GoogleBooksConfig {
     /// and deleted after successful import or when all retries are exhausted.
     #[serde(default)]
     pub cache_files: bool,
+
+    /// Global resident-overlay heap budget across all simultaneously-resident
+    /// shards, in bytes. `None` = unbounded (legacy). Default 10 GiB: the
+    /// checkpoint tail divides it by the resident-shard count to bound peak heap
+    /// during large sharded imports. CLI `--overlay-budget-gib 0` disables it.
+    #[serde(default = "default_overlay_budget_bytes")]
+    pub overlay_budget_bytes: Option<usize>,
 }
 
 /// Sharding mode for Google Books import.
@@ -161,6 +168,10 @@ fn default_auto_threshold() -> u64 {
 
 fn default_tx_chunk_size() -> u64 {
     500_000 // 500K entries per chunk
+}
+
+fn default_overlay_budget_bytes() -> Option<usize> {
+    Some(10 * 1024 * 1024 * 1024) // 10 GiB global overlay budget (default-on)
 }
 
 /// Configuration options for sharded import.
@@ -277,6 +288,7 @@ impl Default for GoogleBooksConfig {
             tx_chunk_size: default_tx_chunk_size(),
             prefix: None,
             cache_files: false,
+            overlay_budget_bytes: default_overlay_budget_bytes(),
         }
     }
 }
@@ -420,6 +432,7 @@ impl GoogleBooksConfig {
             .with_granularity(granularity)
             .with_max_writers(self.parallel_downloads)
             .with_max_open_shards(max_open_shards)
+            .with_overlay_budget_bytes(self.overlay_budget_bytes)
     }
 }
 

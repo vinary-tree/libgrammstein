@@ -680,6 +680,11 @@ impl ShardCoordinator {
         let path = self.config.shard_path(&key.as_file_stem());
 
         let shard = ShardHandle::open_or_create(key.clone(), &path)?;
+        // Arm overlay-heap eviction (no-op when no budget is configured). The
+        // installed eviction coordinator holds a weak ref to the shard's Arc-d
+        // trie, so it is torn down when this shard is LRU-evicted or the
+        // coordinator closes.
+        shard.arm_eviction(self.config.overlay_eviction_config())?;
         let shard = Arc::new(RwLock::new(shard));
 
         // Insert into map - no race now since we hold the lock

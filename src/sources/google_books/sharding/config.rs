@@ -3,7 +3,17 @@
 //! Sharding distributes n-grams across multiple trie instances based on
 //! prefix keys, enabling parallel writes without lock contention.
 
+use libdictenstein::persistent_artrie::eviction::EvictionConfig;
 use std::path::PathBuf;
+
+/// Floor for the per-shard overlay resident budget (~one arena), so a tiny
+/// global budget or a huge shard count cannot drive eviction into thrashing.
+const MIN_PER_SHARD_OVERLAY_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
+/// Per-checkpoint cap on overlay nodes evicted in one pass. Bounds the
+/// checkpoint-tail latency while staying large enough to keep up with the
+/// per-file cold-set growth (tune from massif if the resident set accumulates).
+const OVERLAY_EVICTION_CAP_NODES: usize = 200_000;
 
 /// Sharding granularity options.
 ///
@@ -213,6 +223,11 @@ pub struct ShardConfig {
 
     /// Merge configuration.
     pub merge: MergeConfig,
+
+    /// Global resident-overlay heap budget across all simultaneously-resident
+    /// shards, in bytes. `None` = unbounded (legacy). The checkpoint tail evicts
+    /// each shard's cold overlay down to `budget / resident_shard_count`.
+    pub overlay_budget_bytes: Option<usize>,
 }
 
 impl Default for ShardConfig {
@@ -226,6 +241,7 @@ impl Default for ShardConfig {
             checkpoint_interval_ms: 30_000, // 30 seconds
             auto_shard_threshold: 10_000_000, // 10M n-grams
             merge: MergeConfig::default(),
+            overlay_budget_bytes: None,
         }
     }
 }
@@ -237,6 +253,35 @@ impl ShardConfig {
             shard_dir: shard_dir.into(),
             ..Default::default()
         }
+    }
+
+    /// Set the global overlay-heap resident budget (bytes; `None` = unbounded).
+    pub fn with_overlay_budget_bytes(mut self, budget: Option<usize>) -> Self {
+        self.overlay_budget_bytes = budget;
+        self
+    }
+
+    /// Build the per-shard overlay [`EvictionConfig`] from the global budget.
+    ///
+    /// The global budget is divided by the number of SIMULTANEOUSLY-RESIDENT
+    /// shards: hash-based granularities (`CpuProportional`) and an unlimited
+    /// `max_open_shards` keep all `num_shards` resident; otherwise the LRU cap
+    /// bounds residents to `max_open_shards`. So `SUM(per-shard budget)` over the
+    /// resident set ≈ the global budget, granularity-invariant. Returns `None`
+    /// (unbounded overlay) when no budget is configured.
+    pub fn overlay_eviction_config(&self) -> Option<EvictionConfig> {
+        let global = self.overlay_budget_bytes?;
+        let num_shards = self.granularity.num_shards().max(1);
+        let resident = if self.granularity.is_hash_based() || self.max_open_shards == 0 {
+            num_shards
+        } else {
+            self.max_open_shards.min(num_shards)
+        };
+        let per_shard = (global / resident).max(MIN_PER_SHARD_OVERLAY_BUDGET_BYTES);
+        let mut config = EvictionConfig::without_memory_monitor();
+        config.resident_budget_bytes = Some(per_shard);
+        config.resident_budget_eviction_cap = Some(OVERLAY_EVICTION_CAP_NODES);
+        Some(config)
     }
 
     /// Set the sharding granularity.

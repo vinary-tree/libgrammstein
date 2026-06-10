@@ -5,9 +5,11 @@
 //! so workers need no exclusive write lock.
 
 use super::routing::ShardKey;
+use libdictenstein::persistent_artrie::eviction::{EvictionConfig, EvictionStats};
 use libdictenstein::persistent_artrie::wal::SyncHandle;
 use libdictenstein::persistent_artrie::wal_managed::WalManaged;
-use libdictenstein::persistent_artrie::{DocumentTransaction, PersistentARTrie};
+use libdictenstein::persistent_artrie::{DocumentTransaction, PersistentARTrie, SharedARTrie};
+use libdictenstein::EvictableARTrie;
 use liblevenshtein::dictionary::Dictionary;
 use parking_lot::{Condvar, Mutex};
 use std::collections::HashSet;
@@ -516,8 +518,9 @@ pub struct ShardHandle {
     /// The shard key identifying this shard.
     key: ShardKey,
 
-    /// The underlying trie (byte-keyed).
-    trie: PersistentARTrie<u64>,
+    /// The underlying trie (byte-keyed), shared via `Arc` so the lock-free
+    /// overlay's eviction coordinator can hold a weak self-reference.
+    trie: SharedARTrie<u64>,
 
     /// File path for this shard.
     path: PathBuf,
@@ -568,7 +571,7 @@ impl ShardHandle {
 
         Ok(Self {
             key,
-            trie,
+            trie: Arc::new(trie),
             path,
             checkpoint_state: ShardCheckpointState::default(),
             stats: ShardStats::default(),
@@ -608,7 +611,7 @@ impl ShardHandle {
 
         let mut handle = Self {
             key,
-            trie,
+            trie: Arc::new(trie),
             path,
             checkpoint_state: ShardCheckpointState::default(),
             stats: ShardStats::default(),
@@ -653,6 +656,34 @@ impl ShardHandle {
         } else {
             Self::create(key, path)
         }
+    }
+
+    /// Arm overlay-heap eviction on this shard's trie.
+    ///
+    /// When `config` is `Some`, the checkpoint tail evicts the coldest resident
+    /// overlay nodes down to `config.resident_budget_bytes` (lossless — evicted
+    /// nodes fault back on read). `None` leaves the overlay unbounded (legacy
+    /// behavior). Called once by the coordinator after open/create; the installed
+    /// eviction coordinator holds a weak ref to this shard's `Arc`-d trie, so it
+    /// is torn down when the shard's last `Arc` drops.
+    pub fn arm_eviction(&self, config: Option<EvictionConfig>) -> ShardResult<()> {
+        if let Some(config) = config {
+            self.trie
+                .enable_eviction(config)
+                .map_err(|e| ShardError::Open {
+                    path: self.path.clone(),
+                    message: format!("failed to enable overlay eviction: {e}"),
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Overlay-eviction statistics for this shard's trie.
+    ///
+    /// `nodes_evicted` / `bytes_freed` accumulate across the checkpoint-tail
+    /// budget evictions; `resident_bytes` is the live resident-overlay estimate.
+    pub fn eviction_stats(&self) -> EvictionStats {
+        self.trie.eviction_stats()
     }
 
     /// Get the shard key.
@@ -1880,5 +1911,112 @@ mod tests {
             Some(10),
             "commit_chunk uses SET semantics — re-inserting the same value must not double it"
         );
+    }
+
+    #[test]
+    fn test_overlay_eviction_is_lossless_and_observable() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("evict_shard.artrie");
+        let shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
+
+        // Tiny resident budget so a modest insert provably exceeds it and the
+        // checkpoint tail evicts cold overlay nodes. (min_eviction_depth pins the
+        // shallow fan-out, so the budget itself may be structurally unreachable —
+        // we assert eviction OCCURRED and was lossless, not a strict residency.)
+        shard
+            .arm_eviction(Some(EvictionConfig {
+                resident_budget_bytes: Some(4096),
+                ..EvictionConfig::without_memory_monitor()
+            }))
+            .expect("arm eviction");
+
+        const N: u64 = 2000;
+        for i in 0..N {
+            shard
+                .increment_lockfree(format!("th|w{:05}", i).as_bytes(), i + 1)
+                .expect("increment");
+        }
+        // #1 registers the overlay; #2's tail evicts the now-cold nodes to budget.
+        shard.checkpoint().expect("checkpoint 1");
+        shard.checkpoint().expect("checkpoint 2");
+
+        // Observable (libdictenstein e2f7681 records the checkpoint-tail eviction).
+        let stats = shard.eviction_stats();
+        assert!(
+            stats.nodes_evicted > 0,
+            "budget eviction should have reclaimed cold overlay nodes (nodes_evicted={})",
+            stats.nodes_evicted
+        );
+
+        // Lossless: every evicted value still faults back on read with its count.
+        for i in 0..N {
+            assert_eq!(
+                shard.get(format!("th|w{:05}", i).as_bytes()),
+                Some(i + 1),
+                "evicted key th|w{:05} must fault back losslessly",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_overlay_eviction_under_concurrent_writers() {
+        // Red-team coverage the loom proofs do not reach: many lock-free
+        // increment_cas writers per shard racing the checkpoint-tail budget
+        // eviction (root-CAS unswizzle + 1c stamp guard). Unique keys => each
+        // final count is deterministically 1 regardless of interleaving.
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("evict_concurrent.artrie");
+        let shard = Arc::new(ShardHandle::create(ShardKey::new("th"), &path).expect("create"));
+        shard
+            .arm_eviction(Some(EvictionConfig {
+                resident_budget_bytes: Some(4096),
+                ..EvictionConfig::without_memory_monitor()
+            }))
+            .expect("arm eviction");
+
+        const WRITERS: u64 = 4;
+        const PER_WRITER: u64 = 500;
+
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|w| {
+                let shard = Arc::clone(&shard);
+                std::thread::spawn(move || {
+                    for i in 0..PER_WRITER {
+                        shard
+                            .increment_lockfree(format!("th|w{}_{:04}", w, i).as_bytes(), 1)
+                            .expect("concurrent increment");
+                    }
+                })
+            })
+            .collect();
+
+        let checkpointer = {
+            let shard = Arc::clone(&shard);
+            std::thread::spawn(move || {
+                for _ in 0..4 {
+                    shard.checkpoint().expect("concurrent checkpoint");
+                }
+            })
+        };
+
+        for writer in writers {
+            writer.join().expect("writer thread panicked");
+        }
+        checkpointer.join().expect("checkpoint thread panicked");
+
+        // Final checkpoint, then verify no write was lost under concurrent eviction.
+        shard.checkpoint().expect("final checkpoint");
+        for w in 0..WRITERS {
+            for i in 0..PER_WRITER {
+                let key = format!("th|w{}_{:04}", w, i);
+                assert_eq!(
+                    shard.get(key.as_bytes()),
+                    Some(1),
+                    "write {} lost under concurrent budget eviction",
+                    key
+                );
+            }
+        }
     }
 }

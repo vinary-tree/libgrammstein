@@ -328,6 +328,15 @@ pub struct ImportGoogleBooksArgs {
     #[arg(long, default_value = "500000", value_name = "ENTRIES")]
     pub tx_chunk_size: u64,
 
+    /// Global overlay-heap resident budget across all shards, in GiB.
+    ///
+    /// The checkpoint tail evicts each shard's coldest resident overlay nodes
+    /// down to (budget / simultaneously-resident-shard-count), losslessly
+    /// (evicted nodes fault back on read), to bound peak heap during large
+    /// sharded imports. Default 10 GiB. Set to 0 to disable (unbounded overlay).
+    #[arg(long, default_value = "10", value_name = "GIB")]
+    pub overlay_budget_gib: u64,
+
     /// Resource management options.
     #[command(flatten)]
     pub resources: ResourceArgs,
