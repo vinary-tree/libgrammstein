@@ -14,6 +14,7 @@ grammstein train import-google-books \
   --parallel 8 \
   --tx-chunk-size 250000 \
   --lockfree-flush-threshold 25000 \
+  --overlay-budget-gib 12 \
   --cache-files
 ```
 
@@ -77,11 +78,39 @@ Setting this explicitly overrides the auto-scaled default. Setting to a
 very low value (e.g., 1,000) effectively turns every write into a flush —
 useful for debugging but kills throughput.
 
+## `--overlay-budget-gib <GiB>`
+
+**Default: 10.** The global resident-overlay heap budget across all
+simultaneously-resident shards, in GiB. After each shard checkpoint, the tail
+evicts that shard's coldest resident overlay nodes down to its share of the
+budget — **losslessly**, since evicted nodes fault back from the durable image on
+read. This is the hard bound that keeps peak heap in check during a full 1–5gram
+import (without it the resident overlay grows unbounded; see
+`docs/architecture/memory-optimization.md` #15).
+
+| Value | Effect |
+|---|---|
+| `0` | Disable eviction — unbounded resident overlay (the legacy behavior). |
+| 8 | Aggressive: more headroom under a 16 GB ceiling, more fault-back-on-read. |
+| 10 (default) | Balanced for a ≤16 GB heap target on a 32 GB machine. |
+| 12–14 | Larger heaps: fewer read faults, tighter against the limit. |
+
+The budget is **divided by the number of simultaneously-resident shards**
+(`num_shards` for the default hash-based granularity, since it keeps all shards
+resident), so `SUM(per-shard budget) ≈ --overlay-budget-gib` regardless of
+granularity. A 64 MiB per-shard floor prevents thrashing when the division would
+otherwise produce a tiny budget.
+
 ## Interaction notes
 
-- `--cache-files` is orthogonal to `--tx-chunk-size` and
-  `--lockfree-flush-threshold`. The cache layer affects the *download* path;
-  the others affect the *write* path.
+- `--cache-files` is orthogonal to `--tx-chunk-size`,
+  `--lockfree-flush-threshold`, and `--overlay-budget-gib`. The cache layer
+  affects the *download* path; the others affect the *write* path.
+- `--lockfree-flush-threshold` and `--overlay-budget-gib` are complementary
+  overlay bounds: the flush threshold caps the *inter-checkpoint* overlay growth
+  (entries before a forced flush), while the overlay budget caps the
+  *post-checkpoint resident* overlay (bytes retained after eviction). The
+  threshold paces flushes; the budget reclaims RAM at each checkpoint tail.
 - On a freshly-resumed import, `--tx-chunk-size` and
   `--lockfree-flush-threshold` re-apply per the new run's CLI args; they
   are not stored in the checkpoint state.

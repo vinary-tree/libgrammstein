@@ -17,6 +17,15 @@ Dependency tree status at latest verification: clean (`git status` empty at
 `a46d9c1`); the unsafe-ledger files `formal-verification/UNSAFE_INVENTORY.tsv` and
 `formal-verification/UNSAFE_CONTRACTS.tsv` are committed.
 
+Current build target: libgrammstein now compiles + tests against the newer
+libdictenstein `e2f7681` (which adds the CX-universal path-compressed checkpoint
+serializer atop the same eviction surface). The verified-revision re-pin to a
+clean `e2f7681`+ rev — and the `verify-formal-correspondence.sh` re-run — are
+pending libdictenstein's in-flight CX-to-traits generalization landing (it leaves
+the tree dirty and breaks `--all-features` until the `OverlayCompressedSerialize`
+impls are wired for the char/vocab tries). The `a46d9c1` contracts above hold
+unchanged across that serializer refactor.
+
 ## Verification Command
 
 Run this command before treating the dependency contracts below as current:
@@ -50,6 +59,7 @@ sub-gate (set `RUN_TLC=1` to enable) and Miri.
 | `formal-verification/tla+/PersistentTransactionIncrementRecovery.tla` | Increment aggregation and replay fail before publishing overflowed records; recovery stops at invalid arithmetic prefixes. |
 | `formal-verification/tla+/LockFreeCounterMergeAtomicity.tla` | Lock-free checked counter increments and the atomic overlay→persistent merge reject overflow without mutating the overlay, persistent map, or WAL; the u64 overlay counter and i64 WAL delta stay consistent. |
 | `formal-verification/tla+/LockFreeDurableCheckpoint.tla` | A lock-free checkpoint that captures the committed watermark loses no write: every visible term is either within the snapshot (≤ watermark) or retained in the WAL and replayed (> watermark), even though writers commit out of LSN order with no lock excluding the checkpoint. |
+| `formal-verification/tla+/LockFreeDurableCheckpointEviction.tla` | The eviction-ON checkpoint composes the watermark-bounded WAL reclaim with the eviction `DiskLocationRegistry` publication ordering: evicting a cold overlay node to its durable image loses no value — every evicted term faults back from the published image (or the retained WAL) on read. This is the lossless guarantee the importer's overlay-budget eviction relies on. |
 | `formal-verification/rocq/Spec/PersistentWalAtomicitySpec.v` | Persistent mutation writes WAL records before making trie mutations visible, and committed transactions are atomic at the dependency boundary. |
 | `formal-verification/rocq/Spec/PersistentVocabWalAtomicitySpec.v` | Vocabulary insert and batch insert write WAL records before visible mutation and preserve stable index mappings. |
 | `formal-verification/rocq/Spec/PersistentVocabCheckpointSpec.v` | Vocabulary checkpoint/reopen preserves the term-index bijection, publishes sidecars consistently, and resumes WAL LSN allocation after the checkpoint. |
@@ -114,3 +124,18 @@ lock-free durability contracts to cover the full "writes during sync are safe an
 never lost" argument. This replaces the retired `ShardWriteToken.tla`
 defer-and-exclude model, whose write-token mechanism no longer exists in
 production.
+
+## Overlay-Heap Eviction Delegation
+
+The importer arms libdictenstein's production overlay-heap eviction per shard
+(`ShardHandle::arm_eviction` → `EvictableARTrie::enable_eviction` with a
+`resident_budget_bytes`; see `docs/architecture/memory-optimization.md` #15). The
+checkpoint tail then evicts the coldest resident overlay nodes down to the budget
+to bound peak heap. libgrammstein does NOT re-verify that eviction is lossless —
+that is exactly `LockFreeDurableCheckpointEviction.tla`'s guarantee (an evicted
+node's value faults back from the published durable image or the retained WAL on
+the next read). The libgrammstein-side obligation is only the *budget arithmetic*
+(global budget ÷ resident-shard count) and the lifecycle (the eviction
+coordinator's weak self-reference is torn down when the shard's last `Arc` drops),
+which are covered by the importer's own eviction unit/concurrency tests in
+`src/sources/google_books/sharding/shard.rs::tests`, not by a TLA model.

@@ -32,6 +32,7 @@ bottleneck.
 | 12 | Removed worker-exit checkpoint storm | ~6 min blocking I/O at end-of-import |
 | 13 | `tokio::task::yield_now()` before finalization | SIGINT responsiveness during synchronous MKN work |
 | 14 | Auto-scaled checkpoint interval (every 5 vs 10 files) | I/O cadence at high parallelism |
+| 15 | `--overlay-budget-gib` overlay-heap eviction | hard bound on resident overlay RAM (the (a) root cause) |
 
 ## How they fit together
 
@@ -252,6 +253,38 @@ Smaller surgical fixes:
   else { 10 }` at three sites in the importer. Higher parallelism →
   faster overall throughput → checkpoints amortize over more work.
 
+### 15. `--overlay-budget-gib` overlay-heap eviction (the OOM bound)
+
+Optimizations #8/#9 *bounded* the inter-checkpoint overlay growth, but the
+resident lock-free overlay itself (bottleneck (a)) was still **unbounded** — it
+accumulated for the lifetime of an open shard, because `checkpoint()` serialized
+the overlay snapshot to disk without reclaiming its resident RAM. After
+libdictenstein added production overlay-heap eviction (the `checkpoint()` tail now
+evicts the coldest resident overlay nodes down to a `resident_budget_bytes`,
+**losslessly** — evicted nodes fault back from the durable image on read),
+libgrammstein arms it per shard:
+
+- **`ShardHandle.trie`** is held as `SharedARTrie<u64>` (`Arc<PersistentARTrie>`)
+  so the eviction coordinator can hold a weak self-reference; `arm_eviction()`
+  installs it after open/create. All trie writes remain `&self` (lock-free
+  overlay), so they deref through the `Arc` unchanged.
+- **Budget policy** (`ShardConfig::overlay_eviction_config`): a global budget `G`
+  (CLI `--overlay-budget-gib`, default **10 GiB**, default-on; `0` disables) is
+  divided by the number of *simultaneously-resident* shards. Hash-based
+  `CpuProportional` (the default) and an unlimited `max_open_shards` keep all
+  `num_shards` resident, so the divisor is `num_shards`; otherwise the LRU cap
+  bounds residents to `max_open_shards`. So `SUM(per-shard budget)` over the
+  resident set ≈ `G`, granularity-invariant. A 64 MiB per-shard floor + a finite
+  200K-node per-checkpoint eviction cap keep the tail from thrashing or
+  latency-spiking; the base preset is `without_memory_monitor()` (no per-shard
+  `sysinfo` thread — the checkpoint tail fires purely on `resident > budget`).
+- CX path-compression (also new in libdictenstein) shrinks the on-disk/evicted
+  node form, complementing eviction (it does not shrink the resident hot set).
+
+This converts bottleneck (a) from "unbounded" to "bounded by `G`" — the resident
+overlay is the dominant heap term during bulk ingest, so this is the lever that
+makes the <16 GB target reachable.
+
 ## Verification
 
 The fixes are guarded by ~20 unit and integration tests:
@@ -275,13 +308,24 @@ The fixes are guarded by ~20 unit and integration tests:
 - `src/sources/google_books/parser.rs::tests` — 7 tests for
   `parse_ngram_line_ref` (unigram/bigram/unicode/wrong-field-count/
   empty-ngram/invalid-fields/equivalence-to-owned).
+- `src/sources/google_books/sharding/shard.rs::tests` — 3 overlay-eviction
+  tests (#15): `test_overlay_eviction_is_lossless_and_observable`
+  (`nodes_evicted > 0` + every evicted key faults back),
+  `test_overlay_eviction_bounds_resident_to_budget` (a 1 MiB budget reclaims the
+  bulk of a 50K-node overlay — `nodes_evicted >= 30K`), and
+  `test_overlay_eviction_under_concurrent_writers` (no lost writes under writers
+  racing the budget eviction; deterministic across repeats).
 
-## Pending: profiling
+## Pending: end-to-end peak-RSS benchmark
 
-The optimizations have not yet been validated against real-world peak heap
-and `__mprotect` share. The plan is to run `valgrind --tool=massif` and
-`perf record -g --call-graph=dwarf` against a 1- to 2-gram English prefix
-with CPU affinity (`taskset -c 0-11`), comparing `git stash`ed baseline
-vs. current HEAD. Acceptance targets: peak heap 33.79 GB → <16 GB;
-`__mprotect` CPU share 49% → <5%. Results will land in MEMORY.md and as
-an appendix here.
+The overlay-eviction bound (#15) is verified **in process** — the eviction tests
+prove it fires, reclaims the bulk of the resident overlay (`nodes_evicted`), and
+is lossless and concurrency-safe. The remaining validation is the **end-to-end
+peak-RSS** measurement on a real import: run the importer with
+`--overlay-budget-gib 0` (unbounded = the old behavior) vs the default 10 GiB,
+under `/usr/bin/time -v` (off tmpfs, so RSS reflects the heap) with CPU affinity
+(`taskset -c 0-11`), plus `valgrind --tool=massif` for the heap shape. Acceptance
+targets: peak heap 33.79 GB → <16 GB; `__mprotect` CPU share 49% → <5% (the latter
+already addressed by mimalloc, #1). Results will land in MEMORY.md and as an
+appendix here. (This run also needs the full `--all-features` build, currently
+blocked by libdictenstein's in-flight CX-to-traits generalization.)
