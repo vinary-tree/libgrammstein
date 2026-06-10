@@ -316,16 +316,32 @@ The fixes are guarded by ~20 unit and integration tests:
   `test_overlay_eviction_under_concurrent_writers` (no lost writes under writers
   racing the budget eviction; deterministic across repeats).
 
-## Pending: end-to-end peak-RSS benchmark
+## Benchmark results
 
-The overlay-eviction bound (#15) is verified **in process** — the eviction tests
-prove it fires, reclaims the bulk of the resident overlay (`nodes_evicted`), and
-is lossless and concurrency-safe. The remaining validation is the **end-to-end
-peak-RSS** measurement on a real import: run the importer with
-`--overlay-budget-gib 0` (unbounded = the old behavior) vs the default 10 GiB,
-under `/usr/bin/time -v` (off tmpfs, so RSS reflects the heap) with CPU affinity
-(`taskset -c 0-11`), plus `valgrind --tool=massif` for the heap shape. Acceptance
-targets: peak heap 33.79 GB → <16 GB; `__mprotect` CPU share 49% → <5% (the latter
-already addressed by mimalloc, #1). Results will land in MEMORY.md and as an
-appendix here. (This run also needs the full `--all-features` build, currently
-blocked by libdictenstein's in-flight CX-to-traits generalization.)
+**In-process micro-benchmark** (`benches/overlay_eviction.rs` — single shard, 1M
+distinct n-grams, `cargo bench --features google-books --bench overlay_eviction`):
+
+| config | ingest throughput | final checkpoint | nodes reclaimed |
+|---|---|---|---|
+| eviction OFF (unbounded) | ~211K ngrams/s | 448 ms | 0 |
+| eviction ON (4 MiB budget) | ~135K ngrams/s | 139 ms | 1,078,092 |
+
+The budget reclaims the **entire** resident overlay (>1M nodes) — the memory bound
+works. The 4 MiB budget is a worst-case stress (maximal eviction); it costs ~36%
+ingest throughput and, in exchange, makes the final checkpoint **3× faster** (the
+overlay was evicted incrementally rather than serialized whole at the end). The
+production default (10 GiB ÷ resident-shard count, ≥ 64 MiB/shard) evicts far less
+often, so the real-world throughput cost is much smaller — the tradeoff is
+"bounded heap, no OOM" vs unbounded growth. The bound is further verified by the
+in-process eviction tests (fires, reclaims the bulk of the overlay, lossless,
+concurrency-safe).
+
+**Pending — end-to-end peak-RSS on a real corpus.** Run the importer with
+`--overlay-budget-gib 0` (unbounded = old behavior) vs the default 10 GiB under
+`/usr/bin/time -v` (off tmpfs) with CPU affinity (`taskset -c 0-11`). Acceptance:
+peak heap 33.79 GB → <16 GB; `__mprotect` CPU share 49% → <5% (the latter already
+addressed by mimalloc, #1). **Caveat:** mimalloc retains freed pages, so RSS lags
+the live heap and understates the reduction — prefer `valgrind --tool=massif`
+(live-heap profile, not RSS) for the heap-shape confirmation, or read the live
+reclamation off `eviction_stats().nodes_evicted` as the micro-benchmark does. This
+needs a real Google Books corpus run; results will land in MEMORY.md and here.
