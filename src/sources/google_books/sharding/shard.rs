@@ -1960,6 +1960,62 @@ mod tests {
     }
 
     #[test]
+    fn test_overlay_eviction_bounds_resident_to_budget() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("evict_budget.artrie");
+        let shard = ShardHandle::create(ShardKey::new("th"), &path).expect("create");
+
+        // 1 MiB budget — well above the min_eviction_depth=1 pinned shallow
+        // fan-out, so the budget is reachable and the resident overlay is
+        // genuinely bounded by it after the checkpoint tail evicts.
+        const BUDGET: usize = 1024 * 1024;
+        shard
+            .arm_eviction(Some(EvictionConfig {
+                resident_budget_bytes: Some(BUDGET),
+                ..EvictionConfig::without_memory_monitor()
+            }))
+            .expect("arm eviction");
+
+        // Insert enough distinct keys that the resident overlay far exceeds budget.
+        const N: u64 = 50_000;
+        for i in 0..N {
+            shard
+                .increment_lockfree(format!("th|term{:06}", i).as_bytes(), 1)
+                .expect("increment");
+        }
+        shard.checkpoint().expect("checkpoint 1");
+        shard.checkpoint().expect("checkpoint 2");
+
+        let stats = shard.eviction_stats();
+        // The OOM-relevant property: the budget tail reclaims the BULK of the
+        // resident overlay — each evicted node drops its `Arc`, freeing RAM. With
+        // a 1 MiB budget over a ~6 MiB / 50K-node overlay and no inter-checkpoint
+        // transient, nearly the whole cold set is reclaimed, so the resident RAM
+        // is bounded to a small remainder (the pinned shallow fan-out).
+        // `nodes_evicted` is the genuine reclamation count (libdictenstein
+        // e2f7681); `resident_bytes` is the disk-registry total and intentionally
+        // does NOT shrink (it backs fault-on-read), so it is not the RAM observable.
+        assert!(
+            stats.nodes_evicted >= 30_000,
+            "budget eviction must reclaim the bulk of the {}-key overlay \
+             (nodes_evicted={}, registry resident_bytes={})",
+            N,
+            stats.nodes_evicted,
+            stats.resident_bytes
+        );
+
+        // Lossless under the budget.
+        for i in 0..N {
+            assert_eq!(
+                shard.get(format!("th|term{:06}", i).as_bytes()),
+                Some(1),
+                "key th|term{:06} lost under budget eviction",
+                i
+            );
+        }
+    }
+
+    #[test]
     fn test_overlay_eviction_under_concurrent_writers() {
         // Red-team coverage the loom proofs do not reach: many lock-free
         // increment_cas writers per shard racing the checkpoint-tail budget
