@@ -1,0 +1,56 @@
+@startuml formal-verification
+' Formal-verification map: TLA+ specs (red) grouped by concern verify importer
+' components (blue/teal); Rocq proofs (red) cover MKN/merge arithmetic;
+' dependency bridges (grey, dashed) tie to libdictenstein / liblevenshtein contracts.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title Formal Verification Map  —  `make -C formal complete-with-dependencies`
+
+package "TLA+ specifications  (TLC bounded model checking · TLAPS proofs · Apalache typecheck)" {
+  package "Concurrency" {
+    rectangle "**AsyncShardSync**\n≤1 syncer · clean⇒0 dirty\nTLAPS: 249 obligations" as ass #C62828
+  }
+  package "Lifecycle" {
+    rectangle "**ImporterLifecycle**" as il #C62828
+    rectangle "**WorkerShutdown**\nno job lost" as ws #C62828
+    rectangle "**CronStateMachine**" as cron #C62828
+  }
+  package "Durability" {
+    rectangle "**CheckpointStateMachine**" as csm #C62828
+    rectangle "**PersistentStorageBridge**" as psb #C62828
+    rectangle "**QuerySemanticsBridge**\nno metadata leak" as qsb #C62828
+  }
+}
+
+package "Rocq proofs" {
+  rectangle "**MknStatistics** · **MknFloatBounds**\ndiscount / binary64 bounds" as mkn #C62828
+  rectangle "**FrequencyCountsMerge**\nmerge assoc. / commut." as fcm #C62828
+}
+
+rectangle "**Importer + checkpoint + sharding**\n(Rust)" as impl #00838F
+rectangle "**loom** concurrency tests\nmemory-ordering interleavings" as loom #1565C0
+rectangle "**libdictenstein / liblevenshtein**\ndurability + query contracts" as deps #546E7A
+
+ass -[#C62828,dashed]-> impl
+il -[#C62828,dashed]-> impl
+ws -[#C62828,dashed]-> impl
+cron -[#C62828,dashed]-> impl
+csm -[#C62828,dashed]-> impl
+psb -[#C62828,dashed]-> impl
+qsb -[#C62828,dashed]-> impl
+mkn -[#C62828,dashed]-> impl
+fcm -[#C62828,dashed]-> impl
+loom --> impl : alignment
+psb .[#546E7A,dashed].> deps : bridge
+qsb .[#546E7A,dashed].> deps : bridge
+
+@enduml

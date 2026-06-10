@@ -1,0 +1,48 @@
+@startuml importer-eviction
+' Google Books importer dataflow + overlay-heap eviction (the OOM fix).
+' Colors: blue=compute, teal=storage/persistence, red=formal verification, grey=external.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Google Books Importer — Sharded Lock-Free Ingestion + Overlay-Heap Eviction
+
+rectangle "**Google Books n-gram files**\n.gz over HTTP · 206 Range-resumable\noptional local cache" as corpus #546E7A
+rectangle "**Worker pool**  (--parallel)\nzero-alloc line parse → varint key" as workers #1565C0
+
+package "Per shard  ×(26 | 676)" {
+  rectangle "**Lock-free overlay**\nDashMap + atomic counters\n(high-concurrency write buffer)" as overlay #00838F
+  rectangle "**Persistent ARTrie shard**\nmmap-backed · CX path-compressed" as shards #00838F
+}
+
+rectangle "**Crash-safe checkpoint**  (cron)\nchunked tx · SET semantics\n(idempotent recovery) · vocab WAL merge" as ckpt #00838F
+rectangle "**Eviction tail**\nevict coldest overlay nodes →\nbudget ÷ resident shards (≥64 MiB)\n**lossless** — fault back from durable image" as evict #006064
+
+rectangle "**CheckpointStateMachine**\n**PersistentStorageBridge**\nTLA+ / TLAPS" as spec #C62828
+
+corpus --> workers : stream / cache
+workers --> overlay : store_ngram\n(lock-free CAS, count = max)
+overlay --> shards : flush over\nthreshold
+shards --> ckpt : periodic\n(every 5–10 files)
+ckpt --> evict : after durable\npublish
+evict -[#006064,dashed]-> overlay : reclaim resident RAM
+
+spec -[#C62828,dashed]-> ckpt : verifies\nno-loss publish
+spec -[#C62828,dashed]-> evict : verifies\nlossless eviction
+
+note bottom of evict #FFF3E0
+  **Peak heap: 33.79 GB → < 16 GB.**
+  The budget is the hard bound on resident overlay RAM;
+  `--overlay-budget-gib` (default 10). mimalloc removes the
+  ~49% `__mprotect` CPU separately.
+end note
+
+@enduml

@@ -1,0 +1,72 @@
+@startuml architecture
+' libgrammstein — layered architecture. Color legend (semantic, shared across all repo diagrams):
+'   #1565C0 blue   = statistical LM core      #2E7D32 green = embeddings / neural
+'   #6A1B9A purple = retrieval / topic        #EF6C00 orange = code / LaTeX
+'   #00838F teal   = storage / persistence    #C62828 red    = formal verification
+'   #546E7A grey   = external crates / corpora
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title libgrammstein — Layered Architecture
+
+legend top right
+  |= Color |= Layer |
+  |<#1565C0>     | Statistical LM core |
+  |<#2E7D32>     | Embeddings / Neural |
+  |<#6A1B9A>     | Retrieval / Topic |
+  |<#EF6C00>     | Code / LaTeX |
+  |<#00838F>     | Storage / Persistence |
+  |<#C62828>     | Formal Verification |
+  |<#546E7A>     | External crates / corpora |
+endlegend
+
+rectangle "**Applications** — perplexity scoring · spell/grammar correction · text generation · WFST lattice rescoring" as apps #455A64
+
+together {
+  rectangle "**Code Correction**\n(code-*) · CPG · PCFG · GNN" as code #EF6C00
+  rectangle "**LaTeX Modeling**\n(latex-*) · mode-aware" as latex #EF6C00
+  rectangle "**Neural**\n(neural-rescore) · ModernBERT" as neural #2E7D32
+  rectangle "**RAG**\n(rag / rag-hnsw) · HNSW · cosine" as rag #6A1B9A
+  rectangle "**Topic Modeling**\n(rag) · HAC · c-TF-IDF" as topic #6A1B9A
+}
+
+rectangle "**Hybrid Model** — n-gram ⊕ embeddings (interpolated, lock-free cache)" as hybrid #1B6CA8
+
+together {
+  rectangle "**N-gram LM**\nModified Kneser-Ney · orders 1–5" as ngram #1565C0
+  rectangle "**Embeddings**\nFastText · BPE · phonetic · acoustic" as embed #2E7D32
+}
+
+together {
+  rectangle "**libdictenstein**\npersistent ARTrie · lock-free overlay\neviction · CX checkpoints" as dict #00838F
+  rectangle "**liblevenshtein**\ntrie dictionaries · fuzzy matching" as lev #00838F
+}
+
+rectangle "**Corpora** — Wikipedia · Project Gutenberg · Google Books n-grams" as corpus #546E7A
+rectangle "**Integrations** — lling-llang WFST (LanguageModel trait)" as integ #546E7A
+
+corpus --> ngram
+corpus --> embed
+ngram --> hybrid
+embed --> hybrid
+hybrid --> apps
+neural --> apps
+rag --> apps
+topic --> apps
+code --> apps
+latex --> apps
+ngram -[#00838F,dashed]-> dict : persists
+embed -[#00838F,dashed]-> dict
+dict --> lev
+hybrid .[#546E7A,dashed].> integ : implements\nLanguageModel
+neural ..> rag
+
+@enduml

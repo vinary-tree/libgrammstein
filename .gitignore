@@ -99,3 +99,7 @@ formal/rocq/.CoqMakefile.d
 formal/tla/states/
 formal/tla/.tlacache/
 .aider*
+
+.pgmcp.toml
+
+!docs/diagrams/*.svg

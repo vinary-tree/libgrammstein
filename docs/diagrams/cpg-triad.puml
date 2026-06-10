@@ -1,0 +1,49 @@
+@startuml cpg-triad
+' Code Property Graph: one tree-sitter parse fuses AST + CFG + DFG into a joint
+' graph that three correctors consume. Colors: orange=code, green=neural, blue=lexical.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title Code Property Graph  &  Ensemble Correction
+
+rectangle "**Source**  (Python · Rust · JS · Rholang · MeTTa)\ntree-sitter incremental parse" as src #546E7A
+
+package "Code Property Graph  (joint structure)" {
+  rectangle "**AST**\nsyntax · parent/sibling" as ast #EF6C00
+  rectangle "**CFG**\ncontrol flow · branch/back edges" as cfg #EF6C00
+  rectangle "**DFG**\ndata flow · def→use" as dfg #EF6C00
+}
+
+package "Ensemble correctors" {
+  rectangle "**Lexical**\nliblevenshtein fuzzy match" as lex #1565C0
+  rectangle "**Grammar**\nPCFG + Earley" as gram #EF6C00
+  rectangle "**Semantic** 🟨\nGNN over CPG" as sem #2E7D32
+}
+
+rectangle "**Ranked corrections**\nconfidence-weighted" as out #455A64
+
+src --> ast
+src --> cfg
+src --> dfg
+ast --> lex
+ast --> gram
+cfg --> sem
+dfg --> sem
+lex --> out
+gram --> out
+sem --> out
+
+note bottom of sem #FFF8E1
+  🟨 GNN semantic correction is experimental —
+  a natural contribution surface.
+end note
+
+@enduml

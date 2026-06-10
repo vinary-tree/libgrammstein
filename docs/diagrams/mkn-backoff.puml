@@ -1,0 +1,37 @@
+@startuml mkn-backoff
+' Modified Kneser-Ney backoff recursion. Each node = one order's discounted estimate;
+' each edge = the backoff weight γ(h) multiplying the lower-order term.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #1565C0
+skinparam ArrowFontColor #0D47A1
+title Modified Kneser-Ney — Backoff Recursion  (h′ drops the oldest word)
+
+rectangle "**5-gram** (highest order)\n[c(h·w) − D(c)]⁺ / c(h)" as g5 #1565C0
+rectangle "**4-gram**\ncontinuation counts N₁₊" as g4 #1565C0
+rectangle "**3-gram**" as g3 #1565C0
+rectangle "**2-gram**" as g2 #1565C0
+rectangle "**1-gram**\n[N₁₊(•·w) − D]⁺ / N₁₊(•·•)" as g1 #1565C0
+rectangle "**uniform**  1 / |V|" as uni #546E7A
+
+g5 --> g4 : + γ(h) ·
+g4 --> g3 : + γ(h′) ·
+g3 --> g2 : + γ ·
+g2 --> g1 : + γ ·
+g1 --> uni : + γ_unif ·
+
+note right of g5 #E3F2FD
+  D(c) = D₁ if c=1, D₂ if c=2, D₃₊ if c≥3.
+  Invariant: γ(h) equals exactly the
+  discounted mass, so Σ_w ℙ_MKN(w | h) = 1.
+end note
+
+@enduml
