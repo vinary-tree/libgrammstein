@@ -3,7 +3,7 @@ name = "libgrammstein"
 version = "0.1.0"
 edition = "2021"
 description = "Hybrid language model (N-gram + Embeddings) for WFST text correction"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 authors = ["Dylon Edwards"]
 repository = "https://github.com/vinary-tree/libgrammstein"
 keywords = ["nlp", "language-model", "ngram", "embeddings", "wfst"]
@@ -24,7 +24,7 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 libdictenstein = { path = "../libdictenstein", features = ["persistent-artrie", "parking_lot"] }
 
 # PathMap for efficient trie storage (production deployment after training)
-pathmap = { path = "../PathMap", default-features = true }
+pathmap = "0.2"
 ndarray = { version = "0.16", features = ["serde"] }
 ordered-float = "4.0"
 smallvec = "1.13"
