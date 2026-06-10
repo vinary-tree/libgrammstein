@@ -6,25 +6,41 @@ recovery. liblevenshtein adapter and query contracts are recorded in
 `formal/dependencies/liblevenshtein-contracts.md`.
 
 Dependency repository: `../libdictenstein`
-Verified revision: `62ea161cdf8d645ba33611b5b8af68f5c9e39e85` (post lock-free
+Verified revision: `5a0512a66cfd740c874715bb24deb2425b3a9024` (post lock-free
 overlay refactor — overlay-default writes, lock collapse `Arc<RwLock<T>>` →
 `Arc<T>`, overlay compaction, overlay-backed `DictionaryNode`, the production
-overlay-heap eviction in `checkpoint()`, and the CX-universal path-compressed
-checkpoint serializer generalized into one `OverlayCompressedSerialize<K>` trait
-across the byte/char/vocab ARTries). Re-pinned from `a46d9c1` after the
-CX-to-traits generalization landed and `--all-features` was restored;
-`make -C formal complete-with-dependencies` (which runs
-`../libdictenstein/scripts/verify-formal-correspondence.sh`) passed against this
-revision on 2026-06-10.
-Dependency tree status at latest verification: not bit-for-bit clean, but clean
-within the contract surface. One tracked file is modified —
-`src/persistent_artrie_char/io_uring_ctor.rs` (a one-line warning-hygiene change,
-`entry_count` → `_entry_count` in the io-uring char-trie constructor) — which is
-outside the durability/eviction/overlay contract surface these bridges depend on.
-The 201 untracked files are benchmark logs under `docs/benchmarks/` (199 `.txt`,
-2 `.md`), no code. The unsafe-ledger files
-`formal-verification/UNSAFE_INVENTORY.tsv` and
+overlay-heap eviction in `checkpoint()`, the CX-universal path-compressed
+checkpoint serializer generalized into one `OverlayCompressedSerialize<K>` trait,
+and the overlay-machinery cleanup that unified eviction across the byte/char/vocab
+ARTries through `persistent_artrie_core/overlay/` and deleted the dead flip
+machinery — `enable_lockfree`→`install_overlay`, constructors install the overlay
+directly via `install_overlay_on_create`). Re-pinned from `62ea161` after that
+cleanup. The dependency correspondence was re-verified against this revision on
+2026-06-10 via `make -C formal dependency-contracts` (which runs
+`../libdictenstein/scripts/verify-formal-correspondence.sh`): 57 Rust
+correspondence suites green, Rocq proofs + TLA+ syntax green. The full in-repo
+formal gate (TLC/TLAPS/Apalache + `--all-features` source-hygiene) was last run at
+the immediately-preceding `62ea161` and is unaffected by this dependency-only
+cleanup — libgrammstein's own specs are unchanged, and the imported contract
+surface (durability/eviction/overlay) did not change across `62ea161..5a0512a`
+(the cleanup removed dead code and renamed an internal install path).
+Dependency tree status at latest verification: tracked tree clean (`git status`
+empty bar untracked files at `5a0512a`); the only non-clean state is 201 untracked
+benchmark logs under `docs/benchmarks/` (199 `.txt`, 2 `.md`), no code. The
+unsafe-ledger files `formal-verification/UNSAFE_INVENTORY.tsv` and
 `formal-verification/UNSAFE_CONTRACTS.tsv` are committed.
+
+Eviction-surface note (relevant to importer OOM reasoning): at `5a0512a` all three
+ARTries implement `EvictableARTrie`, but reclamation is asymmetric — the byte
+(`SharedARTrie`) and char (`SharedCharARTrie`) impls genuinely reclaim overlay
+heap (`evict_overlay_nodes` drops cold `Arc`s, faulting back via the per-checkpoint
+`DiskLocationRegistry`), whereas the vocab impl
+(`persistent_vocab_artrie/mod.rs:643`) installs a no-op `(0,0)` callback
+(`fault_overlay_slot → None`) and reclaims nothing — its coordinator exists for
+memory-pressure accounting + API parity only. The importer therefore arms eviction
+on the byte n-gram shards (the dominant heap) and bounds the vocabulary overlay via
+`merge_and_rotate_vocabulary_wal` (overlay→persistent mmap merge), NOT via vocab
+eviction.
 
 ## Verification Command
 
@@ -42,9 +58,9 @@ checkpoint publication, recovery replay, vocabulary checkpoint, and persistent
 end-to-end trace correspondence tests used by this bridge.
 
 Latest local result: `scripts/verify-formal-correspondence.sh` passed against
-libdictenstein `62ea161` (2026-06-10, via `make -C formal
-complete-with-dependencies`) — Rust correspondence tests, Rocq proofs, and TLA+
-syntax all green. The default run skipped the optional bounded TLC sub-gate (set
+libdictenstein `5a0512a` (2026-06-10, via `make -C formal dependency-contracts`) —
+57 Rust correspondence suites green (0 failed), Rocq proofs, and TLA+ syntax all
+green. The default run skipped the optional bounded TLC sub-gate (set
 `RUN_TLC=1` to enable) and Miri.
 
 ## Imported Contracts

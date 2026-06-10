@@ -403,19 +403,29 @@ Makefile defaults (one TLC worker, `-Xmx768m`, `-Xmx1536m` for Apalache):
   + 5 liveness TLC runs and 7 Apalache typechecks pass with `ShardWriteToken`
   removed — no collateral regression in the eight retained specs.
 
-Reconciliation against libdictenstein `62ea161` (post overlay refactor +
-production overlay-heap eviction + CX-to-traits checkpoint serializer) is
-COMPLETE: the verified-revision re-pin landed in
-`dependencies/libdictenstein-contracts.md` — `make -C formal
-complete-with-dependencies` (which runs `verify-formal-correspondence.sh`) passed
-on 2026-06-10, the tree clean within the contract surface bar a one-line io-uring
-char-ctor warning-hygiene change (`entry_count` → `_entry_count`, out of contract
-surface) plus untracked benchmark logs. The cargo `--all-features` lib suite is
-green (933 passed / 0 failed); the full formal gate is green (dependency
-contracts + rocq + 21 TLC runs no-error + 7 TLAPS modules [incl. AsyncShardSync's
-249 obligations] + 7 Apalache typechecks + rust-alignment + `--all-features`
-source-hygiene); the loom alignment tests pass (3/3). The optional `RUN_TLC=1`
-dependency-imported-TLC sub-gate and Miri were not run.
+Reconciliation against libdictenstein is COMPLETE. The full in-repo formal gate
+ran at `62ea161` (post overlay refactor + production overlay-heap eviction +
+CX-to-traits checkpoint serializer): `make -C formal complete-with-dependencies`
+passed on 2026-06-10 — the cargo `--all-features` lib suite green (933 passed / 0
+failed); dependency contracts + rocq + 21 TLC runs no-error + 7 TLAPS modules
+[incl. AsyncShardSync's 249 obligations] + 7 Apalache typechecks + rust-alignment +
+`--all-features` source-hygiene all green; loom alignment 3/3. The optional
+`RUN_TLC=1` dependency-imported-TLC sub-gate and Miri were not run.
+
+The contract was subsequently re-pinned to `5a0512a` (2026-06-10) after a
+dependency-only overlay-machinery cleanup (eviction unified across the
+byte/char/vocab ARTries via `persistent_artrie_core/overlay/`; dead flip machinery
+deleted; `enable_lockfree`→`install_overlay`). libgrammstein builds clean against
+`5a0512a` (`cargo check --all-targets --all-features` → 0 libgrammstein-local
+warnings) and the dependency correspondence re-passed (`make -C formal
+dependency-contracts`: 57 Rust correspondence suites green). The full TLC/TLAPS/
+Apalache gate was not re-run for `5a0512a` because libgrammstein's own specs are
+unchanged and the imported contract surface (durability/eviction/overlay) did not
+change across `62ea161..5a0512a` (the cleanup removed dead code + renamed an
+internal install path). See `dependencies/libdictenstein-contracts.md` for the
+eviction-surface asymmetry note (vocab `enable_eviction` is an accounting-only
+no-op; the importer arms eviction on the byte n-gram shards and bounds the
+vocabulary overlay via `merge_and_rotate_vocabulary_wal`).
 
 ## Source Alignment And Warning Hygiene
 
