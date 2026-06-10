@@ -8,17 +8,21 @@ This migration replaces the deleted wrappers across 4 files.
 ## Semantic + perf note (BENCHMARK)
 The old `ConcurrentVocabARTrie::insert_cas` was IN-MEMORY (durability via checkpoint only). The new
 `PersistentVocabARTrie::insert` is DURABLE Order-A (per-insert WAL append → overlay CAS → CommitRank).
-For the bulk n-gram import hot path, the factory functions MUST set `durability_policy(None)` so the WAL
-append stays cheap (buffered, no per-insert fsync) with durability via periodic `checkpoint()`. Benchmark
-the import throughput vs the old path before/after.
+IMPORTANT: this durable insert REQUIRES `durability_policy` ∈ {Immediate, GroupCommit} and REJECTS
+`None`/`Periodic` (an acknowledged write must be durable BEFORE it becomes visible, so a buffered "cheap"
+policy is rejected at insert time). The factories therefore use the DEFAULT policy — the `None` override
+an earlier draft of this doc suggested would error. For the bulk n-gram import hot path, set
+`durability_policy(GroupCommit)`: batched fsync keeps the WAL append cheap while honoring the
+ACK-durability contract. Benchmark import throughput (old in-memory `insert_cas` vs the new durable insert
+under Immediate vs GroupCommit) before/after.
 
 ## File 1 — src/ngram/vocabulary.rs (the bulk)
 - **import (65):** drop `ConcurrentMode, ConcurrentVocabARTrie, ConcurrentVocabStats, LockFreeVocab,
   LockFreeVocabStats`. Keep `PersistentVocabARTrie, SharedVocabARTrie, VocabSyncHandle`.
 - **`SharedConcurrentVocab` alias (323):** `Arc<ConcurrentVocabARTrie>` → `Arc<PersistentVocabARTrie>`.
 - **`open_or_create_concurrent_vocabulary_lockfree(path)` (255-266):** return `Arc<PersistentVocabARTrie>`;
-  body = open/create the trie, `trie.set_durability_policy(DurabilityPolicy::None)`, `Ok(Arc::new(trie))`.
-  (Drop the `ConcurrentVocabARTrie::new_lockfree(trie)` wrap.)
+  body = open/create the trie (DEFAULT durability_policy — the durable insert REJECTS `None`), then
+  `Ok(Arc::new(trie))`. (Drop the `ConcurrentVocabARTrie::new_lockfree(trie)` wrap.)
 - **`..._with_capacity` (279-294):** same (drop the capacity arg or document it as ignored — the overlay
   DashMap auto-sizes; or expose a capacity ctor in libdictenstein later).
 - **`..._with_bloom` (304-320):** `create_with_start_index_and_bloom` is DELETED → use
