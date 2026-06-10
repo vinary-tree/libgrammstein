@@ -143,7 +143,7 @@ impl NgramStorage {
         output_path: &Path,
         vocabulary: Option<SharedConcurrentVocab>,
     ) -> StorageResult<Self> {
-        let mut trie = if output_path.exists() {
+        let trie = if output_path.exists() {
             log::info!("Opening existing trie at {:?}", output_path);
             PersistentARTrie::open_with_slot_tracking(output_path)
                 .map_err(|e| StorageError::Trie(format!("Failed to open trie: {}", e)))?
@@ -152,9 +152,8 @@ impl NgramStorage {
             PersistentARTrie::create_with_slot_tracking(output_path)
                 .map_err(|e| StorageError::Trie(format!("Failed to create trie: {}", e)))?
         };
-
-        // Enable lock-free overlay for concurrent increment_cas access
-        trie.enable_lockfree();
+        // The lock-free overlay is always-on now (libdictenstein flips to it on
+        // create); the explicit enable_lockfree() toggle was removed.
 
         Ok(Self::SingleTrie {
             trie: Arc::new(RwLock::new(trie)),
@@ -369,8 +368,7 @@ impl NgramStorage {
     /// This replaces `vocabulary_current_lsn()` and `vocabulary_synced_lsn()`.
     /// Returns `false` if no vocabulary is configured or vocabulary is clean.
     pub fn vocabulary_is_dirty(&self) -> bool {
-        self.vocabulary()
-            .is_some_and(|v| v.inner().read().is_dirty())
+        self.vocabulary().is_some_and(|v| v.is_dirty())
     }
 
     /// Encode tokens to a raw byte n-gram key using vocabulary.
@@ -710,16 +708,17 @@ impl NgramStorage {
         }
     }
 
-    /// Sync the vocabulary WAL (if present).
+    /// Sync the vocabulary WAL to disk (if present).
     ///
-    /// First merges lock-free entries into the persistent layer, then syncs WAL.
+    /// Lightweight durability: syncs the WAL (the overlay image is published only
+    /// by `checkpoint_vocabulary`). Crash recovery replays the WAL tail on reopen.
     pub fn sync_vocabulary(&self) -> StorageResult<()> {
         let vocab = match self {
             Self::SingleTrie { vocabulary, .. } => vocabulary,
             Self::Sharded { vocabulary, .. } => vocabulary,
         };
         if let Some(v) = vocab {
-            v.flush()
+            v.sync()
                 .map_err(|e| StorageError::Trie(format!("Vocabulary sync failed: {}", e)))?;
         }
         Ok(())
@@ -727,22 +726,16 @@ impl NgramStorage {
 
     /// Checkpoint the vocabulary (if present).
     ///
-    /// Merges lock-free entries into the persistent layer, then checkpoints
-    /// the persistent trie to disk.
+    /// Publishes the vocabulary's overlay snapshot to disk. The migrated single
+    /// lock-free `PersistentVocabARTrie` has no separate persistent layer to merge
+    /// into — `checkpoint()` is the durable image publication.
     pub fn checkpoint_vocabulary(&self) -> StorageResult<()> {
         let vocab = match self {
             Self::SingleTrie { vocabulary, .. } => vocabulary,
             Self::Sharded { vocabulary, .. } => vocabulary,
         };
         if let Some(v) = vocab {
-            // Merge lock-free layer into persistent
-            v.checkpoint().map_err(|e| {
-                StorageError::Trie(format!("Vocabulary lock-free merge failed: {}", e))
-            })?;
-            // Checkpoint persistent trie to disk
-            v.inner()
-                .write()
-                .checkpoint()
+            v.checkpoint()
                 .map_err(|e| StorageError::Trie(format!("Vocabulary checkpoint failed: {}", e)))?;
         }
         Ok(())
@@ -750,14 +743,10 @@ impl NgramStorage {
 
     /// Rotate vocabulary WAL without full checkpoint serialization.
     ///
-    /// Unlike [`checkpoint_vocabulary()`], which re-serializes the entire trie
-    /// (causing file bloat), this method:
-    /// 1. Flushes the reverse index and bloom filter
-    /// 2. Flushes only dirty slots (not the entire trie)
-    /// 3. Syncs the WAL for durability
-    ///
-    /// This prevents vocabulary file bloat during bulk imports while still
-    /// providing crash recovery via WAL replay.
+    /// Unlike [`checkpoint_vocabulary()`], which publishes a full overlay image
+    /// (causing file growth), this syncs the WAL and retains it for replay — no
+    /// overlay image is written — so it provides crash-recovery durability during
+    /// bulk imports without vocabulary file bloat.
     ///
     /// # When to Use
     ///
@@ -774,48 +763,32 @@ impl NgramStorage {
             Self::Sharded { vocabulary, .. } => vocabulary,
         };
         if let Some(v) = vocab {
-            // Merge lock-free layer into persistent first
-            v.checkpoint().map_err(|e| {
-                StorageError::Trie(format!("Vocabulary lock-free merge failed: {}", e))
-            })?;
-            // Rotate WAL on persistent trie
-            v.inner().write().rotate_wal().map_err(|e| {
+            // Sync + rotate the WAL while retaining it for replay; no overlay image
+            // is published (that is checkpoint_vocabulary's job), so no file bloat.
+            v.rotate_wal().map_err(|e| {
                 StorageError::Trie(format!("Vocabulary WAL rotation failed: {}", e))
             })?;
         }
         Ok(())
     }
 
-    /// Merge lock-free vocabulary entries and rotate WAL in a single operation.
+    /// Rotate the vocabulary WAL for periodic bulk-import durability.
     ///
-    /// This replaces the previous pattern of calling `sync_vocabulary()` then
-    /// `rotate_vocabulary_wal()` separately. Both operations internally call
-    /// `merge_into()` on the lock-free vocabulary, which rebuilds the persistent
-    /// trie's `reverse_index: HashMap<NodeRef, *const VocabTrieNode>`. During
-    /// resize, the HashMap requires both old and new tables in memory
-    /// simultaneously.
-    ///
-    /// By performing a single merge instead of two back-to-back merges, this
-    /// method eliminates the transient memory spike (~1.7 GB saved at peak
-    /// for a 5.8M-word English vocabulary).
-    ///
-    /// # Operations
-    ///
-    /// 1. Merges lock-free vocabulary entries into the persistent trie (single
-    ///    HashMap rebuild)
-    /// 2. Rotates the WAL on the persistent trie (no re-merge needed)
+    /// Under the migrated single lock-free `PersistentVocabARTrie` this is now
+    /// equivalent to [`rotate_vocabulary_wal()`]: it syncs + retains the WAL with
+    /// no overlay image published. The historical two-layer "merge into the
+    /// persistent `reverse_index` HashMap" step (and its ~1.7 GB rebuild spike)
+    /// no longer exists — the overlay *is* the vocabulary, so there is nothing to
+    /// merge. Retained as a distinct entry point for its existing callers.
     pub fn merge_and_rotate_vocabulary_wal(&self) -> StorageResult<()> {
         let vocab = match self {
             Self::SingleTrie { vocabulary, .. } => vocabulary,
             Self::Sharded { vocabulary, .. } => vocabulary,
         };
         if let Some(v) = vocab {
-            // Single merge: flush lock-free layer into persistent
-            v.checkpoint().map_err(|e| {
-                StorageError::Trie(format!("Vocabulary lock-free merge failed: {}", e))
-            })?;
-            // Rotate WAL on persistent trie (no re-merge needed since we just flushed)
-            v.inner().write().rotate_wal().map_err(|e| {
+            // Sync + rotate the WAL while retaining it for replay; no overlay image
+            // is published, so no file bloat (see rotate_vocabulary_wal).
+            v.rotate_wal().map_err(|e| {
                 StorageError::Trie(format!("Vocabulary WAL rotation failed: {}", e))
             })?;
         }
@@ -1554,7 +1527,8 @@ impl StoragePrefixTx {
 mod tests {
     use super::*;
     use crate::ngram::vocabulary::{
-        create_concurrent_vocabulary_lockfree, decode_ngram_key_bytes, open_or_create_vocabulary,
+        decode_ngram_key_bytes, open_or_create_concurrent_vocabulary_lockfree,
+        open_or_create_vocabulary,
     };
     use crate::sources::google_books::config::ShardingMode;
     use tempfile::TempDir;
@@ -1638,9 +1612,8 @@ mod tests {
         let vocab_path = dir.path().join("vocab.artrie");
 
         // Create lock-free concurrent vocabulary
-        let vocabulary =
-            open_or_create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
-        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocab_path)
+            .expect("Failed to create vocabulary");
 
         // Create storage with vocabulary
         let storage =
@@ -1682,9 +1655,8 @@ mod tests {
         let vocab_path = dir.path().join("vocab.artrie");
 
         // Create lock-free concurrent vocabulary
-        let vocabulary =
-            open_or_create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
-        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocab_path)
+            .expect("Failed to create vocabulary");
 
         // Create sharded storage with vocabulary using Adaptive granularity
         // to test prefix-based routing behavior
@@ -1751,9 +1723,8 @@ mod tests {
         let trie_path = dir.path().join("test.artrie");
         let vocab_path = dir.path().join("vocab.artrie");
 
-        let vocabulary =
-            open_or_create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
-        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocab_path)
+            .expect("Failed to create vocabulary");
 
         let storage =
             NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(vocabulary))
@@ -1789,8 +1760,7 @@ mod tests {
     fn test_single_commit_at_150_entries() {
         let dir = TempDir::new().expect("tempdir");
         let vocab_path = dir.path().join("vocab.artrie");
-        let vocabulary = open_or_create_vocabulary(&vocab_path).expect("vocab");
-        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab");
 
         let config = GoogleBooksConfig {
             output_path: dir.path().join("output.artrie"),
@@ -1845,8 +1815,7 @@ mod tests {
         // documented on NgramStorage::begin_prefix_tx).
         let dir = TempDir::new().expect("tempdir");
         let vocab_path = dir.path().join("vocab.artrie");
-        let vocabulary = open_or_create_vocabulary(&vocab_path).expect("vocab");
-        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab");
 
         let config = GoogleBooksConfig {
             output_path: dir.path().join("output.artrie"),
@@ -1927,8 +1896,7 @@ mod tests {
         // get_tokens reads would later miss the data entirely.
         let dir = TempDir::new().expect("tempdir");
         let vocab_path = dir.path().join("vocab.artrie");
-        let vocabulary = open_or_create_vocabulary(&vocab_path).expect("vocab");
-        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab");
 
         let config = GoogleBooksConfig {
             output_path: dir.path().join("output.artrie"),
@@ -1991,8 +1959,7 @@ mod tests {
         // and it must be safe to call repeatedly.
         let dir = TempDir::new().expect("tempdir");
         let vocab_path = dir.path().join("vocab.artrie");
-        let vocabulary = open_or_create_vocabulary(&vocab_path).expect("vocab");
-        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab");
 
         let config = GoogleBooksConfig {
             output_path: dir.path().join("output.artrie"),
@@ -2079,8 +2046,8 @@ mod tests {
 
         // ---- Phase 1: import, checkpoint, drop ----
         {
-            let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab create");
-            let vocab = create_concurrent_vocabulary_lockfree(vocab);
+            let vocab =
+                open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab create");
 
             let config = GoogleBooksConfig {
                 output_path: dir.path().join("english.artrie"),
@@ -2110,8 +2077,8 @@ mod tests {
 
         // ---- Phase 2: reopen and verify ----
         {
-            let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab reopen");
-            let vocab = create_concurrent_vocabulary_lockfree(vocab);
+            let vocab =
+                open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab reopen");
 
             let config = GoogleBooksConfig {
                 output_path: dir.path().join("english.artrie"),
@@ -2163,7 +2130,7 @@ mod tests {
             let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab create");
             let mut indices = Vec::new();
             {
-                let mut guard = vocab.write();
+                let guard = vocab.write();
                 for term in &terms {
                     indices.push(guard.insert(term).expect("test vocab insert"));
                 }
@@ -2177,7 +2144,7 @@ mod tests {
         let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab reopen");
         let mut reopened_indices = Vec::new();
         {
-            let mut guard = vocab.write();
+            let guard = vocab.write();
             for term in &terms {
                 reopened_indices.push(guard.insert(term).expect("test vocab insert"));
             }
@@ -2289,8 +2256,8 @@ mod tests {
         let vocab_path = dir.path().join("vocab.artrie");
 
         {
-            let vocabulary = open_or_create_vocabulary(&vocab_path).expect("vocab create");
-            let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+            let vocabulary =
+                open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab create");
             let storage = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocabulary))
                 .expect("create sharded storage with vocabulary");
 
@@ -2315,8 +2282,8 @@ mod tests {
                 .expect("save checkpoint claim after data durability");
         }
 
-        let vocabulary = open_or_create_vocabulary(&vocab_path).expect("vocab reopen");
-        let vocabulary = create_concurrent_vocabulary_lockfree(vocabulary);
+        let vocabulary =
+            open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab reopen");
         let reopened = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocabulary))
             .expect("reopen sharded storage with vocabulary");
 
@@ -2415,7 +2382,7 @@ mod tests {
 
         {
             let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab create");
-            let mut guard = vocab.write();
+            let guard = vocab.write();
             first_indices = terms
                 .iter()
                 .map(|term| guard.insert(term).expect("insert vocab term"))
@@ -2424,7 +2391,7 @@ mod tests {
         }
 
         let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab reopen");
-        let mut guard = vocab.write();
+        let guard = vocab.write();
         let reopened_indices: Vec<u64> = terms
             .iter()
             .map(|term| guard.insert(term).expect("reinsert vocab term"))

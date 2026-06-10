@@ -703,7 +703,7 @@ mod tests {
         // so each varint byte is ASCII and the UTF-8 representation is identical).
         let encode = |words: &[&str]| -> String {
             let mut buf = Vec::with_capacity(words.len() * 2);
-            let mut guard = vocab.write();
+            let guard = vocab.write();
             for word in words {
                 let idx = guard.insert(word).expect("test vocab insert");
                 crate::ngram::vocabulary::encode_varint(idx, &mut buf);

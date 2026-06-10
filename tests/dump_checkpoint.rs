@@ -45,7 +45,7 @@ fn make_byte_checkpoint(dir: &Path) {
 /// Create a minimal `PersistentVocabARTrie` vocabulary file with 3 sample terms.
 fn make_vocab(dir: &Path) {
     let path = dir.join("english.vocab.artrie");
-    let mut vocab = PersistentVocabARTrie::create_with_start_index(&path, 1)
+    let vocab = PersistentVocabARTrie::create_with_start_index(&path, 1)
         .expect("PersistentVocabARTrie::create_with_start_index failed");
     vocab.insert("hello").expect("insert hello");
     vocab.insert("world").expect("insert world");

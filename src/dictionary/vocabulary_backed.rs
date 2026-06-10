@@ -12,7 +12,7 @@
 //! - **Always consistent**: Dictionary is always in sync with n-gram model
 //! - **Efficient**: No separate extraction or building step required
 
-use crate::ngram::vocabulary::{encode_ngram_key, SharedVocabARTrie};
+use crate::ngram::vocabulary::{encode_ngram_key_lockfree, SharedConcurrentVocab};
 use crate::sources::google_books::NgramStorage;
 
 /// A dictionary backed by shared vocabulary and n-gram storage.
@@ -42,7 +42,7 @@ use crate::sources::google_books::NgramStorage;
 /// ```
 pub struct VocabularyDictionary<'a> {
     /// Shared vocabulary mapping words to indices.
-    vocabulary: SharedVocabARTrie,
+    vocabulary: SharedConcurrentVocab,
     /// N-gram storage containing unigram counts.
     storage: &'a NgramStorage,
 }
@@ -54,7 +54,7 @@ impl<'a> VocabularyDictionary<'a> {
     ///
     /// * `vocabulary` - The shared vocabulary from n-gram training
     /// * `storage` - The n-gram storage containing unigram counts
-    pub fn new(vocabulary: SharedVocabARTrie, storage: &'a NgramStorage) -> Self {
+    pub fn new(vocabulary: SharedConcurrentVocab, storage: &'a NgramStorage) -> Self {
         Self {
             vocabulary,
             storage,
@@ -65,7 +65,7 @@ impl<'a> VocabularyDictionary<'a> {
     ///
     /// This is O(k) in word length due to trie lookup.
     pub fn contains(&self, word: &str) -> bool {
-        self.vocabulary.read().get_index(word).is_some()
+        self.vocabulary.get_index(word).is_some()
     }
 
     /// Get the unigram frequency of a word.
@@ -80,25 +80,25 @@ impl<'a> VocabularyDictionary<'a> {
     /// support to guarantee correct routing.
     pub fn frequency(&self, word: &str) -> Option<u64> {
         // Check if word is in vocabulary
-        self.vocabulary.read().get_index(word)?;
+        self.vocabulary.get_index(word)?;
 
         // Encode as unigram key and look up in storage
-        let key = encode_ngram_key(&[word], &self.vocabulary);
+        let key = encode_ngram_key_lockfree(&[word], &self.vocabulary);
         self.storage.get(&key)
     }
 
     /// Get the vocabulary size (number of unique words).
     pub fn len(&self) -> u64 {
-        self.vocabulary.read().len() as u64
+        self.vocabulary.len() as u64
     }
 
     /// Check if the dictionary is empty.
     pub fn is_empty(&self) -> bool {
-        self.vocabulary.read().len() == 0
+        self.vocabulary.len() == 0
     }
 
     /// Get a reference to the underlying vocabulary.
-    pub fn vocabulary(&self) -> &SharedVocabARTrie {
+    pub fn vocabulary(&self) -> &SharedConcurrentVocab {
         &self.vocabulary
     }
 
@@ -111,9 +111,7 @@ impl<'a> VocabularyDictionary<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ngram::vocabulary::{
-        create_concurrent_vocabulary_lockfree, open_or_create_vocabulary,
-    };
+    use crate::ngram::vocabulary::open_or_create_concurrent_vocabulary_lockfree;
     use crate::sources::google_books::NgramStorage;
     use tempfile::TempDir;
 
@@ -124,12 +122,11 @@ mod tests {
         let trie_path = dir.path().join("ngrams.artrie");
 
         // Create vocabulary and storage
-        let vocabulary =
-            open_or_create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
-        let concurrent = create_concurrent_vocabulary_lockfree(vocabulary.clone());
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocab_path)
+            .expect("Failed to create vocabulary");
 
         let storage =
-            NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(concurrent))
+            NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(vocabulary.clone()))
                 .expect("Failed to create storage");
 
         // Store some unigrams
@@ -175,12 +172,11 @@ mod tests {
         let vocab_path = dir.path().join("vocab.artrie");
         let trie_path = dir.path().join("ngrams.artrie");
 
-        let vocabulary =
-            open_or_create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
-        let concurrent = create_concurrent_vocabulary_lockfree(vocabulary.clone());
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocab_path)
+            .expect("Failed to create vocabulary");
 
         let storage =
-            NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(concurrent))
+            NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(vocabulary.clone()))
                 .expect("Failed to create storage");
 
         storage
@@ -191,7 +187,6 @@ mod tests {
             .expect("Failed to sync vocabulary");
 
         vocabulary
-            .write()
             .insert("vocab_only")
             .expect("Failed to insert vocabulary-only word");
 
@@ -215,12 +210,11 @@ mod tests {
         let vocab_path = dir.path().join("vocab.artrie");
         let trie_path = dir.path().join("ngrams.artrie");
 
-        let vocabulary =
-            open_or_create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
-        let concurrent = create_concurrent_vocabulary_lockfree(vocabulary.clone());
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocab_path)
+            .expect("Failed to create vocabulary");
 
         let storage =
-            NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(concurrent))
+            NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(vocabulary.clone()))
                 .expect("Failed to create storage");
 
         let dict = VocabularyDictionary::new(vocabulary, &storage);

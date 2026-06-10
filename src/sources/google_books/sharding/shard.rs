@@ -557,15 +557,14 @@ impl ShardHandle {
     pub fn create(key: ShardKey, path: impl AsRef<Path>) -> ShardResult<Self> {
         let path = path.as_ref().to_path_buf();
 
-        // Use create_with_slot_tracking for optimized incremental checkpoints
-        let mut trie =
+        // Use create_with_slot_tracking for optimized incremental checkpoints.
+        // The lock-free overlay is always-on now (libdictenstein flips to it on
+        // create), so no explicit enable_lockfree() toggle is needed.
+        let trie =
             PersistentARTrie::create_with_slot_tracking(&path).map_err(|e| ShardError::Open {
                 path: path.clone(),
                 message: e.to_string(),
             })?;
-
-        // Enable lock-free overlay for concurrent CAS-based increments
-        trie.enable_lockfree();
 
         Ok(Self {
             key,
@@ -584,8 +583,8 @@ impl ShardHandle {
     pub fn open(key: ShardKey, path: impl AsRef<Path>) -> ShardResult<Self> {
         let path = path.as_ref().to_path_buf();
 
-        let (mut trie, recovery_report) =
-            PersistentARTrie::open_with_recovery_and_slot_tracking(&path).map_err(|e| {
+        let (trie, recovery_report) = PersistentARTrie::open_with_recovery_and_slot_tracking(&path)
+            .map_err(|e| {
                 let msg = format!(
                     "Failed to open shard at {:?}. If this shard was created with an older format \
                      (PersistentARTrieChar), it must be re-imported. Error: {}",
@@ -596,9 +595,7 @@ impl ShardHandle {
                     message: msg,
                 }
             })?;
-
-        // Enable lock-free overlay for concurrent CAS-based increments
-        trie.enable_lockfree();
+        // The lock-free overlay is always-on now; no explicit enable_lockfree().
 
         if recovery_report.mode.recovered() {
             log::info!(
