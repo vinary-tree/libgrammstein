@@ -6,25 +6,25 @@ recovery. liblevenshtein adapter and query contracts are recorded in
 `formal/dependencies/liblevenshtein-contracts.md`.
 
 Dependency repository: `../libdictenstein`
-Verified revision: `a46d9c1aa3f1c921214ca68f41d05260741daeaf` (post lock-free
-overlay refactor: overlay-default writes, lock collapse `Arc<RwLock<T>>` →
-`Arc<T>`, overlay compaction, overlay-backed `DictionaryNode`, and the production
-overlay-heap eviction in `checkpoint()` — task #39). Re-pinned from the
-planning-era `02ec4d010109641247c1962465921d2560572f67` after the overlay
-migration; `scripts/verify-formal-correspondence.sh` passed against this revision
-on a clean tree.
-Dependency tree status at latest verification: clean (`git status` empty at
-`a46d9c1`); the unsafe-ledger files `formal-verification/UNSAFE_INVENTORY.tsv` and
+Verified revision: `62ea161cdf8d645ba33611b5b8af68f5c9e39e85` (post lock-free
+overlay refactor — overlay-default writes, lock collapse `Arc<RwLock<T>>` →
+`Arc<T>`, overlay compaction, overlay-backed `DictionaryNode`, the production
+overlay-heap eviction in `checkpoint()`, and the CX-universal path-compressed
+checkpoint serializer generalized into one `OverlayCompressedSerialize<K>` trait
+across the byte/char/vocab ARTries). Re-pinned from `a46d9c1` after the
+CX-to-traits generalization landed and `--all-features` was restored;
+`make -C formal complete-with-dependencies` (which runs
+`../libdictenstein/scripts/verify-formal-correspondence.sh`) passed against this
+revision on 2026-06-10.
+Dependency tree status at latest verification: not bit-for-bit clean, but clean
+within the contract surface. One tracked file is modified —
+`src/persistent_artrie_char/io_uring_ctor.rs` (a one-line warning-hygiene change,
+`entry_count` → `_entry_count` in the io-uring char-trie constructor) — which is
+outside the durability/eviction/overlay contract surface these bridges depend on.
+The 201 untracked files are benchmark logs under `docs/benchmarks/` (199 `.txt`,
+2 `.md`), no code. The unsafe-ledger files
+`formal-verification/UNSAFE_INVENTORY.tsv` and
 `formal-verification/UNSAFE_CONTRACTS.tsv` are committed.
-
-Current build target: libgrammstein now compiles + tests against the newer
-libdictenstein `e2f7681` (which adds the CX-universal path-compressed checkpoint
-serializer atop the same eviction surface). The verified-revision re-pin to a
-clean `e2f7681`+ rev — and the `verify-formal-correspondence.sh` re-run — are
-pending libdictenstein's in-flight CX-to-traits generalization landing (it leaves
-the tree dirty and breaks `--all-features` until the `OverlayCompressedSerialize`
-impls are wired for the char/vocab tries). The `a46d9c1` contracts above hold
-unchanged across that serializer refactor.
 
 ## Verification Command
 
@@ -42,9 +42,10 @@ checkpoint publication, recovery replay, vocabulary checkpoint, and persistent
 end-to-end trace correspondence tests used by this bridge.
 
 Latest local result: `scripts/verify-formal-correspondence.sh` passed against
-libdictenstein `a46d9c1` (clean tree) — Rust correspondence tests, Rocq proofs,
-and TLA+ syntax all green. The default run skipped the optional bounded TLC
-sub-gate (set `RUN_TLC=1` to enable) and Miri.
+libdictenstein `62ea161` (2026-06-10, via `make -C formal
+complete-with-dependencies`) — Rust correspondence tests, Rocq proofs, and TLA+
+syntax all green. The default run skipped the optional bounded TLC sub-gate (set
+`RUN_TLC=1` to enable) and Miri.
 
 ## Imported Contracts
 

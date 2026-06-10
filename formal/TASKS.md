@@ -403,14 +403,19 @@ Makefile defaults (one TLC worker, `-Xmx768m`, `-Xmx1536m` for Apalache):
   + 5 liveness TLC runs and 7 Apalache typechecks pass with `ShardWriteToken`
   removed — no collateral regression in the eight retained specs.
 
-Reconciliation against the repaired libdictenstein `a46d9c1` (post overlay
-refactor + production overlay-heap eviction) is COMPLETE: the verified-revision
-re-pin landed in `dependencies/libdictenstein-contracts.md`
-(`verify-formal-correspondence.sh` passed on a clean tree); the cargo
-`--all-features` suite is green (969 passed / 0 failed); `make -C formal check`
-is green (rustfmt + rocq + 14 TLC + 7 Apalache + rust-alignment); the loom
-alignment tests pass (3/3). The optional `RUN_TLC=1` dependency-imported-TLC
-sub-gate and Miri were not run.
+Reconciliation against libdictenstein `62ea161` (post overlay refactor +
+production overlay-heap eviction + CX-to-traits checkpoint serializer) is
+COMPLETE: the verified-revision re-pin landed in
+`dependencies/libdictenstein-contracts.md` — `make -C formal
+complete-with-dependencies` (which runs `verify-formal-correspondence.sh`) passed
+on 2026-06-10, the tree clean within the contract surface bar a one-line io-uring
+char-ctor warning-hygiene change (`entry_count` → `_entry_count`, out of contract
+surface) plus untracked benchmark logs. The cargo `--all-features` lib suite is
+green (933 passed / 0 failed); the full formal gate is green (dependency
+contracts + rocq + 21 TLC runs no-error + 7 TLAPS modules [incl. AsyncShardSync's
+249 obligations] + 7 Apalache typechecks + rust-alignment + `--all-features`
+source-hygiene); the loom alignment tests pass (3/3). The optional `RUN_TLC=1`
+dependency-imported-TLC sub-gate and Miri were not run.
 
 ## Source Alignment And Warning Hygiene
 
