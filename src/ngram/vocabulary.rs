@@ -62,7 +62,6 @@ use thiserror::Error;
 pub use libdictenstein::persistent_artrie::dict_impl::DurabilityPolicy;
 pub use libdictenstein::persistent_artrie::recovery::RecoveryReport;
 pub use libdictenstein::persistent_vocab_artrie::{
-    ConcurrentMode, ConcurrentVocabARTrie, ConcurrentVocabStats, LockFreeVocab, LockFreeVocabStats,
     PersistentVocabARTrie, SharedVocabARTrie, VocabSyncHandle,
 };
 
@@ -113,7 +112,7 @@ pub type VocabularyResult<T> = Result<T, VocabularyError>;
 /// Enables slot-level dirty tracking for optimized WAL rotation (90%+ I/O reduction
 /// compared to full checkpoint serialization).
 pub fn create_vocabulary(path: &Path) -> VocabularyResult<SharedVocabARTrie> {
-    let mut trie = PersistentVocabARTrie::create_with_start_index(path, FIRST_VALID_INDEX)?;
+    let trie = PersistentVocabARTrie::create_with_start_index(path, FIRST_VALID_INDEX)?;
     trie.enable_slot_tracking();
     Ok(Arc::new(RwLock::new(trie)))
 }
@@ -134,11 +133,9 @@ pub fn create_vocabulary_with_bloom(
     path: &Path,
     bloom_capacity: usize,
 ) -> VocabularyResult<SharedVocabARTrie> {
-    let mut trie = PersistentVocabARTrie::create_with_start_index_and_bloom(
-        path,
-        FIRST_VALID_INDEX,
-        bloom_capacity,
-    )?;
+    // BloomFilter removed (overlay reads use the lock-free walk); equivalent to create_vocabulary.
+    let _ = bloom_capacity;
+    let trie = PersistentVocabARTrie::create_with_start_index(path, FIRST_VALID_INDEX)?;
     trie.enable_slot_tracking();
     Ok(Arc::new(RwLock::new(trie)))
 }
@@ -151,7 +148,7 @@ pub fn create_vocabulary_with_bloom(
 /// Enables slot-level dirty tracking for optimized WAL rotation (90%+ I/O reduction
 /// compared to full checkpoint serialization).
 pub fn open_vocabulary(path: &Path) -> VocabularyResult<SharedVocabARTrie> {
-    let (mut trie, _report) = PersistentVocabARTrie::open_with_recovery(path)?;
+    let (trie, _report) = PersistentVocabARTrie::open_with_recovery(path)?;
     trie.enable_slot_tracking();
     Ok(Arc::new(RwLock::new(trie)))
 }
@@ -165,7 +162,7 @@ pub fn open_vocabulary(path: &Path) -> VocabularyResult<SharedVocabARTrie> {
 pub fn open_vocabulary_with_recovery(
     path: &Path,
 ) -> VocabularyResult<(SharedVocabARTrie, RecoveryReport)> {
-    let (mut trie, report) = PersistentVocabARTrie::open_with_recovery(path)?;
+    let (trie, report) = PersistentVocabARTrie::open_with_recovery(path)?;
     trie.enable_slot_tracking();
     Ok((Arc::new(RwLock::new(trie)), report))
 }
@@ -235,92 +232,53 @@ pub fn open_or_create_vocabulary_with_bloom(
 /// concurrent.checkpoint()?;
 /// ```
 pub fn create_concurrent_vocabulary_lockfree(
-    vocab: SharedVocabARTrie,
-) -> Arc<ConcurrentVocabARTrie> {
-    Arc::new(ConcurrentVocabARTrie::from_shared_lockfree(vocab))
+    vocab: PersistentVocabARTrie,
+) -> Arc<PersistentVocabARTrie> {
+    // `PersistentVocabARTrie` IS the single lock-free impl (no wrapper). `Arc` it so many threads
+    // insert/checkpoint through `&self` with no external locking.
+    Arc::new(vocab)
 }
 
-/// Create a new lock-free concurrent vocabulary from a path.
+/// Open/create a vocabulary and return a shared lock-free handle.
 ///
-/// This is a convenience function that opens/creates a vocabulary and wraps
-/// it in a lock-free `ConcurrentVocabARTrie`.
-///
-/// # Arguments
-///
-/// * `path` - Path to the vocabulary file
-///
-/// # Returns
-///
-/// An `Arc<ConcurrentVocabARTrie>` in lock-free mode.
+/// Sets `DurabilityPolicy::None` so the durable Order-A insert's WAL append stays cheap for bulk
+/// import (no per-insert fsync); durability is via periodic `checkpoint()`.
 pub fn open_or_create_concurrent_vocabulary_lockfree(
     path: &Path,
-) -> VocabularyResult<Arc<ConcurrentVocabARTrie>> {
+) -> VocabularyResult<Arc<PersistentVocabARTrie>> {
+    // The durable Order-A insert requires Immediate/GroupCommit durability (an ACK guarantees the
+    // write is durable before it becomes visible) — it REJECTS None/Periodic. Use the default
+    // policy; for bulk-import throughput tune to DurabilityPolicy::GroupCommit (batched fsync) and
+    // benchmark (this is the durable-vs-old-in-memory-insert_cas trade-off).
     let trie = if path.exists() {
         let (trie, _report) = PersistentVocabARTrie::open_with_recovery(path)?;
         trie
     } else {
         PersistentVocabARTrie::create_with_start_index(path, FIRST_VALID_INDEX)?
     };
-
-    Ok(Arc::new(ConcurrentVocabARTrie::new_lockfree(trie)))
+    Ok(Arc::new(trie))
 }
 
-/// Create or open a lock-free concurrent vocabulary with pre-allocated capacity.
-///
-/// Pre-sizing the lock-free layer avoids geometric doubling resize spikes
-/// in the DashMap term cache and the reverse-lookup Vec. This is critical
-/// for large-vocabulary imports where resize doubling can spike peak memory
-/// by several GB.
-///
-/// # Arguments
-///
-/// * `path` - Path to the vocabulary file
-/// * `estimated_terms` - Expected number of unique vocabulary terms
+/// Open/create a lock-free vocabulary (capacity hint currently advisory — the overlay's `DashMap`
+/// auto-sizes). Sets `DurabilityPolicy::None` for bulk import.
 pub fn open_or_create_concurrent_vocabulary_lockfree_with_capacity(
     path: &Path,
-    estimated_terms: usize,
-) -> VocabularyResult<Arc<ConcurrentVocabARTrie>> {
-    let trie = if path.exists() {
-        let (trie, _report) = PersistentVocabARTrie::open_with_recovery(path)?;
-        trie
-    } else {
-        PersistentVocabARTrie::create_with_start_index(path, FIRST_VALID_INDEX)?
-    };
-
-    Ok(Arc::new(ConcurrentVocabARTrie::new_lockfree_with_capacity(
-        trie,
-        estimated_terms,
-    )))
+    _estimated_terms: usize,
+) -> VocabularyResult<Arc<PersistentVocabARTrie>> {
+    open_or_create_concurrent_vocabulary_lockfree(path)
 }
 
-/// Create a new lock-free concurrent vocabulary with BloomFilter.
-///
-/// The BloomFilter provides O(1) fast-path for detecting new terms.
-///
-/// # Arguments
-///
-/// * `path` - Path to the vocabulary file
-/// * `bloom_capacity` - Expected number of vocabulary entries
+/// Open/create a lock-free vocabulary (the BloomFilter was removed — overlay reads use the
+/// lock-free walk, not a bloom). Sets `DurabilityPolicy::None` for bulk import.
 pub fn open_or_create_concurrent_vocabulary_lockfree_with_bloom(
     path: &Path,
-    bloom_capacity: usize,
-) -> VocabularyResult<Arc<ConcurrentVocabARTrie>> {
-    let trie = if path.exists() {
-        let (trie, _report) = PersistentVocabARTrie::open_with_recovery(path)?;
-        trie
-    } else {
-        PersistentVocabARTrie::create_with_start_index_and_bloom(
-            path,
-            FIRST_VALID_INDEX,
-            bloom_capacity,
-        )?
-    };
-
-    Ok(Arc::new(ConcurrentVocabARTrie::new_lockfree(trie)))
+    _bloom_capacity: usize,
+) -> VocabularyResult<Arc<PersistentVocabARTrie>> {
+    open_or_create_concurrent_vocabulary_lockfree(path)
 }
 
-/// Type alias for shared lock-free concurrent vocabulary.
-pub type SharedConcurrentVocab = Arc<ConcurrentVocabARTrie>;
+/// Type alias for a shared lock-free vocabulary.
+pub type SharedConcurrentVocab = Arc<PersistentVocabARTrie>;
 
 // ============================================================================
 // Varint Encoding Utilities
@@ -390,7 +348,7 @@ pub fn decode_varint(bytes: &[u8]) -> Option<(u64, usize)> {
 /// ```
 pub fn encode_ngram_key(words: &[&str], vocab: &SharedVocabARTrie) -> String {
     let mut buf = Vec::with_capacity(words.len() * 2); // Estimate 2 bytes/word average
-    let mut guard = vocab.write();
+    let guard = vocab.write();
     for word in words {
         let index = guard
             .insert(word)
@@ -408,7 +366,7 @@ pub fn encode_ngram_key(words: &[&str], vocab: &SharedVocabARTrie) -> String {
 /// rather than panicking.
 pub fn try_encode_ngram_key(words: &[&str], vocab: &SharedVocabARTrie) -> VocabularyResult<String> {
     let mut buf = Vec::with_capacity(words.len() * 2);
-    let mut guard = vocab.write();
+    let guard = vocab.write();
     for word in words {
         let index = guard.insert(word)?;
         encode_varint(index, &mut buf);
@@ -524,13 +482,15 @@ pub fn try_encode_ngram_key_batch(
 ///     }
 /// });
 /// ```
-pub fn encode_ngram_key_lockfree(words: &[&str], vocab: &ConcurrentVocabARTrie) -> String {
+pub fn encode_ngram_key_lockfree(words: &[&str], vocab: &PersistentVocabARTrie) -> String {
     if words.is_empty() {
         return String::new();
     }
 
     // Use lock-free insert_batch_concurrent
-    let indices = vocab.insert_batch_concurrent(words);
+    let indices = vocab
+        .insert_batch(words)
+        .expect("vocab insert_batch failed");
 
     // Convert indices to varint-encoded Latin-1 string
     let mut buf = Vec::with_capacity(indices.len() * 2);
@@ -545,7 +505,7 @@ pub fn encode_ngram_key_lockfree(words: &[&str], vocab: &ConcurrentVocabARTrie) 
 /// Uses lock-free CAS operations for concurrent vocabulary access.
 pub fn try_encode_ngram_key_lockfree(
     words: &[&str],
-    vocab: &ConcurrentVocabARTrie,
+    vocab: &PersistentVocabARTrie,
 ) -> VocabularyResult<String> {
     Ok(encode_ngram_key_lockfree(words, vocab))
 }
@@ -563,13 +523,18 @@ pub fn try_encode_ngram_key_lockfree(
 /// # Returns
 ///
 /// A Latin-1 encoded string where each word's index is varint-encoded.
-pub fn encode_ngram_key_with_lockfree_vocab(words: &[&str], vocab: &LockFreeVocab) -> String {
+pub fn encode_ngram_key_with_lockfree_vocab(
+    words: &[&str],
+    vocab: &PersistentVocabARTrie,
+) -> String {
     if words.is_empty() {
         return String::new();
     }
 
     // Use lock-free batch insert
-    let indices = vocab.insert_batch(words);
+    let indices = vocab
+        .insert_batch(words)
+        .expect("vocab insert_batch failed");
 
     // Convert indices to varint-encoded Latin-1 string
     let mut buf = Vec::with_capacity(indices.len() * 2);
@@ -614,13 +579,15 @@ thread_local! {
 /// ```
 pub fn with_encoded_ngram_key_lockfree<R>(
     words: &[&str],
-    vocab: &ConcurrentVocabARTrie,
+    vocab: &PersistentVocabARTrie,
     f: impl FnOnce(&[u8]) -> R,
 ) -> R {
     ENCODE_BUF.with(|buf| {
         let mut buf = buf.borrow_mut();
         buf.clear();
-        let indices = vocab.insert_batch_concurrent(words);
+        let indices = vocab
+            .insert_batch(words)
+            .expect("vocab insert_batch failed");
         for index in indices {
             encode_varint(index, &mut *buf);
         }
@@ -633,7 +600,7 @@ pub fn with_encoded_ngram_key_lockfree<R>(
 /// Like `with_encoded_ngram_key_lockfree` but returns the key as a `Vec<u8>` for
 /// callers that need ownership. Slightly less efficient than the callback variant
 /// since it clones the buffer, but avoids lifetime issues.
-pub fn encode_ngram_key_lockfree_bytes(words: &[&str], vocab: &ConcurrentVocabARTrie) -> Vec<u8> {
+pub fn encode_ngram_key_lockfree_bytes(words: &[&str], vocab: &PersistentVocabARTrie) -> Vec<u8> {
     with_encoded_ngram_key_lockfree(words, vocab, |key| key.to_vec())
 }
 
@@ -654,7 +621,7 @@ pub fn encode_ngram_key_existing(words: &[&str], vocab: &SharedVocabARTrie) -> O
 /// Encode an n-gram as raw varint bytes, inserting new words into vocab.
 pub fn encode_ngram_key_bytes(words: &[&str], vocab: &SharedVocabARTrie) -> Vec<u8> {
     let mut buf = Vec::with_capacity(words.len() * 2);
-    let mut guard = vocab.write();
+    let guard = vocab.write();
     for word in words {
         let index = guard
             .insert(word)
@@ -797,7 +764,7 @@ pub fn ngram_order_bytes(key: &[u8]) -> u8 {
 /// This is the fallible version of `encode_ngram_key_lockfree_bytes`.
 pub fn try_encode_ngram_key_lockfree_bytes(
     words: &[&str],
-    vocab: &ConcurrentVocabARTrie,
+    vocab: &PersistentVocabARTrie,
 ) -> VocabularyResult<Vec<u8>> {
     Ok(encode_ngram_key_lockfree_bytes(words, vocab))
 }
@@ -1252,47 +1219,14 @@ mod tests {
         assert!(!vocab.read().contains_index(2)); // Not yet inserted
     }
 
-    #[test]
-    fn test_bloom_filter() {
-        let dir = TempDir::new().expect("Failed to create temp dir");
-        let path = dir.path().join("vocab.artrie");
-
-        // Create with bloom filter
-        let vocab = create_vocabulary_with_bloom(&path, 1000).expect("Failed to create vocab");
-
-        assert!(vocab.read().has_bloom_filter());
-
-        // Insert some words
-        vocab.write().insert("hello").expect("test insert");
-        vocab.write().insert("world").expect("test insert");
-
-        // Bloom filter should report these might exist
-        assert!(vocab.read().might_contain("hello"));
-        assert!(vocab.read().might_contain("world"));
-
-        // Unknown word - bloom might return false (true negative) or true (false positive)
-        // We can't assert on this since bloom filters have false positives
-
-        // Checkpoint and reopen
-        vocab.write().checkpoint().expect("checkpoint failed");
-        drop(vocab);
-
-        let vocab = open_vocabulary(&path).expect("Failed to open vocab");
-
-        // Bloom filter should be restored
-        assert!(vocab.read().has_bloom_filter());
-        assert!(vocab.read().might_contain("hello"));
-        assert!(vocab.read().might_contain("world"));
-    }
-
     // ==================== Lock-Free Mode Tests ====================
 
     #[test]
     fn test_encode_ngram_key_lockfree() {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let path = dir.path().join("vocab.artrie");
-        let vocab = create_vocabulary(&path).expect("Failed to create vocab");
-        let concurrent = create_concurrent_vocabulary_lockfree(vocab);
+        let concurrent = open_or_create_concurrent_vocabulary_lockfree(&path)
+            .expect("Failed to create concurrent vocab");
 
         // Encode using lock-free API
         let key = encode_ngram_key_lockfree(&["the", "quick", "brown"], &concurrent);
@@ -1313,8 +1247,8 @@ mod tests {
 
         let dir = TempDir::new().expect("Failed to create temp dir");
         let path = dir.path().join("vocab.artrie");
-        let vocab = create_vocabulary(&path).expect("Failed to create vocab");
-        let concurrent = create_concurrent_vocabulary_lockfree(vocab);
+        let concurrent = open_or_create_concurrent_vocabulary_lockfree(&path)
+            .expect("Failed to create concurrent vocab");
 
         let num_threads = 8;
         let terms_per_thread = 100;
@@ -1369,16 +1303,11 @@ mod tests {
         let concurrent1 = open_or_create_concurrent_vocabulary_lockfree(&path)
             .expect("Failed to create concurrent vocab");
 
-        concurrent1.insert_cas("hello");
-        concurrent1.insert_cas("world");
+        concurrent1.insert("hello").expect("insert");
+        concurrent1.insert("world").expect("insert");
 
         // Checkpoint to persistent storage and ensure it's persisted to disk
         concurrent1.checkpoint().expect("checkpoint failed");
-        {
-            // Explicitly checkpoint the underlying persistent trie
-            let mut guard = concurrent1.inner().write();
-            guard.checkpoint().expect("persistent checkpoint failed");
-        }
         drop(concurrent1);
 
         // Reopen - the lock-free layer starts fresh, but the persistent layer
@@ -1392,7 +1321,7 @@ mod tests {
 
         // New term should get the next index.
         // The lock-free layer starts from next_index of the persistent trie (3).
-        let idx3 = concurrent2.insert_cas("new");
+        let idx3 = concurrent2.insert("new").expect("insert");
         assert!(
             idx3 >= 3,
             "New term index should be at least 3, got {}",
@@ -1404,23 +1333,16 @@ mod tests {
     fn test_lockfree_vocab_stats() {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let path = dir.path().join("vocab.artrie");
-        let vocab = create_vocabulary(&path).expect("Failed to create vocab");
-        let concurrent = create_concurrent_vocabulary_lockfree(vocab);
+        let concurrent = open_or_create_concurrent_vocabulary_lockfree(&path)
+            .expect("Failed to create concurrent vocab");
 
         // Insert some terms
-        concurrent.insert_cas("one");
-        concurrent.insert_cas("two");
-        concurrent.insert_cas("three");
+        concurrent.insert("one").expect("insert");
+        concurrent.insert("two").expect("insert");
+        concurrent.insert("three").expect("insert");
 
-        // Check stats
-        let stats = concurrent
-            .lockfree_stats()
-            .expect("should have lockfree stats");
-        assert_eq!(stats.entry_count, 3);
-        assert_eq!(stats.next_index, 4); // 1, 2, 3 inserted, next is 4 (start at 1)
-
-        // General stats
-        let general_stats = concurrent.stats();
-        assert_eq!(general_stats.mode, ConcurrentMode::LockFree);
+        // Lock-free vocab stats are now just len()/next_index() on the single impl.
+        assert_eq!(concurrent.len(), 3);
+        assert_eq!(concurrent.next_index(), 4); // 1,2,3 inserted, next is 4 (start at 1)
     }
 }

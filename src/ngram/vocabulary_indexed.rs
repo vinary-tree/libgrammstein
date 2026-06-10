@@ -227,7 +227,7 @@ impl<D> VocabularyIndexedDictionary<D> {
     /// Encode words to a varint key, acquiring new indices as needed.
     fn encode_key_inserting(&self, words: &[&str]) -> String {
         let mut buf = Vec::with_capacity(words.len() * 2);
-        let mut guard = self.vocabulary.write();
+        let guard = self.vocabulary.write();
         for word in words {
             let index = guard
                 .insert(word)
@@ -895,7 +895,7 @@ mod tests {
 
         // Insert enough words to require multi-byte varints
         {
-            let mut guard = vocab.write();
+            let guard = vocab.write();
             for i in 0..200 {
                 guard.insert(&format!("word{}", i)).expect("insert word");
             }
