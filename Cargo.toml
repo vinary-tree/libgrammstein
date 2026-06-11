@@ -2,6 +2,7 @@
 name = "libgrammstein"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.70"
 description = "Hybrid language model (N-gram + Embeddings) for WFST text correction"
 license = "Apache-2.0"
 authors = ["Dylon Edwards"]
@@ -13,7 +14,7 @@ categories = ["text-processing", "science"]
 # Core dependencies
 # Note: persistent-artrie has its own WAL-based persistence for crash-safe training.
 # Serialization uses portable format (IterableDictionary) that doesn't require D: Serialize.
-liblevenshtein = { path = "../liblevenshtein-rust", features = ["pathmap-backend", "persistent-artrie", "embedded-rules"] }
+liblevenshtein = { path = "../liblevenshtein-rust", version = "0.9", features = ["pathmap-backend", "persistent-artrie", "embedded-rules"] }
 
 # Global allocator: mimalloc avoids glibc's mmap/munmap per-allocation __mprotect
 # syscalls that consume ~45% CPU during large imports (thread-local segment heaps
@@ -21,7 +22,7 @@ liblevenshtein = { path = "../liblevenshtein-rust", features = ["pathmap-backend
 mimalloc = { version = "0.1", default-features = false, optional = true }
 
 # Dictionary implementations (needed for IndexedVocabularyART and LSN tracking)
-libdictenstein = { path = "../libdictenstein", features = ["persistent-artrie", "parking_lot"] }
+libdictenstein = { path = "../libdictenstein", version = "0.1", features = ["persistent-artrie", "parking_lot"] }
 
 # PathMap for efficient trie storage (production deployment after training)
 pathmap = "0.2"
@@ -113,7 +114,7 @@ image = { version = "0.25", optional = true }
 pdf = { version = "0.9", optional = true }
 
 # lling-llang integration (optional)
-lling-llang = { path = "../lling-llang", features = ["lm-rerank"], optional = true }
+lling-llang = { path = "../lling-llang", version = "0.1", features = ["lm-rerank"], optional = true }
 
 # Tree-sitter for incremental parsing (code module)
 tree-sitter = { version = "0.25", optional = true }
