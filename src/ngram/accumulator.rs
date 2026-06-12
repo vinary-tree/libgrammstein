@@ -38,7 +38,7 @@
 //! }
 //! ```
 
-use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
+use libdictenstein::persistent_artrie::char::PersistentARTrieChar;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 

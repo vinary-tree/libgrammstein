@@ -61,7 +61,7 @@ use thiserror::Error;
 // Re-export from libdictenstein
 pub use libdictenstein::persistent_artrie::dict_impl::DurabilityPolicy;
 pub use libdictenstein::persistent_artrie::recovery::RecoveryReport;
-pub use libdictenstein::persistent_vocab_artrie::{
+pub use libdictenstein::persistent_artrie::vocab::{
     PersistentVocabARTrie, SharedVocabARTrie, VocabSyncHandle,
 };
 

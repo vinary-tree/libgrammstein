@@ -21,7 +21,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::Parser;
 use libdictenstein::persistent_artrie::PersistentARTrie;
-use libdictenstein::persistent_vocab_artrie::PersistentVocabARTrie;
+use libdictenstein::persistent_artrie::vocab::PersistentVocabARTrie;
 use liblevenshtein::dictionary::Dictionary;
 use std::collections::HashMap;
 use std::io::Read;
@@ -54,7 +54,7 @@ struct Args {
 }
 
 /// On-disk u64 LE magic for `PersistentARTrie<V>` (mirrors
-/// `libdictenstein::persistent_artrie_core::disk_manager::MAGIC_NUMBER`).
+/// `libdictenstein::persistent_artrie::core::disk_manager::MAGIC_NUMBER`).
 ///
 /// Both byte-keyed (`PersistentARTrie`) and the legacy char-keyed
 /// (`PersistentARTrieChar`) tries share this file-header magic because they

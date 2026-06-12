@@ -9,8 +9,8 @@
 use std::io::Write;
 use std::path::Path;
 
-use libdictenstein::double_array_trie_char::DoubleArrayTrieChar;
-use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
+use libdictenstein::double_array_trie::char::DoubleArrayTrieChar;
+use libdictenstein::persistent_artrie::char::PersistentARTrieChar;
 
 /// Check if a term is a unigram (single word without whitespace).
 ///

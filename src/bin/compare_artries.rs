@@ -34,7 +34,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::Parser;
-use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
+use libdictenstein::persistent_artrie::char::PersistentARTrieChar;
 use libgrammstein::ngram::vocabulary::{
     decode_ngram_key, encode_ngram_key_existing, open_vocabulary, SharedVocabARTrie,
 };

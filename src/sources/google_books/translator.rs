@@ -10,7 +10,7 @@
 use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
 
-use libdictenstein::persistent_artrie_char::PersistentARTrieChar;
+use libdictenstein::persistent_artrie::char::PersistentARTrieChar;
 use pathmap::paths_serialization::{for_each_deserialized_path, serialize_paths_with_auxdata};
 use pathmap::PathMap;
 

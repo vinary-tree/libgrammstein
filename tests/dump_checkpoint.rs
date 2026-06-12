@@ -14,7 +14,7 @@
 #![cfg(all(feature = "cli", feature = "google-books"))]
 
 use libdictenstein::persistent_artrie::PersistentARTrie;
-use libdictenstein::persistent_vocab_artrie::PersistentVocabARTrie;
+use libdictenstein::persistent_artrie::vocab::PersistentVocabARTrie;
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;

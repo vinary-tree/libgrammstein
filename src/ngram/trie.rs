@@ -52,7 +52,7 @@ impl IterableDictionary for liblevenshtein::dictionary::pathmap::PathMapDictiona
 // implements `MutableMappedDictionary<Value = NgramEntry>`, so the supertrait holds;
 // this adds the portable-serialization iteration hook so the type can back
 // HybridLanguageModel / NgramModel / TrainerBuilder.
-impl IterableDictionary for libdictenstein::persistent_artrie_char::SharedCharARTrie<NgramEntry> {
+impl IterableDictionary for libdictenstein::persistent_artrie::char::SharedCharARTrie<NgramEntry> {
     fn iter_all(&self) -> Box<dyn Iterator<Item = (String, NgramEntry)> + '_> {
         // `iter_with_values()` borrows the lock-free `SharedTrieAccess` read guard;
         // materialize into an owned Vec so the returned iterator does not borrow a
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn iter_all_shared_char_artrie_roundtrip() {
-        use libdictenstein::persistent_artrie_char::{PersistentARTrieChar, SharedCharARTrie};
+        use libdictenstein::persistent_artrie::char::{PersistentARTrieChar, SharedCharARTrie};
         use std::collections::HashMap;
         use std::sync::Arc;
 
@@ -513,7 +513,7 @@ mod tests {
     fn iter_all_vocab_indexed_reconstructs_words() {
         use crate::ngram::vocabulary::create_vocabulary;
         use crate::ngram::vocabulary_indexed::VocabularyIndexedDictionary;
-        use libdictenstein::persistent_artrie_char::{PersistentARTrieChar, SharedCharARTrie};
+        use libdictenstein::persistent_artrie::char::{PersistentARTrieChar, SharedCharARTrie};
         use std::collections::HashMap;
         use std::sync::Arc;
 
@@ -547,7 +547,7 @@ mod tests {
         use crate::ngram::vocabulary_indexed::{
             decode_key_to_indices, VocabularyIndexedDictionary,
         };
-        use libdictenstein::persistent_artrie_char::{PersistentARTrieChar, SharedCharARTrie};
+        use libdictenstein::persistent_artrie::char::{PersistentARTrieChar, SharedCharARTrie};
         use std::sync::Arc;
 
         let dir = tempfile::tempdir().expect("tempdir");

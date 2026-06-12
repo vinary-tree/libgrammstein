@@ -41,7 +41,7 @@ pub const METADATA_PREFIX: char = '\x00';
 ///
 /// ```ignore
 /// use libgrammstein::ngram::metadata_filtering_zipper::MetadataFilteringZipper;
-/// use libdictenstein::dynamic_dawg_char_zipper::DynamicDawgCharZipper;
+/// use libdictenstein::dynamic_dawg::char_zipper::DynamicDawgCharZipper;
 ///
 /// let dict: DynamicDawgChar<u64> = DynamicDawgChar::new();
 /// dict.insert_with_value("\x00meta", 1);
