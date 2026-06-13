@@ -298,7 +298,7 @@ where
         update_fn: F,
     ) -> bool
     where
-        F: FnOnce(&mut D::Value),
+        F: Fn(&mut D::Value),
     {
         let key = self.encode_key_inserting(words);
         self.backend
@@ -417,7 +417,7 @@ where
 
     fn update_or_insert<F>(&self, term: &str, default_value: Self::Value, update_fn: F) -> bool
     where
-        F: FnOnce(&mut Self::Value),
+        F: Fn(&mut Self::Value),
     {
         let words: Vec<&str> = self.split_term(term).collect();
         let key = self.encode_key_inserting(&words);
