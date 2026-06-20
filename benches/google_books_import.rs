@@ -16,6 +16,17 @@
 //! `nodes_evicted` is the reliable live-heap reclamation observable. The real-corpus
 //! peak-RSS gate is run separately (see `docs/architecture/memory-optimization.md`).
 //!
+//! Eviction-threshold note (why a small-`N` run reports `nodes_evicted = 0`):
+//! `nodes_evicted` only becomes nonzero once a single shard's resident overlay
+//! exceeds the per-shard floor `MIN_PER_SHARD_OVERLAY_BUDGET_BYTES` (64 MiB) — any
+//! smaller `[budget_bytes]` is floored up to it by `overlay_eviction_config`. With
+//! the default ~32 hash shards that is ~2 GiB resident (on the order of 8M+ synthetic
+//! n-grams) before the first eviction fires, so smoke-scale runs exercise only the
+//! `resident_bytes` gauge (nonzero under a budget, `0` when unbudgeted because
+//! eviction is then unarmed) — verified: a 1000-n-gram run reports
+//! `resident_bytes = 262274` budgeted vs `0` unbudgeted, `nodes_evicted = 0` in both.
+//! The reclamation signal itself appears only at the real-corpus scale this scaffolds.
+//!
 //! Run: `cargo bench --features google-books --bench google_books_import [N] [budget_bytes]`.
 
 use libgrammstein::sources::google_books::sharding::{ShardConfig, ShardCoordinator};
