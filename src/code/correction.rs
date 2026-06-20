@@ -66,19 +66,13 @@ impl Correction {
         self
     }
 
-    /// Returns the edit distance of this correction.
+    /// Returns the edit distance between the original and replacement text.
+    ///
+    /// Uses liblevenshtein's `standard_distance` (Levenshtein: insert / delete /
+    /// substitute). It returns `0` for equal strings and `max(len)` when one
+    /// operand is empty, so no special-casing is needed here.
     pub fn edit_distance(&self) -> usize {
-        // Simple approximation - actual distance would use liblevenshtein
-        let len_diff =
-            (self.original.len() as isize - self.replacement.len() as isize).unsigned_abs();
-        if self.original == self.replacement {
-            0
-        } else if self.original.is_empty() || self.replacement.is_empty() {
-            self.original.len().max(self.replacement.len())
-        } else {
-            // Rough estimate
-            len_diff + 1
-        }
+        liblevenshtein::distance::standard_distance(&self.original, &self.replacement)
     }
 
     /// Returns true if this is a no-op correction (original == replacement).
@@ -344,5 +338,29 @@ mod tests {
         assert!(!CorrectionKind::SyntaxError.is_semantic());
         assert!(CorrectionKind::VariableMisuse.is_semantic());
         assert!(CorrectionKind::TypeError.is_semantic());
+    }
+
+    #[test]
+    fn test_correction_edit_distance() {
+        // Equal strings → 0 (no special-casing needed; liblevenshtein returns 0).
+        assert_eq!(
+            Correction::new(CorrectionKind::Spelling, 0, 4, "test", "test").edit_distance(),
+            0
+        );
+        // Transposition costs 2 under Levenshtein (sub + sub / del + ins).
+        assert_eq!(
+            Correction::new(CorrectionKind::Spelling, 0, 5, "pritn", "print").edit_distance(),
+            2
+        );
+        // Classic Levenshtein example.
+        assert_eq!(
+            Correction::new(CorrectionKind::Spelling, 0, 6, "kitten", "sitting").edit_distance(),
+            3
+        );
+        // Empty operand → length of the other.
+        assert_eq!(
+            Correction::new(CorrectionKind::Spelling, 0, 0, "", "abc").edit_distance(),
+            3
+        );
     }
 }
