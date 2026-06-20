@@ -33,7 +33,7 @@ fn detect_source_type(path: &Path) -> Option<SourceModel> {
     use crate::embedding::SubwordEmbedding;
     use crate::hybrid::HybridLanguageModel;
     use crate::ngram::{NgramEntry, NgramModel};
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
     // Try hybrid first
     if HybridLanguageModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new).is_ok() {
@@ -64,7 +64,7 @@ fn convert_to_static(args: ConvertToStaticArgs, verbose: bool) -> CliResult<()> 
     use crate::embedding::SubwordEmbedding;
     use crate::hybrid::HybridLanguageModel;
     use crate::ngram::{NgramEntry, NgramModel};
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
     if !args.input.exists() {
         return Err(CliError::file_not_found(&args.input));

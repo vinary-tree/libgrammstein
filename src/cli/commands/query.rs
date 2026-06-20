@@ -32,7 +32,7 @@ trait ScoringModel {
 /// N-gram model wrapper for scoring.
 struct NgramScoringModel {
     model: crate::ngram::NgramModel<
-        liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>,
+        libdictenstein::dynamic_dawg::char::DynamicDawgChar<crate::ngram::NgramEntry>,
     >,
 }
 
@@ -57,7 +57,7 @@ impl ScoringModel for NgramScoringModel {
 /// Hybrid model wrapper for scoring.
 struct HybridScoringModel {
     model: crate::hybrid::HybridLanguageModel<
-        liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>,
+        libdictenstein::dynamic_dawg::char::DynamicDawgChar<crate::ngram::NgramEntry>,
     >,
 }
 
@@ -85,7 +85,7 @@ impl ScoringModel for HybridScoringModel {
 fn load_model_for_scoring(path: &Path) -> CliResult<Box<dyn ScoringModel>> {
     use crate::hybrid::HybridLanguageModel;
     use crate::ngram::NgramModel;
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
     // Try to load as hybrid model first (more complex)
     if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::new) {
@@ -141,7 +141,7 @@ impl SimilarityModel for EmbeddingSimilarityModel {
 /// Hybrid model wrapper for similarity (uses embedding component).
 struct HybridSimilarityModel {
     model: crate::hybrid::HybridLanguageModel<
-        liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>,
+        libdictenstein::dynamic_dawg::char::DynamicDawgChar<crate::ngram::NgramEntry>,
     >,
 }
 
@@ -167,7 +167,7 @@ impl SimilarityModel for HybridSimilarityModel {
 fn load_model_for_similarity(path: &Path) -> CliResult<Box<dyn SimilarityModel>> {
     use crate::embedding::SubwordEmbedding;
     use crate::hybrid::HybridLanguageModel;
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
     // Try to load as hybrid model first
     if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::new) {
@@ -198,7 +198,7 @@ trait CompletionModel {
 /// Hybrid model wrapper for completions (can iterate vocabulary).
 struct HybridCompletionModel {
     model: crate::hybrid::HybridLanguageModel<
-        liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>,
+        libdictenstein::dynamic_dawg::char::DynamicDawgChar<crate::ngram::NgramEntry>,
     >,
 }
 
@@ -241,7 +241,7 @@ impl CompletionModel for HybridCompletionModel {
 /// Note: This is slower because we need to iterate the trie.
 struct NgramCompletionModel {
     model: crate::ngram::NgramModel<
-        liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>,
+        libdictenstein::dynamic_dawg::char::DynamicDawgChar<crate::ngram::NgramEntry>,
     >,
 }
 
@@ -287,7 +287,7 @@ impl CompletionModel for NgramCompletionModel {
 fn load_model_for_completions(path: &Path) -> CliResult<Box<dyn CompletionModel>> {
     use crate::hybrid::HybridLanguageModel;
     use crate::ngram::NgramModel;
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
     // Try to load as hybrid model first (preferred - has vocabulary from embedding)
     if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::new) {

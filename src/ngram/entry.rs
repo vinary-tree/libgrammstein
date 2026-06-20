@@ -3,7 +3,7 @@
 //! This module defines the `NgramEntry` struct that stores n-gram statistics
 //! in liblevenshtein-rust dictionary backends.
 
-use liblevenshtein::dictionary::value::DictionaryValue;
+use libdictenstein::value::DictionaryValue;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 

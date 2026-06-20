@@ -11,7 +11,7 @@ pub(super) fn train_hybrid(args: TrainHybridArgs, verbose: bool, quiet: bool) ->
         HybridConfig, HybridLanguageModel, InterpolationStrategy as HybridStrategy,
     };
     use crate::ngram::NgramModel;
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
     if verbose {
         eprintln!("Creating hybrid model");

@@ -20,9 +20,9 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::Parser;
-use libdictenstein::persistent_artrie::PersistentARTrie;
 use libdictenstein::persistent_artrie::vocab::PersistentVocabARTrie;
-use liblevenshtein::dictionary::Dictionary;
+use libdictenstein::persistent_artrie::PersistentARTrie;
+use libdictenstein::Dictionary;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};

@@ -33,7 +33,7 @@ use lling_llang::wfst::{MutableWfst, StateId, VectorWfst};
 
 #[allow(deprecated)]
 use crate::ngram::{IterableDictionary, NgramEntry, NgramModel, NGRAM_SEPARATOR};
-use liblevenshtein::dictionary::MutableMappedDictionary;
+use libdictenstein::MutableMappedDictionary;
 
 use super::vocabulary::{WordId, WordVocabulary, EOS_WORD_ID, UNK_WORD_ID};
 
@@ -685,7 +685,7 @@ mod tests {
     use super::*;
     use crate::corpus::PlaintextReader;
     use crate::ngram::TrainerBuilder;
-    use liblevenshtein::dictionary::pathmap::PathMapDictionary;
+    use libdictenstein::pathmap::PathMapDictionary;
     use lling_llang::wfst::Wfst;
     use std::io::Write;
     use tempfile::TempDir;

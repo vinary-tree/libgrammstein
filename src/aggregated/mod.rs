@@ -75,8 +75,7 @@ use crate::ngram::vocabulary::{
     encode_ngram_key_bytes, encode_ngram_key_existing_bytes, SharedVocabARTrie,
 };
 use crate::sources::google_books::sharding::coordinator::ShardCoordinator;
-#[allow(deprecated)]
-use liblevenshtein::dictionary::{
+use libdictenstein::{
     Dictionary, DictionaryNode, MappedDictionary, MappedDictionaryNode, SyncStrategy,
 };
 use std::sync::Arc;
@@ -539,7 +538,7 @@ mod tests {
     use super::*;
     use crate::ngram::vocabulary::create_vocabulary;
     use crate::sources::google_books::sharding::{ShardConfig, ShardGranularity};
-    use liblevenshtein::dictionary::{Dictionary, MappedDictionary};
+    use libdictenstein::{Dictionary, MappedDictionary};
     use tempfile::TempDir;
 
     // Note: Full integration tests require setting up ShardCoordinator and SharedVocabulary

@@ -12,7 +12,7 @@
 use crate::embedding::SubwordEmbedding;
 use crate::ngram::{NgramEntry, NgramModel};
 use dashmap::DashMap;
-use liblevenshtein::dictionary::MutableMappedDictionary;
+use libdictenstein::MutableMappedDictionary;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -598,7 +598,7 @@ mod tests {
     use crate::corpus::PlaintextReader;
     use crate::embedding::EmbeddingTrainerBuilder;
     use crate::ngram::TrainerBuilder;
-    use liblevenshtein::dictionary::pathmap::PathMapDictionary;
+    use libdictenstein::pathmap::PathMapDictionary;
     use std::io::Write;
     use tempfile::TempDir;
 
@@ -740,7 +740,7 @@ mod tests {
     #[cfg(feature = "serde-extras")]
     mod serde_tests {
         use super::*;
-        use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+        use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
         fn create_serializable_test_models(
         ) -> (NgramModel<DynamicDawgChar<NgramEntry>>, SubwordEmbedding) {

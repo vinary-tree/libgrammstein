@@ -1,7 +1,7 @@
 //! Sentence-level scoring utilities.
 
 use crate::ngram::NgramModel;
-use liblevenshtein::dictionary::MutableMappedDictionary;
+use libdictenstein::MutableMappedDictionary;
 
 /// Sentence scorer providing various scoring methods.
 pub struct SentenceScorer<'a, D>

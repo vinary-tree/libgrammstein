@@ -23,7 +23,7 @@
 
 #[allow(deprecated)]
 use crate::ngram::{IterableDictionary, NgramEntry, NgramModel, NGRAM_SEPARATOR};
-use liblevenshtein::dictionary::MutableMappedDictionary;
+use libdictenstein::MutableMappedDictionary;
 use rand::distributions::WeightedIndex;
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -378,7 +378,7 @@ mod tests {
     use super::*;
     use crate::corpus::PlaintextReader;
     use crate::ngram::TrainerBuilder;
-    use liblevenshtein::dictionary::pathmap::PathMapDictionary;
+    use libdictenstein::pathmap::PathMapDictionary;
     use std::io::Write;
     use tempfile::TempDir;
 

@@ -63,7 +63,7 @@ use crate::ngram::NgramEntry;
 /// let model: SerializableHybridModel = SerializableHybridModel::load("hybrid_model.bin")?;
 /// ```
 pub type SerializableHybridModel =
-    HybridLanguageModel<liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<NgramEntry>>;
+    HybridLanguageModel<libdictenstein::dynamic_dawg::char::DynamicDawgChar<NgramEntry>>;
 
 /// Memory-efficient hybrid model using PathMapDictionary backend.
 ///
@@ -71,4 +71,4 @@ pub type SerializableHybridModel =
 /// This backend does NOT support serde serialization but provides
 /// better memory sharing characteristics.
 pub type PathMapHybridModel =
-    HybridLanguageModel<liblevenshtein::dictionary::pathmap::PathMapDictionary<NgramEntry>>;
+    HybridLanguageModel<libdictenstein::pathmap::PathMapDictionary<NgramEntry>>;

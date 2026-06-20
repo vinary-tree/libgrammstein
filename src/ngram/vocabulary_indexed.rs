@@ -38,7 +38,7 @@
 //! ```ignore
 //! use libgrammstein::ngram::vocabulary_indexed::VocabularyIndexedDictionary;
 //! use libgrammstein::ngram::SharedVocabARTrie;
-//! use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+//! use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 //!
 //! // Create or open vocabulary
 //! let vocab = Arc::new(SharedVocabARTrie::open_or_create(&vocab_path)?);
@@ -63,7 +63,7 @@
 
 use super::metadata_filtering_zipper::{MetadataFilteringZipper, METADATA_PREFIX};
 use super::vocabulary::{decode_varint, encode_varint, SharedVocabARTrie};
-use liblevenshtein::dictionary::{
+use libdictenstein::{
     Dictionary, DictionaryNode, MappedDictionary, MappedDictionaryNode, MutableMappedDictionary,
     SyncStrategy,
 };
@@ -109,7 +109,7 @@ pub fn decode_key_to_indices(key: &str) -> Vec<u64> {
 /// A dictionary wrapper that transparently encodes/decodes vocabulary-indexed keys.
 ///
 /// This struct wraps an underlying [`MutableMappedDictionary`] backend (like
-/// [`DynamicDawgChar`](liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar))
+/// [`DynamicDawgChar`](libdictenstein::dynamic_dawg::char::DynamicDawgChar))
 /// and provides n-gram-aware insertion and lookup using a shared vocabulary.
 ///
 /// # Type Parameters
@@ -126,7 +126,7 @@ pub fn decode_key_to_indices(key: &str) -> Vec<u64> {
 /// ```ignore
 /// use libgrammstein::ngram::vocabulary_indexed::VocabularyIndexedDictionary;
 /// use libgrammstein::ngram::SharedVocabARTrie;
-/// use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+/// use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 ///
 /// let vocab = Arc::new(SharedVocabARTrie::open_or_create(&path)?);
 /// let backend: DynamicDawgChar<u64> = DynamicDawgChar::new();
@@ -581,9 +581,9 @@ where
 // Zipper Support
 // ============================================================================
 
-use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
-use liblevenshtein::dictionary::dynamic_dawg_char_zipper::DynamicDawgCharZipper;
-use liblevenshtein::dictionary::value::DictionaryValue;
+use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+use libdictenstein::dynamic_dawg::char_zipper::DynamicDawgCharZipper;
+use libdictenstein::value::DictionaryValue;
 
 /// Type alias for the zipper over a DynamicDawgChar backend.
 ///
@@ -632,7 +632,7 @@ impl<V: DictionaryValue> VocabularyIndexedDictionary<DynamicDawgChar<V>> {
 mod tests {
     use super::*;
     use crate::ngram::vocabulary::create_vocabulary;
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
     use tempfile::TempDir;
 
     fn create_test_dict() -> (TempDir, VocabularyIndexedDictionary<DynamicDawgChar<u64>>) {
@@ -938,7 +938,7 @@ mod tests {
 
     #[test]
     fn test_zipper_excludes_metadata() {
-        use liblevenshtein::dictionary::zipper::DictZipper;
+        use libdictenstein::zipper::DictZipper;
 
         let (_dir, dict) = create_test_dict();
 

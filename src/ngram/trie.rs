@@ -18,7 +18,7 @@
 
 use super::entry::NgramEntry;
 use libdictenstein::persistent_artrie::SharedTrieAccess;
-use liblevenshtein::dictionary::{MappedDictionaryNode, MutableMappedDictionary};
+use libdictenstein::{MappedDictionaryNode, MutableMappedDictionary};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -32,16 +32,14 @@ pub trait IterableDictionary: MutableMappedDictionary<Value = NgramEntry> {
 }
 
 // Implement IterableDictionary for DynamicDawgChar
-impl IterableDictionary
-    for liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<NgramEntry>
-{
+impl IterableDictionary for libdictenstein::dynamic_dawg::char::DynamicDawgChar<NgramEntry> {
     fn iter_all(&self) -> Box<dyn Iterator<Item = (String, NgramEntry)> + '_> {
         Box::new(self.iter())
     }
 }
 
 // Implement IterableDictionary for PathMapDictionary
-impl IterableDictionary for liblevenshtein::dictionary::pathmap::PathMapDictionary<NgramEntry> {
+impl IterableDictionary for libdictenstein::pathmap::PathMapDictionary<NgramEntry> {
     fn iter_all(&self) -> Box<dyn Iterator<Item = (String, NgramEntry)> + '_> {
         Box::new(self.iter())
     }
@@ -134,7 +132,7 @@ pub(crate) const LEGACY_NGRAM_SEPARATOR: char = '|';
 ///
 /// ```ignore
 /// use libgrammstein::ngram::{NgramTrie, NgramEntry};
-/// use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+/// use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 ///
 /// let dict = DynamicDawgChar::<NgramEntry>::new();
 /// let trie = NgramTrie::new(dict);
@@ -442,7 +440,7 @@ mod tests {
 
     #[test]
     fn test_encode_key_legacy() {
-        type Trie = NgramTrie<liblevenshtein::dictionary::pathmap::PathMapDictionary<NgramEntry>>;
+        type Trie = NgramTrie<libdictenstein::pathmap::PathMapDictionary<NgramEntry>>;
 
         assert_eq!(Trie::encode_key_legacy(&["the"]), "the");
         assert_eq!(Trie::encode_key_legacy(&["the", "quick"]), "the|quick");
@@ -455,7 +453,7 @@ mod tests {
     #[test]
     fn test_legacy_encoding_pipe_bug() {
         // This test demonstrates the bug that vocabulary-indexed encoding fixes
-        type Trie = NgramTrie<liblevenshtein::dictionary::pathmap::PathMapDictionary<NgramEntry>>;
+        type Trie = NgramTrie<libdictenstein::pathmap::PathMapDictionary<NgramEntry>>;
 
         // A token containing a pipe character
         let tokens = ["foo|bar", "baz"];

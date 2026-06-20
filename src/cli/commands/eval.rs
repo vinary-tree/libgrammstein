@@ -52,7 +52,7 @@ trait PerplexityModel {
 /// N-gram model wrapper for perplexity computation.
 struct NgramPerplexityModel {
     model: crate::ngram::NgramModel<
-        liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>,
+        libdictenstein::dynamic_dawg::char::DynamicDawgChar<crate::ngram::NgramEntry>,
     >,
 }
 
@@ -77,7 +77,7 @@ impl PerplexityModel for NgramPerplexityModel {
 /// Hybrid model wrapper for perplexity computation.
 struct HybridPerplexityModel {
     model: crate::hybrid::HybridLanguageModel<
-        liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<crate::ngram::NgramEntry>,
+        libdictenstein::dynamic_dawg::char::DynamicDawgChar<crate::ngram::NgramEntry>,
     >,
 }
 
@@ -104,7 +104,7 @@ impl PerplexityModel for HybridPerplexityModel {
 fn load_model_for_perplexity(path: &Path) -> CliResult<Box<dyn PerplexityModel>> {
     use crate::hybrid::HybridLanguageModel;
     use crate::ngram::NgramModel;
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
     // Try to load as hybrid model first (more complex)
     if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::new) {

@@ -6,7 +6,7 @@
 use crate::embedding::SubwordEmbedding;
 use crate::hybrid::{HybridConfig, HybridLanguageModel};
 use crate::ngram::{NgramEntry, NgramModel};
-use liblevenshtein::dictionary::MutableMappedDictionary;
+use libdictenstein::MutableMappedDictionary;
 use lling_llang::layers::LanguageModel;
 use std::sync::Arc;
 
@@ -168,7 +168,7 @@ mod tests {
     use crate::corpus::PlaintextReader;
     use crate::embedding::EmbeddingTrainerBuilder;
     use crate::ngram::TrainerBuilder;
-    use liblevenshtein::dictionary::pathmap::PathMapDictionary;
+    use libdictenstein::pathmap::PathMapDictionary;
     use std::io::Write;
     use tempfile::TempDir;
 

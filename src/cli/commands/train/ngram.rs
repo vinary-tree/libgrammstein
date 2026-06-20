@@ -264,7 +264,7 @@ fn finalize_ngram_model(
     quiet: bool,
 ) -> CliResult<()> {
     use crate::ngram::{NgramModel, NgramTrie};
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
     if !quiet {
         eprintln!("Finalizing model (converting to inference format)...");
@@ -329,7 +329,7 @@ fn train_ngram_inmemory(
     _stats: Arc<TrainingStats>,
 ) -> CliResult<()> {
     use crate::ngram::TrainerBuilder;
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
     if verbose {
         eprintln!("Using in-memory training (no checkpointing)");

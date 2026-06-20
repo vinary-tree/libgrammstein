@@ -9,8 +9,8 @@ use libdictenstein::persistent_artrie::eviction::{EvictionConfig, EvictionStats}
 use libdictenstein::persistent_artrie::wal::SyncHandle;
 use libdictenstein::persistent_artrie::wal_managed::WalManaged;
 use libdictenstein::persistent_artrie::{DocumentTransaction, PersistentARTrie, SharedARTrie};
+use libdictenstein::Dictionary;
 use libdictenstein::EvictableARTrie;
-use liblevenshtein::dictionary::Dictionary;
 use parking_lot::{Condvar, Mutex};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -1331,7 +1331,7 @@ impl ShardHandle {
 /// }
 /// shard.commit_prefix(tx)?;
 /// ```
-pub struct PrefixTransaction<V: liblevenshtein::dictionary::DictionaryValue> {
+pub struct PrefixTransaction<V: libdictenstein::DictionaryValue> {
     /// The prefix file being imported.
     pub prefix: String,
 

@@ -28,7 +28,7 @@ use crate::ngram::vocabulary::{
     VocabularyError,
 };
 use libdictenstein::persistent_artrie::PersistentARTrie;
-use liblevenshtein::dictionary::Dictionary;
+use libdictenstein::Dictionary;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::path::Path;

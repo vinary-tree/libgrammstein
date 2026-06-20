@@ -12,7 +12,7 @@ use crate::embedding::SubwordEmbedding;
 use crate::hybrid::HybridLanguageModel;
 use crate::ngram::{NgramEntry, NgramModel};
 
-type DynamicDict = liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<NgramEntry>;
+type DynamicDict = libdictenstein::dynamic_dawg::char::DynamicDawgChar<NgramEntry>;
 
 /// Loaded model type.
 enum LoadedModel {
@@ -109,7 +109,7 @@ impl LoadedModel {
 
 /// Load a model from path.
 fn load_model(path: &Path) -> CliResult<LoadedModel> {
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
     // Try hybrid first
     if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::new) {

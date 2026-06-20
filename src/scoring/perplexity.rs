@@ -7,7 +7,7 @@ use crate::corpus::CorpusReader;
 use crate::ngram::NgramModel;
 use crate::Result;
 
-use liblevenshtein::dictionary::MutableMappedDictionary;
+use libdictenstein::MutableMappedDictionary;
 
 /// Perplexity evaluator for language models.
 ///

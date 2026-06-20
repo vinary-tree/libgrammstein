@@ -93,7 +93,7 @@ pub use accumulator::{AccumulatorError, AccumulatorResult, NgramAccumulator};
 ///
 /// ```ignore
 /// use libgrammstein::ngram::SerializableNgramModel;
-/// use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+/// use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 ///
 /// // Train and save
 /// let dictionary = DynamicDawgChar::<NgramEntry>::new();
@@ -104,7 +104,7 @@ pub use accumulator::{AccumulatorError, AccumulatorResult, NgramAccumulator};
 /// let model: SerializableNgramModel = SerializableNgramModel::load("model.bin")?;
 /// ```
 pub type SerializableNgramModel =
-    NgramModel<liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar<NgramEntry>>;
+    NgramModel<libdictenstein::dynamic_dawg::char::DynamicDawgChar<NgramEntry>>;
 
 /// Memory-efficient n-gram model using PathMapDictionary backend.
 ///
@@ -116,7 +116,7 @@ pub type SerializableNgramModel =
 ///
 /// ```ignore
 /// use libgrammstein::ngram::PathMapNgramModel;
-/// use liblevenshtein::dictionary::pathmap::PathMapDictionary;
+/// use libdictenstein::pathmap::PathMapDictionary;
 ///
 /// let dictionary = PathMapDictionary::<NgramEntry>::new();
 /// let model = TrainerBuilder::new(dictionary).order(5).train(reader)?;
@@ -124,5 +124,4 @@ pub type SerializableNgramModel =
 /// // Use with lling-llang's LanguageModelLayer
 /// let lm = GrammsteinLanguageModel::from_ngram(model);
 /// ```
-pub type PathMapNgramModel =
-    NgramModel<liblevenshtein::dictionary::pathmap::PathMapDictionary<NgramEntry>>;
+pub type PathMapNgramModel = NgramModel<libdictenstein::pathmap::PathMapDictionary<NgramEntry>>;

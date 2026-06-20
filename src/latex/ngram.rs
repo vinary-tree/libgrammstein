@@ -5,7 +5,7 @@
 
 use crate::latex::tokenizer::{LaTeXToken, LaTeXTokenKind};
 use crate::ngram::{NgramEntry, NgramModel};
-use liblevenshtein::dictionary::MutableMappedDictionary;
+use libdictenstein::MutableMappedDictionary;
 
 /// Configuration for LaTeX n-gram model training and scoring.
 #[derive(Debug, Clone)]

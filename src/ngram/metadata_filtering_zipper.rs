@@ -18,8 +18,8 @@
 //! at the trie root level (e.g., `\x00__meta__:version`). Non-root nodes cannot
 //! have metadata entries, so filtering at every level would be unnecessary overhead.
 
-use liblevenshtein::dictionary::value::DictionaryValue;
-use liblevenshtein::dictionary::zipper::{DictZipper, ValuedDictZipper};
+use libdictenstein::value::DictionaryValue;
+use libdictenstein::zipper::{DictZipper, ValuedDictZipper};
 
 /// Metadata key prefix (null byte).
 ///
@@ -144,8 +144,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
-    use liblevenshtein::dictionary::dynamic_dawg_char_zipper::DynamicDawgCharZipper;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::char_zipper::DynamicDawgCharZipper;
 
     #[test]
     fn test_metadata_filtering_zipper_blocks_descend() {

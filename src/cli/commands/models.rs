@@ -51,7 +51,7 @@ fn detect_model(path: &Path) -> DetectedModel {
     use crate::embedding::SubwordEmbedding;
     use crate::hybrid::HybridLanguageModel;
     use crate::ngram::{NgramEntry, NgramModel};
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
     // Try hybrid model first (most complex)
     if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new)
@@ -289,7 +289,7 @@ fn load_model_info(path: &Path, file_size_bytes: u64) -> CliResult<ModelInfo> {
     use crate::embedding::SubwordEmbedding;
     use crate::hybrid::HybridLanguageModel;
     use crate::ngram::{NgramEntry, NgramModel};
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
     // Try hybrid model first
     if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new)
