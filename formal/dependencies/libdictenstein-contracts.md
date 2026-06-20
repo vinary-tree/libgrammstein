@@ -30,6 +30,27 @@ benchmark logs under `docs/benchmarks/` (199 `.txt`, 2 `.md`), no code. The
 unsafe-ledger files `formal-verification/UNSAFE_INVENTORY.tsv` and
 `formal-verification/UNSAFE_CONTRACTS.tsv` are committed.
 
+Re-verification (libgrammstein side): `make -C formal complete` re-ran green at the
+current libgrammstein tree (the Tier-3 stub completions, the `DoubleArrayTrieChar`
+read-only generics relaxation, and the Kneser-Ney unseen-n-gram backoff fix) —
+source-hygiene, Rocq, TLC safety + liveness, Apalache, rust-alignment, stress,
+TLAPS, and the `--all-features` source-hygiene suite (943 tests) all pass. Those
+changes touch n-gram smoothing / dictionary generics / neural / CLI surfaces, none
+of which appear in the durability/eviction/overlay specs or the discount-bound Rocq
+proofs, so the imported contract surface is unchanged.
+
+`make -C formal complete-with-dependencies` could not complete the cross-repo
+`dependency-contracts` step: the local `../libdictenstein` checkout is at `e5f3b20`
+(its master, past the v0.2.0 release `b655cfb09e59` and this pinned `5a0512a`), and
+at that HEAD libdictenstein's own correspondence test
+`group_commit_writes_returned_lsns_in_wal_order`
+(`tests/persistent_artrie_formal_correspondence.rs:1682`) fails (expected 3 LSNs,
+got 0). That is a libdictenstein-side issue at a revision past the released
+contract — reported for guidance per the no-modify-libdictenstein rule, not a
+libgrammstein regression. The verified contract revision therefore remains
+`5a0512a` (the durability/eviction/overlay surface is identical at the v0.2.0
+release `b655cfb`); re-pinning forward awaits a green libdictenstein HEAD.
+
 Eviction-surface note (relevant to importer OOM reasoning): at `5a0512a` all three
 ARTries implement `EvictableARTrie`, but reclamation is asymmetric — the byte
 (`SharedARTrie`) and char (`SharedCharARTrie`) impls genuinely reclaim overlay
