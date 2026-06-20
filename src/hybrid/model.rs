@@ -12,7 +12,11 @@
 use crate::embedding::SubwordEmbedding;
 use crate::ngram::{NgramEntry, NgramModel};
 use dashmap::DashMap;
-use libdictenstein::{MappedDictionary, MutableMappedDictionary};
+use libdictenstein::MappedDictionary;
+// Only the `serde-extras` portable-load impl below needs the mutable trait; gating the
+// import to match keeps the default-feature build warning-free.
+#[cfg(feature = "serde-extras")]
+use libdictenstein::MutableMappedDictionary;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};

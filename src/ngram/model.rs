@@ -6,7 +6,11 @@
 use super::entry::NgramEntry;
 use super::smoothing::KneserNeySmoothing;
 use super::trie::NgramTrie;
-use libdictenstein::{MappedDictionary, MutableMappedDictionary};
+use libdictenstein::MappedDictionary;
+// Only the `serde-extras` portable-load impl below needs the mutable trait; gating the
+// import to match keeps the default-feature build warning-free.
+#[cfg(feature = "serde-extras")]
+use libdictenstein::MutableMappedDictionary;
 
 #[cfg(feature = "serde-extras")]
 use std::path::Path;
