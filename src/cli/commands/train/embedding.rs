@@ -108,19 +108,27 @@ pub(super) fn train_embedding(
             }
             existing_model
         } else {
-            // Continue training for remaining epochs
-            // Note: The current trainer doesn't support resuming mid-training,
-            // so we save after each epoch and resume from saved model.
-            // For true resumption, we'd need to refactor the trainer.
-
-            // For now, just use the model as-is (training continuation not fully supported)
+            // Continue training for the remaining epochs from the loaded model state,
+            // keeping its weights + vocabulary. The ephemeral corpus statistics (negative
+            // sampling / sub-sampling) are recovered inside `train_continued` with one
+            // pass aligned to the model's vocabulary.
             if !quiet {
                 eprintln!(
-                    "{}: Resuming embedding training continues from saved model state",
-                    style("note").yellow()
+                    "{}: Resuming embedding training from epoch {} to {}",
+                    style("note").cyan(),
+                    start_epoch,
+                    args.epochs
                 );
             }
-            existing_model
+            EmbeddingTrainerBuilder::new()
+                .dim(args.dim)
+                .window_size(args.window)
+                .min_count(args.min_count)
+                .neg_samples(args.neg_samples)
+                .epochs(args.epochs as usize)
+                .learning_rate(args.learning_rate as f32)
+                .train_continued(existing_model, start_epoch as usize, reader)
+                .map_err(|e| CliError::training(format!("Resumed training failed: {}", e)))?
         }
     } else {
         // Train from scratch

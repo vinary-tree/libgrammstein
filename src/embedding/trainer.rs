@@ -471,6 +471,7 @@ impl EmbeddingTrainer {
             &word_counts,
             total_words,
             &sampler,
+            0,
         )?;
 
         Ok(model)
@@ -559,6 +560,97 @@ impl EmbeddingTrainer {
         Ok((vocab, counts, total_words, sentences))
     }
 
+    /// Continue training a previously-trained model for the remaining epochs.
+    ///
+    /// Unlike [`train`](Self::train), this does **not** rebuild the vocabulary or
+    /// re-initialize the embeddings — it keeps the loaded model's weights and vocab.
+    /// Checkpoints persist weights + vocabulary but not the ephemeral corpus statistics
+    /// (the negative-sampling table and sub-sampling counts), so those are recovered with
+    /// one corpus pass, aligned to the model's existing vocabulary to keep embedding-row
+    /// indices consistent. Training then runs epochs `start_epoch .. epochs`, so the
+    /// learning-rate schedule resumes at the correct point.
+    pub fn train_continued<R: CorpusReader + 'static>(
+        &self,
+        mut model: SubwordEmbedding,
+        start_epoch: usize,
+        reader: R,
+    ) -> Result<SubwordEmbedding> {
+        if start_epoch >= self.config.epochs {
+            log::info!(
+                "Resume requested at epoch {} but the model already has {} epochs; nothing to do.",
+                start_epoch,
+                self.config.epochs
+            );
+            return Ok(model);
+        }
+
+        let vocab: Vec<String> = model.vocab().to_vec();
+        log::info!(
+            "Resuming training from epoch {} to {} ({} vocab words)...",
+            start_epoch,
+            self.config.epochs,
+            vocab.len()
+        );
+
+        // Recover corpus statistics aligned to the model's existing vocabulary.
+        let (word_counts, total_words, sentences) =
+            self.collect_aligned_counts_and_sentences(reader, &vocab)?;
+
+        let sampler = Arc::new(NegativeSampler::new(&word_counts, 10_000_000));
+
+        self.train_epochs_on_sentences(
+            &sentences,
+            &mut model,
+            &vocab,
+            &word_counts,
+            total_words,
+            &sampler,
+            start_epoch,
+        )?;
+
+        Ok(model)
+    }
+
+    /// Collect corpus statistics (per-word counts, total tokens, and the sentences)
+    /// aligned to an existing `vocab` ordering. Words outside `vocab` count toward
+    /// `total_words` (for sub-sampling) but get no per-word entry — mirroring
+    /// [`build_vocabulary_and_collect`](Self::build_vocabulary_and_collect).
+    fn collect_aligned_counts_and_sentences<R: CorpusReader + 'static>(
+        &self,
+        reader: R,
+        vocab: &[String],
+    ) -> Result<(Vec<u64>, u64, Vec<String>)> {
+        let index_of: HashMap<&str, usize> = vocab
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (w.as_str(), i))
+            .collect();
+
+        let mut counts = vec![0u64; vocab.len()];
+        let mut total_words = 0u64;
+        let mut sentences = Vec::new();
+
+        let config = PrefetchConfig::new()
+            .with_batch_size(self.config.batch_size)
+            .with_ram_fraction(0.10);
+        let prefetch = PrefetchingReader::with_config(reader, config);
+
+        for batch in prefetch.batches() {
+            for sentence in batch {
+                for word in sentence.split_whitespace() {
+                    let word = word.to_lowercase();
+                    total_words += 1;
+                    if let Some(&i) = index_of.get(word.as_str()) {
+                        counts[i] += 1;
+                    }
+                }
+                sentences.push(sentence);
+            }
+        }
+
+        Ok((counts, total_words, sentences))
+    }
+
     /// Initialize embeddings with small random values.
     fn initialize_embeddings(&self, model: &mut SubwordEmbedding) {
         let mut rng = StdRng::seed_from_u64(42);
@@ -586,6 +678,7 @@ impl EmbeddingTrainer {
         word_counts: &[u64],
         total_words: u64,
         sampler: &Arc<NegativeSampler>,
+        start_epoch: usize,
     ) -> Result<()> {
         let word_to_idx: HashMap<&str, usize> = vocab
             .iter()
@@ -593,7 +686,7 @@ impl EmbeddingTrainer {
             .map(|(i, w)| (w.as_str(), i))
             .collect();
 
-        for epoch in 0..self.config.epochs {
+        for epoch in start_epoch..self.config.epochs {
             let stats = TrainingStats::default();
             let lr = self.config.learning_rate * (1.0 - epoch as f32 / self.config.epochs as f32);
 
@@ -945,6 +1038,18 @@ impl EmbeddingTrainerBuilder {
     {
         self.build().train_streaming(reader_factory)
     }
+
+    /// Build and continue training an existing model for the remaining epochs.
+    ///
+    /// See [`EmbeddingTrainer::train_continued`].
+    pub fn train_continued<R: CorpusReader + 'static>(
+        self,
+        model: SubwordEmbedding,
+        start_epoch: usize,
+        reader: R,
+    ) -> Result<SubwordEmbedding> {
+        self.build().train_continued(model, start_epoch, reader)
+    }
 }
 
 impl Default for EmbeddingTrainerBuilder {
@@ -1034,5 +1139,81 @@ mod tests {
         assert!((EmbeddingTrainer::sigmoid(0.0) - 0.5).abs() < 1e-6);
         assert!(EmbeddingTrainer::sigmoid(10.0) > 0.99);
         assert!(EmbeddingTrainer::sigmoid(-10.0) < 0.01);
+    }
+
+    #[test]
+    fn test_train_continued_resumes_remaining_epochs() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        // Use a corpus with many distinct, low-frequency words across several lines so
+        // word2vec sub-sampling reliably keeps some words to train (a tiny high-frequency
+        // corpus can stochastically drop every word, making the "did training run?" check
+        // flaky). Each word appears 3x (once per repeat) — low frequency, kept by sub-sampling.
+        let mut content = String::new();
+        for _ in 0..3 {
+            for i in 0..60 {
+                content.push_str(&format!("alpha{i} beta{i} gamma{i} "));
+            }
+            content.push('\n');
+        }
+        let path = create_test_corpus(dir.path(), &content);
+
+        // Train one epoch from scratch.
+        let model1 = EmbeddingTrainerBuilder::new()
+            .dim(10)
+            .window_size(2)
+            .min_count(1)
+            .epochs(1)
+            .train(PlaintextReader::from_file(&path).expect("reader"))
+            .expect("initial training failed");
+        let vsz = model1.vocab_size();
+        // Snapshot every word vector before resuming (checking all words is robust to
+        // word2vec sub-sampling, which can skip the most frequent words like "the").
+        let words: Vec<String> = model1.vocab().to_vec();
+        // Use the uncached accessor: `word_vector` memoizes, and snapshotting would
+        // otherwise populate a cache that survives into the resumed model and read stale.
+        let before: Vec<Vec<f32>> = words
+            .iter()
+            .map(|w| model1.word_vector_uncached(w).to_vec())
+            .collect();
+
+        // Continue from epoch 1 to 3, keeping the model's weights + vocabulary.
+        let model2 = EmbeddingTrainerBuilder::new()
+            .dim(10)
+            .window_size(2)
+            .min_count(1)
+            .epochs(3)
+            .train_continued(
+                model1,
+                1,
+                PlaintextReader::from_file(&path).expect("reader"),
+            )
+            .expect("continued training failed");
+
+        // Vocabulary stays aligned (same size) and the remaining epochs ran (some moved).
+        assert_eq!(model2.vocab_size(), vsz);
+        let changed = words.iter().zip(&before).any(|(w, b)| {
+            model2
+                .word_vector_uncached(w)
+                .iter()
+                .zip(b)
+                .any(|(x, y)| (x - y).abs() > 1e-9)
+        });
+        assert!(
+            changed,
+            "continued training should update at least one embedding"
+        );
+
+        // start_epoch >= epochs is a no-op that returns the model unchanged.
+        let model3 = EmbeddingTrainerBuilder::new()
+            .dim(10)
+            .min_count(1)
+            .epochs(3)
+            .train_continued(
+                model2,
+                3,
+                PlaintextReader::from_file(&path).expect("reader"),
+            )
+            .expect("no-op resume failed");
+        assert_eq!(model3.vocab_size(), vsz);
     }
 }

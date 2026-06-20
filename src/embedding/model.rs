@@ -176,6 +176,15 @@ impl SubwordEmbedding {
         self.idx_to_word.len()
     }
 
+    /// Get the vocabulary in index order (`idx_to_word`).
+    ///
+    /// The slice is indexed by the same word ids the model's embedding rows use —
+    /// resumed training relies on this to keep indices aligned.
+    #[inline]
+    pub fn vocab(&self) -> &[String] {
+        &self.idx_to_word
+    }
+
     /// Get number of subword buckets.
     #[inline]
     pub fn bucket_count(&self) -> usize {
