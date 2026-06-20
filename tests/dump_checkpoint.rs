@@ -13,8 +13,8 @@
 // not the binary, and they fail to spawn it.
 #![cfg(all(feature = "cli", feature = "google-books"))]
 
-use libdictenstein::persistent_artrie::PersistentARTrie;
 use libdictenstein::persistent_artrie::vocab::PersistentVocabARTrie;
+use libdictenstein::persistent_artrie::PersistentARTrie;
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
