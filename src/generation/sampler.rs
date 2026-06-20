@@ -427,15 +427,43 @@ mod tests {
 
     #[test]
     fn test_stop_tokens() {
-        let model = create_test_model();
-        let config = GenerationConfig::greedy()
-            .with_max_tokens(100)
-            .with_stop_tokens(vec![".".to_string()]);
-        let generator = TextGenerator::new(model, config);
+        // The corpus has no standalone "." token (periods are attached, e.g. "dog."),
+        // so a "." stop token can never be generated. The previous version of this test
+        // only "passed" because greedy generation used to dead-end on a -inf log_prob
+        // for unseen continuations; that Kneser-Ney bug is fixed, so generation now
+        // continues normally to max_tokens.
+        //
+        // Exercise the stop-token mechanism deterministically instead: greedy generation
+        // is reproducible, so discover the first token it emits, then verify that using
+        // that token as a stop token terminates generation immediately.
+        let baseline = TextGenerator::new(
+            create_test_model(),
+            GenerationConfig::greedy()
+                .with_max_tokens(20)
+                .with_stop_tokens(vec![]),
+        )
+        .generate(&["the"]);
+        assert!(
+            !baseline.is_empty(),
+            "greedy generation should produce output"
+        );
 
-        let result = generator.generate(&["the"]);
-        // Should stop at or before reaching max_tokens due to stop token
-        assert!(result.len() < 100 || result.last() == Some(&".".to_string()));
+        let stop = baseline[0].clone();
+        let stopped = TextGenerator::new(
+            create_test_model(),
+            GenerationConfig::greedy()
+                .with_max_tokens(20)
+                .with_stop_tokens(vec![stop.clone()]),
+        )
+        .generate(&["the"]);
+
+        assert!(
+            stopped.len() <= 1,
+            "generation should stop at the first token when it is a stop token, got {stopped:?}"
+        );
+        if let Some(last) = stopped.last() {
+            assert_eq!(last, &stop);
+        }
     }
 
     #[test]

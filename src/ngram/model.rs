@@ -501,6 +501,35 @@ mod tests {
     }
 
     #[test]
+    fn test_log_prob_finite_for_unseen_ngrams() {
+        // Regression for the Modified Kneser-Ney backoff bug: an unseen n-gram whose
+        // context IS seen must still yield a finite (backed-off) log probability.
+        // Previously discount(0) == 0 zeroed both the discounted term and the
+        // interpolation weight, giving prob = 0 and log_prob = -inf.
+        let model = create_test_ngram_model();
+
+        // "lazy" is a seen context, but "lazy dog" never occurs in the corpus.
+        let unseen = model.log_prob("dog", &["lazy"]);
+        assert!(
+            unseen.is_finite(),
+            "unseen bigram must be finite, got {unseen}"
+        );
+        assert!(unseen <= 0.0);
+
+        // A higher-order unseen n-gram backs off through multiple levels.
+        let unseen3 = model.log_prob("dog", &["the", "lazy"]);
+        assert!(
+            unseen3.is_finite(),
+            "unseen trigram must be finite, got {unseen3}"
+        );
+
+        // An out-of-vocabulary word and an empty-token continuation (the case that
+        // triggered the WFST weight panics) must be finite too.
+        assert!(model.log_prob("zzz_oov", &["the"]).is_finite());
+        assert!(model.log_prob("", &["the"]).is_finite());
+    }
+
+    #[test]
     fn test_sentence_log_prob() {
         let model = create_test_ngram_model();
 

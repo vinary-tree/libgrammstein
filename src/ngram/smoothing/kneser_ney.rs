@@ -195,20 +195,34 @@ impl KneserNeySmoothing {
         let discounted_count = (ngram_count as f64 - discount).max(0.0);
         let discounted_prob = discounted_count / context_count as f64;
 
-        // Interpolation weight: λ(h) = D * N_{1+}(h,•) / c(h)
-        // where N_{1+}(h,•) is the number of unique words following h
+        // Interpolation weight: λ(h) = D · N_{1+}(h,•) / c(h), where N_{1+}(h,•) is the
+        // number of unique words following h. The discount that reserves backoff mass
+        // must stay positive even when the queried n-gram is UNSEEN: `discount(0) == 0`
+        // would otherwise zero both the discounted term and λ, giving prob = 0 and
+        // log_prob = -inf. For unseen n-grams fall back to the primary discount d1 so
+        // mass is still reserved for the (always-positive) backoff distribution. Seen
+        // n-grams (count ≥ 1) keep their existing per-count discount unchanged.
+        let lambda_discount = if ngram_count == 0 { self.d1 } else { discount };
         let unique_continuations = trie
             .get(context)
             .map(|e| e.unique_continuations() as f64)
-            .unwrap_or(1.0);
-        let lambda = (discount * unique_continuations) / context_count as f64;
+            .unwrap_or(1.0)
+            .max(1.0);
+        let lambda = (lambda_discount * unique_continuations) / context_count as f64;
 
-        // Backoff probability
+        // Backoff probability (always > 0; the recursion bottoms out at unigram_prob).
         let backoff_prob =
             self.prob_recursive(word, &context[1..], trie, vocab_size, total_count, false);
 
-        // Interpolated probability
-        discounted_prob + lambda * backoff_prob
+        // Interpolated probability. Guard against a degenerate zero (e.g. an unseen
+        // n-gram with all-zero discounts) so the log probability stays finite, falling
+        // back to the strictly-positive backoff mass.
+        let prob = discounted_prob + lambda * backoff_prob;
+        if prob > 0.0 {
+            prob
+        } else {
+            backoff_prob
+        }
     }
 
     /// Compute unigram probability.
