@@ -198,7 +198,8 @@ impl Default for CodeEmbedderConfig {
     }
 }
 
-/// Backend for code embeddings - supports multiple Candle architectures.
+/// Backend for code embeddings - supports multiple Candle architectures, plus an
+/// ONNX backend (via `ort`) when the `code-neural` feature is enabled.
 enum EmbedderBackend {
     /// ModernBERT via ModernBertEmbedder
     ModernBert(ModernBertEmbedder),
@@ -209,6 +210,8 @@ enum EmbedderBackend {
         device: CandleDevice,
         hidden_size: usize,
     },
+    /// ONNX-backed code embedder (UniXcoder / GraphCodeBERT) via `ort`.
+    Onnx(Box<dyn crate::neural::code::CodeEmbedder>),
 }
 
 impl EmbedderBackend {
@@ -267,6 +270,9 @@ impl EmbedderBackend {
 
                 Ok(embedding)
             }
+            EmbedderBackend::Onnx(embedder) => embedder
+                .embed_code(text, crate::neural::code::CodeLanguage::Unknown)
+                .map_err(|e| CodeEmbedderError::Embedding(e.to_string())),
         }
     }
 
@@ -337,6 +343,12 @@ impl EmbedderBackend {
                 }
 
                 Ok(embeddings)
+            }
+            EmbedderBackend::Onnx(embedder) => {
+                let languages = vec![crate::neural::code::CodeLanguage::Unknown; texts.len()];
+                embedder
+                    .embed_code_batch(texts, &languages)
+                    .map_err(|e| CodeEmbedderError::Embedding(e.to_string()))
             }
         }
     }
@@ -455,29 +467,39 @@ impl CodeEmbedder {
 
     /// Load an ONNX model from a directory.
     ///
-    /// For full ONNX support with code-specific models like UniXcoder or GraphCodeBERT,
-    /// consider using `crate::neural::code::UniXcoderEmbedder` directly.
-    fn load_onnx_model(
-        path: &Path,
-        _config: CodeEmbedderConfig,
-    ) -> Result<Self, CodeEmbedderError> {
-        // ONNX models require the code-neural feature and ort runtime
-        // For now, we provide a helpful error message directing users to the specialized embedders
-        //
-        // In a full implementation, this would:
-        // 1. Load the ONNX model via ort
-        // 2. Create a custom embedder wrapper
-        // 3. Return a CodeEmbedder with the ONNX backend
-        //
-        // However, since CodeEmbedder currently wraps ModernBertEmbedder (Candle-based),
-        // ONNX support would require refactoring to support multiple backends.
-        Err(CodeEmbedderError::ModelLoad(format!(
-            "ONNX model detected at {}. For ONNX code models (UniXcoder, GraphCodeBERT), \
-             please use the specialized embedders from `crate::neural::code`:\n\
-             - `UniXcoderEmbedder::from_directory(path)` for UniXcoder models\n\
-             - `GraphCodeBertEmbedder::from_directory(path)` for GraphCodeBERT models",
-            path.display()
-        )))
+    /// Delegates to the `ort`-backed embedders in [`crate::neural::code`] (selected by
+    /// `config.model`) and wraps the result in [`EmbedderBackend::Onnx`], so an ONNX
+    /// directory loads transparently through [`CodeEmbedder::from_path`]. (This module is
+    /// only compiled under the `code-neural` feature, which provides the `ort` runtime.)
+    fn load_onnx_model(path: &Path, config: CodeEmbedderConfig) -> Result<Self, CodeEmbedderError> {
+        use crate::neural::code::{GraphCodeBertEmbedder, UniXcoderEmbedder};
+
+        // Select the ONNX embedder by configured model. UniXcoder is the general default
+        // for UniXcoder / CodeBERT / Custom; GraphCodeBERT has its own loader.
+        let backend: Box<dyn crate::neural::code::CodeEmbedder> = match config.model {
+            EmbeddingModel::GraphCodeBERT => Box::new(
+                GraphCodeBertEmbedder::from_directory(path)
+                    .map_err(|e| CodeEmbedderError::ModelLoad(e.to_string()))?,
+            ),
+            _ => Box::new(
+                UniXcoderEmbedder::from_directory(path)
+                    .map_err(|e| CodeEmbedderError::ModelLoad(e.to_string()))?,
+            ),
+        };
+
+        let cache = if config.use_cache {
+            Some(DashMap::with_capacity(config.cache_size))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            config,
+            backend: EmbedderBackend::Onnx(backend),
+            // UniXcoder / GraphCodeBERT / CodeBERT are RoBERTa-family architectures.
+            architecture: ModelArchitecture::Roberta,
+            cache,
+        })
     }
 
     /// Load a SafeTensors model from a directory.
@@ -913,5 +935,58 @@ mod tests {
             ModelFormat::SafeTensors.expected_files(),
             &["model.safetensors", "config.json", "tokenizer.json"]
         );
+    }
+
+    /// Mock `ort`-backed embedder so the ONNX dispatch can be tested without a real
+    /// ONNX runtime or model file.
+    struct MockOnnxEmbedder;
+
+    impl crate::neural::code::CodeEmbedder for MockOnnxEmbedder {
+        fn embed_code(
+            &self,
+            _code: &str,
+            _language: crate::neural::code::CodeLanguage,
+        ) -> crate::neural::code::Result<Vec<f32>> {
+            Ok(vec![0.5, 0.25, 0.75])
+        }
+
+        fn embed_code_batch(
+            &self,
+            codes: &[&str],
+            _languages: &[crate::neural::code::CodeLanguage],
+        ) -> crate::neural::code::Result<Vec<Vec<f32>>> {
+            Ok(codes.iter().map(|_| vec![0.5, 0.25, 0.75]).collect())
+        }
+
+        fn embedding_dim(&self) -> usize {
+            3
+        }
+
+        fn model_name(&self) -> &str {
+            "mock-onnx"
+        }
+
+        fn max_sequence_length(&self) -> usize {
+            512
+        }
+
+        fn supported_languages(&self) -> &[crate::neural::code::CodeLanguage] {
+            &[]
+        }
+    }
+
+    #[test]
+    fn test_onnx_backend_dispatch() {
+        let backend = EmbedderBackend::Onnx(Box::new(MockOnnxEmbedder));
+
+        // Single embed routes through to the ONNX embedder.
+        let v = backend.embed("fn main() {}").expect("embed");
+        assert_eq!(v, vec![0.5, 0.25, 0.75]);
+
+        // Batch embed routes through and preserves length per input.
+        let batch = backend.embed_batch(&["a", "b"]).expect("embed_batch");
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0], vec![0.5, 0.25, 0.75]);
+        assert_eq!(batch[1], vec![0.5, 0.25, 0.75]);
     }
 }
