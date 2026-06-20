@@ -235,26 +235,28 @@ impl LaTeXTokenizer {
         tokens
     }
 
-    /// Tokenize and return an iterator over tokens.
+    /// Tokenize and return a lazy iterator over tokens.
+    ///
+    /// Unlike [`tokenize`](Self::tokenize), this streams tokens straight from the
+    /// lexer without materializing the full `Vec`, applying the same
+    /// preserve-whitespace / preserve-comment filtering inline. Collecting it
+    /// yields exactly the same sequence as `tokenize`.
     pub fn tokenize_iter<'a>(&'a self, input: &'a str) -> impl Iterator<Item = LaTeXToken> + 'a {
         let preserve_whitespace = self.config.preserve_whitespace;
         let preserve_comments = self.config.preserve_comments;
+        let mut lexer = Lexer::new(input, &self.config);
 
-        std::iter::from_fn(move || {
-            // Note: This is a simplified version; full implementation would use
-            // an actual streaming lexer
-            None
+        std::iter::from_fn(move || loop {
+            let token = lexer.next_token()?;
+            let keep = match &token.kind {
+                LaTeXTokenKind::Whitespace(_) => preserve_whitespace,
+                LaTeXTokenKind::Comment(_) => preserve_comments,
+                _ => true,
+            };
+            if keep {
+                return Some(token);
+            }
         })
-        .take(0)
-        .chain(
-            self.tokenize(input)
-                .into_iter()
-                .filter(move |token| match &token.kind {
-                    LaTeXTokenKind::Whitespace(_) => preserve_whitespace,
-                    LaTeXTokenKind::Comment(_) => preserve_comments,
-                    _ => true,
-                }),
-        )
     }
 
     /// Get the configuration.
@@ -906,5 +908,27 @@ mod tests {
 
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].kind, LaTeXTokenKind::Newline);
+    }
+
+    #[test]
+    fn test_tokenize_iter_matches_tokenize() {
+        let input = "\\alpha $x^2$ % a comment\n\\beta";
+
+        // Default config (filters whitespace + comments): streamed == eager.
+        let tokenizer = LaTeXTokenizer::new();
+        let eager = tokenizer.tokenize(input);
+        let streamed: Vec<_> = tokenizer.tokenize_iter(input).collect();
+        assert_eq!(streamed, eager);
+
+        // Preserve-everything config exercises the keep branches and must agree too.
+        let tokenizer = LaTeXTokenizer::with_config(TokenizerConfig {
+            preserve_whitespace: true,
+            preserve_comments: true,
+            ..Default::default()
+        });
+        let eager = tokenizer.tokenize(input);
+        let streamed: Vec<_> = tokenizer.tokenize_iter(input).collect();
+        assert_eq!(streamed, eager);
+        assert!(!streamed.is_empty());
     }
 }
