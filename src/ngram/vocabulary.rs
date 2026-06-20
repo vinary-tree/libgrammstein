@@ -199,20 +199,18 @@ pub fn open_or_create_vocabulary_with_bloom(
 // Lock-Free Concurrent Vocabulary Factory Functions
 // ============================================================================
 
-/// Create a new lock-free concurrent vocabulary wrapper from shared vocab.
+/// Wrap a `PersistentVocabARTrie` in an `Arc` for lock-free concurrent use.
 ///
-/// This wraps the given `SharedVocabARTrie` in a `ConcurrentVocabARTrie` with
-/// lock-free mode enabled. Multiple threads can insert vocabulary entries
-/// simultaneously without blocking each other.
-///
-/// Note: This uses `from_shared_lockfree()` which means the underlying
-/// persistent vocabulary is still shared and can be checkpointed separately.
+/// `PersistentVocabARTrie` IS the single lock-free vocabulary implementation —
+/// there is no separate wrapper type. `Arc`-sharing it lets multiple threads
+/// insert vocabulary entries and checkpoint through `&self` with no external
+/// locking.
 ///
 /// # Usage Pattern
 ///
 /// ```ignore
-/// // Create vocabulary with lock-free wrapper
-/// let vocab = open_or_create_vocabulary(&path)?;
+/// // Create the lock-free vocabulary, then share it.
+/// let vocab = PersistentVocabARTrie::create_with_start_index(&path, FIRST_VALID_INDEX)?;
 /// let concurrent = create_concurrent_vocabulary_lockfree(vocab);
 ///
 /// // Use in parallel workers - no contention!
@@ -241,8 +239,9 @@ pub fn create_concurrent_vocabulary_lockfree(
 
 /// Open/create a vocabulary and return a shared lock-free handle.
 ///
-/// Sets `DurabilityPolicy::None` so the durable Order-A insert's WAL append stays cheap for bulk
-/// import (no per-insert fsync); durability is via periodic `checkpoint()`.
+/// Uses the trie's default durability policy. (The durable Order-A insert requires
+/// `Immediate`/`GroupCommit` and rejects `None`/`Periodic` — see the in-body note;
+/// tune to `GroupCommit` for batched-fsync bulk-import throughput.)
 pub fn open_or_create_concurrent_vocabulary_lockfree(
     path: &Path,
 ) -> VocabularyResult<Arc<PersistentVocabARTrie>> {
@@ -260,7 +259,7 @@ pub fn open_or_create_concurrent_vocabulary_lockfree(
 }
 
 /// Open/create a lock-free vocabulary (capacity hint currently advisory — the overlay's `DashMap`
-/// auto-sizes). Sets `DurabilityPolicy::None` for bulk import.
+/// auto-sizes). Uses the trie's default durability policy.
 pub fn open_or_create_concurrent_vocabulary_lockfree_with_capacity(
     path: &Path,
     _estimated_terms: usize,
@@ -269,7 +268,7 @@ pub fn open_or_create_concurrent_vocabulary_lockfree_with_capacity(
 }
 
 /// Open/create a lock-free vocabulary (the BloomFilter was removed — overlay reads use the
-/// lock-free walk, not a bloom). Sets `DurabilityPolicy::None` for bulk import.
+/// lock-free walk, not a bloom). Uses the trie's default durability policy.
 pub fn open_or_create_concurrent_vocabulary_lockfree_with_bloom(
     path: &Path,
     _bloom_capacity: usize,
@@ -454,7 +453,7 @@ pub fn try_encode_ngram_key_batch(
 /// # Arguments
 ///
 /// * `words` - Slice of word strings
-/// * `vocab` - A `ConcurrentVocabARTrie` in LockFree mode
+/// * `vocab` - A `PersistentVocabARTrie` (the lock-free vocabulary)
 ///
 /// # Returns
 ///
@@ -465,9 +464,9 @@ pub fn try_encode_ngram_key_batch(
 /// ```ignore
 /// use std::sync::Arc;
 ///
-/// // Create lock-free vocabulary wrapper
+/// // Create the lock-free vocabulary, then share it.
 /// let vocab = PersistentVocabARTrie::create("vocab.vocab")?;
-/// let concurrent = Arc::new(ConcurrentVocabARTrie::new_lockfree(vocab));
+/// let concurrent = Arc::new(vocab);
 ///
 /// // Multiple threads can encode concurrently without blocking
 /// std::thread::scope(|s| {
@@ -487,7 +486,7 @@ pub fn encode_ngram_key_lockfree(words: &[&str], vocab: &PersistentVocabARTrie) 
         return String::new();
     }
 
-    // Use lock-free insert_batch_concurrent
+    // Use lock-free insert_batch
     let indices = vocab
         .insert_batch(words)
         .expect("vocab insert_batch failed");
@@ -510,15 +509,15 @@ pub fn try_encode_ngram_key_lockfree(
     Ok(encode_ngram_key_lockfree(words, vocab))
 }
 
-/// Encode an n-gram using a shared `LockFreeVocab` directly.
+/// Encode an n-gram using a `PersistentVocabARTrie` directly.
 ///
 /// This is the most efficient encoding path when you have direct access
-/// to the `LockFreeVocab` instance (without the `ConcurrentVocabARTrie` wrapper).
+/// to the `PersistentVocabARTrie` (the lock-free vocabulary).
 ///
 /// # Arguments
 ///
 /// * `words` - Slice of word strings
-/// * `vocab` - A `LockFreeVocab` instance
+/// * `vocab` - A `PersistentVocabARTrie` instance
 ///
 /// # Returns
 ///
@@ -558,7 +557,7 @@ thread_local! {
 ///
 /// This avoids allocating a `Vec<u8>` per n-gram by reusing a thread-local buffer.
 /// The callback pattern ensures the buffer reference doesn't escape. Uses
-/// `ConcurrentVocabARTrie::insert_batch_concurrent` for lock-free vocabulary access.
+/// `PersistentVocabARTrie::insert_batch` for lock-free vocabulary access.
 ///
 /// # Arguments
 ///
