@@ -55,15 +55,15 @@ fn detect_source_type(path: &Path) -> Option<SourceModel> {
 
 /// Convert model to static format for faster inference.
 ///
-/// This converts models from the DynamicDawgChar backend (which supports
-/// updates) to a portable format optimized for fast loading and inference.
-///
-/// Note: Full DoubleArrayTrie conversion requires additional library support.
-/// This currently re-exports the model in optimized portable format.
+/// Rebuilds the n-gram model on an immutable `DoubleArrayTrieChar` backend (optimized for
+/// read-only query speed) and saves a validated portable artifact. The output loads as a
+/// fast static model via `NgramModel::load_static_portable`, and still loads through the
+/// regular `load_portable` path for compatibility with `query`/`eval`/`repl`.
 fn convert_to_static(args: ConvertToStaticArgs, verbose: bool) -> CliResult<()> {
     use crate::embedding::SubwordEmbedding;
     use crate::hybrid::HybridLanguageModel;
     use crate::ngram::{NgramEntry, NgramModel};
+    use libdictenstein::double_array_trie::char::DoubleArrayTrieChar;
     use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
     if !args.input.exists() {
@@ -99,6 +99,16 @@ fn convert_to_static(args: ConvertToStaticArgs, verbose: bool) -> CliResult<()> 
                 eprintln!("  Embedding dim: {}", model.embedding_model().dim());
             }
 
+            // Validate the n-gram half is DoubleArrayTrie-constructible (the static fast path).
+            let ngram_count = model.ngram_model().ngram_count();
+            let static_ngram: NgramModel<DoubleArrayTrieChar<NgramEntry>> =
+                NgramModel::from_portable_static(model.ngram_model().to_portable());
+            if static_ngram.ngram_count() != ngram_count {
+                return Err(CliError::io(
+                    "static conversion validation failed: n-gram statistics differ".to_string(),
+                ));
+            }
+
             eprintln!("Saving to portable format...");
             model
                 .save_portable(&args.output)
@@ -117,12 +127,27 @@ fn convert_to_static(args: ConvertToStaticArgs, verbose: bool) -> CliResult<()> 
                 eprintln!("  N-grams: {}", model.ngram_count());
             }
 
-            eprintln!("Saving to portable format...");
-            model
+            // Rebuild on the immutable DoubleArrayTrie backend, validating it is
+            // constructible and preserves the model's statistics.
+            eprintln!("Building static DoubleArrayTrie model...");
+            let (ngrams, vocab, order) = (model.ngram_count(), model.vocab_size(), model.order());
+            let static_model: NgramModel<DoubleArrayTrieChar<NgramEntry>> =
+                NgramModel::from_portable_static(model.to_portable());
+            if static_model.ngram_count() != ngrams
+                || static_model.vocab_size() != vocab
+                || static_model.order() != order
+            {
+                return Err(CliError::io(
+                    "static conversion validation failed: model statistics differ".to_string(),
+                ));
+            }
+
+            eprintln!("Saving static model to portable format...");
+            static_model
                 .save_portable(&args.output)
                 .map_err(|e| CliError::io(format!("Failed to save model: {}", e)))?;
 
-            print_conversion_success(&args.input, &args.output, "ngram");
+            print_conversion_success(&args.input, &args.output, "ngram (static DoubleArrayTrie)");
         }
         SourceModel::Embedding => {
             let model = SubwordEmbedding::load(&args.input)
@@ -181,11 +206,11 @@ fn print_conversion_success(input: &Path, output: &Path, model_type: &str) {
 
     println!();
     println!(
-        "{}: The portable format is optimized for fast loading.",
+        "{}: The output is a portable model validated against the DoubleArrayTrie backend.",
         style("note").cyan()
     );
     println!(
-        "    For maximum inference speed, use DoubleArrayTrie backend (requires library support)."
+        "    Load it with NgramModel::load_static_portable for the fast read-only static backend."
     );
 }
 

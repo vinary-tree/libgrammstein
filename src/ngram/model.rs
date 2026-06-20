@@ -6,7 +6,7 @@
 use super::entry::NgramEntry;
 use super::smoothing::KneserNeySmoothing;
 use super::trie::NgramTrie;
-use libdictenstein::MutableMappedDictionary;
+use libdictenstein::{MappedDictionary, MutableMappedDictionary};
 
 #[cfg(feature = "serde-extras")]
 use std::path::Path;
@@ -40,7 +40,7 @@ use std::path::Path;
 #[serde(bound = "D: serde::Serialize + serde::de::DeserializeOwned")]
 pub struct NgramModel<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry>,
+    D: MappedDictionary<Value = NgramEntry>,
 {
     /// N-gram trie storage.
     trie: NgramTrie<D>,
@@ -57,7 +57,7 @@ where
 
 impl<D> NgramModel<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry>,
+    D: MappedDictionary<Value = NgramEntry>,
 {
     /// Create a new n-gram model from a trained trie.
     ///
@@ -202,7 +202,7 @@ where
 
 impl<D> Clone for NgramModel<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry>,
+    D: MappedDictionary<Value = NgramEntry>,
 {
     fn clone(&self) -> Self {
         Self {
@@ -218,7 +218,7 @@ where
 #[cfg(feature = "serde-extras")]
 impl<D> NgramModel<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + serde::Serialize + serde::de::DeserializeOwned,
+    D: MappedDictionary<Value = NgramEntry> + serde::Serialize + serde::de::DeserializeOwned,
 {
     /// Save the model to a binary file.
     ///
@@ -295,7 +295,7 @@ pub struct PortableNgramModel {
 #[cfg(feature = "serde-extras")]
 impl<D> NgramModel<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry>,
+    D: MappedDictionary<Value = NgramEntry>,
 {
     /// Export to portable format for serialization (without vocabulary).
     ///
@@ -404,7 +404,16 @@ where
         bincode::serialize_into(writer, &portable)?;
         Ok(())
     }
+}
 
+// Loading from a portable snapshot fills an empty backend via `insert_with_value`, so it
+// requires a writable (mutable) dictionary. Kept separate from the read-only query/export
+// surface above.
+#[cfg(feature = "serde-extras")]
+impl<D> NgramModel<D>
+where
+    D: MutableMappedDictionary<Value = NgramEntry>,
+{
     /// Load model from a portable binary file.
     ///
     /// Reconstructs the model using the provided dictionary factory.
@@ -443,6 +452,47 @@ where
             vocab_size: portable.vocab_size,
             total_count: portable.total_count,
         })
+    }
+}
+
+/// Static (read-only) `DoubleArrayTrieChar`-backed construction.
+///
+/// A Double-Array Trie is bulk-built and immutable — it answers queries faster than the
+/// dynamic backends but cannot be trained or updated. These constructors let `--to-static`
+/// (and downstream inference) load a portable model into the fast static backend.
+#[cfg(feature = "serde-extras")]
+impl NgramModel<libdictenstein::double_array_trie::char::DoubleArrayTrieChar<NgramEntry>> {
+    /// Build a static `DoubleArrayTrieChar`-backed model from a portable snapshot.
+    ///
+    /// `from_terms_with_values` sorts the entries with the trie builder's own comparator,
+    /// so no manual key ordering is required. The result answers `count`/`log_prob`
+    /// identically to the source model.
+    pub fn from_portable_static(portable: PortableNgramModel) -> Self {
+        use libdictenstein::double_array_trie::char::DoubleArrayTrieChar;
+
+        let entries = portable
+            .entries
+            .into_iter()
+            .map(|(key, snapshot)| (key, NgramEntry::from(snapshot)));
+        let dictionary = DoubleArrayTrieChar::from_terms_with_values(entries);
+        let trie = NgramTrie::new(dictionary, portable.max_order);
+
+        Self {
+            trie,
+            smoothing: portable.smoothing,
+            vocab_size: portable.vocab_size,
+            total_count: portable.total_count,
+        }
+    }
+
+    /// Load a static `DoubleArrayTrieChar`-backed model from a portable binary file.
+    ///
+    /// The fast read-only counterpart to [`NgramModel::load_portable`].
+    pub fn load_static_portable<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        let portable: PortableNgramModel = bincode::deserialize_from(reader)?;
+        Ok(Self::from_portable_static(portable))
     }
 }
 
@@ -527,6 +577,48 @@ mod tests {
         // triggered the WFST weight panics) must be finite too.
         assert!(model.log_prob("zzz_oov", &["the"]).is_finite());
         assert!(model.log_prob("", &["the"]).is_finite());
+    }
+
+    #[cfg(feature = "serde-extras")]
+    #[test]
+    fn static_dat_model_matches_source() {
+        use libdictenstein::double_array_trie::char::DoubleArrayTrieChar;
+
+        let model = create_test_ngram_model();
+        let static_model: NgramModel<DoubleArrayTrieChar<NgramEntry>> =
+            NgramModel::from_portable_static(model.to_portable());
+
+        // Structural equality.
+        assert_eq!(static_model.order(), model.order());
+        assert_eq!(static_model.vocab_size(), model.vocab_size());
+        assert_eq!(static_model.total_count(), model.total_count());
+        assert_eq!(static_model.ngram_count(), model.ngram_count());
+
+        // The static DAT-backed model must answer counts and log-probs identically to the
+        // source for seen, unseen, and OOV n-grams.
+        let cases: &[(&str, &[&str])] = &[
+            ("fox", &["quick", "brown"]),
+            ("brown", &["quick"]),
+            ("the", &[]),
+            ("dog", &["lazy"]),
+            ("dog", &["the", "lazy"]),
+            ("zzz_oov", &["the"]),
+        ];
+        for (w, ctx) in cases {
+            let mut toks = ctx.to_vec();
+            toks.push(w);
+            assert_eq!(
+                static_model.count(&toks),
+                model.count(&toks),
+                "count mismatch for {toks:?}"
+            );
+            let a = model.log_prob(w, ctx);
+            let b = static_model.log_prob(w, ctx);
+            assert!(
+                (a - b).abs() < 1e-12,
+                "log_prob mismatch for ({w:?}, {ctx:?}): {a} vs {b}"
+            );
+        }
     }
 
     #[test]

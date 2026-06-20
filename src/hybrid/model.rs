@@ -12,7 +12,7 @@
 use crate::embedding::SubwordEmbedding;
 use crate::ngram::{NgramEntry, NgramModel};
 use dashmap::DashMap;
-use libdictenstein::MutableMappedDictionary;
+use libdictenstein::{MappedDictionary, MutableMappedDictionary};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -210,7 +210,7 @@ fn default_cache() -> ScoreCache {
 #[serde(bound = "D: serde::Serialize + serde::de::DeserializeOwned")]
 pub struct HybridLanguageModel<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+    D: MappedDictionary<Value = NgramEntry> + Send + Sync,
 {
     /// N-gram model.
     ngram: NgramModel<D>,
@@ -229,7 +229,7 @@ where
 
 impl<D> HybridLanguageModel<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+    D: MappedDictionary<Value = NgramEntry> + Send + Sync,
 {
     /// Create a new hybrid model.
     pub fn new(ngram: NgramModel<D>, embedding: SubwordEmbedding, config: HybridConfig) -> Self {
@@ -449,12 +449,12 @@ where
 
 // Implement Send + Sync for the hybrid model
 unsafe impl<D> Send for HybridLanguageModel<D> where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync
+    D: MappedDictionary<Value = NgramEntry> + Send + Sync
 {
 }
 
 unsafe impl<D> Sync for HybridLanguageModel<D> where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync
+    D: MappedDictionary<Value = NgramEntry> + Send + Sync
 {
 }
 
@@ -462,7 +462,7 @@ unsafe impl<D> Sync for HybridLanguageModel<D> where
 #[cfg(feature = "serde-extras")]
 impl<D> HybridLanguageModel<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry>
+    D: MappedDictionary<Value = NgramEntry>
         + Send
         + Sync
         + serde::Serialize
@@ -519,7 +519,7 @@ pub struct PortableHybridModel {
 #[cfg(feature = "serde-extras")]
 impl<D> HybridLanguageModel<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+    D: MappedDictionary<Value = NgramEntry> + Send + Sync,
 {
     /// Export to portable format for serialization.
     ///
@@ -555,7 +555,15 @@ where
         bincode::serialize_into(writer, &portable)?;
         Ok(())
     }
+}
 
+// Loading from a portable snapshot reconstructs the N-gram model via insert, so it
+// requires a writable (mutable) backend. Kept separate from the read-only export surface.
+#[cfg(feature = "serde-extras")]
+impl<D> HybridLanguageModel<D>
+where
+    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+{
     /// Load model from a portable binary file.
     ///
     /// Reconstructs the model using the provided dictionary factory.

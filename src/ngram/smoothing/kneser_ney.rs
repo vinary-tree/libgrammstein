@@ -14,7 +14,7 @@
 
 use super::super::entry::NgramEntry;
 use super::super::trie::NgramTrie;
-use libdictenstein::MutableMappedDictionary;
+use libdictenstein::MappedDictionary;
 
 /// Modified Kneser-Ney smoothing parameters and algorithm.
 ///
@@ -153,7 +153,7 @@ impl KneserNeySmoothing {
         total_count: u64,
     ) -> f64
     where
-        D: MutableMappedDictionary<Value = NgramEntry>,
+        D: MappedDictionary<Value = NgramEntry>,
     {
         let prob = self.prob_recursive(word, context, trie, vocab_size, total_count, true);
         prob.ln()
@@ -170,7 +170,7 @@ impl KneserNeySmoothing {
         is_highest_order: bool,
     ) -> f64
     where
-        D: MutableMappedDictionary<Value = NgramEntry>,
+        D: MappedDictionary<Value = NgramEntry>,
     {
         if context.is_empty() {
             // Unigram case: use continuation probability or raw probability
@@ -235,7 +235,7 @@ impl KneserNeySmoothing {
         is_highest_order: bool,
     ) -> f64
     where
-        D: MutableMappedDictionary<Value = NgramEntry>,
+        D: MappedDictionary<Value = NgramEntry>,
     {
         let entry = trie.get(&[word]);
 

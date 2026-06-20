@@ -18,7 +18,7 @@
 
 use super::entry::NgramEntry;
 use libdictenstein::persistent_artrie::SharedTrieAccess;
-use libdictenstein::{MappedDictionaryNode, MutableMappedDictionary};
+use libdictenstein::{MappedDictionary, MappedDictionaryNode, MutableMappedDictionary};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -26,7 +26,7 @@ use std::sync::Arc;
 ///
 /// This is used for portable serialization, allowing models to be saved
 /// and loaded without requiring the dictionary to implement serde traits.
-pub trait IterableDictionary: MutableMappedDictionary<Value = NgramEntry> {
+pub trait IterableDictionary: MappedDictionary<Value = NgramEntry> {
     /// Iterate over all (key, value) pairs in the dictionary.
     fn iter_all(&self) -> Box<dyn Iterator<Item = (String, NgramEntry)> + '_>;
 }
@@ -96,6 +96,17 @@ where
     }
 }
 
+// `DoubleArrayTrieChar` is a read-only static backend: it implements `MappedDictionary`
+// (not `MutableMappedDictionary`). The relaxed `IterableDictionary` supertrait lets it
+// back `NgramModel` for the query path. `iter()` yields (key, value) in lexicographic order.
+impl IterableDictionary
+    for libdictenstein::double_array_trie::char::DoubleArrayTrieChar<NgramEntry>
+{
+    fn iter_all(&self) -> Box<dyn Iterator<Item = (String, NgramEntry)> + '_> {
+        Box::new(self.iter())
+    }
+}
+
 /// Separator used between tokens in legacy n-gram keys.
 ///
 /// # Deprecation Notice
@@ -144,7 +155,7 @@ pub(crate) const LEGACY_NGRAM_SEPARATOR: char = '|';
 #[serde(bound = "D: serde::Serialize + serde::de::DeserializeOwned")]
 pub struct NgramTrie<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry>,
+    D: MappedDictionary<Value = NgramEntry>,
 {
     /// The underlying dictionary backend.
     dictionary: Arc<D>,
@@ -159,7 +170,7 @@ where
 
 impl<D> NgramTrie<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry>,
+    D: MappedDictionary<Value = NgramEntry>,
 {
     /// Create a new n-gram trie wrapping the given dictionary.
     pub fn new(dictionary: D, max_order: usize) -> Self {
@@ -232,6 +243,80 @@ where
         tokens.join(&LEGACY_NGRAM_SEPARATOR.to_string())
     }
 
+    /// Get the entry for an n-gram, if it exists.
+    ///
+    /// # Note
+    ///
+    /// This method uses legacy pipe-separated encoding. For vocabulary-indexed
+    /// encoding, use [`Self::get_by_key`].
+    pub fn get(&self, tokens: &[&str]) -> Option<NgramEntry> {
+        let key = Self::encode_key_legacy(tokens);
+        self.dictionary.get_value(&key)
+    }
+
+    /// Get the entry for an n-gram using a pre-encoded key.
+    pub fn get_by_key(&self, key: &str) -> Option<NgramEntry> {
+        self.dictionary.get_value(key)
+    }
+
+    /// Check if an n-gram exists in the trie.
+    ///
+    /// # Note
+    ///
+    /// This method uses legacy pipe-separated encoding. For vocabulary-indexed
+    /// encoding, use [`Self::contains_key`].
+    pub fn contains(&self, tokens: &[&str]) -> bool {
+        let key = Self::encode_key_legacy(tokens);
+        self.dictionary.contains(&key)
+    }
+
+    /// Check if an n-gram exists in the trie using a pre-encoded key.
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.dictionary.contains(key)
+    }
+
+    /// Get the count for an n-gram, or 0 if it doesn't exist.
+    #[inline]
+    pub fn count(&self, tokens: &[&str]) -> u64 {
+        self.get(tokens).map(|e| e.count()).unwrap_or(0)
+    }
+
+    /// Get the count for an n-gram using a pre-encoded key, or 0 if it doesn't exist.
+    #[inline]
+    pub fn count_by_key(&self, key: &str) -> u64 {
+        self.get_by_key(key).map(|e| e.count()).unwrap_or(0)
+    }
+
+    /// Get the total number of n-grams stored.
+    ///
+    /// Returns `None` if the dictionary doesn't support length queries.
+    pub fn len(&self) -> usize {
+        self.dictionary.len().unwrap_or(0)
+    }
+
+    /// Check if the trie is empty.
+    pub fn is_empty(&self) -> bool {
+        self.dictionary.len().map_or(true, |len| len == 0)
+    }
+
+    /// Iterate over all (key, entry) pairs in the trie.
+    ///
+    /// This is available when the dictionary implements `IterableDictionary`.
+    pub fn iter_entries(&self) -> impl Iterator<Item = (String, NgramEntry)> + '_
+    where
+        D: IterableDictionary,
+    {
+        self.dictionary.iter_all()
+    }
+}
+
+/// Mutating (training-time) operations. These require a writable backend and are split
+/// from the read-only query surface above so that read-only static backends such as
+/// `DoubleArrayTrieChar` can back `NgramTrie` (and thus `NgramModel`) for inference.
+impl<D> NgramTrie<D>
+where
+    D: MutableMappedDictionary<Value = NgramEntry>,
+{
     /// Insert or increment an n-gram count.
     ///
     /// If the n-gram exists, increments its count. Otherwise, inserts it with count 1.
@@ -279,50 +364,6 @@ where
     pub fn insert_with_key_and_count(&self, key: &str, count: u64) -> bool {
         self.dictionary
             .insert_with_value(key, NgramEntry::new(count))
-    }
-
-    /// Get the entry for an n-gram, if it exists.
-    ///
-    /// # Note
-    ///
-    /// This method uses legacy pipe-separated encoding. For vocabulary-indexed
-    /// encoding, use [`Self::get_by_key`].
-    pub fn get(&self, tokens: &[&str]) -> Option<NgramEntry> {
-        let key = Self::encode_key_legacy(tokens);
-        self.dictionary.get_value(&key)
-    }
-
-    /// Get the entry for an n-gram using a pre-encoded key.
-    pub fn get_by_key(&self, key: &str) -> Option<NgramEntry> {
-        self.dictionary.get_value(key)
-    }
-
-    /// Check if an n-gram exists in the trie.
-    ///
-    /// # Note
-    ///
-    /// This method uses legacy pipe-separated encoding. For vocabulary-indexed
-    /// encoding, use [`Self::contains_key`].
-    pub fn contains(&self, tokens: &[&str]) -> bool {
-        let key = Self::encode_key_legacy(tokens);
-        self.dictionary.contains(&key)
-    }
-
-    /// Check if an n-gram exists in the trie using a pre-encoded key.
-    pub fn contains_key(&self, key: &str) -> bool {
-        self.dictionary.contains(key)
-    }
-
-    /// Get the count for an n-gram, or 0 if it doesn't exist.
-    #[inline]
-    pub fn count(&self, tokens: &[&str]) -> u64 {
-        self.get(tokens).map(|e| e.count()).unwrap_or(0)
-    }
-
-    /// Get the count for an n-gram using a pre-encoded key, or 0 if it doesn't exist.
-    #[inline]
-    pub fn count_by_key(&self, key: &str) -> u64 {
-        self.get_by_key(key).map(|e| e.count()).unwrap_or(0)
     }
 
     /// Update continuation count for an n-gram.
@@ -375,33 +416,11 @@ where
             |entry| entry.set_unique_continuations(unique_continuations),
         );
     }
-
-    /// Get the total number of n-grams stored.
-    ///
-    /// Returns `None` if the dictionary doesn't support length queries.
-    pub fn len(&self) -> usize {
-        self.dictionary.len().unwrap_or(0)
-    }
-
-    /// Check if the trie is empty.
-    pub fn is_empty(&self) -> bool {
-        self.dictionary.len().map_or(true, |len| len == 0)
-    }
-
-    /// Iterate over all (key, entry) pairs in the trie.
-    ///
-    /// This is available when the dictionary implements `IterableDictionary`.
-    pub fn iter_entries(&self) -> impl Iterator<Item = (String, NgramEntry)> + '_
-    where
-        D: IterableDictionary,
-    {
-        self.dictionary.iter_all()
-    }
 }
 
 impl<D> Clone for NgramTrie<D>
 where
-    D: MutableMappedDictionary<Value = NgramEntry>,
+    D: MappedDictionary<Value = NgramEntry>,
 {
     fn clone(&self) -> Self {
         Self {
