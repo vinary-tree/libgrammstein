@@ -15,7 +15,7 @@ use crate::corpus::{CorpusReader, PrefetchConfig, PrefetchingReader, Tokenizer};
 use crate::Result;
 
 use crossbeam_channel::Sender;
-use liblevenshtein::dictionary::MutableMappedDictionary;
+use libdictenstein::MutableMappedDictionary;
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -682,7 +682,7 @@ where
         let (n1, n2, n3, n4) = self.count_ngram_frequencies();
 
         // Need all counts to be non-zero for meaningful discount computation
-        if n1 > 0 && n2 > 0 && n3 > 0 && n4 > 0 {
+        let smoothing = if n1 > 0 && n2 > 0 && n3 > 0 && n4 > 0 {
             log::info!("Computing optimal MKN discounts from corpus statistics");
             KneserNeySmoothing::from_counts(n1, n2, n3, n4)
         } else {
@@ -691,7 +691,34 @@ where
                 n1, n2, n3, n4
             );
             KneserNeySmoothing::new(self.config.order)
+        };
+
+        // Attach N₁₊(•,•) (total distinct bigram types) — the correct denominator
+        // for lower-order continuation probabilities. Continuation counts were
+        // populated in Phase 2 (collect_continuation_counts), so summing them over
+        // the unigram entries now yields Σ_w N₁₊(•,w).
+        smoothing.with_total_bigram_types(self.count_total_bigram_types())
+    }
+
+    /// Sum `N₁₊(•,w)` over all unigram entries to obtain `N₁₊(•,•)`, the total
+    /// number of distinct bigram types (the lower-order continuation denominator).
+    ///
+    /// Accumulated in `u64` because the per-word continuation counts are `u32`
+    /// and their sum can exceed `u32::MAX` on large corpora.
+    fn count_total_bigram_types(&self) -> u64 {
+        let use_vocabulary = self.vocabulary.is_some();
+        let mut total: u64 = 0;
+        for (key, entry) in self.trie.iter_entries() {
+            let is_unigram = if use_vocabulary {
+                key.chars().count() == 1
+            } else {
+                !key.contains(LEGACY_NGRAM_SEPARATOR)
+            };
+            if is_unigram {
+                total += entry.continuation_count() as u64;
+            }
         }
+        total
     }
 
     /// Count unique unigrams (vocabulary size).
@@ -824,7 +851,7 @@ mod tests {
     use super::super::vocabulary::create_vocabulary;
     use super::*;
     use crate::corpus::PlaintextReader;
-    use liblevenshtein::dictionary::pathmap::PathMapDictionary;
+    use libdictenstein::pathmap::PathMapDictionary;
     use std::io::Write;
     use tempfile::TempDir;
 
@@ -1042,5 +1069,35 @@ mod tests {
         // Log probabilities should be finite (proves smoothing works)
         let log_prob = model.log_prob("fox", &["quick"]);
         assert!(log_prob.is_finite(), "Log probability should be finite");
+    }
+
+    #[test]
+    fn test_total_bigram_types_populated() {
+        // "the quick fox the slow fox the big fox" has 7 distinct bigram types:
+        // (the,quick)(quick,fox)(fox,the)(the,slow)(slow,fox)(the,big)(big,fox),
+        // so N₁₊(•,•) = Σ_w N₁₊(•,w) must be carried on the smoothing params
+        // (previously absent / approximated by vocab_size).
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let vocab_path = dir.path().join("vocab.artrie");
+        let corpus_path = create_test_corpus(dir.path(), "the quick fox the slow fox the big fox");
+
+        let reader = PlaintextReader::from_file(&corpus_path).expect("Failed to create reader");
+        let dictionary = PathMapDictionary::<NgramEntry>::new();
+
+        let model = TrainerBuilder::new(dictionary)
+            .order(2)
+            .with_vocabulary_path(vocab_path)
+            .train(reader)
+            .expect("Training failed");
+
+        let total = model.smoothing().total_bigram_types();
+        assert!(total > 0, "N₁₊(•,•) must be populated after training");
+        // Distinct bigram types cannot exceed the total entry count (sanity bound).
+        assert!(
+            total <= model.ngram_count() as u64,
+            "N₁₊(•,•) ({}) must not exceed entry count ({})",
+            total,
+            model.ngram_count()
+        );
     }
 }

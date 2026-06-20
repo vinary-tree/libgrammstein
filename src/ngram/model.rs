@@ -6,7 +6,7 @@
 use super::entry::NgramEntry;
 use super::smoothing::KneserNeySmoothing;
 use super::trie::NgramTrie;
-use liblevenshtein::dictionary::MutableMappedDictionary;
+use libdictenstein::MutableMappedDictionary;
 
 #[cfg(feature = "serde-extras")]
 use std::path::Path;
@@ -131,6 +131,12 @@ where
     pub fn log_prob(&self, word: &str, context: &[&str]) -> f64 {
         self.smoothing
             .log_prob(word, context, &self.trie, self.vocab_size, self.total_count)
+    }
+
+    /// The Modified Kneser-Ney smoothing parameters (discounts and the
+    /// `N₁₊(•,•)` continuation denominator) computed for this model.
+    pub fn smoothing(&self) -> &KneserNeySmoothing {
+        &self.smoothing
     }
 
     /// Compute log probability of a complete sentence.
@@ -445,8 +451,8 @@ mod tests {
     use super::*;
     use crate::corpus::PlaintextReader;
     use crate::ngram::TrainerBuilder;
-    use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
-    use liblevenshtein::dictionary::pathmap::PathMapDictionary;
+    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+    use libdictenstein::pathmap::PathMapDictionary;
     use std::io::Write;
     use tempfile::TempDir;
 

@@ -14,7 +14,7 @@
 
 use super::super::entry::NgramEntry;
 use super::super::trie::NgramTrie;
-use liblevenshtein::dictionary::MutableMappedDictionary;
+use libdictenstein::MutableMappedDictionary;
 
 /// Modified Kneser-Ney smoothing parameters and algorithm.
 ///
@@ -36,6 +36,15 @@ pub struct KneserNeySmoothing {
     d2: f64,
     /// Discount for n-grams with count >= 3.
     d3_plus: f64,
+    /// `N₁₊(•,•)` — the total number of distinct bigram types, i.e. `Σ_w N₁₊(•,w)`.
+    ///
+    /// This is the correct denominator for the lower-order continuation
+    /// probability `P_cont(w) = N₁₊(•,w) / N₁₊(•,•)`. Populated at training time
+    /// (see `Trainer::compute_smoothing_params`). `#[serde(default)]` so models
+    /// serialized before this field existed load with `0`, which `unigram_prob`
+    /// treats as "unknown" and falls back to the previous `vocab_size` denominator.
+    #[serde(default)]
+    total_bigram_types: u64,
 }
 
 impl KneserNeySmoothing {
@@ -73,7 +82,12 @@ impl KneserNeySmoothing {
         let d2 = (2.0 - 3.0 * y * (n3 / n2)).max(0.0).min(2.0);
         let d3_plus = (3.0 - 4.0 * y * (n4 / n3)).max(0.0).min(3.0);
 
-        Self { d1, d2, d3_plus }
+        Self {
+            d1,
+            d2,
+            d3_plus,
+            total_bigram_types: 0,
+        }
     }
 
     /// Create with default discount values.
@@ -84,7 +98,21 @@ impl KneserNeySmoothing {
             d1: 0.75,
             d2: 0.85,
             d3_plus: 0.95,
+            total_bigram_types: 0,
         }
+    }
+
+    /// Attach the corpus-wide `N₁₊(•,•)` total (number of distinct bigram types),
+    /// used as the denominator for lower-order continuation probabilities.
+    pub fn with_total_bigram_types(mut self, total_bigram_types: u64) -> Self {
+        self.total_bigram_types = total_bigram_types;
+        self
+    }
+
+    /// The corpus-wide `N₁₊(•,•)` total, or `0` if it was never populated
+    /// (e.g. a model serialized before this statistic was tracked).
+    pub fn total_bigram_types(&self) -> u64 {
+        self.total_bigram_types
     }
 
     /// Get the discount for a given count.
@@ -213,8 +241,15 @@ impl KneserNeySmoothing {
                 // OOV: uniform distribution
                 return 1.0 / vocab_size as f64;
             }
-            // Normalize by total continuation counts (approximated by vocab_size for now)
-            continuation_count as f64 / vocab_size as f64
+            // Normalize by N₁₊(•,•) = Σ_w N₁₊(•,w) (total distinct bigram types).
+            // Models serialized before this statistic existed store 0; fall back
+            // to the previous vocab_size approximation in that case.
+            let denominator = if self.total_bigram_types > 0 {
+                self.total_bigram_types
+            } else {
+                vocab_size as u64
+            };
+            continuation_count as f64 / denominator as f64
         }
     }
 }
@@ -258,5 +293,23 @@ mod tests {
         assert_eq!(smoothing.d1, 0.75);
         assert_eq!(smoothing.d2, 0.85);
         assert_eq!(smoothing.d3_plus, 0.95);
+    }
+
+    #[test]
+    fn test_total_bigram_types_builder_and_default() {
+        // Defaults to 0 ("unknown") so unigram_prob falls back to the vocab_size
+        // denominator for models that never populated the statistic.
+        assert_eq!(
+            KneserNeySmoothing::default_discounts().total_bigram_types(),
+            0
+        );
+        assert_eq!(KneserNeySmoothing::new(3).total_bigram_types(), 0);
+        assert_eq!(
+            KneserNeySmoothing::from_counts(1, 1, 1, 1).total_bigram_types(),
+            0
+        );
+
+        let smoothing = KneserNeySmoothing::default_discounts().with_total_bigram_types(42);
+        assert_eq!(smoothing.total_bigram_types(), 42);
     }
 }
