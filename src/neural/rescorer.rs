@@ -124,43 +124,41 @@ impl ModernBertRescorer {
 
         let mut total_log_prob = 0.0;
 
-        // For each position, mask and predict
+        // For each position, mask it and accumulate the model's log P(original token).
         for i in 0..num_tokens {
-            // Create masked sequence
             let mut masked_tokens = tokens.clone();
             let original_token = masked_tokens[i];
             masked_tokens[i] = mask_id;
 
-            // Forward pass to get hidden states
+            // Real masked-LM forward: project hidden states to vocabulary logits, then
+            // take the log-probability of the original token at the masked position.
             let input_ids = Tensor::new(&masked_tokens[..], self.model.device())?.unsqueeze(0)?;
-            let hidden_states = self.model.forward(&input_ids, None)?;
-
-            // Get logits for masked position
-            // Note: This is a simplified version. A full implementation would
-            // need the MLM head to project hidden states to vocabulary logits.
-            let masked_hidden = hidden_states.i((0, i))?;
-
-            // For now, use a proxy: cosine similarity between masked hidden state
-            // and the embedding of the original token
-            // This is an approximation; real PPL requires the full MLM head
-            let score = self.token_probability_proxy(&masked_hidden, original_token)?;
-            total_log_prob += score.ln();
+            let logits = self.model.get_mlm_logits(&input_ids)?; // (1, seq_len, vocab)
+            let logits_i = logits.i((0, i))?; // (vocab,)
+            total_log_prob += Self::token_log_prob(&logits_i, original_token)?;
         }
 
-        // Perplexity = exp(-avg_log_prob)
+        // Pseudo-perplexity = exp(-mean log P).
         let avg_log_prob = total_log_prob / num_tokens as f64;
         Ok((-avg_log_prob).exp())
     }
 
-    /// Proxy for token probability using embedding similarity.
-    ///
-    /// This is a simplified approximation when we don't have the full MLM head.
-    fn token_probability_proxy(&self, hidden: &Tensor, _token_id: u32) -> Result<f64> {
-        // Simplified: use L2 norm of hidden state as a proxy for confidence
-        // A real implementation would use the MLM head projection
-        let norm: f32 = hidden.sqr()?.sum_all()?.sqrt()?.to_scalar()?;
-        Ok(norm as f64 / 10.0) // Scale to reasonable range
+    /// Log-probability of `token_id` from a single position's logit row, via a
+    /// numerically stable log-softmax over the vocabulary dimension.
+    fn token_log_prob(logits_row: &Tensor, token_id: u32) -> Result<f64> {
+        let log_probs = candle_nn::ops::log_softmax(logits_row, candle_core::D::Minus1)?;
+        let lp: f32 = log_probs.i(token_id as usize)?.to_scalar()?;
+        Ok(lp as f64)
     }
+
+    // DISABLED: superseded by the real masked-LM head (`ModernBertModel::get_mlm_logits`)
+    // now used in `pseudo_perplexity` (task A3). This previously returned an
+    // L2-norm-of-hidden-state proxy because the MLM head was unimplemented. Kept
+    // commented out per the project's no-delete policy.
+    // fn token_probability_proxy(&self, hidden: &Tensor, _token_id: u32) -> Result<f64> {
+    //     let norm: f32 = hidden.sqr()?.sum_all()?.sqrt()?.to_scalar()?;
+    //     Ok(norm as f64 / 10.0) // Scale to reasonable range
+    // }
 
     /// Score sentence using embedding coherence.
     ///
@@ -378,5 +376,29 @@ mod tests {
         assert_eq!(paths[0].text(), "b");
         assert_eq!(paths[1].text(), "a");
         assert_eq!(paths[2].text(), "c");
+    }
+
+    #[test]
+    fn test_token_log_prob_matches_log_softmax() {
+        use candle_core::{Device, Tensor};
+
+        let logits = [1.0f32, 2.0, 3.0];
+        let row = Tensor::new(&logits[..], &Device::Cpu).expect("logits tensor");
+
+        // Manual numerically-stable log-softmax for the max-logit index (2).
+        let max = 3.0f32;
+        let denom: f32 = logits.iter().map(|x| (x - max).exp()).sum();
+        let expected = ((3.0f32 - max).exp() / denom).ln() as f64;
+
+        let got = ModernBertRescorer::token_log_prob(&row, 2).expect("token_log_prob");
+        assert!(
+            (got - expected).abs() < 1e-5,
+            "got {got}, expected {expected}"
+        );
+
+        // Every log-prob is negative, and the largest logit yields the largest log-prob.
+        let lp_low = ModernBertRescorer::token_log_prob(&row, 0).expect("token_log_prob");
+        assert!(got < 0.0 && lp_low < 0.0);
+        assert!(got > lp_low);
     }
 }

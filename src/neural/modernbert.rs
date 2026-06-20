@@ -4,7 +4,7 @@
 //! encoder-only transformer model with 8,192 token context length.
 
 use candle_core::{DType, Device as CandleDevice, IndexOp, Tensor};
-use candle_nn::VarBuilder;
+use candle_nn::{layer_norm_no_bias, linear_no_bias, LayerNorm, Linear, VarBuilder};
 use candle_transformers::models::modernbert::{Config as ModernBertConfigInner, ModernBert};
 use hf_hub::{api::sync::Api, Repo, RepoType};
 use std::path::Path;
@@ -62,6 +62,14 @@ impl Default for ModernBertConfig {
 /// ModernBERT model for encoding text.
 pub struct ModernBertModel {
     model: ModernBert,
+    /// Masked-LM head + tied decoder, replicated from candle's (private)
+    /// `ModernBertHead` / `ModernBertDecoder`. This lets us project encoder hidden
+    /// states to vocabulary logits without holding a second copy of the
+    /// 149M-parameter encoder — candle only exposes the MLM head via
+    /// `ModernBertForMaskedLM`, whose inner encoder is private.
+    mlm_head_dense: Linear,
+    mlm_head_norm: LayerNorm,
+    mlm_decoder: Linear,
     tokenizer: Tokenizer,
     device: CandleDevice,
     config: ModernBertConfig,
@@ -118,10 +126,30 @@ impl ModernBertModel {
         let vb =
             unsafe { VarBuilder::from_mmaped_safetensors(&[model_path], config.dtype, &device)? };
 
-        let model = ModernBert::load(vb, &model_config)?;
+        let model = ModernBert::load(vb.clone(), &model_config)?;
+
+        // Replicate candle's MLM head (`ModernBertHead`: dense → GELU → LayerNorm) and
+        // decoder (`ModernBertDecoder`: a Linear whose weight is tied to the input token
+        // embeddings). Both have private constructors in candle, so we build them from the
+        // same `VarBuilder` using the identical weight paths.
+        let mlm_head_dense = linear_no_bias(hidden_size, hidden_size, vb.pp("head").pp("dense"))?;
+        let mlm_head_norm = layer_norm_no_bias(
+            hidden_size,
+            model_config.layer_norm_eps,
+            vb.pp("head").pp("norm"),
+        )?;
+        let decoder_weights = vb.get(
+            (model_config.vocab_size, hidden_size),
+            "model.embeddings.tok_embeddings.weight",
+        )?;
+        let decoder_bias = vb.get(model_config.vocab_size, "decoder.bias")?;
+        let mlm_decoder = Linear::new(decoder_weights, Some(decoder_bias));
 
         Ok(Self {
             model,
+            mlm_head_dense,
+            mlm_head_norm,
+            mlm_decoder,
             tokenizer,
             device,
             config,
@@ -264,12 +292,18 @@ impl ModernBertModel {
     ///
     /// Input should contain [MASK] tokens at positions to predict.
     /// Returns logits of shape (batch, seq_len, vocab_size).
+    ///
+    /// Runs the encoder, then the masked-LM head (dense → GELU(erf) → LayerNorm) and the
+    /// tied decoder projection — equivalent to candle's `ModernBertForMaskedLM::forward`,
+    /// but reusing our single encoder instance.
     pub fn get_mlm_logits(&self, input_ids: &Tensor) -> Result<Tensor> {
-        // ModernBERT's forward returns hidden states; we need the LM head
-        // For now, return hidden states - full MLM head implementation would
-        // require additional model components
         let hidden_states = self.forward(input_ids, None)?;
-        Ok(hidden_states)
+        let logits = hidden_states
+            .apply(&self.mlm_head_dense)?
+            .gelu_erf()?
+            .apply(&self.mlm_head_norm)?
+            .apply(&self.mlm_decoder)?;
+        Ok(logits)
     }
 
     /// Get the mask token ID.

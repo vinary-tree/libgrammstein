@@ -214,17 +214,18 @@ impl LaTeXRescorer {
         }
 
         #[cfg(feature = "neural-rescore")]
-        if let Some(ref _model) = self.neural_model {
-            // Convert tokens to text for neural model
-            let _text = tokens_to_string(tokens);
-
-            // Neural model scoring would be:
-            // let score = model.score_sequence(&text)?;
-            // return Some(score);
-
-            // For now, use heuristic as the neural integration
-            // requires async runtime and more complex setup
-            return Some(self.heuristic_neural_score(tokens));
+        if let Some(ref model) = self.neural_model {
+            // ModernBERT pseudo-perplexity (lower = more natural). Map it to a [0, 1]
+            // higher-is-better score consistent with the heuristic/embedding components.
+            // On inference error or a degenerate value, fall back to the heuristic.
+            let text = tokens_to_string(tokens);
+            return Some(
+                model
+                    .score_sentence(&text)
+                    .ok()
+                    .and_then(perplexity_to_score)
+                    .unwrap_or_else(|| self.heuristic_neural_score(tokens)),
+            );
         }
 
         // Fallback: compute a heuristic score based on token structure
@@ -398,6 +399,21 @@ impl LaTeXRescorer {
 impl Default for LaTeXRescorer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Map a ModernBERT pseudo-perplexity (lower is better, always ≥ 1) to a `[0, 1]`
+/// higher-is-better score comparable to the heuristic and embedding components.
+///
+/// Returns `None` for non-finite or out-of-range (`< 1`) perplexities so the caller
+/// falls back to the structural heuristic. The mapping `1 / (1 + ln(ppl))` is `1.0`
+/// at the ideal `ppl = 1` and decreases monotonically toward `0` as perplexity grows.
+#[cfg(feature = "neural-rescore")]
+fn perplexity_to_score(perplexity: f64) -> Option<f64> {
+    if perplexity.is_finite() && perplexity >= 1.0 {
+        Some(1.0 / (1.0 + perplexity.ln()))
+    } else {
+        None
     }
 }
 
@@ -597,5 +613,22 @@ mod tests {
         // With only neural score
         let neural_only = rescorer.combine_scores(Some(0.9), None, None);
         assert!((neural_only - 0.9).abs() < 1e-6);
+    }
+
+    #[cfg(feature = "neural-rescore")]
+    #[test]
+    fn test_perplexity_to_score_mapping() {
+        // Ideal perplexity (1.0) maps to the maximum score 1.0.
+        assert!((perplexity_to_score(1.0).expect("finite") - 1.0).abs() < 1e-9);
+        // ppl = e -> 1 / (1 + 1) = 0.5.
+        assert!((perplexity_to_score(std::f64::consts::E).expect("finite") - 0.5).abs() < 1e-9);
+        // Monotonically decreasing in perplexity, and stays in (0, 1].
+        let a = perplexity_to_score(2.0).expect("finite");
+        let b = perplexity_to_score(10.0).expect("finite");
+        assert!(a > b && b > 0.0 && a <= 1.0);
+        // Degenerate values fall through to None (caller uses the heuristic).
+        assert!(perplexity_to_score(f64::INFINITY).is_none());
+        assert!(perplexity_to_score(f64::NAN).is_none());
+        assert!(perplexity_to_score(0.5).is_none());
     }
 }
