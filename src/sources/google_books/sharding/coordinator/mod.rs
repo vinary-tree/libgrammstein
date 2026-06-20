@@ -11,6 +11,7 @@ use super::checkpoint::CheckpointManager;
 use super::config::ShardConfig;
 use super::routing::ShardKey;
 use super::shard::{PrefixTransaction, ShardError, ShardHandle, ShardSyncHandle};
+use libdictenstein::persistent_artrie::eviction::EvictionStats;
 
 use dashmap::DashMap;
 use lru::LruCache;
@@ -623,6 +624,25 @@ impl ShardCoordinator {
     /// Get the number of currently open shards.
     pub fn open_shard_count(&self) -> usize {
         self.shards.len()
+    }
+
+    /// Aggregate overlay-eviction statistics across all open shards.
+    ///
+    /// Sums the per-shard [`EvictionStats`] so the importer can confirm, at checkpoint
+    /// boundaries, that the resident-overlay budget is actually reclaiming cold nodes
+    /// (`nodes_evicted` > 0) and observe the live resident-overlay heap (`resident_bytes`).
+    /// This is the import-wide observability the peak-heap validation (33.79 GB → < 16 GB)
+    /// reads — `resident_bytes` is the live gauge, `nodes_evicted`/`bytes_freed` accumulate.
+    pub fn aggregate_eviction_stats(&self) -> EvictionStats {
+        let mut total = EvictionStats::default();
+        for entry in self.shards.iter() {
+            let stats = entry.value().read().eviction_stats();
+            total.nodes_evicted += stats.nodes_evicted;
+            total.bytes_freed += stats.bytes_freed;
+            total.eviction_cycles += stats.eviction_cycles;
+            total.resident_bytes += stats.resident_bytes;
+        }
+        total
     }
 
     /// Get or create a shard for the given key.

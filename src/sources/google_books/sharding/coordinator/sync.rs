@@ -93,6 +93,19 @@ impl ShardCoordinator {
         }
 
         if errors.is_empty() {
+            // Observability for the peak-heap validation (33.79 GB → < 16 GB): confirm the
+            // resident-overlay budget is reclaiming cold nodes during checkpoints. Computed
+            // only when debug logging is on, so it stays zero-cost on the hot path.
+            if log::log_enabled!(log::Level::Debug) {
+                let evict = self.aggregate_eviction_stats();
+                log::debug!(
+                    "checkpoint_all: {} shards; eviction nodes_evicted={} bytes_freed={} resident_bytes={}",
+                    self.shards.len(),
+                    evict.nodes_evicted,
+                    evict.bytes_freed,
+                    evict.resident_bytes
+                );
+            }
             Ok(())
         } else {
             Err(CoordinatorError::Checkpoint(errors.join("; ")))
