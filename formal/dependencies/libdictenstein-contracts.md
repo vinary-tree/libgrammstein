@@ -6,7 +6,11 @@ recovery. liblevenshtein adapter and query contracts are recorded in
 `formal/dependencies/liblevenshtein-contracts.md`.
 
 Dependency repository: `../libdictenstein`
-Verified revision: `5a0512a66cfd740c874715bb24deb2425b3a9024` (post lock-free
+Verified revision: `e5f3b20` (2026-06-19; supersedes the prior
+`5a0512a66cfd740c874715bb24deb2425b3a9024` pin described next — the durability /
+eviction / overlay surface is byte-identical across `5a0512a..e5f3b20` bar one
+rustdoc comment, and `dependency-contracts` re-verified green at `e5f3b20`). The
+superseded `5a0512a` pin (post lock-free
 overlay refactor — overlay-default writes, lock collapse `Arc<RwLock<T>>` →
 `Arc<T>`, overlay compaction, overlay-backed `DictionaryNode`, the production
 overlay-heap eviction in `checkpoint()`, the CX-universal path-compressed
@@ -30,26 +34,41 @@ benchmark logs under `docs/benchmarks/` (199 `.txt`, 2 `.md`), no code. The
 unsafe-ledger files `formal-verification/UNSAFE_INVENTORY.tsv` and
 `formal-verification/UNSAFE_CONTRACTS.tsv` are committed.
 
-Re-verification (libgrammstein side): `make -C formal complete` re-ran green at the
-current libgrammstein tree (the Tier-3 stub completions, the `DoubleArrayTrieChar`
-read-only generics relaxation, and the Kneser-Ney unseen-n-gram backoff fix) —
+Re-verification (libgrammstein side): the libgrammstein half (`make -C formal
+complete`) re-ran green at the current libgrammstein tree (the Tier-3
+implementation completions A1–A8, the `DoubleArrayTrieChar` read-only generics
+relaxation, and the Kneser-Ney unseen-n-gram backoff fix) on 2026-06-19 —
 source-hygiene, Rocq, TLC safety + liveness, Apalache, rust-alignment, stress,
 TLAPS, and the `--all-features` source-hygiene suite (943 tests) all pass. Those
 changes touch n-gram smoothing / dictionary generics / neural / CLI surfaces, none
 of which appear in the durability/eviction/overlay specs or the discount-bound Rocq
 proofs, so the imported contract surface is unchanged.
 
-`make -C formal complete-with-dependencies` could not complete the cross-repo
-`dependency-contracts` step: the local `../libdictenstein` checkout is at `e5f3b20`
-(its master, past the v0.2.0 release `b655cfb09e59` and this pinned `5a0512a`), and
-at that HEAD libdictenstein's own correspondence test
-`group_commit_writes_returned_lsns_in_wal_order`
-(`tests/persistent_artrie_formal_correspondence.rs:1682`) fails (expected 3 LSNs,
-got 0). That is a libdictenstein-side issue at a revision past the released
-contract — reported for guidance per the no-modify-libdictenstein rule, not a
-libgrammstein regression. The verified contract revision therefore remains
-`5a0512a` (the durability/eviction/overlay surface is identical at the v0.2.0
-release `b655cfb`); re-pinning forward awaits a green libdictenstein HEAD.
+Cross-repo `dependency-contracts` ran green against libdictenstein HEAD `e5f3b20`
+(its master) on 2026-06-19: all 57 Rust correspondence suites plus both group-commit
+correspondence tests reported 0 failures (`make -C formal dependency-contracts`,
+exit 0). The only change past the v0.2.0 release `b655cfb09e59` up to `e5f3b20` is a
+single rustdoc comment in `src/lib.rs`, so the verified surface is byte-identical to
+the release and to the prior pin `5a0512a`. The verified contract revision is
+therefore advanced to `e5f3b20`.
+
+Flaky-test caveat (libdictenstein-side, reported, not blocking): one correspondence
+test, `group_commit_writes_returned_lsns_in_wal_order`
+(`tests/persistent_artrie_formal_correspondence.rs:1682`), is contention-sensitive —
+it can intermittently assert `records_committed == 0` instead of 3 under heavy
+full-parallel-suite CPU load (measured 13/14 passes in isolation). Root cause in
+`src/persistent_artrie/core/group_commit.rs:678-690`: `flush_batch` publishes
+`synced_lsn` with `Ordering::Release` — the exact edge `wait_for_lsn` (line 544)
+spins on — *before* it takes the stats lock to increment `records_committed`, so a
+waiter released by `wait_for_lsn` can read the statistic in the window before the
+commit thread updates it. This is a pre-existing test/stat-ordering race (it predates
+v0.2.0, since the only post-release change is documentation); it was reported to
+libdictenstein for guidance per the no-modify-libdictenstein rule. It does not affect
+the imported durability/eviction/overlay contract surface: the data-path
+`synced_lsn` publication those contracts depend on is itself correctly
+Release-ordered and lossless — only the auxiliary `records_committed` *statistic*
+lags the release edge. A `dependency-contracts` re-run under heavy load may need a
+retry until libdictenstein orders the stat update ahead of the `synced_lsn` store.
 
 Eviction-surface note (relevant to importer OOM reasoning): at `5a0512a` all three
 ARTries implement `EvictableARTrie`, but reclamation is asymmetric — the byte
