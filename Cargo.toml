@@ -339,6 +339,10 @@ latex-rag = ["latex", "rag"]
 # Full LaTeX support with all features
 latex-full = ["latex-neural", "latex-rag"]
 
+[[example]]
+name = "correct_sentence"
+required-features = ["lling-llang-integration"]
+
 [[bin]]
 name = "grammstein"
 path = "src/bin/grammstein.rs"

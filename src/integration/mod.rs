@@ -40,11 +40,18 @@
 //! let score = lm.score_sequence(&["the", "quick", "brown", "fox"]);
 //! ```
 
+#[cfg(feature = "lling-llang-integration")]
+pub mod corrector;
 pub mod lazy_ngram;
 mod lling_llang;
 pub mod vocabulary;
 pub mod wfst_export;
 
+#[cfg(feature = "lling-llang-integration")]
+pub use self::corrector::{
+    CorrectionResult, CorrectorConfig, CorrectorError, EditConfig, HierarchicalCorrector,
+    LevenshteinCorrectionLayer,
+};
 pub use self::lazy_ngram::{NgramHistoryKey, NgramLazyWfst, NgramStateRegistry, NgramStateSource};
 pub use self::lling_llang::GrammsteinLanguageModel;
 pub use self::vocabulary::{WordId, WordVocabulary, EOS_WORD_ID, UNK_WORD_ID};
