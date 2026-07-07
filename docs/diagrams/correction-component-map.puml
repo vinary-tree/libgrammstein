@@ -1,0 +1,57 @@
+@startuml correction-component-map
+' Five-crate component + data-flow map for hierarchical spelling/grammar
+' correction. One colour per crate; arrows show the acyclic dependency DAG and
+' the artifacts each crate contributes to a correction.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Component & data-flow map — who provides each dimension
+
+rectangle "**libdictenstein**\nDictionary / DictionaryNode traits\nPersistentVocabARTrie (lock-free, UTF-8)" as dict #37474F
+rectangle "**liblevenshtein**\nLevenshtein automaton (Transducer)\n+ Zompist phonetics" as lev #1565C0
+rectangle "**lling-llang**\nWFST framework: Lattice, semirings,\nCorrectionLayer, viterbi / nbest" as llang #6A1B9A
+rectangle "**libgrammstein**\nGoogle-Books LM factory:\nModified Kneser-Ney n-gram + subword embeddings" as gram #2E7D32
+rectangle "**duallity**\nWFST adapters\n(LevenshteinWfst ∘ compose)" as dual #00838F
+
+rectangle "vocabulary\n(term ↔ u64)" as vocab #455A64
+rectangle "MKN n-gram + embeddings" as lm #455A64
+rectangle "LevenshteinCorrectionLayer\n(Transducer over the vocab)" as spell #1565C0
+rectangle "LanguageModelLayer\n(GrammsteinLanguageModel)" as lmlayer #2E7D32
+
+' dependency DAG (acyclic): who depends on whom
+lev --> dict : Dictionary trait
+llang ..> lev : opt (levenshtein)
+llang ..> dict : opt (lattice)
+gram --> dict
+gram --> lev
+gram ..> llang : opt (integration)
+dual --> lev
+dual --> llang
+
+' data flow into a correction
+gram --> vocab
+gram --> lm
+vocab --> spell : traversed in place\n(persistent trie)
+lev --> spell : automaton
+lm --> lmlayer : score_continuation()
+spell --> llang : DIM 1 (orthographic)
+lmlayer --> llang : DIM 4+5 (contextual+semantic)
+
+legend right
+  | Colour | Crate / role |
+  |<#37474F> | libdictenstein — dictionary substrate |
+  |<#1565C0> | liblevenshtein — edit-distance automaton |
+  |<#6A1B9A> | lling-llang — WFST host |
+  |<#2E7D32> | libgrammstein — LM factory |
+  |<#00838F> | duallity — WFST adapters |
+endlegend
+@enduml

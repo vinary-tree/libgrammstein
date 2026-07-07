@@ -1,0 +1,51 @@
+@startuml correction-dimensions
+' The N heterogeneous "dimensions" of approximate matching, each with its own
+' metric/engine, unified into one joint score by a semiring. Colour groups a
+' dimension with the crate that provides it.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title N-dimensional approximate matching — heterogeneous axes fused by a semiring
+
+rectangle "**noisy channel**\nŵ = argmax ℙ(x│w)·ℙ(w)" as nc #455A64
+
+rectangle "**DIM 1 · Orthographic**\nedit distance (a metric)\nliblevenshtein automaton" as d1 #1565C0
+rectangle "**DIM 2 · Phonetic**\nZompist sound-alike\nliblevenshtein + libgrammstein" as d2 #1E88E5
+rectangle "**DIM 3 · Syntactic**\nCFG membership (constraint)\nlling-llang CfgFilter" as d3 #6A1B9A
+rectangle "**DIM 4 · Contextual**\n−log ℙ(w│ctx) (likelihood)\nlibgrammstein MKN n-gram" as d4 #2E7D32
+rectangle "**DIM 5 · Semantic**\ncos-similarity → pseudo-ℙ\nlibgrammstein embeddings" as d5 #388E3C
+
+rectangle "**Semiring**  (K, ⊕, ⊗, 0̄, 1̄)\n⊗ combines factors along a path\n⊕ selects among competing paths\nTropical: (min, +)   Log: (logsumexp, +)" as sr #00838F
+rectangle "**joint score**\nbest correction = shortest / max-ℙ path" as js #455A64
+
+nc --> d1 : channel
+nc --> d2 : channel
+nc --> d3 : prior
+nc --> d4 : prior
+nc --> d5 : prior
+
+d1 --> sr
+d2 --> sr
+d3 --> sr
+d4 --> sr
+d5 --> sr
+sr --> js
+
+note bottom of sr
+  The dimensions are **heterogeneous** —
+  metric / likelihood / constraint. The
+  semiring is the common currency that
+  makes them composable. Each independent
+  factor is one dimension → the WFST product
+  construction makes the joint search N-D.
+end note
+@enduml

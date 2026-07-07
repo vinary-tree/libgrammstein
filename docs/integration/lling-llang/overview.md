@@ -450,6 +450,10 @@ model.prewarm_contexts(&[
 
 ## Next Steps
 
+- [Hierarchical Correction](hierarchical-correction.md): the end-to-end design — noisy channel, dimensions, WFST composition
+- [Dimensions](dimensions.md): each approximate-matching dimension, its weight, and the hybrid fusion
+- [Dictionary Backend](dictionary-backend.md): why the Levenshtein automaton runs directly over the persistent vocabulary trie (no DoubleArrayTrie export)
+- [Pipeline Assembly](pipeline-assembly.md): the concrete `HierarchicalCorrector` API
 - [Pipeline Usage](pipeline-usage.md): Complete pipeline examples
 - [PathMap Synergy](pathmap-synergy.md): Shared infrastructure
 - [Hybrid Model](../../components/hybrid/overview.md): Model details

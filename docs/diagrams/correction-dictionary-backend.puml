@@ -1,0 +1,48 @@
+@startuml correction-dictionary-backend
+' How the Levenshtein automaton is fed. The persistent vocab trie's Dictionary
+' node handle (VocabTrieNodeRef = OverlayDictionaryNode) owns an Arc to each
+' overlay node and re-resolves children on demand, so the automaton descends the
+' FULL depth of the trie and runs directly over the mmap'd vocabulary — no in-RAM
+' materialization. Green = the working, default path. Blue (dashed) = the optional
+' materialized-trie side branch, reserved for small static dictionaries.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Dictionary backend — feeding the Levenshtein automaton
+
+rectangle "**Google-Books checkpoint**\nPersistentVocabARTrie (mmap, ~13M terms)\nlock-free overlay, UTF-8" as pv #37474F
+
+rectangle "**Dictionary::contains()**\nwalks the real trie — WORKS\n(used to skip in-vocabulary tokens)" as contains #2E7D32
+rectangle "**Dictionary::root() / DictionaryNode::transition()**\nVocabTrieNodeRef = OverlayDictionaryNode<CharKey,u64>\nowns an Arc per overlay node → descends FULL depth" as trans #2E7D32
+
+rectangle "**liblevenshtein Transducer**\nquery_with_distance(term, k)\nruns directly over the persistent trie" as auto #1565C0
+rectangle "candidate corrections\n{the·1, ten·1, tea·2}" as cand #2E7D32
+
+rectangle "**optional: DynamicDawgChar / DoubleArrayTrie**\nin-memory automaton materialized from\niter_terms() — small, static dictionaries only" as dawg #90A4AE
+
+pv --> contains
+pv --> trans
+contains --> auto : membership test
+trans --> auto : full traversal
+auto --> cand
+
+pv -[#607D8B,dashed]-> dawg : (only if small & static)
+dawg -[#607D8B,dashed]-> auto : same generic\nDictionary interface
+
+note bottom of trans
+  Fixed in libdictenstein: VocabTrieNodeRef was superseded by the shared
+  OverlayDictionaryNode, which holds the child Arc and re-resolves children
+  on demand. The former depth-1 snapshot (childless nodes) is gone, so the
+  generic LevenshteinCorrectionLayer runs **directly over the mmap'd
+  SharedVocabARTrie** — no in-RAM copy, no libgrammstein change required.
+end note
+@enduml

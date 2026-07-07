@@ -1,0 +1,46 @@
+@startuml correction-wfst-composition
+' Why the joint search is *literally* N-dimensional: WFST composition builds a
+' product automaton whose states are tuples (q1,q2), and the path weight is the
+' semiring product of the per-dimension weights.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title WFST composition — states are tuples, so the search is N-dimensional
+
+rectangle "**T₁ · edit-distance**\nstates q₁, weight = distance" as t1 #1565C0
+rectangle "**T₂ · n-gram LM**\nstates q₂, weight = −log ℙ(w│ctx)" as t2 #2E7D32
+
+rectangle "**T = T₁ ∘ T₂**\nstates = pairs (q₁, q₂)  ← Cartesian product\npath weight  w(p) = ⊗ᵢ w(eᵢ)  (semiring product)" as comp #6A1B9A
+
+rectangle "**decode**\nviterbi (Tropical) / nbest (Log)\nbeam pruning keeps ∏ of sizes tractable" as dec #37474F
+rectangle "**ŵ** — joint-optimal correction" as out #455A64
+
+t1 --> comp : ∘
+t2 --> comp : ∘
+comp --> dec
+dec --> out
+
+note right of comp
+  Searching the composition is dynamic
+  programming over a 2-D grid of (q₁,q₂);
+  stacking Tₙ makes it an n-D grid.
+  Global optimality does **not** compose
+  from per-layer optima → beam / k-best,
+  a Pareto-frontier phenomenon.
+end note
+
+legend bottom
+  |= semiring |= ⊕ |= ⊗ |= decodes to |
+  | Tropical | min | + | shortest path (edit distance) |
+  | Log | logsumexp | + | max-probability path |
+endlegend
+@enduml

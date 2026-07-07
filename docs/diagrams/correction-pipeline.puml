@@ -1,0 +1,52 @@
+@startuml correction-pipeline
+' End-to-end correction as a lattice that is expanded, reweighted, then
+' collapsed. Colour encodes the role of each stage: expand (blue), filter
+' (purple), rescore (green), decode (grey).
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Correction pipeline — expand → reweight → collapse
+
+rectangle "**Input**\n\"I saw teh quikc brown fox to the stroe\"" as in #455A64
+rectangle "**0. Tokenize → input lattice**\none original edge per token slot" as tok #455A64
+
+rectangle "**1. LevenshteinCorrectionLayer**  (DIM 1)\nautomaton ∩ Google-Books vocab\nteh→{the·1, ten·1, tea·2}  stroe→{store·1, stroke·2}\nweight = edit distance (Tropical)" as spell #1565C0
+rectangle "**(PhoneticRescoreLayer)**  (DIM 2)\nsound-alike candidates (Zompist)" as phon #1E88E5
+
+rectangle "**2. CfgFilterLayer**  (DIM 3)\nEarley parse over the lattice —\ndrop / penalise ungrammatical paths\n(active only when a grammar is supplied)" as cfg #6A1B9A
+
+rectangle "**3. LanguageModelLayer**  (DIM 4+5)\nw' = (1−λ)·w + λ·(−log ℙ(word | context))\nMKN n-gram ⊕ subword embedding" as lm #2E7D32
+
+rectangle "**4. viterbi / nbest**\nshortest-path argmax over the semiring" as dec #37474F
+rectangle "**Output**\n\"I saw the quick brown fox two the store\"" as out #455A64
+
+in --> tok
+tok --> spell : EXPAND
+spell --> phon
+phon --> cfg : PRUNE
+cfg --> lm : REWEIGHT
+lm --> dec : COLLAPSE
+dec --> out
+
+note right of spell
+  Lattice now encodes a
+  **combinatorial space**
+  of candidate sentences.
+end note
+note right of lm
+  Context via topological
+  forward-DP; the LM prior
+  overturns even the
+  zero-edit real-word
+  error  to → two.
+end note
+@enduml
