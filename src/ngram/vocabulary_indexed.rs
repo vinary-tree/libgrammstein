@@ -216,7 +216,7 @@ impl<D> VocabularyIndexedDictionary<D> {
     /// Returns `None` if any word is OOV (out of vocabulary).
     fn encode_key_existing(&self, words: &[&str]) -> Option<String> {
         let mut buf = Vec::with_capacity(words.len() * 2);
-        let guard = self.vocabulary.read();
+        let guard = self.vocabulary.as_ref();
         for word in words {
             let index = guard.get_index(word)?;
             encode_varint(index, &mut buf);
@@ -227,7 +227,7 @@ impl<D> VocabularyIndexedDictionary<D> {
     /// Encode words to a varint key, acquiring new indices as needed.
     fn encode_key_inserting(&self, words: &[&str]) -> String {
         let mut buf = Vec::with_capacity(words.len() * 2);
-        let guard = self.vocabulary.write();
+        let guard = self.vocabulary.as_ref();
         for word in words {
             let index = guard
                 .insert(word)
@@ -673,7 +673,7 @@ mod tests {
         assert!(dict.get_ngram(&["unknown", "word"]).is_none());
 
         // Vocabulary should still be empty (no side effects)
-        assert_eq!(dict.vocabulary().read().len(), 0);
+        assert_eq!(dict.vocabulary().as_ref().len(), 0);
     }
 
     #[test]
@@ -874,12 +874,12 @@ mod tests {
         let (_dir, dict) = create_test_dict();
 
         dict.insert_ngram(&["known"], 7);
-        let len_before = dict.vocabulary().read().len();
+        let len_before = dict.vocabulary().as_ref().len();
 
         assert!(dict.get_ngram(&["missing"]).is_none());
         assert!(!dict.contains_ngram(&["known", "missing"]));
         assert_eq!(
-            dict.vocabulary().read().len(),
+            dict.vocabulary().as_ref().len(),
             len_before,
             "read-only query paths must not allocate vocabulary indices"
         );
@@ -895,7 +895,7 @@ mod tests {
 
         // Insert enough words to require multi-byte varints
         {
-            let guard = vocab.write();
+            let guard = vocab.as_ref();
             for i in 0..200 {
                 guard.insert(&format!("word{}", i)).expect("insert word");
             }

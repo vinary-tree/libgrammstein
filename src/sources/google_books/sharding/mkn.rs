@@ -703,7 +703,7 @@ mod tests {
         // so each varint byte is ASCII and the UTF-8 representation is identical).
         let encode = |words: &[&str]| -> String {
             let mut buf = Vec::with_capacity(words.len() * 2);
-            let guard = vocab.write();
+            let guard = vocab.as_ref();
             for word in words {
                 let idx = guard.insert(word).expect("test vocab insert");
                 crate::ngram::vocabulary::encode_varint(idx, &mut buf);
@@ -914,7 +914,7 @@ mod tests {
 
         // Get the index for "quick" to check predecessor counts
         let quick_idx = vocab
-            .read()
+            .as_ref()
             .get_index("quick")
             .expect("quick should be in vocab");
         let quick_key = encode_indices_to_key_bytes(&[quick_idx]);
@@ -926,7 +926,7 @@ mod tests {
 
         // Get the index for "the" to check successor counts
         let the_idx = vocab
-            .read()
+            .as_ref()
             .get_index("the")
             .expect("the should be in vocab");
         let the_key = encode_indices_to_key_bytes(&[the_idx]);

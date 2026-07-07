@@ -1068,7 +1068,7 @@ impl ImportCheckpoint {
     /// # Returns
     ///
     /// The number of keys written.
-    pub fn save_to_trie<T>(&self, trie: &mut T) -> Result<usize, CheckpointError>
+    pub fn save_to_trie<T>(&self, trie: &T) -> Result<usize, CheckpointError>
     where
         T: TrieCheckpointStorage,
     {
@@ -1412,7 +1412,7 @@ impl ImportCheckpoint {
     /// Delete checkpoint data from a trie.
     ///
     /// Uses prefix deletion to remove all checkpoint keys efficiently.
-    pub fn delete_from_trie<T>(trie: &mut T) -> Result<usize, CheckpointError>
+    pub fn delete_from_trie<T>(trie: &T) -> Result<usize, CheckpointError>
     where
         T: TrieCheckpointStorage,
     {
@@ -1426,7 +1426,7 @@ impl ImportCheckpoint {
     /// only a single prefix status changes.
     pub fn save_prefix_status_to_trie<T>(
         &self,
-        trie: &mut T,
+        trie: &T,
         order: u8,
         prefix: &str,
         status: PrefixStatusCode,
@@ -1442,7 +1442,7 @@ impl ImportCheckpoint {
 
     /// Remove a prefix status from the trie (e.g., when retrying a failed prefix).
     pub fn remove_prefix_status_from_trie<T>(
-        trie: &mut T,
+        trie: &T,
         order: u8,
         prefix: &str,
     ) -> Result<bool, CheckpointError>
@@ -1466,16 +1466,19 @@ pub trait TrieCheckpointStorage {
     type Error: std::error::Error;
 
     /// Store a checkpoint key with u64 value.
-    fn store_checkpoint_u64(&mut self, key: &str, value: u64) -> Result<(), Self::Error>;
+    ///
+    /// Takes `&self`: the backing tries are lock-free (overlay CAS) after
+    /// libdictenstein's F4 lock-collapse, so no exclusive borrow is required.
+    fn store_checkpoint_u64(&self, key: &str, value: u64) -> Result<(), Self::Error>;
 
     /// Load a checkpoint key's u64 value.
     fn load_checkpoint_u64(&self, key: &str) -> Result<Option<u64>, Self::Error>;
 
     /// Delete a checkpoint key.
-    fn delete_checkpoint_key(&mut self, key: &str) -> Result<bool, Self::Error>;
+    fn delete_checkpoint_key(&self, key: &str) -> Result<bool, Self::Error>;
 
     /// Delete all checkpoint keys with a given prefix.
-    fn delete_checkpoint_prefix(&mut self, prefix: &str) -> Result<usize, Self::Error>;
+    fn delete_checkpoint_prefix(&self, prefix: &str) -> Result<usize, Self::Error>;
 
     /// Iterate over all checkpoint keys with a given prefix.
     fn iter_checkpoint_prefix(&self, prefix: &str) -> Result<Vec<(String, u64)>, Self::Error>;

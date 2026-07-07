@@ -923,16 +923,16 @@ mod tests {
         assert!(model.ngram_count() > 0, "Model should contain n-grams");
 
         // Verify words are in the SharedVocabARTrie (not model.in_vocabulary, which uses legacy encoding)
-        assert!(vocab.read().contains("the"), "Expected 'the' in vocabulary");
+        assert!(vocab.as_ref().contains("the"), "Expected 'the' in vocabulary");
         assert!(
-            vocab.read().contains("quick"),
+            vocab.as_ref().contains("quick"),
             "Expected 'quick' in vocabulary"
         );
         assert!(
-            vocab.read().contains("brown"),
+            vocab.as_ref().contains("brown"),
             "Expected 'brown' in vocabulary"
         );
-        assert!(vocab.read().contains("fox"), "Expected 'fox' in vocabulary");
+        assert!(vocab.as_ref().contains("fox"), "Expected 'fox' in vocabulary");
 
         // Verify we can look up n-grams using the vocabulary for encoding
         let bigram_key = encode_ngram_key(&["the", "quick"], &vocab);
@@ -967,10 +967,10 @@ mod tests {
         // so it won't be corrupted by the pipe separator.
         // Verify through the vocabulary, not the model's legacy query methods
         assert!(
-            vocab.read().contains("foo|bar"),
+            vocab.as_ref().contains("foo|bar"),
             "Expected 'foo|bar' as single token in vocabulary"
         );
-        assert!(vocab.read().contains("baz"), "Expected 'baz' in vocabulary");
+        assert!(vocab.as_ref().contains("baz"), "Expected 'baz' in vocabulary");
 
         // vocab_size should be 2 (the two unique words)
         assert_eq!(model.vocab_size(), 2, "Should have exactly 2 unique words");
@@ -1020,9 +1020,9 @@ mod tests {
         let vocab = create_vocabulary(&vocab_path).expect("Failed to create vocabulary");
 
         // Pre-populate the vocabulary
-        vocab.write().insert("pre").expect("insert pre");
-        vocab.write().insert("populated").expect("insert populated");
-        vocab.write().insert("words").expect("insert words");
+        vocab.as_ref().insert("pre").expect("insert pre");
+        vocab.as_ref().insert("populated").expect("insert populated");
+        vocab.as_ref().insert("words").expect("insert words");
 
         let corpus_path = create_test_corpus(dir.path(), "pre populated words are here");
         let reader = PlaintextReader::from_file(&corpus_path).expect("Failed to create reader");
@@ -1036,7 +1036,7 @@ mod tests {
 
         // The vocabulary should have grown
         assert!(
-            vocab.read().len() > 3,
+            vocab.as_ref().len() > 3,
             "Vocabulary should have grown with new words"
         );
         assert!(model.vocab_size() > 0);

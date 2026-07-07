@@ -253,7 +253,7 @@ pub enum TrieCheckpointError {
 impl TrieCheckpointStorage for PersistentARTrie<u64> {
     type Error = TrieCheckpointError;
 
-    fn store_checkpoint_u64(&mut self, key: &str, value: u64) -> Result<(), Self::Error> {
+    fn store_checkpoint_u64(&self, key: &str, value: u64) -> Result<(), Self::Error> {
         self.upsert_bytes(key.as_bytes(), value)
             .map_err(|e| TrieCheckpointError::TrieError(e.to_string()))?;
         Ok(())
@@ -263,11 +263,11 @@ impl TrieCheckpointStorage for PersistentARTrie<u64> {
         Ok(self.get_value_bytes(key.as_bytes()))
     }
 
-    fn delete_checkpoint_key(&mut self, key: &str) -> Result<bool, Self::Error> {
+    fn delete_checkpoint_key(&self, key: &str) -> Result<bool, Self::Error> {
         Ok(self.remove(key))
     }
 
-    fn delete_checkpoint_prefix(&mut self, prefix: &str) -> Result<usize, Self::Error> {
+    fn delete_checkpoint_prefix(&self, prefix: &str) -> Result<usize, Self::Error> {
         Ok(self.remove_prefix(prefix.as_bytes()))
     }
 

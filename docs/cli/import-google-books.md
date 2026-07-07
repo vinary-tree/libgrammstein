@@ -118,6 +118,27 @@ otherwise produce a tiny budget.
   eliminates per-allocation `mprotect` syscall pressure independent of any
   of these flags. There is no CLI knob — it's a compile-time choice.
 
+## Compatibility & migration (libdictenstein lock-free upgrade)
+
+The importer now builds against libdictenstein's lock-free persistent-ARTrie
+upgrade. Two operational consequences:
+
+- **Re-import checkpoints built before the fix.** A prior bug corrupted a
+  vocabulary/n-gram checkpoint on reopen once its serialized image spanned more
+  than a few arenas (roughly a few thousand terms) — i.e. every at-scale
+  Google-Books checkpoint. That is now fixed, but **checkpoints written by an
+  older build are not trustworthy and must be re-imported from scratch.** A
+  fresh import writes a correct image; there is no in-place repair.
+- **One owner per checkpoint (Tier-1 advisory lock).** Opening any persistent
+  trie (vocabulary, n-gram shard, or checkpoint-metadata trie) now takes an
+  advisory `flock` on a `<path>.wlock` sidecar. A second **process** — or a
+  second independent handle to the same file — is rejected with a clear
+  "already opened/locked by another process or handle" error instead of
+  silently corrupting the file. Same-process reopen (e.g. resume-after-crash)
+  is unaffected. The `.wlock` sidecars are transient (git-ignored) and released
+  when the owning handle drops; a stale one after a hard kill can be removed
+  manually.
+
 ## See also
 
 - `docs/training/large-corpora.md` — broader corpus-scale strategies.

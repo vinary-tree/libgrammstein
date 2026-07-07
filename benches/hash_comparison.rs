@@ -31,7 +31,7 @@ fn load_vocabulary_words() -> Vec<String> {
 
     // Use O(1) get_term() lookups to collect all words. Hold the read guard
     // for the duration of the iteration to amortize lock-acquisition cost.
-    let guard = vocab.read();
+    let guard = vocab.as_ref();
     let count = guard.len() as u64;
     (1..=count).filter_map(|i| guard.get_term(i)).collect()
 }

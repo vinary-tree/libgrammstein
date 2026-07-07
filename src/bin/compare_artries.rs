@@ -139,11 +139,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load vocabularies using SharedVocabARTrie for O(1) reverse lookups
     println!("Loading vocabulary 1: {:?}", args.vocab1);
     let vocab1 = open_vocabulary(&args.vocab1)?;
-    println!("  {} terms in vocabulary 1", vocab1.read().len());
+    println!("  {} terms in vocabulary 1", vocab1.as_ref().len());
 
     println!("Loading vocabulary 2: {:?}", args.vocab2);
     let vocab2 = open_vocabulary(&args.vocab2)?;
-    println!("  {} terms in vocabulary 2", vocab2.read().len());
+    println!("  {} terms in vocabulary 2", vocab2.as_ref().len());
 
     // Compare vocabularies
     println!("\nComparing vocabularies...");
@@ -202,7 +202,7 @@ fn compare_vocabularies(
     // Get all terms from vocab1 using iter_terms()
     let mut terms1 = HashSet::new();
     {
-        let guard = vocab1.read();
+        let guard = vocab1.as_ref();
         for term in guard.iter_terms() {
             result.vocab1_count += 1;
             terms1.insert(term);
@@ -212,7 +212,7 @@ fn compare_vocabularies(
     // Get all terms from vocab2 using iter_terms()
     let mut terms2 = HashSet::new();
     {
-        let guard = vocab2.read();
+        let guard = vocab2.as_ref();
         for term in guard.iter_terms() {
             result.vocab2_count += 1;
             terms2.insert(term);
@@ -284,7 +284,7 @@ fn compare_ngrams_streaming(
             let indices = decode_ngram_key(&key1);
 
             // Reverse lookup to get words (O(1) per index)
-            let guard = vocab1.read();
+            let guard = vocab1.as_ref();
             let words: Vec<String> = indices
                 .iter()
                 .filter_map(|&idx| {
@@ -294,7 +294,6 @@ fn compare_ngrams_streaming(
                     guard.get_term(idx)
                 })
                 .collect();
-            drop(guard);
 
             if words.len() != indices.len() {
                 result.decode_failures_1 += 1;
@@ -367,7 +366,7 @@ fn compare_ngrams_streaming(
                 result.trie2_count += 1;
 
                 let indices = decode_ngram_key(&key2);
-                let guard = vocab2.read();
+                let guard = vocab2.as_ref();
                 let words: Vec<String> = indices
                     .iter()
                     .filter_map(|&idx| {
@@ -377,7 +376,6 @@ fn compare_ngrams_streaming(
                         guard.get_term(idx)
                     })
                     .collect();
-                drop(guard);
 
                 if words.len() != indices.len() {
                     result.decode_failures_2 += 1;

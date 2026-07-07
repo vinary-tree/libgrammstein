@@ -350,7 +350,7 @@ where
         // Convert vocabulary to portable format if provided
         // Use O(1) get_term() lookups, iterating in index order
         let portable_vocab = vocabulary.map(|vocab| {
-            let guard = vocab.read();
+            let guard = vocab.as_ref();
             let len = guard.len();
             let mut words = Vec::with_capacity(len);
 

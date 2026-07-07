@@ -292,7 +292,7 @@ impl AggregatedLanguageModelDictionary {
     /// Note: Prefer using `vocabulary().get_term(index)` for O(1) lookups
     /// instead of building a full HashMap when only a few lookups are needed.
     pub fn build_reverse_vocabulary(&self) -> std::collections::HashMap<u64, String> {
-        let guard = self.vocabulary.read();
+        let guard = self.vocabulary.as_ref();
         let len = guard.len();
         let mut map = std::collections::HashMap::with_capacity(len);
         for i in 1..=(len as u64) {
@@ -307,7 +307,7 @@ impl AggregatedLanguageModelDictionary {
     pub fn checkpoint(&self) -> Result<(), String> {
         // Checkpoint vocabulary first
         self.vocabulary
-            .write()
+            .as_ref()
             .checkpoint()
             .map_err(|e| format!("Vocabulary checkpoint failed: {}", e))?;
 
@@ -556,11 +556,11 @@ mod tests {
         // Verify SharedVocabARTrie has the methods we need
         // This test verifies the API we depend on exists
         fn _check_api(v: &SharedVocabARTrie) {
-            let _: libdictenstein::persistent_artrie::error::Result<u64> = v.write().insert("word");
-            let _: Option<u64> = v.read().get_index("word");
-            let _: bool = v.read().contains("word");
-            let _: usize = v.read().len();
-            let _: bool = v.read().is_empty();
+            let _: libdictenstein::persistent_artrie::error::Result<u64> = v.as_ref().insert("word");
+            let _: Option<u64> = v.as_ref().get_index("word");
+            let _: bool = v.as_ref().contains("word");
+            let _: usize = v.as_ref().len();
+            let _: bool = v.as_ref().is_empty();
         }
     }
 
@@ -592,7 +592,7 @@ mod tests {
 
         assert_eq!(dict.get_ngram(&["missing"]), None);
         assert_eq!(
-            vocabulary.read().len(),
+            vocabulary.as_ref().len(),
             0,
             "read-only aggregated queries must not allocate vocabulary indices"
         );

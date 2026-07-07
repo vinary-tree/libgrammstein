@@ -29,7 +29,6 @@ use crate::ngram::vocabulary::{
 };
 use libdictenstein::persistent_artrie::PersistentARTrie;
 use libdictenstein::Dictionary;
-use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -94,7 +93,7 @@ pub enum NgramStorage {
         /// The trie instance (byte-keyed). Holds both n-gram data and
         /// `ImportCheckpoint` metadata (metadata keys are prefixed with
         /// `\x00` per checkpoint.rs convention).
-        trie: Arc<RwLock<PersistentARTrie<u64>>>,
+        trie: Arc<PersistentARTrie<u64>>,
         /// Optional lock-free concurrent vocabulary for encoding.
         vocabulary: Option<SharedConcurrentVocab>,
         /// Storage statistics.
@@ -108,7 +107,7 @@ pub enum NgramStorage {
         /// Auxiliary checkpoint-metadata trie. Stores `ImportCheckpoint`
         /// progress separately from the n-gram data shards. Created at
         /// `{output_path}.checkpoint.artrie`.
-        checkpoint_trie: Arc<RwLock<PersistentARTrie<u64>>>,
+        checkpoint_trie: Arc<PersistentARTrie<u64>>,
         /// Optional lock-free concurrent vocabulary for encoding.
         vocabulary: Option<SharedConcurrentVocab>,
         /// Storage statistics.
@@ -156,7 +155,7 @@ impl NgramStorage {
         // create); the explicit enable_lockfree() toggle was removed.
 
         Ok(Self::SingleTrie {
-            trie: Arc::new(RwLock::new(trie)),
+            trie: Arc::new(trie),
             vocabulary,
             stats: Arc::new(StorageStats::default()),
         })
@@ -207,7 +206,7 @@ impl NgramStorage {
 
         Ok(Self::Sharded {
             coordinator,
-            checkpoint_trie: Arc::new(RwLock::new(checkpoint_trie)),
+            checkpoint_trie: Arc::new(checkpoint_trie),
             vocabulary,
             stats: Arc::new(StorageStats::default()),
         })
@@ -225,7 +224,7 @@ impl NgramStorage {
     /// `delete_import_checkpoint`) — direct trie access is reserved for the
     /// MKN compute path in single-trie mode (which iterates n-gram data
     /// living in the same trie).
-    pub fn checkpoint_trie(&self) -> &Arc<RwLock<PersistentARTrie<u64>>> {
+    pub fn checkpoint_trie(&self) -> &Arc<PersistentARTrie<u64>> {
         match self {
             Self::SingleTrie { trie, .. } => trie,
             Self::Sharded {
@@ -238,8 +237,8 @@ impl NgramStorage {
     /// flush it to disk (truncating its WAL).
     pub fn save_import_checkpoint(&self, checkpoint: &ImportCheckpoint) -> StorageResult<()> {
         let trie_arc = self.checkpoint_trie();
-        let mut trie = trie_arc.write();
-        checkpoint.save_to_trie(&mut *trie).map_err(|e| {
+        let trie = trie_arc.as_ref();
+        checkpoint.save_to_trie(trie).map_err(|e| {
             StorageError::Trie(format!("Failed to save import checkpoint to trie: {}", e))
         })?;
         trie.checkpoint()
@@ -252,8 +251,8 @@ impl NgramStorage {
     /// checkpoints where WAL replay on next open is acceptable.
     pub fn save_import_checkpoint_async(&self, checkpoint: &ImportCheckpoint) -> StorageResult<()> {
         let trie_arc = self.checkpoint_trie();
-        let mut trie = trie_arc.write();
-        checkpoint.save_to_trie(&mut *trie).map_err(|e| {
+        let trie = trie_arc.as_ref();
+        checkpoint.save_to_trie(trie).map_err(|e| {
             StorageError::Trie(format!("Failed to save import checkpoint to trie: {}", e))
         })?;
         trie.sync().map_err(|e| {
@@ -266,7 +265,7 @@ impl NgramStorage {
     /// exists. Returns `Ok(None)` when no checkpoint has been saved.
     pub fn load_import_checkpoint(&self) -> Result<Option<ImportCheckpoint>, CheckpointError> {
         let trie_arc = self.checkpoint_trie();
-        let trie = trie_arc.read();
+        let trie = trie_arc.as_ref();
         ImportCheckpoint::load_from_trie(&*trie)
     }
 
@@ -275,8 +274,8 @@ impl NgramStorage {
     /// Returns the number of checkpoint keys removed.
     pub fn delete_import_checkpoint(&self) -> Result<usize, CheckpointError> {
         let trie_arc = self.checkpoint_trie();
-        let mut trie = trie_arc.write();
-        ImportCheckpoint::delete_from_trie(&mut *trie)
+        let trie = trie_arc.as_ref();
+        ImportCheckpoint::delete_from_trie(trie)
     }
 
     /// Resume or start storage based on configuration.
@@ -333,7 +332,7 @@ impl NgramStorage {
 
             Ok(Self::Sharded {
                 coordinator,
-                checkpoint_trie: Arc::new(RwLock::new(checkpoint_trie)),
+                checkpoint_trie: Arc::new(checkpoint_trie),
                 vocabulary,
                 stats: Arc::new(StorageStats::default()),
             })
@@ -409,7 +408,7 @@ impl NgramStorage {
 
         match self {
             Self::SingleTrie { trie, stats, .. } => {
-                let guard = trie.read();
+                let guard = trie.as_ref();
                 // Zero-alloc path via thread-local buffer
                 let is_new = with_encoded_ngram_key_lockfree(tokens, vocab, |encoded_key| {
                     // Single overlay read (overlay-default single source of truth).
@@ -498,7 +497,7 @@ impl NgramStorage {
         let ngram_bytes = ngram.as_bytes();
         match self {
             Self::SingleTrie { trie, stats, .. } => {
-                let guard = trie.read();
+                let guard = trie.as_ref();
                 // Single overlay read (overlay-default single source of truth).
                 let is_new = guard.get_value_bytes(ngram_bytes).is_none();
                 guard.increment_cas(ngram_bytes, count);
@@ -535,7 +534,7 @@ impl NgramStorage {
     {
         match self {
             Self::SingleTrie { trie, stats, .. } => {
-                let guard = trie.read();
+                let guard = trie.as_ref();
                 let mut new_count = 0u64;
                 let mut total_count = 0u64;
 
@@ -583,7 +582,7 @@ impl NgramStorage {
         let ngram_bytes = ngram.as_bytes();
         match self {
             Self::SingleTrie { trie, .. } => {
-                let guard = trie.read();
+                let guard = trie.as_ref();
                 // Single overlay read (overlay-default single source of truth); the
                 // prior get_lockfree + get_value_bytes sum read the same leaf twice.
                 match guard.get_value_bytes(ngram_bytes).unwrap_or(0) {
@@ -610,7 +609,7 @@ impl NgramStorage {
 
         match self {
             Self::SingleTrie { trie, .. } => {
-                let guard = trie.read();
+                let guard = trie.as_ref();
                 // Single overlay read (overlay-default single source of truth).
                 match guard.get_value_bytes(&encoded_key).unwrap_or(0) {
                     0 => None,
@@ -643,7 +642,7 @@ impl NgramStorage {
     pub fn checkpoint(&self) -> StorageResult<()> {
         match self {
             Self::SingleTrie { trie, .. } => {
-                let guard = trie.write();
+                let guard = trie.as_ref();
                 guard
                     .checkpoint()
                     .map_err(|e| StorageError::Trie(format!("Checkpoint failed: {}", e)))
@@ -663,7 +662,7 @@ impl NgramStorage {
     pub fn sync(&self) -> StorageResult<()> {
         match self {
             Self::SingleTrie { trie, .. } => {
-                let guard = trie.write();
+                let guard = trie.as_ref();
                 guard
                     .checkpoint()
                     .map_err(|e| StorageError::Trie(format!("Sync failed: {}", e)))
@@ -696,7 +695,7 @@ impl NgramStorage {
                 // memory. (We don't track per-entry counts on the single trie, so we
                 //  always checkpoint when this is called, which is fine since
                 //  single-trie mode is not the OOM-prone path.)
-                let guard = trie.write();
+                let guard = trie.as_ref();
                 guard
                     .checkpoint()
                     .map_err(|e| StorageError::Trie(format!("Lock-free flush failed: {}", e)))?;
@@ -875,7 +874,7 @@ impl NgramStorage {
     pub fn sync_parallel(&self, max_concurrent: usize) -> StorageResult<usize> {
         match self {
             Self::SingleTrie { trie, .. } => {
-                let guard = trie.write();
+                let guard = trie.as_ref();
                 guard
                     .checkpoint()
                     .map_err(|e| StorageError::Trie(format!("Sync failed: {}", e)))?;
@@ -907,7 +906,7 @@ impl NgramStorage {
     pub fn checkpoint_parallel(&self, max_concurrent_syncs: usize) -> StorageResult<()> {
         match self {
             Self::SingleTrie { trie, .. } => {
-                let guard = trie.write();
+                let guard = trie.as_ref();
                 guard
                     .checkpoint()
                     .map_err(|e| StorageError::Trie(format!("Checkpoint failed: {}", e)))
@@ -944,7 +943,7 @@ impl NgramStorage {
             Self::SingleTrie { trie, .. } => {
                 // Single trie: checkpoint synchronously (the overlay snapshot is the
                 // durable state; the obsolete merge pre-step has been removed)
-                let guard = trie.write();
+                let guard = trie.as_ref();
                 guard
                     .checkpoint()
                     .map_err(|e| StorageError::Trie(format!("Checkpoint failed: {}", e)))?;
@@ -1001,7 +1000,7 @@ impl NgramStorage {
     pub fn close(&self) -> StorageResult<()> {
         match self {
             Self::SingleTrie { trie, .. } => {
-                let guard = trie.write();
+                let guard = trie.as_ref();
                 guard
                     .checkpoint()
                     .map_err(|e| StorageError::Trie(format!("Close checkpoint failed: {}", e)))
@@ -1017,7 +1016,7 @@ impl NgramStorage {
     pub fn len(&self) -> u64 {
         match self {
             Self::SingleTrie { trie, .. } => {
-                let guard = trie.read();
+                let guard = trie.as_ref();
                 guard.len().unwrap_or(0) as u64
             }
             Self::Sharded { coordinator, .. } => coordinator.total_entry_count(),
@@ -1042,7 +1041,7 @@ impl NgramStorage {
     /// Get the underlying trie (for single-trie mode only).
     ///
     /// Returns `None` for sharded mode.
-    pub fn as_single_trie(&self) -> Option<&Arc<RwLock<PersistentARTrie<u64>>>> {
+    pub fn as_single_trie(&self) -> Option<&Arc<PersistentARTrie<u64>>> {
         match self {
             Self::SingleTrie { trie, .. } => Some(trie),
             Self::Sharded { .. } => None,
@@ -1319,7 +1318,7 @@ impl NgramStorage {
                 trie, vocabulary, ..
             } => {
                 let tx = trie
-                    .write()
+                    .as_ref()
                     .begin_document(file_id)
                     .map_err(|e| StorageError::Trie(format!("Failed to begin file tx: {}", e)))?;
                 Ok(StorageFileTx {
@@ -1357,7 +1356,7 @@ impl NgramStorage {
                 let encoded_key = tx.encode_tokens(tokens)?;
 
                 // Buffer the increment in the transaction
-                trie.read()
+                trie.as_ref()
                     .tx_increment_bytes(&mut tx.inner, &encoded_key, count as i64);
                 tx.ngram_count += 1;
                 Ok(())
@@ -1384,7 +1383,7 @@ impl NgramStorage {
         match self {
             Self::SingleTrie { trie, .. } => {
                 // Buffer the increment in the transaction
-                trie.read()
+                trie.as_ref()
                     .tx_increment_bytes(&mut tx.inner, ngram.as_bytes(), count as i64);
                 tx.ngram_count += 1;
                 Ok(())
@@ -1412,7 +1411,7 @@ impl NgramStorage {
             Self::SingleTrie { trie, stats, .. } => {
                 let ngram_count = tx.ngram_count;
                 let committed = trie
-                    .write()
+                    .as_ref()
                     .commit_document(tx.inner)
                     .map_err(|e| StorageError::Trie(format!("Failed to commit file tx: {}", e)))?;
 
@@ -1433,7 +1432,7 @@ impl NgramStorage {
     pub fn abort_file_tx(&self, tx: StorageFileTx) -> StorageResult<()> {
         match self {
             Self::SingleTrie { trie, .. } => trie
-                .read()
+                .as_ref()
                 .abort_document(tx.inner)
                 .map_err(|e| StorageError::Trie(format!("Failed to abort file tx: {}", e))),
             Self::Sharded { .. } => Err(StorageError::Config(
@@ -2130,21 +2129,21 @@ mod tests {
             let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab create");
             let mut indices = Vec::new();
             {
-                let guard = vocab.write();
+                let guard = vocab.as_ref();
                 for term in &terms {
                     indices.push(guard.insert(term).expect("test vocab insert"));
                 }
             }
             original_indices = indices;
 
-            vocab.write().checkpoint().expect("vocab checkpoint");
+            vocab.as_ref().checkpoint().expect("vocab checkpoint");
         }
 
         // Phase 2: reopen + re-insert
         let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab reopen");
         let mut reopened_indices = Vec::new();
         {
-            let guard = vocab.write();
+            let guard = vocab.as_ref();
             for term in &terms {
                 reopened_indices.push(guard.insert(term).expect("test vocab insert"));
             }
@@ -2382,7 +2381,7 @@ mod tests {
 
         {
             let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab create");
-            let guard = vocab.write();
+            let guard = vocab.as_ref();
             first_indices = terms
                 .iter()
                 .map(|term| guard.insert(term).expect("insert vocab term"))
@@ -2391,7 +2390,7 @@ mod tests {
         }
 
         let vocab = open_or_create_vocabulary(&vocab_path).expect("vocab reopen");
-        let guard = vocab.write();
+        let guard = vocab.as_ref();
         let reopened_indices: Vec<u64> = terms
             .iter()
             .map(|term| guard.insert(term).expect("reinsert vocab term"))

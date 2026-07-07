@@ -66,6 +66,8 @@ wal_archive/
 *.artrie
 *.idx
 *.wal
+# Tier-1 single-owner advisory-lock sidecars (libdictenstein persistent-artrie)
+*.wlock
 *.checkpoint.json
 global_checkpoint.json
 *_ckpt_*.bin

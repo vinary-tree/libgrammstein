@@ -289,13 +289,12 @@ impl GoogleBooksImporter {
             // Single-trie MKN: iterate the n-gram data living in the
             // checkpoint trie (which IS the data trie in single-trie mode).
             let trie_arc = self.storage.checkpoint_trie();
-            let trie = trie_arc.read();
+            let trie = trie_arc.as_ref();
             // Collect all entries first to avoid lifetime issues with borrowed iterator
             let entries: Vec<(Vec<u8>, u64)> = trie
                 .iter_prefix_with_values(b"")
                 .map(|iter| iter.collect())
                 .unwrap_or_default();
-            drop(trie);
             for (ngram, count) in entries {
                 // Skip metadata keys (they start with \x00)
                 if ngram.starts_with(&[0x00]) {
@@ -373,7 +372,7 @@ impl GoogleBooksImporter {
             // Single-trie MKN writes to the data trie (same as checkpoint
             // trie in single-trie mode).
             let trie_arc = self.storage.checkpoint_trie();
-            let trie = trie_arc.write();
+            let trie = trie_arc.as_ref();
 
             // Count unique prefixes per suffix (N1+(suffix))
             let mut suffix_counts: std::collections::HashMap<Vec<u8>, u64> =
@@ -438,7 +437,7 @@ impl GoogleBooksImporter {
         let mut frequency_entries = 0u64;
         {
             let trie_arc = self.storage.checkpoint_trie();
-            let trie = trie_arc.write();
+            let trie = trie_arc.as_ref();
 
             trie.upsert_bytes(b"\x00mkn\x00n1", n1)
                 .map_err(|e| ImportError::Trie(format!("Failed to write MKN n1: {}", e)))?;
