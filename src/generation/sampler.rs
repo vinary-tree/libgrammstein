@@ -192,11 +192,15 @@ where
     pub fn generate_greedy(&self, prompt: &[&str]) -> Vec<String> {
         let mut context: Vec<String> = prompt.iter().map(|s| s.to_string()).collect();
         let mut generated = Vec::new();
-        let order = self.model.order();
+        // Hardening: `order` flows from model state; a degenerate `order == 0`
+        // would make `order - 1` underflow `usize` (panic in debug). Clamp the
+        // context-window width to `order.saturating_sub(1)` so the generator
+        // never panics regardless of the model's reported order.
+        let context_width = self.model.order().saturating_sub(1);
 
         for _ in 0..self.config.max_tokens {
             // Get context window (last n-1 tokens)
-            let ctx_start = context.len().saturating_sub(order - 1);
+            let ctx_start = context.len().saturating_sub(context_width);
             let ctx: Vec<&str> = context[ctx_start..].iter().map(|s| s.as_str()).collect();
 
             // Find highest probability token
@@ -228,11 +232,13 @@ where
 
         let mut context: Vec<String> = prompt.iter().map(|s| s.to_string()).collect();
         let mut generated = Vec::new();
-        let order = self.model.order();
+        // Hardening: clamp context-window width (see `generate_greedy`); avoids a
+        // `usize` underflow panic if the model reports `order == 0`.
+        let context_width = self.model.order().saturating_sub(1);
 
         for _ in 0..self.config.max_tokens {
             // Get context window (last n-1 tokens)
-            let ctx_start = context.len().saturating_sub(order - 1);
+            let ctx_start = context.len().saturating_sub(context_width);
             let ctx: Vec<&str> = context[ctx_start..].iter().map(|s| s.as_str()).collect();
 
             // Sample next token
@@ -474,4 +480,5 @@ mod tests {
 
         assert!(generator.vocab_size() > 0);
     }
+
 }
