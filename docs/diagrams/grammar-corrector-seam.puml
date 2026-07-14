@@ -1,0 +1,58 @@
+@startuml grammar-corrector-seam
+' The one-seam design: GrammarCore<P: NgramViewSource> holds the entire beam decoder;
+' SingleView and ShardedView are the two view sources; GrammarCorrector<D> and
+' ShardedGrammarCorrector are thin delegating newtypes over the identical decode path.
+' Render: plantuml -tsvg docs/diagrams/grammar-corrector-seam.puml
+' Source of truth for Figure 1 in docs/integration/multi-shard-grammar-corrector.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title GrammarCore<P> — one decoder, two view sources
+
+legend top right
+  |= Color |= Concept |
+  |<#455A64>     | Public API (delegating newtype) |
+  |<#1565C0>     | Shared beam decoder |
+  |<#6A1B9A>     | View-source seam |
+  |<#00838F>     | Storage / view |
+endlegend
+
+rectangle "**GrammarCorrector<D>**\nsingle store — verbatim public API" as gc #455A64
+rectangle "**ShardedGrammarCorrector**\nsharded corpus\n+ grammar_neighbors_fanout" as sgc #455A64
+
+rectangle "**GrammarCore<P: NgramViewSource>**\nT_lex · stupid-backoff · layered beam\nresolves a view PER lookup" as core #1565C0
+
+rectangle "**trait NgramViewSource**\nview_for(first_id, key_len) → Option<View>\nwhole_view() → Option<View>" as trait #6A1B9A
+rectangle "**SingleView<D>**\nignores routing;\nreturns the one whole-store view" as single #6A1B9A
+rectangle "**ShardedView**\nroutes (first_id, key_len) → shard;\nwhole_view() = None" as sharded #6A1B9A
+
+rectangle "**U64NgramView<D>**\nvarint byte trie ⇒ Unit = u64" as view #00838F
+rectangle "**DynamicDawg / SharedARTrie<u64>**\nin-memory · or one persistent trie" as dstore #00838F
+rectangle "**ShardCoordinator**\nget_shard_readonly (open-only)\ndiscover_shard_files" as coord #00838F
+
+gc --> core : GrammarCore<SingleView<D>>
+sgc --> core : GrammarCore<ShardedView>
+core --> trait : source.view_for(…)
+single ..|> trait
+sharded ..|> trait
+single --> view
+sharded --> view
+view --> dstore
+sharded --> coord : route + open
+coord --> dstore
+
+note bottom of core #E3F2FD
+  GrammarCorrector<D>'s public signatures are verbatim, so every existing
+  test passes unchanged; ShardedGrammarCorrector reuses the identical decode
+  path via GrammarCore<ShardedView> — no duplicated beam.
+end note
+@enduml

@@ -658,6 +658,17 @@ impl ShardHandle {
         }
     }
 
+    /// Clone this shard's `Arc`-shared byte trie for read-only, lock-free access.
+    ///
+    /// The trie's reads are `&self` and lock-free (the collapsed `Arc<PersistentARTrie>`
+    /// has no inner `RwLock`), so a cloned handle can be walked — e.g. wrapped in a
+    /// `U64NgramView` and driven by a `Transducer` — without holding the outer
+    /// `RwLock<ShardHandle>` for the duration of the query. Used by the sharded grammar
+    /// corrector's read-only query path (`ShardedView::view_for`).
+    pub fn trie_arc(&self) -> SharedARTrie<u64> {
+        Arc::clone(&self.trie)
+    }
+
     /// Arm overlay-heap eviction on this shard's trie.
     ///
     /// When `config` is `Some`, the checkpoint tail evicts the coldest resident

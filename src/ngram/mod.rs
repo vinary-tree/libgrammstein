@@ -51,6 +51,7 @@ mod model;
 pub mod smoothing;
 mod trainer;
 mod trie;
+pub mod u64_view;
 pub mod vocabulary;
 pub mod vocabulary_indexed;
 
@@ -67,6 +68,7 @@ pub use trainer::{
 };
 #[allow(deprecated)]
 pub use trie::{IterableDictionary, NgramTrie, NGRAM_SEPARATOR};
+pub use u64_view::{U64NgramNode, U64NgramView, VarintByteUnit};
 pub use vocabulary::{
     create_vocabulary, create_vocabulary_with_bloom, decode_ngram_key, decode_varint,
     encode_ngram_key, encode_ngram_key_batch, encode_ngram_key_existing, encode_varint,

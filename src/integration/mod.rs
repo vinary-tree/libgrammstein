@@ -42,8 +42,19 @@
 
 #[cfg(feature = "lling-llang-integration")]
 pub mod corrector;
+/// The `T_lex ∘ T_gram` term-id noisy-channel cascade (the grammar corrector).
+///
+/// Available without the lling-llang lattice framework — it composes two
+/// liblevenshtein automata directly over the term-id alphabet. The articulatory
+/// `T_lex` path additionally requires the `phonetic-correction` feature.
+pub mod grammar_corrector;
 pub mod lazy_ngram;
 mod lling_llang;
+/// The sharded `T_lex ∘ T_gram` cascade over a Google-Books shard store — the same
+/// beam decoder as [`grammar_corrector`], reading views from a `ShardCoordinator`.
+/// Additionally requires the `google-books` feature (for the shard coordinator).
+#[cfg(feature = "google-books")]
+pub mod sharded_grammar_corrector;
 pub mod vocabulary;
 pub mod wfst_export;
 
@@ -52,8 +63,14 @@ pub use self::corrector::{
     CorrectionResult, CorrectorConfig, CorrectorError, EditConfig, HierarchicalCorrector,
     LevenshteinCorrectionLayer,
 };
+pub use self::grammar_corrector::{
+    GrammarCore, GrammarCorrection, GrammarCorrector, GrammarCorrectorConfig, GrammarNeighbor,
+    LexCandidate, NgramViewSource, SingleView, DEFAULT_BACKOFF_ALPHA,
+};
 pub use self::lazy_ngram::{NgramHistoryKey, NgramLazyWfst, NgramStateRegistry, NgramStateSource};
 pub use self::lling_llang::GrammsteinLanguageModel;
+#[cfg(feature = "google-books")]
+pub use self::sharded_grammar_corrector::{ShardedGrammarCorrector, ShardedView};
 pub use self::vocabulary::{WordId, WordVocabulary, EOS_WORD_ID, UNK_WORD_ID};
 pub use self::wfst_export::{
     FromLogProb, NgramTransducerBuilder, NgramWfstBuilder, NgramWfstExport,

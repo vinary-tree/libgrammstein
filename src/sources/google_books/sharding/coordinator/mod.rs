@@ -717,6 +717,66 @@ impl ShardCoordinator {
         Ok(shard)
     }
 
+    /// Get a resident shard, or lazily **open** (never create) an existing one, for a
+    /// read-only query. Returns `Ok(None)` when the shard file does not exist — an
+    /// absent first-token, which the caller treats as "no n-gram evidence".
+    ///
+    /// Unlike [`get_or_create_shard`](Self::get_or_create_shard), this performs **no
+    /// writes** on the coordinator's behalf: it never creates a shard file, never
+    /// calls [`maybe_evict_shard`](Self::maybe_evict_shard) (so it never triggers the
+    /// eviction-path `checkpoint()` write), and never arms overlay eviction. Combined
+    /// with `max_open_shards == 0` (all shards resident — the required query-mode
+    /// configuration; see [`ShardedGrammarCorrector`]), the entire query path is
+    /// write-free while readers are active, so the lock-free trie reads never race a
+    /// concurrent writer.
+    ///
+    /// Opening a shard replays its WAL for crash recovery, which is a no-op on a
+    /// cleanly-finalized corpus. A given shard is opened at most once (serialized by
+    /// the per-key creation lock) and then stays resident.
+    ///
+    /// [`ShardedGrammarCorrector`]: crate::integration::ShardedGrammarCorrector
+    pub fn get_shard_readonly(
+        &self,
+        key: &ShardKey,
+    ) -> CoordinatorResult<Option<Arc<RwLock<ShardHandle>>>> {
+        // Fast path: already resident.
+        if let Some(shard) = self.shards.get(key) {
+            self.touch_lru(key);
+            return Ok(Some(Arc::clone(&shard)));
+        }
+
+        // Serialize concurrent opens of the same shard (avoids a double WAL replay),
+        // mirroring `create_or_open_shard`'s creation-lock discipline.
+        let lock = self
+            .creation_locks
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock();
+
+        // Double-check: another thread may have opened it while we waited.
+        if let Some(shard) = self.shards.get(key) {
+            self.touch_lru(key);
+            return Ok(Some(Arc::clone(&shard)));
+        }
+
+        let path = self.config.shard_path(&key.as_file_stem());
+        if !path.exists() {
+            // Absent first-token: no shard, no n-gram evidence. NOT an error.
+            return Ok(None);
+        }
+
+        // Open-only (never `create`), NO `arm_eviction` (read-only), NO
+        // `maybe_evict_shard` (no eviction-path checkpoint write).
+        let shard = ShardHandle::open(key.clone(), &path)?;
+        let shard = Arc::new(RwLock::new(shard));
+        self.shards.insert(key.clone(), Arc::clone(&shard));
+        self.touch_lru(key);
+        self.stats.active_shards.fetch_add(1, Ordering::Relaxed);
+
+        Ok(Some(shard))
+    }
+
     /// Update LRU tracker for a shard.
     fn touch_lru(&self, key: &ShardKey) {
         if let Some(ref lru) = self.lru_tracker {

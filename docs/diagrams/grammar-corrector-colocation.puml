@@ -1,0 +1,53 @@
+@startuml grammar-corrector-colocation
+' Co-location: the importer's store router and the query's view router are the SAME
+' pure function of (first_token, order). So the shard that STORES a key answers it.
+' Render: plantuml -tsvg docs/diagrams/grammar-corrector-colocation.puml
+' Source of truth for Figure 2 in docs/integration/multi-shard-grammar-corrector.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Co-location — the store route equals the query route
+
+legend top right
+  |= Color |= Path |
+  |<#00838F>     | Import (write) |
+  |<#1565C0>     | Query (read) |
+  |<#6A1B9A>     | Shared pure router |
+endlegend
+
+rectangle "**Importer**\nn-gram tokens [w₀, w₁, …]" as imp #00838F
+rectangle "**route_tokens(tokens)**\nfirst = tokens[0], order = |tokens|" as rt #00838F
+rectangle "**ShardedView::view_for(first_id, key_len)**\nfirst = get_term(first_id), order = key_len" as vf #1565C0
+
+rectangle "**compute_shard_key_from_token(first, order, granularity)**\nhash(first)  —or—  prefix(first, order)" as csk #6A1B9A
+rectangle "**ShardKey**" as sk #6A1B9A
+
+rectangle "**store_in_shard(key, varint(ids), count)**\nget_or_create — write path" as store #00838F
+rectangle "**get_shard_readonly(key)**\nresident-or-open-only — read path" as read #1565C0
+rectangle "**One physical shard trie**" as shard #455A64
+
+imp --> rt
+rt --> csk : (first, order)
+vf --> csk : (first, order)
+csk --> sk
+sk --> store
+sk --> read
+store --> shard : writes
+read --> shard : reads
+
+note bottom of shard #E3F2FD
+  Both sides call the identical pure function on the identical (first_token, order),
+  so every exact key is answered by the shard that stored it. Under Adaptive
+  granularity the router must use the PRODUCED length key_len (|h|+1 for the
+  successor oracle), not the history length — else order-1 vs order-≥2 split apart.
+end note
+@enduml

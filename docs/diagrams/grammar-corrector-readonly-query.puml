@@ -1,0 +1,49 @@
+@startuml grammar-corrector-readonly-query
+' One count() lookup in read-only query mode: view_for routes and opens the shard
+' READ-ONLY (never create, never evict, never checkpoint); an absent shard yields None,
+' which the decoder reads as "no n-gram evidence" (count 0).
+' Render: plantuml -tsvg docs/diagrams/grammar-corrector-readonly-query.puml
+' Source of truth for Figure 3 in docs/integration/multi-shard-grammar-corrector.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam sequence {
+  LifeLineBorderColor #263238
+  ParticipantFontColor white
+  ParticipantFontStyle bold
+  ParticipantBorderColor #263238
+}
+title Read-only query mode — one count() lookup
+
+participant "GrammarCore" as core #1565C0
+participant "ShardedView" as sv #6A1B9A
+participant "Vocabulary" as voc #00838F
+participant "ShardCoordinator" as coord #00838F
+participant "Shard trie\nSharedARTrie<u64>" as trie #00838F
+
+core -> sv : view_for(first_id, key_len)
+sv -> voc : get_term(first_id)
+voc --> sv : first_token
+sv -> sv : compute_shard_key_from_token(first_token, key_len, granularity)
+sv -> coord : get_shard_readonly(key)
+
+alt shard resident, or file exists
+  coord -> trie : open — READ-ONLY\n(no create · no evict · no checkpoint)
+  coord --> sv : Some(shard)
+  sv -> trie : trie_arc() ⇒ U64NgramView
+  sv --> core : Some(view)
+  core -> trie : walk ids → node.value()\n(lock-free &self read)
+else shard file absent (unpopulated first-token)
+  coord --> sv : Ok(None)
+  sv --> core : None
+  core -> core : count = 0 — "no n-gram evidence"
+end
+
+note over core, trie #E3F2FD
+  With max_open_shards = 0 (all resident) the read path performs NO writes while
+  readers are active — no shard is created, evicted, or checkpointed — so the
+  lock-free trie reads never race a concurrent writer.
+end note
+@enduml
