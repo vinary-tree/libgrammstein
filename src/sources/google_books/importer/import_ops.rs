@@ -92,6 +92,9 @@ pub(super) async fn wait_for_worker_exits_before_checkpoint(
     Ok(())
 }
 
+// Async teardown consumes each worker handle, channel, and background task
+// independently; they are distinct owned resources, not a cohesive group.
+#[allow(clippy::too_many_arguments)]
 async fn cleanup_reactive_import_resources(
     worker_handles: std::collections::HashMap<usize, tokio::task::JoinHandle<()>>,
     worker_shutdown_txs: std::collections::HashMap<usize, tokio::sync::watch::Sender<bool>>,
@@ -405,8 +408,9 @@ impl GoogleBooksImporter {
                 worker_id_pool_rx: Arc::clone(&worker_id_pool_rx),
             });
 
-            // Track deferred items for retry after initial pass
-            let mut deferred_items: Vec<(Arc<str>, Arc<str>, u8, u8, u64)> = Vec::new();
+            // Track deferred items for retry after initial pass.
+            type DeferredItem = (Arc<str>, Arc<str>, u8, u8, u64);
+            let mut deferred_items: Vec<DeferredItem> = Vec::new();
             let mut failed_prefixes: Vec<(Arc<str>, ImportError, u32)> = Vec::new();
 
             // Create futures for each prefix - worker IDs will be claimed dynamically

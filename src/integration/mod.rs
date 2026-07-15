@@ -44,9 +44,12 @@
 pub mod corrector;
 /// The `T_lex ∘ T_gram` term-id noisy-channel cascade (the grammar corrector).
 ///
-/// Available without the lling-llang lattice framework — it composes two
-/// liblevenshtein automata directly over the term-id alphabet. The articulatory
-/// `T_lex` path additionally requires the `phonetic-correction` feature.
+/// It composes two liblevenshtein automata directly over the term-id alphabet,
+/// without the lling-llang lattice machinery the sibling [`corrector`] uses — but,
+/// like the rest of this module, it is compiled only under the
+/// `lling-llang-integration` feature (`lib.rs` gates the whole `integration` tree).
+/// The articulatory `T_lex` path additionally requires `phonetic-correction`; the
+/// sharded backend ([`sharded_grammar_corrector`]) additionally requires `google-books`.
 pub mod grammar_corrector;
 pub mod lazy_ngram;
 mod lling_llang;

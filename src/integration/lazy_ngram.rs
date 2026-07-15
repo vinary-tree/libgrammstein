@@ -20,7 +20,7 @@
 //! use lling_llang::semiring::LogWeight;
 //! use lling_llang::wfst::LazyWfstWrapper;
 //!
-//! let model: NgramModel<D> = /* ... */;
+//! let model: NgramModel<S> = /* ... */;
 //! let source = NgramStateSource::<_, LogWeight>::new(Arc::new(model));
 //! let lazy_wfst = LazyWfstWrapper::new(source);
 //!
@@ -36,9 +36,8 @@ use lling_llang::semiring::Semiring;
 use lling_llang::wfst::{LazyState, StateId, StateSource, WeightedTransition};
 use smallvec::SmallVec;
 
-#[allow(deprecated)]
-use crate::ngram::{IterableDictionary, NgramEntry, NgramModel, NGRAM_SEPARATOR};
-use libdictenstein::MutableMappedDictionary;
+use crate::ngram::store::{IterableNgramStore, NgramLookup};
+use crate::ngram::NgramModel;
 
 use super::vocabulary::{WordId, WordVocabulary};
 use super::wfst_export::FromLogProb;
@@ -158,13 +157,13 @@ impl Default for NgramStateRegistry {
 ///
 /// The state registry is protected by a `RwLock`, allowing concurrent
 /// reads during WFST traversal while serializing state registration.
-pub struct NgramStateSource<D, W>
+pub struct NgramStateSource<S, W>
 where
-    D: MutableMappedDictionary<Value = NgramEntry>,
+    S: NgramLookup,
     W: Semiring + FromLogProb,
 {
     /// The underlying n-gram model.
-    model: Arc<NgramModel<D>>,
+    model: Arc<NgramModel<S>>,
     /// Word vocabulary.
     vocabulary: Arc<WordVocabulary>,
     /// Thread-safe state registry.
@@ -173,13 +172,13 @@ where
     _weight: PhantomData<W>,
 }
 
-impl<D, W> NgramStateSource<D, W>
+impl<S, W> NgramStateSource<S, W>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary,
+    S: IterableNgramStore,
     W: Semiring + FromLogProb,
 {
     /// Create a new lazy state source from an n-gram model.
-    pub fn new(model: Arc<NgramModel<D>>) -> Self {
+    pub fn new(model: Arc<NgramModel<S>>) -> Self {
         let vocabulary = Arc::new(Self::build_vocabulary(&model));
 
         Self {
@@ -191,7 +190,7 @@ where
     }
 
     /// Create with a pre-built vocabulary.
-    pub fn with_vocabulary(model: Arc<NgramModel<D>>, vocabulary: Arc<WordVocabulary>) -> Self {
+    pub fn with_vocabulary(model: Arc<NgramModel<S>>, vocabulary: Arc<WordVocabulary>) -> Self {
         Self {
             model,
             vocabulary,
@@ -206,18 +205,18 @@ where
     }
 
     /// Get a reference to the model.
-    pub fn model(&self) -> &NgramModel<D> {
+    pub fn model(&self) -> &NgramModel<S> {
         &self.model
     }
 
     /// Build vocabulary from the n-gram model.
-    #[allow(deprecated)]
-    fn build_vocabulary(model: &NgramModel<D>) -> WordVocabulary {
+    fn build_vocabulary(model: &NgramModel<S>) -> WordVocabulary {
         let mut vocab = WordVocabulary::with_capacity(model.vocab_size());
 
-        for (key, _entry) in model.trie().iter_entries() {
-            if !key.contains(NGRAM_SEPARATOR) {
-                vocab.add_word(&key);
+        for (words, _entry) in model.iter_ngrams() {
+            // A unigram is a single-word n-gram.
+            if words.len() == 1 {
+                vocab.add_word(&words[0]);
             }
         }
 
@@ -378,9 +377,9 @@ where
     }
 }
 
-impl<D, W> Clone for NgramStateSource<D, W>
+impl<S, W> Clone for NgramStateSource<S, W>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary,
+    S: IterableNgramStore,
     W: Semiring + FromLogProb,
 {
     fn clone(&self) -> Self {
@@ -393,9 +392,9 @@ where
     }
 }
 
-impl<D, W> StateSource<WordId, W> for NgramStateSource<D, W>
+impl<S, W> StateSource<WordId, W> for NgramStateSource<S, W>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary + Send + Sync,
+    S: IterableNgramStore + Send + Sync,
     W: Semiring + FromLogProb,
 {
     fn compute_state(&self, state: StateId) -> LazyState<WordId, W> {
@@ -427,9 +426,9 @@ where
 }
 
 /// Extension trait for NgramModel to provide lazy WFST.
-pub trait NgramLazyWfst<D>
+pub trait NgramLazyWfst<S>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary,
+    S: IterableNgramStore + Clone,
 {
     /// Create a lazy WFST state source for this n-gram model.
     ///
@@ -448,20 +447,20 @@ where
     /// use lling_llang::semiring::LogWeight;
     /// use lling_llang::wfst::LazyWfstWrapper;
     ///
-    /// let model: NgramModel<D> = /* ... */;
+    /// let model: NgramModel<S> = /* ... */;
     /// let source = model.to_lazy_wfst_source::<LogWeight>();
     /// let lazy_wfst = LazyWfstWrapper::new(source);
     /// ```
-    fn to_lazy_wfst_source<W>(&self) -> NgramStateSource<D, W>
+    fn to_lazy_wfst_source<W>(&self) -> NgramStateSource<S, W>
     where
         W: Semiring + FromLogProb;
 }
 
-impl<D> NgramLazyWfst<D> for NgramModel<D>
+impl<S> NgramLazyWfst<S> for NgramModel<S>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary,
+    S: IterableNgramStore + Clone,
 {
-    fn to_lazy_wfst_source<W>(&self) -> NgramStateSource<D, W>
+    fn to_lazy_wfst_source<W>(&self) -> NgramStateSource<S, W>
     where
         W: Semiring + FromLogProb,
     {
@@ -469,11 +468,11 @@ where
     }
 }
 
-impl<D> NgramLazyWfst<D> for Arc<NgramModel<D>>
+impl<S> NgramLazyWfst<S> for Arc<NgramModel<S>>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary,
+    S: IterableNgramStore + Clone,
 {
-    fn to_lazy_wfst_source<W>(&self) -> NgramStateSource<D, W>
+    fn to_lazy_wfst_source<W>(&self) -> NgramStateSource<S, W>
     where
         W: Semiring + FromLogProb,
     {
@@ -485,15 +484,16 @@ where
 mod tests {
     use super::*;
     use crate::corpus::PlaintextReader;
-    use crate::ngram::TrainerBuilder;
-    use libdictenstein::pathmap::PathMapDictionary;
+    use crate::ngram::store::TermIdStore;
+    use crate::ngram::{NgramEntry, TrainerBuilder};
+    use libdictenstein::dynamic_dawg::DynamicDawg;
     use lling_llang::semiring::LogWeight;
     use lling_llang::wfst::LazyWfst;
     use lling_llang::wfst::LazyWfstWrapper;
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn create_test_model() -> NgramModel<PathMapDictionary<NgramEntry>> {
+    fn create_test_model() -> NgramModel<TermIdStore<DynamicDawg<NgramEntry>>> {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let content = "the quick brown fox the quick brown dog";
         let path = dir.path().join("test.txt");
@@ -501,7 +501,7 @@ mod tests {
         write!(file, "{}", content).expect("Failed to write test file");
 
         let reader = PlaintextReader::from_file(&path).expect("Failed to create reader");
-        let dictionary = PathMapDictionary::<NgramEntry>::new();
+        let dictionary = DynamicDawg::<NgramEntry>::new();
         TrainerBuilder::new(dictionary)
             .order(3)
             .train(reader)

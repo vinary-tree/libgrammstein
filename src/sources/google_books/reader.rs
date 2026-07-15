@@ -87,8 +87,7 @@ fn save_failed_response(
     // Generate unique filename from URL
     let filename: String = url
         .replace("://", "_")
-        .replace('/', "_")
-        .replace('?', "_")
+        .replace(['/', '?'], "_")
         .chars()
         .take(100)
         .collect();

@@ -103,7 +103,7 @@ pub enum NgramStorage {
     /// Sharded storage using prefix-based routing.
     Sharded {
         /// The shard coordinator.
-        coordinator: ShardCoordinator,
+        coordinator: Box<ShardCoordinator>,
         /// Auxiliary checkpoint-metadata trie. Stores `ImportCheckpoint`
         /// progress separately from the n-gram data shards. Created at
         /// `{output_path}.checkpoint.artrie`.
@@ -179,7 +179,7 @@ impl NgramStorage {
             shard_config.granularity
         );
 
-        let coordinator = ShardCoordinator::new_with_checkpoints(shard_config)?;
+        let coordinator = Box::new(ShardCoordinator::new_with_checkpoints(shard_config)?);
 
         // Auxiliary checkpoint-metadata trie at {output_path}.checkpoint.artrie.
         // Holds ImportCheckpoint progress separately from the n-gram data
@@ -266,7 +266,7 @@ impl NgramStorage {
     pub fn load_import_checkpoint(&self) -> Result<Option<ImportCheckpoint>, CheckpointError> {
         let trie_arc = self.checkpoint_trie();
         let trie = trie_arc.as_ref();
-        ImportCheckpoint::load_from_trie(&*trie)
+        ImportCheckpoint::load_from_trie(trie)
     }
 
     /// Delete the persisted `ImportCheckpoint` (call after a successful
@@ -306,7 +306,7 @@ impl NgramStorage {
                 shard_config.shard_dir
             );
 
-            let coordinator = ShardCoordinator::resume_or_start(shard_config)?;
+            let coordinator = Box::new(ShardCoordinator::resume_or_start(shard_config)?);
 
             // Open or create the auxiliary checkpoint-metadata trie. See the
             // doc comment on `Sharded::checkpoint_trie` for why this lives
@@ -436,6 +436,16 @@ impl NgramStorage {
 
     /// Store an n-gram string with count, splitting on spaces into tokens.
     ///
+    /// **Input boundary.** This is the single Google-Books wire-format transcode
+    /// point: the space-delimited n-gram is split into tokens here and immediately
+    /// vocabulary-encoded to a LEB128 term-id byte key by `store_tokens`; no
+    /// delimited representation survives past this call, and routing consumes the
+    /// first token / sequence length, never a joined string. Splitting on `' '` is
+    /// collision-safe because a Google-Books token cannot contain the corpus's own
+    /// space separator — unlike the former `'|'` join, under which a token
+    /// containing `'|'` was ambiguous. (Mirrors the model migration's labeled
+    /// `read_legacy_pipe_entries` boundary.)
+    ///
     /// This is a convenience wrapper around `store_tokens` that avoids heap
     /// allocation by using `SmallVec<[&str; 5]>` for the token split (n-gram
     /// orders 1-5 fit inline on the stack).
@@ -450,6 +460,10 @@ impl NgramStorage {
     }
 
     /// Insert an n-gram string into a pending prefix transaction.
+    ///
+    /// **Input boundary.** Like `store_ngram`, this splits the space-delimited wire
+    /// n-gram into tokens and transcodes them to a term-id key via
+    /// `tx_insert_tokens`; no delimited representation survives past this call.
     ///
     /// This is a convenience wrapper around `tx_insert_tokens` that avoids heap
     /// allocation by using `SmallVec<[&str; 5]>` for the token split.
@@ -487,32 +501,17 @@ impl NgramStorage {
         }
     }
 
-    /// Store an n-gram with count.
+    /// Store a space-separated n-gram string with count.
     ///
-    /// For single-trie mode, uses lock-free `increment_cas()` — workers only acquire
-    /// a shared read lock, eliminating write contention.
+    /// Thin alias for [`store_ngram`](Self::store_ngram): the n-gram is split on
+    /// the Google-Books wire separator (`' '`) into tokens, vocabulary-encoded to a
+    /// LEB128 term-id byte key, and routed by its first token — the single
+    /// input-boundary transcode (see `store_ngram`). No delimited key is ever
+    /// formed, so a token that itself contains `'|'` is stored intact.
     ///
     /// Returns `true` if this was a new n-gram.
     pub fn store(&self, ngram: &str, count: u64) -> StorageResult<bool> {
-        let ngram_bytes = ngram.as_bytes();
-        match self {
-            Self::SingleTrie { trie, stats, .. } => {
-                let guard = trie.as_ref();
-                // Single overlay read (overlay-default single source of truth).
-                let is_new = guard.get_value_bytes(ngram_bytes).is_none();
-                guard.increment_cas(ngram_bytes, count);
-
-                stats.record(count, if is_new { 1 } else { 0 });
-                Ok(is_new)
-            }
-            Self::Sharded {
-                coordinator, stats, ..
-            } => {
-                let is_new = coordinator.store_ngram(ngram, count)?;
-                stats.record(count, if is_new { 1 } else { 0 });
-                Ok(is_new)
-            }
-        }
+        self.store_ngram(ngram, count)
     }
 
     /// Store multiple n-grams to the same shard efficiently.
@@ -576,22 +575,12 @@ impl NgramStorage {
     /// sums their values (the lock-free layer accumulates counts that haven't been
     /// merged to persistent yet).
     ///
-    /// For vocabulary-indexed encoding with sharded storage, use `get_tokens` instead
-    /// to ensure correct routing based on original tokens.
+    /// Thin alias for [`get_tokens`](Self::get_tokens): splits the n-gram on the
+    /// Google-Books wire separator (`' '`) and looks up the resulting term-id key.
+    /// Collision-safe — a token containing `'|'` is one token, not a boundary.
     pub fn get(&self, ngram: &str) -> Option<u64> {
-        let ngram_bytes = ngram.as_bytes();
-        match self {
-            Self::SingleTrie { trie, .. } => {
-                let guard = trie.as_ref();
-                // Single overlay read (overlay-default single source of truth); the
-                // prior get_lockfree + get_value_bytes sum read the same leaf twice.
-                match guard.get_value_bytes(ngram_bytes).unwrap_or(0) {
-                    0 => None,
-                    total => Some(total),
-                }
-            }
-            Self::Sharded { coordinator, .. } => coordinator.get(ngram),
-        }
+        let tokens: SmallVec<[&str; 5]> = ngram.split(' ').collect();
+        self.get_tokens(&tokens)
     }
 
     /// Get the count for an n-gram by tokens (for vocabulary-indexed encoding).
@@ -1026,16 +1015,6 @@ impl NgramStorage {
     /// Check if storage is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-
-    /// Route an n-gram to its shard key (for sharded mode).
-    ///
-    /// Returns `None` for single-trie mode.
-    pub fn route_ngram(&self, ngram: &str) -> Option<ShardKey> {
-        match self {
-            Self::SingleTrie { .. } => None,
-            Self::Sharded { coordinator, .. } => Some(coordinator.route_ngram(ngram)),
-        }
     }
 
     /// Get the underlying trie (for single-trie mode only).
@@ -1535,20 +1514,30 @@ mod tests {
     #[test]
     fn test_single_trie_storage() {
         let dir = TempDir::new().expect("Failed to create temp dir");
-        let path = dir.path().join("test.artrie");
+        let trie_path = dir.path().join("test.artrie");
+        let vocab_path = dir.path().join("vocab.artrie");
 
-        let storage = NgramStorage::create_single_trie(&path).expect("Failed to create storage");
+        // Storage stores TERM-ID keys, so a vocabulary is required. The bigram is
+        // carried as distinct tokens — never a delimiter-joined string.
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab");
+        let storage =
+            NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(vocabulary))
+                .expect("Failed to create storage");
 
         assert!(!storage.is_sharded());
 
-        // Store some n-grams
-        assert!(storage.store("the|quick", 10).expect("Failed to store"));
-        assert!(!storage.store("the|quick", 5).expect("Failed to store"));
+        // Store a real bigram as two distinct tokens.
+        assert!(storage
+            .store_tokens(&["the", "quick"], 10)
+            .expect("Failed to store"));
+        assert!(!storage
+            .store_tokens(&["the", "quick"], 5)
+            .expect("Failed to store"));
 
         // Query
-        assert_eq!(storage.get("the|quick"), Some(15));
-        assert!(storage.contains("the|quick"));
-        assert!(!storage.contains("nonexistent"));
+        assert_eq!(storage.get_tokens(&["the", "quick"]), Some(15));
+        assert!(storage.contains_tokens(&["the", "quick"]));
+        assert!(!storage.contains_tokens(&["no", "such"]));
 
         // Stats
         assert_eq!(storage.stats().total_ngrams.load(Ordering::Relaxed), 15);
@@ -1558,40 +1547,57 @@ mod tests {
     #[test]
     fn test_sharded_storage() {
         let dir = TempDir::new().expect("Failed to create temp dir");
+        let vocab_path = dir.path().join("vocab.artrie");
 
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab");
         let config = GoogleBooksConfig {
             output_path: dir.path().join("output.artrie"),
             sharding: ShardingMode::Enabled(super::super::config::ShardingOptions::default()),
             ..Default::default()
         };
 
-        let storage = NgramStorage::create_sharded(&config).expect("Failed to create storage");
+        let storage = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocabulary))
+            .expect("Failed to create storage");
 
         assert!(storage.is_sharded());
 
-        // Store some n-grams
-        assert!(storage.store("the|quick", 10).expect("Failed to store"));
-        assert!(!storage.store("the|quick", 5).expect("Failed to store"));
-        assert!(storage.store("apple|pie", 3).expect("Failed to store"));
+        // Store bigrams as distinct tokens (routing + term-id keys internally).
+        assert!(storage
+            .store_tokens(&["the", "quick"], 10)
+            .expect("Failed to store"));
+        assert!(!storage
+            .store_tokens(&["the", "quick"], 5)
+            .expect("Failed to store"));
+        assert!(storage
+            .store_tokens(&["apple", "pie"], 3)
+            .expect("Failed to store"));
 
         // Query
-        assert_eq!(storage.get("the|quick"), Some(15));
-        assert_eq!(storage.get("apple|pie"), Some(3));
-        assert!(storage.contains("the|quick"));
-        assert!(!storage.contains("nonexistent"));
+        assert_eq!(storage.get_tokens(&["the", "quick"]), Some(15));
+        assert_eq!(storage.get_tokens(&["apple", "pie"]), Some(3));
+        assert!(storage.contains_tokens(&["the", "quick"]));
+        assert!(!storage.contains_tokens(&["no", "such"]));
     }
 
     #[test]
     fn test_batch_storage() {
         let dir = TempDir::new().expect("Failed to create temp dir");
-        let path = dir.path().join("test.artrie");
+        let trie_path = dir.path().join("test.artrie");
+        let vocab_path = dir.path().join("vocab.artrie");
 
-        let storage = NgramStorage::create_single_trie(&path).expect("Failed to create storage");
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab");
+        let storage =
+            NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(vocabulary))
+                .expect("Failed to create storage");
 
+        // Encode three distinct bigrams to term-id byte keys, then batch-store.
+        let the_quick = storage.encode_tokens(&["the", "quick"]).expect("encode");
+        let the_slow = storage.encode_tokens(&["the", "slow"]).expect("encode");
+        let this_is = storage.encode_tokens(&["this", "is"]).expect("encode");
         let ngrams: Vec<(&[u8], u64)> = vec![
-            (b"the|quick" as &[u8], 10u64),
-            (b"the|slow" as &[u8], 5),
-            (b"this|is" as &[u8], 3),
+            (the_quick.as_slice(), 10u64),
+            (the_slow.as_slice(), 5),
+            (this_is.as_slice(), 3),
         ];
 
         let new_count = storage
@@ -1599,9 +1605,9 @@ mod tests {
             .expect("Failed to batch store");
 
         assert_eq!(new_count, 3);
-        assert_eq!(storage.get("the|quick"), Some(10));
-        assert_eq!(storage.get("the|slow"), Some(5));
-        assert_eq!(storage.get("this|is"), Some(3));
+        assert_eq!(storage.get_tokens(&["the", "quick"]), Some(10));
+        assert_eq!(storage.get_tokens(&["the", "slow"]), Some(5));
+        assert_eq!(storage.get_tokens(&["this", "is"]), Some(3));
     }
 
     #[test]
@@ -1999,13 +2005,20 @@ mod tests {
         // single-trie mode does not track per-entry lock-free counts, so it
         // always flushes when the method is called (returning 1).
         let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("test.artrie");
-        let storage = NgramStorage::create_single_trie(&path).expect("create_single_trie");
+        let trie_path = dir.path().join("test.artrie");
+        let vocab_path = dir.path().join("vocab.artrie");
+        let vocabulary = open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab");
+        let storage =
+            NgramStorage::create_single_trie_with_vocabulary(&trie_path, Some(vocabulary))
+                .expect("create_single_trie_with_vocabulary");
 
-        // Store a small number of entries (well under any threshold)
+        // Store a small number of entries (well under any threshold) as distinct
+        // tokens — the term-id path, never a delimiter-joined string.
         for i in 0..5 {
-            let ngram = format!("the|w{}", i);
-            storage.store(&ngram, 1).expect("store");
+            let suffix = format!("w{}", i);
+            storage
+                .store_tokens(&["the", suffix.as_str()], 1)
+                .expect("store");
         }
 
         // Even with a high threshold, single-trie mode unconditionally flushes
@@ -2095,7 +2108,7 @@ mod tests {
             // fail this loop.
             for (tokens, expected_count) in &ngrams {
                 let got = storage.get_tokens(tokens);
-                let token_slice: Vec<&str> = tokens.iter().copied().collect();
+                let token_slice: Vec<&str> = tokens.to_vec();
                 assert_eq!(
                     got,
                     Some(*expected_count),
@@ -2190,10 +2203,18 @@ mod tests {
     fn persistent_storage_bridge_single_trie_checkpoint_metadata_reopens() {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("single.artrie");
+        let vocab_path = dir.path().join("vocab.artrie");
 
         {
-            let storage = NgramStorage::create_single_trie(&path).expect("create single storage");
-            storage.store("the quick", 7).expect("store data");
+            let vocab = open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab");
+            let storage = NgramStorage::create_single_trie_with_vocabulary(&path, Some(vocab))
+                .expect("create single storage");
+            storage
+                .store_tokens(&["the", "quick"], 7)
+                .expect("store data");
+            storage
+                .merge_and_rotate_vocabulary_wal()
+                .expect("persist vocabulary ids");
             storage.checkpoint().expect("checkpoint data");
 
             let checkpoint = persistent_storage_bridge_checkpoint(2, "th");
@@ -2202,9 +2223,12 @@ mod tests {
                 .expect("save durable checkpoint metadata");
         }
 
-        let reopened = NgramStorage::create_single_trie(&path).expect("reopen single storage");
+        let vocab =
+            open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab reopen");
+        let reopened = NgramStorage::create_single_trie_with_vocabulary(&path, Some(vocab))
+            .expect("reopen single storage");
         assert_eq!(
-            reopened.get("the quick"),
+            reopened.get_tokens(&["the", "quick"]),
             Some(7),
             "single-trie data should recover with checkpoint metadata"
         );
@@ -2220,10 +2244,18 @@ mod tests {
     fn persistent_storage_bridge_sharded_checkpoint_metadata_reopens() {
         let dir = TempDir::new().expect("tempdir");
         let config = persistent_storage_bridge_sharded_config(&dir);
+        let vocab_path = dir.path().join("vocab.artrie");
 
         {
-            let storage = NgramStorage::create_sharded(&config).expect("create sharded storage");
-            storage.store("the quick", 11).expect("store data");
+            let vocab = open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab");
+            let storage = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocab))
+                .expect("create sharded storage");
+            storage
+                .store_tokens(&["the", "quick"], 11)
+                .expect("store data");
+            storage
+                .merge_and_rotate_vocabulary_wal()
+                .expect("persist vocabulary ids");
             storage.sync().expect("sync sharded data");
             storage.checkpoint().expect("checkpoint sharded data");
 
@@ -2233,10 +2265,13 @@ mod tests {
                 .expect("save sharded checkpoint metadata");
         }
 
+        let vocab =
+            open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab reopen");
         let reopened =
-            NgramStorage::resume_or_start(&config, 1_000_000).expect("reopen sharded storage");
+            NgramStorage::resume_or_start_with_vocabulary(&config, 1_000_000, Some(vocab))
+                .expect("reopen sharded storage");
         assert_eq!(
-            reopened.get("the quick"),
+            reopened.get_tokens(&["the", "quick"]),
             Some(11),
             "sharded data should recover with auxiliary checkpoint metadata"
         );
@@ -2308,9 +2343,17 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let config = persistent_storage_bridge_sharded_config(&dir);
 
+        let vocab_path = dir.path().join("vocab.artrie");
         {
-            let storage = NgramStorage::create_sharded(&config).expect("create sharded storage");
-            storage.store("cancel path", 5).expect("store data");
+            let vocab = open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab");
+            let storage = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocab))
+                .expect("create sharded storage");
+            storage
+                .store_tokens(&["cancel", "path"], 5)
+                .expect("store data");
+            storage
+                .merge_and_rotate_vocabulary_wal()
+                .expect("persist vocabulary ids");
             storage.sync().expect("sync data before graceful cancel");
             storage.checkpoint().expect("checkpoint data before cancel");
 
@@ -2321,10 +2364,13 @@ mod tests {
                 .expect("save graceful-cancel checkpoint");
         }
 
+        let vocab =
+            open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab reopen");
         let reopened =
-            NgramStorage::resume_or_start(&config, 1_000_000).expect("reopen sharded storage");
+            NgramStorage::resume_or_start_with_vocabulary(&config, 1_000_000, Some(vocab))
+                .expect("reopen sharded storage");
         assert_eq!(
-            reopened.get("cancel path"),
+            reopened.get_tokens(&["cancel", "path"]),
             Some(5),
             "graceful cancel checkpoint should recover drained data"
         );
@@ -2341,22 +2387,33 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let config = persistent_storage_bridge_sharded_config(&dir);
 
+        let vocab_path = dir.path().join("vocab.artrie");
         {
-            let storage = NgramStorage::create_sharded(&config).expect("create sharded storage");
+            let vocab = open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab");
+            let storage = NgramStorage::create_sharded_with_vocabulary(&config, Some(vocab))
+                .expect("create sharded storage");
             let old_checkpoint = persistent_storage_bridge_checkpoint(2, "aa");
             storage
                 .save_import_checkpoint(&old_checkpoint)
                 .expect("save pre-existing checkpoint");
 
-            storage.store("the quick", 17).expect("store later data");
+            storage
+                .store_tokens(&["the", "quick"], 17)
+                .expect("store later data");
+            storage
+                .merge_and_rotate_vocabulary_wal()
+                .expect("persist vocabulary ids");
             storage.sync().expect("sync later data");
             storage.checkpoint().expect("checkpoint later data");
         }
 
+        let vocab =
+            open_or_create_concurrent_vocabulary_lockfree(&vocab_path).expect("vocab reopen");
         let reopened =
-            NgramStorage::resume_or_start(&config, 1_000_000).expect("reopen sharded storage");
+            NgramStorage::resume_or_start_with_vocabulary(&config, 1_000_000, Some(vocab))
+                .expect("reopen sharded storage");
         assert_eq!(
-            reopened.get("the quick"),
+            reopened.get_tokens(&["the", "quick"]),
             Some(17),
             "force-quit path may leave durable data without publishing a checkpoint claim"
         );

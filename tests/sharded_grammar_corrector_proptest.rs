@@ -1,7 +1,7 @@
 //! Property-based + differential tests for the **sharded** grammar corrector.
 //!
 //! These are the sharded analogue of `tests/grammar_corrector_proptest.rs`. They pin
-//! down the three things the multi-shard refactor must guarantee:
+//! down the guarantees the multi-shard refactor must uphold:
 //!
 //! 1. **Fanout soundness + completeness** — `grammar_neighbors_fanout` returns
 //!    *exactly* the stored term-id sequences within word-edit distance `k`, across all
@@ -11,7 +11,14 @@
 //! 3. **Decoder parity** — `correct()` over a sharded store is identical to `correct()`
 //!    over a single store built from the same n-grams (the seam is behavior-preserving).
 //! 4. **Read-only query mode** — a batch of queries (including one whose first-token
-//!    routes to a never-populated shard) creates/modifies no shard files on disk.
+//!    routes to a never-populated shard) creates/modifies no shard files on disk; a
+//!    reopened (open-from-disk) corpus is likewise served without writing.
+//! 5. **Empty-history successor parity** — the sharded all-shards root fan-out returns
+//!    the same first-token (unigram) set as the single store's whole view, keeping
+//!    first-position insertion at parity (no boundary-less sentence-start gap).
+//! 6. **Adaptive-granularity routing** — under a length-sensitive granularity, the
+//!    produced-length (`|h|+1`) successor routing and each backoff level's own-length
+//!    routing are pinned (invisible under the length-invariant `TwoChar`).
 //!
 //! Run with:
 //! `cargo test --features "lling-llang-integration google-books" --test sharded_grammar_corrector_proptest`.
@@ -25,7 +32,8 @@ use std::time::SystemTime;
 
 use libdictenstein::dynamic_dawg::DynamicDawg;
 use libgrammstein::integration::{
-    GrammarCorrector, GrammarCorrectorConfig, ShardedGrammarCorrector,
+    GrammarCorrector, GrammarCorrectorConfig, NgramViewSource, ShardedGrammarCorrector,
+    ShardedView, SingleView,
 };
 use libgrammstein::ngram::vocabulary::{create_vocabulary, encode_varint, SharedVocabARTrie};
 use libgrammstein::sources::google_books::sharding::{
@@ -247,15 +255,34 @@ struct SentenceCorpus {
 
 impl SentenceCorpus {
     fn build(sentences: &[&str], order: usize, granularity: ShardGranularity) -> Self {
+        Self::build_with_boundaries(sentences, order, granularity, true)
+    }
+
+    /// Build with or without `<s>`/`</s>` boundary padding. Boundary-LESS corpora
+    /// (`boundaries = false`, the Google-Books reality) leave `bos_id = None`, so the
+    /// decoder reaches the EMPTY-history successor oracle at the sentence start — the
+    /// path the sharded `all_shards_root_successors` fan-out must serve at parity.
+    fn build_with_boundaries(
+        sentences: &[&str],
+        order: usize,
+        granularity: ShardGranularity,
+        boundaries: bool,
+    ) -> Self {
         let dir = TempDir::new().expect("tempdir");
         let vocab = create_vocabulary(&dir.path().join("vocab")).expect("vocabulary");
 
-        // Count all 1..=order n-grams with boundary padding (the standard convention).
+        // Count all 1..=order n-grams, optionally with boundary padding.
         let mut counts: HashMap<Vec<u64>, u64> = HashMap::new();
         for sentence in sentences {
-            let mut words: Vec<&str> = vec!["<s>"; order - 1];
+            let mut words: Vec<&str> = if boundaries {
+                vec!["<s>"; order - 1]
+            } else {
+                Vec::new()
+            };
             words.extend(sentence.split_whitespace());
-            words.push("</s>");
+            if boundaries {
+                words.push("</s>");
+            }
             let ids: Vec<u64> = words
                 .iter()
                 .map(|w| vocab.as_ref().insert(w).expect("insert"))
@@ -505,12 +532,23 @@ fn reopen_from_disk_matches_resident_queries() {
         GrammarCorrectorConfig::default(),
     );
 
+    // The finalized corpus is served strictly read-only: querying the reopened
+    // (open-from-disk) coordinator must not create or modify any shard file — WAL replay
+    // on a cleanly-checkpointed corpus is a no-op.
+    let files_before = corpus.shard_dir_snapshot();
+
     let reopened_neighbors: BTreeSet<Vec<u64>> = reopened
         .grammar_neighbors_fanout(&query, 1)
         .into_iter()
         .map(|neighbor| neighbor.ids)
         .collect();
     let reopened_correct = reopened.correct("teh quick brown fox");
+
+    let files_after = corpus.shard_dir_snapshot();
+    assert_eq!(
+        files_before, files_after,
+        "querying a reopened (open-from-disk) corpus must not create or modify shard files"
+    );
 
     assert_eq!(
         baseline_neighbors, reopened_neighbors,
@@ -520,4 +558,87 @@ fn reopen_from_disk_matches_resident_queries() {
         baseline_correct, reopened_correct,
         "correct() must survive a checkpoint + reopen from disk"
     );
+}
+
+/// **Adaptive-granularity routing — the `|h|+1` produced-length invariant.** Under
+/// `Adaptive`, order-1 n-grams route to a 1-char-prefix shard and order ≥ 2 to a
+/// 2-char-prefix shard, so a history and the `(history+1)`-gram it produces can live in
+/// DIFFERENT shards. This pins the successor oracle's produced-length routing and each
+/// stupid-backoff level's own-length routing — the subtlest correctness property, and one
+/// the length-invariant `TwoChar` granularity (every other test) cannot exercise. A
+/// regression routing by `|h|` instead of `|h|+1` would open the wrong shard and diverge
+/// from the single store here.
+#[test]
+fn sharded_correct_matches_single_store_adaptive() {
+    for order in [2usize, 3] {
+        let corpus = SentenceCorpus::build(SENTENCES, order, ShardGranularity::Adaptive);
+        let single = corpus.single_corrector();
+        let sharded = corpus.sharded_corrector();
+        for input in [
+            "teh quick brown fox",     // substitution
+            "the quikc brown fox",     // transposition
+            "the the quick brown fox", // extraneous word
+            "the quick fox",           // missing word (insertion)
+            "the quick brown fox",     // clean
+            "the lazy brown dog",      // mixed
+        ] {
+            assert_eq!(
+                single.correct(input),
+                sharded.correct(input),
+                "adaptive order {order}: sharded and single decodes must match for {input:?}"
+            );
+        }
+    }
+}
+
+/// **Empty-history successor parity — the all-shards fan-out fix.** Over a BOUNDARY-LESS
+/// multi-shard corpus (`bos_id = None`, so the decoder reaches the empty-history oracle at
+/// the sentence start), the sharded `successors(&[])` — the all-shards root fan-out —
+/// returns exactly the set of first-tokens (unigrams) that the single store's
+/// `successors(&[])` (its `whole_view().root().edges()`) returns. This is the completeness
+/// that keeps sharded first-position insertion at parity with the single-store decoder:
+/// BEFORE the fix, `ShardedView::whole_view()` was `None` so the sharded `successors(&[])`
+/// was empty, and the sharded decoder could not insert a word before the first token.
+/// Non-empty histories are checked too, confirming the anchored routing agrees.
+#[test]
+fn sharded_successors_match_single_store_empty_and_nonempty_history() {
+    // Run under BOTH a length-invariant (`TwoChar`) and a length-SENSITIVE (`Adaptive`)
+    // granularity. Under Adaptive a 1-token history's produced (2-gram) successors live in
+    // the 2-char-prefix shard, while the 1-char-prefix shard holds only unigrams — so the
+    // NON-EMPTY case here pins the produced-length (`|h|+1`) successor routing that the
+    // differential decode cannot (insertions are cost-neutral, so a mis-routed successor
+    // set does not change `correct()`'s output).
+    for granularity in [ShardGranularity::TwoChar, ShardGranularity::Adaptive] {
+        let corpus =
+            SentenceCorpus::build_with_boundaries(SENTENCES, 3, granularity.clone(), false);
+        let single_view = SingleView::new(corpus.single.clone());
+        let sharded_view = ShardedView::new(Arc::clone(&corpus.coordinator), corpus.vocab.clone());
+
+        // Empty history → every stored first-token (all unigrams), identical across backends.
+        let single_roots: BTreeSet<u64> = single_view.successors(&[]).into_iter().collect();
+        let sharded_roots: BTreeSet<u64> = sharded_view.successors(&[]).into_iter().collect();
+        assert!(
+            !single_roots.is_empty(),
+            "{granularity:?}: the corpus has unigrams (sanity)"
+        );
+        assert_eq!(
+            single_roots, sharded_roots,
+            "{granularity:?}: empty-history successors (all unigrams) must match — the \
+             all-shards fan-out equals the single store's whole-view root edges"
+        );
+
+        // Non-empty history → same set (co-located, produced-length routing).
+        let the = corpus.vocab.get_index("the").expect("'the' in vocab");
+        let quick = corpus.vocab.get_index("quick").expect("'quick' in vocab");
+        let single_succ: BTreeSet<u64> = single_view.successors(&[the]).into_iter().collect();
+        let sharded_succ: BTreeSet<u64> = sharded_view.successors(&[the]).into_iter().collect();
+        assert_eq!(
+            single_succ, sharded_succ,
+            "{granularity:?}: non-empty-history successors must match (pins produced-length routing)"
+        );
+        assert!(
+            single_succ.contains(&quick),
+            "{granularity:?}: 'the' → 'quick' is a known continuation (sanity)"
+        );
+    }
 }

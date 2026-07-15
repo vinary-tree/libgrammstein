@@ -249,7 +249,7 @@ impl ShardCoordinator {
                         }
                         Err(e) => {
                             // Failure: mark failed
-                            guard.sync_coordinator().fail_sync(&e.to_string());
+                            guard.sync_coordinator().fail_sync(e.to_string());
                             Some((key.clone(), e.to_string()))
                         }
                     }
@@ -444,64 +444,67 @@ impl ShardCoordinator {
         // OPTIMIZATION: Skip shards that are already clean (no dirty data) to avoid
         // expensive persist_to_disk() calls. Clean shards still contribute their state
         // to the checkpoint metadata.
-        let results: Vec<Result<(ShardKey, u64, u64, HashSet<String>, Option<String>), String>> =
-            pool.install(|| {
-                shard_keys
-                    .par_iter()
-                    .filter_map(|key| {
-                        let shard = self.shards.get(key)?;
+        // Per-shard checkpoint outcome collected in parallel: on success,
+        // `(shard_key, ngram_count, unique_count, dirty_keys, checkpoint_label)`.
+        type ShardCheckpointOutcome =
+            Result<(ShardKey, u64, u64, HashSet<String>, Option<String>), String>;
+        let results: Vec<ShardCheckpointOutcome> = pool.install(|| {
+            shard_keys
+                .par_iter()
+                .filter_map(|key| {
+                    let shard = self.shards.get(key)?;
 
-                        // Check if shard is clean with a read lock first (fast, non-blocking)
-                        let result = {
-                            let guard = shard.read();
-                            if !guard.is_dirty() {
-                                // Shard is clean - still collect its state for checkpoint metadata
-                                let state = guard.checkpoint_state();
-                                Some(Ok((
-                                    key.clone(),
-                                    guard.len() as u64,
-                                    state.ngrams_processed,
-                                    state.completed_prefixes.clone(),
-                                    state.current_prefix.clone(),
-                                )))
-                            } else {
-                                None
-                            }
-                        };
-
-                        let result = result.unwrap_or_else(|| {
-                            // Shard is dirty - checkpoint it. `checkpoint()` is `&self`
-                            // (overlay snapshot), so a shared read guard suffices and
-                            // workers keep writing during the checkpoint.
-                            let guard = shard.read();
-
-                            // Checkpoint (retain WAL) - fast since data already synced
-                            if let Err(e) = guard.checkpoint() {
-                                return Err(format!("Shard {}: {}", key, e));
-                            }
-
-                            // Collect state for global checkpoint update (done outside parallel section
-                            // to avoid lock contention on checkpoint_manager)
+                    // Check if shard is clean with a read lock first (fast, non-blocking)
+                    let result = {
+                        let guard = shard.read();
+                        if !guard.is_dirty() {
+                            // Shard is clean - still collect its state for checkpoint metadata
                             let state = guard.checkpoint_state();
-                            Ok((
+                            Some(Ok((
                                 key.clone(),
                                 guard.len() as u64,
                                 state.ngrams_processed,
                                 state.completed_prefixes.clone(),
                                 state.current_prefix.clone(),
-                            ))
-                        });
+                            )))
+                        } else {
+                            None
+                        }
+                    };
 
-                        // Update progress counter and emit event
-                        let processed = shards_processed.fetch_add(1, Ordering::Relaxed) + 1;
-                        if let Some(ref callback) = progress_callback {
-                            callback(processed, total_shards);
+                    let result = result.unwrap_or_else(|| {
+                        // Shard is dirty - checkpoint it. `checkpoint()` is `&self`
+                        // (overlay snapshot), so a shared read guard suffices and
+                        // workers keep writing during the checkpoint.
+                        let guard = shard.read();
+
+                        // Checkpoint (retain WAL) - fast since data already synced
+                        if let Err(e) = guard.checkpoint() {
+                            return Err(format!("Shard {}: {}", key, e));
                         }
 
-                        Some(result)
-                    })
-                    .collect()
-            });
+                        // Collect state for global checkpoint update (done outside parallel section
+                        // to avoid lock contention on checkpoint_manager)
+                        let state = guard.checkpoint_state();
+                        Ok((
+                            key.clone(),
+                            guard.len() as u64,
+                            state.ngrams_processed,
+                            state.completed_prefixes.clone(),
+                            state.current_prefix.clone(),
+                        ))
+                    });
+
+                    // Update progress counter and emit event
+                    let processed = shards_processed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if let Some(ref callback) = progress_callback {
+                        callback(processed, total_shards);
+                    }
+
+                    Some(result)
+                })
+                .collect()
+        });
 
         // Separate errors from successful results
         let mut errors = Vec::new();

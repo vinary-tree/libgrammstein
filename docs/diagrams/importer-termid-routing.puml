@@ -1,0 +1,57 @@
+@startuml importer-termid-routing
+' The single labeled input boundary and the term-id routing data flow:
+'   TSV row -> space-split tokens (the ONLY live delimited parse) -> term-id varint
+'   byte key -> first-token route -> shard. Bottom: the delimiter-collision the
+'   term-id key eliminates and the old '|'-router re-introduced.
+' Colour legend (semantic, shared across all repo diagrams — see architecture.puml):
+'   #1565C0 blue = statistical LM core   #00838F teal = storage / persistence
+'   #546E7A grey = external crates / corpora   #C62828 red = the removed defect
+'   #EF6C00 amber = the labeled boundary (mirrors read_legacy_pipe_entries)
+' Render: plantuml -tsvg docs/diagrams/importer-termid-routing.puml
+' Source of truth for the figure in docs/architecture/google-books-shard-routing.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam NoteBackgroundColor #FFF3E0
+skinparam NoteBorderColor #EF6C00
+title The single input boundary and term-id routing — no delimited key is ever live
+
+rectangle "**Google-Books TSV row**  (grey = external corpus)\n<latex>\text{ngram}\;\backslash t\;\text{year}\;\backslash t\;\text{match\_count}\;\backslash t\;\text{vol\_count}</latex>\nfield 0 is SPACE-separated:  the quick brown" as tsv #546E7A
+
+rectangle "**Input boundary** — the ONLY live delimited parse\nNgramStorage::store_ngram / tx_insert_ngram\n<latex>\texttt{str.split(' ')}\;\Rightarrow\;[w_1, \ldots, w_k]</latex>\ncollision-safe: a token cannot contain the corpus's own space\n(mirrors the labeled read_legacy_pipe_entries)" as boundary #EF6C00
+
+rectangle "**Term-id byte key**  (teal = storage)\n<latex>\operatorname{key}(g) = \operatorname{leb128}(\iota(w_1)) \Vert \cdots \Vert \operatorname{leb128}(\iota(w_k))</latex>\nLEB128 is self-terminating ⟹ NO delimiter byte\n<latex>\iota(w)</latex> = vocabulary index of word <latex>w</latex>" as key #00838F
+
+rectangle "**Route by the FIRST TOKEN's characters**  (blue = LM core)\n<latex>\operatorname{shard}(g) = h(w_1) \bmod S</latex>  (hash, default)\n<latex>\operatorname{shard}(g) = \operatorname{prefix}_p(w_1)</latex>  (prefix)\nnever a term-id VALUE (unstable across vocabularies)\nat query time <latex>w_1</latex> is recovered via vocabulary.get_term" as route #1565C0
+
+rectangle "**Shard**  shard_{prefix}.artrie  (teal = storage)\nstore_in_shard(shard_key, key(g), c(g))\nlock-free increment; byte-keyed ARTrie" as shard #00838F
+
+tsv -down-> boundary : one row per year
+boundary -down-> key : tokens in hand
+key -down-> route : first token = <latex>w_1</latex>
+route -down-> shard : co-located import & query
+
+' The defect this migration removes.
+rectangle "**Deleted '|'-router**  (red = removed defect)\ncompute_shard_key(\"foo|bar\", ..) did split('|')\n⟹ <latex>[\text{``foo|bar''}]</latex> and <latex>[\text{``foo''}, \text{``bar''}]</latex> both became \"foo|bar\"\n⟹ mis-ROUTED and mis-COUNTED (counts collided)" as bug #C62828
+
+rectangle "**Term-id keys keep them apart**  (teal)\n<latex>[\iota(\text{``foo|bar''})]\;\neq\;[\iota(\text{``foo''}), \iota(\text{``bar''})]</latex>\ndistinct byte keys ⟹ independent counts, no cross-talk" as fix #00838F
+
+bug -right-> fix : the fix
+key .up.> fix : same principle
+
+note bottom of shard
+  Legacy pipe / space-**text**-keyed shards are UNSUPPORTED and
+  are NOT reinterpreted. There is no live converter — such shards
+  must be re-imported from source (see the design note §5).
+end note
+
+@enduml

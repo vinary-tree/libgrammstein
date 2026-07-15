@@ -4,6 +4,7 @@
 //! within LaTeX documents: commands, math expressions, and natural text.
 
 use crate::latex::tokenizer::{LaTeXToken, LaTeXTokenKind};
+use crate::ngram::store::NgramLookup;
 use crate::ngram::{NgramEntry, NgramModel};
 use libdictenstein::MutableMappedDictionary;
 
@@ -199,34 +200,34 @@ impl ModeDetector {
 ///
 /// This model maintains separate n-gram statistics for different LaTeX contexts
 /// (commands, math, text) and combines them using configurable weights.
-pub struct LaTeXNgramModel<D>
+pub struct LaTeXNgramModel<S>
 where
-    D: MutableMappedDictionary<Value = NgramEntry>,
+    S: NgramLookup,
 {
     /// N-gram model for command sequences.
-    command_model: NgramModel<D>,
+    command_model: NgramModel<S>,
     /// N-gram model for math expressions.
-    math_model: NgramModel<D>,
+    math_model: NgramModel<S>,
     /// N-gram model for natural text.
-    text_model: NgramModel<D>,
+    text_model: NgramModel<S>,
     /// Combined model for all contexts.
-    combined_model: NgramModel<D>,
+    combined_model: NgramModel<S>,
     /// Mode detector.
     mode_detector: ModeDetector,
     /// Configuration.
     config: NgramConfig,
 }
 
-impl<D> LaTeXNgramModel<D>
+impl<S> LaTeXNgramModel<S>
 where
-    D: MutableMappedDictionary<Value = NgramEntry>,
+    S: NgramLookup,
 {
     /// Create a new LaTeX n-gram model from pre-trained component models.
     pub fn new(
-        command_model: NgramModel<D>,
-        math_model: NgramModel<D>,
-        text_model: NgramModel<D>,
-        combined_model: NgramModel<D>,
+        command_model: NgramModel<S>,
+        math_model: NgramModel<S>,
+        text_model: NgramModel<S>,
+        combined_model: NgramModel<S>,
         config: NgramConfig,
     ) -> Self {
         Self {
@@ -345,7 +346,7 @@ where
     }
 
     /// Get the underlying model for a specific mode.
-    pub fn model_for_mode(&self, mode: LaTeXMode) -> &NgramModel<D> {
+    pub fn model_for_mode(&self, mode: LaTeXMode) -> &NgramModel<S> {
         match mode {
             LaTeXMode::Command => &self.command_model,
             LaTeXMode::Math => &self.math_model,

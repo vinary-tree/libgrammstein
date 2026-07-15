@@ -8,9 +8,10 @@
 use crate::embedding::SubwordEmbedding;
 
 /// OOV handling strategy.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum OovStrategy {
     /// Use subword embeddings to estimate probability.
+    #[default]
     SubwordEmbedding,
 
     /// Use a fixed unknown word probability.
@@ -27,12 +28,6 @@ pub enum OovStrategy {
         /// Number of similar words to consider.
         k: usize,
     },
-}
-
-impl Default for OovStrategy {
-    fn default() -> Self {
-        Self::SubwordEmbedding
-    }
 }
 
 /// OOV handler using embedding-based strategies.
@@ -89,7 +84,7 @@ impl<'a> OovHandler<'a> {
         let log_prob = (similarity as f64) - 1.0;
 
         // Ensure reasonable bounds
-        log_prob.max(-20.0).min(-1e-6)
+        log_prob.clamp(-20.0, -1e-6)
     }
 
     /// Estimate probability from similar in-vocabulary words.
@@ -123,7 +118,7 @@ impl<'a> OovHandler<'a> {
 
         if weight_total > 0.0 {
             let avg_sim = weighted_sum / weight_total;
-            (avg_sim - 1.0).max(-20.0).min(-1e-6)
+            (avg_sim - 1.0).clamp(-20.0, -1e-6)
         } else {
             -(self.vocab_size as f64).ln()
         }

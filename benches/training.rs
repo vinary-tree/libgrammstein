@@ -5,9 +5,9 @@
 //! order. Throughput here dominates real-corpus import time.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use libdictenstein::dynamic_dawg::DynamicDawg;
 use libgrammstein::corpus::PlaintextReader;
 use libgrammstein::ngram::{NgramEntry, TrainerBuilder};
-use liblevenshtein::dictionary::pathmap::PathMapDictionary;
 use std::io::Write;
 use tempfile::TempDir;
 
@@ -54,7 +54,7 @@ fn training_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(sentences), &path, |b, p| {
             b.iter(|| {
                 let reader = PlaintextReader::from_file(p).expect("reader");
-                let dictionary = PathMapDictionary::<NgramEntry>::new();
+                let dictionary = DynamicDawg::<NgramEntry>::new();
                 let model = TrainerBuilder::new(dictionary)
                     .order(3)
                     .train(reader)
@@ -74,7 +74,7 @@ fn training_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(order), &order, |b, &o| {
             b.iter(|| {
                 let reader = PlaintextReader::from_file(&path).expect("reader");
-                let dictionary = PathMapDictionary::<NgramEntry>::new();
+                let dictionary = DynamicDawg::<NgramEntry>::new();
                 let model = TrainerBuilder::new(dictionary)
                     .order(o)
                     .train(reader)

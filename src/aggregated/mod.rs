@@ -439,7 +439,7 @@ impl Dictionary for AggregatedLanguageModelDictionary {
     fn contains(&self, term: &str) -> bool {
         // Split by delimiter and check as n-gram
         let words = self.split_term(term);
-        let refs: Vec<&str> = words.iter().map(|s| *s).collect();
+        let refs: Vec<&str> = words.to_vec();
         self.contains_ngram(&refs)
     }
 
@@ -466,7 +466,7 @@ impl MappedDictionary for AggregatedLanguageModelDictionary {
 
     fn get_value(&self, term: &str) -> Option<Self::Value> {
         let words = self.split_term(term);
-        let refs: Vec<&str> = words.iter().map(|s| *s).collect();
+        let refs: Vec<&str> = words.to_vec();
         self.get_ngram(&refs)
     }
 
@@ -487,8 +487,7 @@ impl MappedDictionary for AggregatedLanguageModelDictionary {
 /// Note: Character-level traversal over an aggregated sharded dictionary is
 /// complex because it requires fanning out across multiple shards. This
 /// implementation provides basic functionality; for Levenshtein automaton
-/// compatibility, use individual shard-level traversal via
-/// [`VocabularyIndexedDictionary`](libdictenstein::VocabularyIndexedDictionary).
+/// compatibility, traverse individual shards directly.
 #[derive(Clone)]
 pub struct AggregatedDictionaryNode {
     _phantom: std::marker::PhantomData<()>,
@@ -556,7 +555,8 @@ mod tests {
         // Verify SharedVocabARTrie has the methods we need
         // This test verifies the API we depend on exists
         fn _check_api(v: &SharedVocabARTrie) {
-            let _: libdictenstein::persistent_artrie::error::Result<u64> = v.as_ref().insert("word");
+            let _: libdictenstein::persistent_artrie::error::Result<u64> =
+                v.as_ref().insert("word");
             let _: Option<u64> = v.as_ref().get_index("word");
             let _: bool = v.as_ref().contains("word");
             let _: usize = v.as_ref().len();

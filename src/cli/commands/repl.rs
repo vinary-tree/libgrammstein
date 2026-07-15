@@ -10,15 +10,18 @@ use crate::cli::args::ReplArgs;
 use crate::cli::error::{CliError, CliResult};
 use crate::embedding::SubwordEmbedding;
 use crate::hybrid::HybridLanguageModel;
+use crate::ngram::store::TermIdStore;
 use crate::ngram::{NgramEntry, NgramModel};
+use libdictenstein::dynamic_dawg::DynamicDawg;
 
-type DynamicDict = libdictenstein::dynamic_dawg::char::DynamicDawgChar<NgramEntry>;
+/// The byte-native in-memory store backing loaded REPL models.
+type ReplStore = TermIdStore<DynamicDawg<NgramEntry>>;
 
 /// Loaded model type.
 enum LoadedModel {
-    Ngram(NgramModel<DynamicDict>),
-    Embedding(SubwordEmbedding),
-    Hybrid(HybridLanguageModel<DynamicDict>),
+    Ngram(Box<NgramModel<ReplStore>>),
+    Embedding(Box<SubwordEmbedding>),
+    Hybrid(Box<HybridLanguageModel<ReplStore>>),
 }
 
 impl LoadedModel {
@@ -94,10 +97,10 @@ impl LoadedModel {
                 )
             }
             LoadedModel::Ngram(m) => {
-                // Extract unigrams (no separator)
-                Box::new(m.trie().iter_entries().filter_map(|(key, _)| {
-                    if !key.contains('|') {
-                        Some(key)
+                // Extract unigrams (single-word n-grams).
+                Box::new(m.iter_ngrams().filter_map(|(mut words, _)| {
+                    if words.len() == 1 {
+                        Some(words.remove(0))
                     } else {
                         None
                     }
@@ -109,21 +112,21 @@ impl LoadedModel {
 
 /// Load a model from path.
 fn load_model(path: &Path) -> CliResult<LoadedModel> {
-    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
-
     // Try hybrid first
-    if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::new) {
-        return Ok(LoadedModel::Hybrid(model));
+    if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawg::<NgramEntry>::new) {
+        return Ok(LoadedModel::Hybrid(Box::new(model)));
     }
 
     // Try N-gram
-    if let Ok(model) = NgramModel::load_portable(path, DynamicDawgChar::new) {
-        return Ok(LoadedModel::Ngram(model));
+    if let Ok(model) =
+        crate::ngram::InMemoryTermIdModel::load_portable(path, DynamicDawg::<NgramEntry>::new)
+    {
+        return Ok(LoadedModel::Ngram(Box::new(model)));
     }
 
     // Try embedding
     if let Ok(model) = SubwordEmbedding::load(path) {
-        return Ok(LoadedModel::Embedding(model));
+        return Ok(LoadedModel::Embedding(Box::new(model)));
     }
 
     Err(CliError::model_load(

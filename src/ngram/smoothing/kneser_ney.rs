@@ -12,9 +12,7 @@
 //! - Chen, S. F., & Goodman, J. (1999). An empirical study of smoothing
 //!   techniques for language modeling. Computer Speech & Language.
 
-use super::super::entry::NgramEntry;
-use super::super::trie::NgramTrie;
-use libdictenstein::MappedDictionary;
+use super::super::store::NgramLookup;
 
 /// Modified Kneser-Ney smoothing parameters and algorithm.
 ///
@@ -78,9 +76,9 @@ impl KneserNeySmoothing {
         let y = n1 / (n1 + 2.0 * n2);
 
         // Compute discounts using Chen & Goodman formula
-        let d1 = (1.0 - 2.0 * y * (n2 / n1)).max(0.0).min(1.0);
-        let d2 = (2.0 - 3.0 * y * (n3 / n2)).max(0.0).min(2.0);
-        let d3_plus = (3.0 - 4.0 * y * (n4 / n3)).max(0.0).min(3.0);
+        let d1 = (1.0 - 2.0 * y * (n2 / n1)).clamp(0.0, 1.0);
+        let d2 = (2.0 - 3.0 * y * (n3 / n2)).clamp(0.0, 2.0);
+        let d3_plus = (3.0 - 4.0 * y * (n4 / n3)).clamp(0.0, 3.0);
 
         Self {
             d1,
@@ -144,37 +142,37 @@ impl KneserNeySmoothing {
     /// - D = discount based on count
     /// - λ(h) = interpolation weight
     /// - N_{1+}(•,h',w) = continuation count (unique preceding contexts)
-    pub fn log_prob<D>(
+    pub fn log_prob<S>(
         &self,
         word: &str,
         context: &[&str],
-        trie: &NgramTrie<D>,
+        store: &S,
         vocab_size: usize,
         total_count: u64,
     ) -> f64
     where
-        D: MappedDictionary<Value = NgramEntry>,
+        S: NgramLookup,
     {
-        let prob = self.prob_recursive(word, context, trie, vocab_size, total_count, true);
+        let prob = self.prob_recursive(word, context, store, vocab_size, total_count, true);
         prob.ln()
     }
 
     /// Recursive probability computation with backoff.
-    fn prob_recursive<D>(
+    fn prob_recursive<S>(
         &self,
         word: &str,
         context: &[&str],
-        trie: &NgramTrie<D>,
+        store: &S,
         vocab_size: usize,
         total_count: u64,
         is_highest_order: bool,
     ) -> f64
     where
-        D: MappedDictionary<Value = NgramEntry>,
+        S: NgramLookup,
     {
         if context.is_empty() {
             // Unigram case: use continuation probability or raw probability
-            return self.unigram_prob(word, trie, vocab_size, total_count, is_highest_order);
+            return self.unigram_prob(word, store, vocab_size, total_count, is_highest_order);
         }
 
         // Build the full n-gram: context + word
@@ -182,12 +180,12 @@ impl KneserNeySmoothing {
         ngram.push(word);
 
         // Get n-gram count
-        let ngram_count = trie.count(&ngram);
-        let context_count = trie.count(context);
+        let ngram_count = store.count(&ngram);
+        let context_count = store.count(context);
 
         if context_count == 0 {
             // Context not found, backoff to shorter context
-            return self.prob_recursive(word, &context[1..], trie, vocab_size, total_count, false);
+            return self.prob_recursive(word, &context[1..], store, vocab_size, total_count, false);
         }
 
         // Discounted probability
@@ -203,8 +201,8 @@ impl KneserNeySmoothing {
         // mass is still reserved for the (always-positive) backoff distribution. Seen
         // n-grams (count ≥ 1) keep their existing per-count discount unchanged.
         let lambda_discount = if ngram_count == 0 { self.d1 } else { discount };
-        let unique_continuations = trie
-            .get(context)
+        let unique_continuations = store
+            .entry(context)
             .map(|e| e.unique_continuations() as f64)
             .unwrap_or(1.0)
             .max(1.0);
@@ -212,7 +210,7 @@ impl KneserNeySmoothing {
 
         // Backoff probability (always > 0; the recursion bottoms out at unigram_prob).
         let backoff_prob =
-            self.prob_recursive(word, &context[1..], trie, vocab_size, total_count, false);
+            self.prob_recursive(word, &context[1..], store, vocab_size, total_count, false);
 
         // Interpolated probability. Guard against a degenerate zero (e.g. an unseen
         // n-gram with all-zero discounts) so the log probability stays finite, falling
@@ -226,18 +224,18 @@ impl KneserNeySmoothing {
     }
 
     /// Compute unigram probability.
-    fn unigram_prob<D>(
+    fn unigram_prob<S>(
         &self,
         word: &str,
-        trie: &NgramTrie<D>,
+        store: &S,
         vocab_size: usize,
         total_count: u64,
         is_highest_order: bool,
     ) -> f64
     where
-        D: MappedDictionary<Value = NgramEntry>,
+        S: NgramLookup,
     {
-        let entry = trie.get(&[word]);
+        let entry = store.entry(&[word]);
 
         if is_highest_order {
             // Highest order: use raw count

@@ -28,8 +28,11 @@
 //!
 //! [`get_shard_readonly`](ShardCoordinator::get_shard_readonly) never creates a shard,
 //! never evicts (so it never triggers the eviction-path `checkpoint()` write), and
-//! never arms overlay eviction. The decoder therefore performs **no writes** while
-//! readers are active, so the lock-free trie reads never race a concurrent writer.
+//! never arms overlay eviction. Over a **checkpoint-finalized corpus** the decoder
+//! therefore performs **no writes** while readers are active, so the lock-free trie
+//! reads never race a concurrent writer. The one caveat: opening a shard from disk
+//! replays its WAL, a no-op only on a cleanly-finalized corpus — serve a finalized
+//! corpus for a strictly read-only query path.
 //! The coordinator should be opened with `max_open_shards = 0` (all shards resident)
 //! for query mode: correction scores touch up to `order` distinct first-token shards,
 //! and the read path never evicts, so a bounded residency cap would only accumulate
@@ -51,11 +54,22 @@
 //! Under sharding a first-token EDIT lands in a *different* shard (and hash routing
 //! destroys prefix locality), so the anchored [`grammar_neighbors`] — which walks the
 //! single shard of the query's own first-token — cannot see first-token-edit
-//! neighbors. This matches exactly what the decoder needs (its successor oracle only
-//! ever consults co-located continuations), so it is the honest default. For full
-//! soundness+completeness across first-token edits, use the opt-in
-//! [`grammar_neighbors_fanout`], which walks **every** shard and merges — batch /
-//! offline only.
+//! neighbors. That matches the co-located continuations the decoder's successor oracle
+//! consults for a NON-empty history (its common case; the empty-history case fans out —
+//! see below), so it is the honest default. For full soundness+completeness across
+//! first-token edits, use the opt-in [`grammar_neighbors_fanout`], which walks **every**
+//! shard and merges — batch / offline only.
+//!
+//! ## First-position insertion — the empty-history fan-out
+//!
+//! At an EMPTY history (a boundary-less sentence start, `bos_id = None`), the successor
+//! oracle needs every stored first-token (unigram). There is no single whole view, so
+//! `ShardedView::successors` fans out over ALL shards' root edges (the private
+//! `all_shards_root_successors`) — the exact unigram set the single store enumerates
+//! from `whole_view().root().edges()`. This keeps sharded first-position insertion at
+//! parity with the single-store decoder — no gap, no gate. Like the single store, it is
+//! `` $`O(|V|)`$ `` at the sentence start; it fires at most once per `correct()` and only
+//! for a boundary-less corpus.
 //!
 //! [`grammar_neighbors`]: ShardedGrammarCorrector::grammar_neighbors
 //! [`grammar_neighbors_fanout`]: ShardedGrammarCorrector::grammar_neighbors_fanout
@@ -63,11 +77,11 @@
 //! [`GrammarCore`]: super::grammar_corrector::GrammarCore
 //! [`GrammarCorrector`]: super::grammar_corrector::GrammarCorrector
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use libdictenstein::persistent_artrie::SharedARTrie;
-use libdictenstein::Dictionary;
+use libdictenstein::{Dictionary, DictionaryNode};
 use liblevenshtein::transducer::Transducer;
 
 use crate::ngram::u64_view::{U64NgramNode, U64NgramView};
@@ -77,8 +91,8 @@ use crate::sources::google_books::sharding::{
 };
 
 use super::grammar_corrector::{
-    GrammarCore, GrammarCorrection, GrammarCorrectorConfig, GrammarNeighbor, LexCandidate,
-    NgramViewSource,
+    node_after, GrammarCore, GrammarCorrection, GrammarCorrectorConfig, GrammarNeighbor,
+    LexCandidate, NgramViewSource,
 };
 
 /// A [`NgramViewSource`] over a sharded byte-trie corpus: it routes each requested
@@ -114,7 +128,22 @@ impl ShardedView {
     /// shard file does not exist. Used by both `view_for` (after routing) and the
     /// all-shards fanout.
     fn open_view(&self, key: &ShardKey) -> Option<U64NgramView<SharedARTrie<u64>>> {
-        let shard = self.coordinator.get_shard_readonly(key).ok().flatten()?;
+        let shard = match self.coordinator.get_shard_readonly(key) {
+            Ok(Some(shard)) => shard,
+            // An absent shard file is legitimately "no n-gram evidence" for this
+            // first-token — the decoder reads it as count 0 / no neighbors.
+            Ok(None) => return None,
+            // A genuine open/recovery fault is NOT absence: swallowing it would
+            // silently degrade correction quality. Surface it, then fall back to
+            // "no evidence" so one bad shard cannot abort the whole decode.
+            Err(error) => {
+                log::warn!(
+                    "sharded view: opening shard {} failed (treated as no evidence): {error}",
+                    key.as_file_stem()
+                );
+                return None;
+            }
+        };
         // Clone the lock-free `Arc` trie out of the brief read guard: the trie's reads
         // are `&self` and lock-free, so the returned view outlives the guard.
         let trie = shard.read().trie_arc();
@@ -171,6 +200,42 @@ impl ShardedView {
         }
         merged.into_values().collect()
     }
+
+    /// Every stored first-token (unigram) across ALL shards — the sharded equivalent
+    /// of a single store's `whole_view().root().edges()`, which the empty-history
+    /// successor oracle needs at a boundary-less sentence start.
+    ///
+    /// Opens each shard READ-ONLY (`discover_shard_files` + `get_shard_readonly` via
+    /// [`open_view`](Self::open_view)); never creates, evicts, or checkpoints.
+    /// De-duplicates across shards because a first-token can root n-grams of several
+    /// length classes that, under Adaptive granularity, live in different shards. The
+    /// result is exactly the unigram set the single store enumerates from its whole
+    /// view — the completeness that keeps sharded first-position insertion at parity
+    /// with the single-store decoder (no gap, no gate). Like first-position insertion
+    /// on the single store, this is `` $`O(|V|)`$ `` at the sentence start; it fires
+    /// at most once per `correct()` and only for a boundary-less corpus.
+    fn all_shards_root_successors(&self) -> Vec<u64> {
+        let shards = match self.coordinator.discover_shard_files() {
+            Ok(shards) => shards,
+            Err(error) => {
+                log::warn!("all_shards_root_successors: shard discovery failed: {error}");
+                return Vec::new();
+            }
+        };
+        let mut seen: HashSet<u64> = HashSet::new();
+        let mut out: Vec<u64> = Vec::new();
+        for (key, _path) in shards {
+            let Some(view) = self.open_view(&key) else {
+                continue;
+            };
+            for (id, _child) in view.root().edges() {
+                if seen.insert(id) {
+                    out.push(id);
+                }
+            }
+        }
+        out
+    }
 }
 
 impl NgramViewSource for ShardedView {
@@ -192,10 +257,31 @@ impl NgramViewSource for ShardedView {
 
     fn whole_view(&self) -> Option<Self::View> {
         // A sharded store has no single whole-store view: unigrams (and the roots of
-        // every length class) are spread across all shards. This disables just the
-        // whole-store operations — the successor oracle at an empty history and an
-        // empty-sequence neighbor query — for the sharded path.
+        // every length class) are spread across all shards. The empty-history
+        // successor oracle no longer needs one — it uses `successors` →
+        // `all_shards_root_successors` — so this now serves only the degenerate
+        // empty-sequence `grammar_neighbors` query. `None` is honest: there genuinely
+        // is no single whole view.
         None
+    }
+
+    fn successors(&self, history: &[u64]) -> Vec<u64> {
+        match history.first() {
+            // Non-empty history: identical to the trait default's anchored path — the
+            // co-located shard for the produced length `(first, history.len()+1)`.
+            Some(&first) => {
+                let Some(view) = self.view_for(first, history.len() + 1) else {
+                    return Vec::new();
+                };
+                node_after(&view, history)
+                    .map(|node| node.edges().map(|(id, _child)| id).collect())
+                    .unwrap_or_default()
+            }
+            // Empty history (a boundary-less sentence start): the whole-store root
+            // fan-out `whole_view()` cannot provide — the union of every shard's root
+            // unigrams (every stored first-token). Parity with the single store.
+            None => self.all_shards_root_successors(),
+        }
     }
 }
 

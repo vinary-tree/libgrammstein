@@ -334,25 +334,20 @@ impl ShardSyncCoordinator {
 
     /// Wait for sync to complete (with timeout).
     ///
-    /// Returns `Ok(())` if sync completed, `Err(())` if timeout.
-    pub fn wait_for_sync(&self, timeout: Duration) -> Result<(), ()> {
+    /// Returns `true` if sync completed, `false` if it timed out (or the condvar
+    /// woke spuriously without the completion flag set).
+    pub fn wait_for_sync(&self, timeout: Duration) -> bool {
         let (lock, cvar) = &*self.sync_complete;
         let mut completed = lock.lock();
 
         if *completed {
-            return Ok(());
+            return true;
         }
 
         // Wait with timeout
         let result = cvar.wait_for(&mut completed, timeout);
 
-        if result.timed_out() {
-            Err(())
-        } else if *completed {
-            Ok(())
-        } else {
-            Err(())
-        }
+        !result.timed_out() && *completed
     }
 
     /// Get the last synced LSN.
@@ -894,11 +889,13 @@ impl ShardHandle {
     ///
     /// Returns `Ok(())` if sync completed, `Err(ShardError::SyncTimeout)` if timeout.
     pub fn wait_for_sync(&self, timeout: Duration) -> ShardResult<()> {
-        self.sync_coordinator
-            .wait_for_sync(timeout)
-            .map_err(|()| ShardError::SyncTimeout {
+        if self.sync_coordinator.wait_for_sync(timeout) {
+            Ok(())
+        } else {
+            Err(ShardError::SyncTimeout {
                 shard_key: self.key.to_string(),
             })
+        }
     }
 
     /// Start async WAL sync - returns immediately, sync happens in background.
@@ -1036,7 +1033,7 @@ impl ShardHandle {
         // Load n-grams processed count
         let ngrams_key = format!("{}ngrams_processed", Self::CHECKPOINT_PREFIX);
         if let Some(value) = self.trie.get_value_bytes(ngrams_key.as_bytes()) {
-            self.checkpoint_state.ngrams_processed = value as u64;
+            self.checkpoint_state.ngrams_processed = value;
         }
 
         // Load completed prefixes by scanning for prefix keys
@@ -1549,8 +1546,8 @@ mod tests {
         });
 
         // Wait for sync (should succeed)
-        let result = coordinator.wait_for_sync(Duration::from_millis(200));
-        assert!(result.is_ok());
+        let completed = coordinator.wait_for_sync(Duration::from_millis(200));
+        assert!(completed);
         assert_eq!(coordinator.state(), ShardSyncState::Clean);
 
         handle.join().expect("Thread panicked");
@@ -1565,8 +1562,8 @@ mod tests {
         assert!(coordinator.try_start_sync());
 
         // Wait should timeout
-        let result = coordinator.wait_for_sync(Duration::from_millis(10));
-        assert!(result.is_err());
+        let completed = coordinator.wait_for_sync(Duration::from_millis(10));
+        assert!(!completed);
         assert!(coordinator.is_syncing()); // Still syncing
     }
 

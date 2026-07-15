@@ -33,28 +33,29 @@
 //!                               │ uses dictionary backends
 //!                               ▼
 //! ┌─────────────────────────────────────────────────────────────┐
-//! │ liblevenshtein-rust                                          │
-//! │   - DynamicDawgChar, PathMapDictionary                       │
-//! │   - MutableMappedDictionary trait for n-gram storage         │
+//! │ libdictenstein (+ liblevenshtein-rust)                       │
+//! │   - DynamicDawgChar, PathMapDictionary, persistent ARTries   │
+//! │   - MappedDictionary / MutableMappedDictionary trait bounds  │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 //!
 //! ## Example Usage
 //!
 //! ```ignore
-//! use libgrammstein::ngram::NgramModel;
-//! use libgrammstein::corpus::WikipediaReader;
+//! use libgrammstein::ngram::{NgramEntry, TrainerBuilder};
+//! use libgrammstein::corpus::PlaintextReader;
+//! use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 //!
-//! // Train n-gram model from Wikipedia
-//! let reader = WikipediaReader::from_dump("enwiki-latest-pages-articles.xml.bz2")?;
-//! let model = NgramModel::train(reader, 5)?;
+//! // Train a 5-gram Modified Kneser-Ney model over a trie backend.
+//! // (Training goes through `TrainerBuilder`; `NgramModel` has no `train` constructor.)
+//! let reader = PlaintextReader::from_file("corpus.txt")?;
+//! let model = TrainerBuilder::new(DynamicDawgChar::<NgramEntry>::new())
+//!     .order(5)
+//!     .train(reader)?;
 //!
-//! // Query log probability
+//! // Query a log probability.
 //! let log_prob = model.log_prob("world", &["hello"]);
 //! println!("log P(world | hello) = {}", log_prob);
-//!
-//! // Sentence scoring
-//! let sentence_log_prob = model.sentence_log_prob(&["the", "quick", "brown", "fox"]);
 //! ```
 
 #![warn(missing_docs)]
@@ -137,6 +138,11 @@ pub mod error {
         /// Serialization error (general, e.g., JSON).
         #[error("Serialization error: {0}")]
         SerializationMessage(String),
+
+        /// Model construction / vocabulary consistency error (e.g. a term-id
+        /// model loaded against a vocabulary whose fingerprint does not match).
+        #[error("Model error: {0}")]
+        Model(String),
 
         /// Neural model error.
         #[cfg(feature = "neural-rescore")]

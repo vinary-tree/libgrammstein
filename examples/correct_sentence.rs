@@ -12,9 +12,9 @@
 
 use std::io::Write;
 
-use libdictenstein::pathmap::PathMapDictionary;
-use libgrammstein::integration::corrector::{CorrectorConfig, HierarchicalCorrector};
+use libdictenstein::dynamic_dawg::DynamicDawg;
 use libgrammstein::corpus::PlaintextReader;
+use libgrammstein::integration::corrector::{CorrectorConfig, HierarchicalCorrector};
 use libgrammstein::ngram::vocabulary::create_vocabulary;
 use libgrammstein::ngram::{NgramEntry, TrainerBuilder};
 
@@ -33,9 +33,9 @@ fn main() {
             .expect("write corpus file");
     }
 
-    // 2. Train a trigram model over a PathMap-backed dictionary.
+    // 2. Train a trigram model over an in-memory byte-native (term-id) backend.
     let reader = PlaintextReader::from_file(&corpus_path).expect("open corpus");
-    let dictionary = PathMapDictionary::<NgramEntry>::new();
+    let dictionary = DynamicDawg::<NgramEntry>::new();
     let model = TrainerBuilder::new(dictionary)
         .order(3)
         .train(reader)

@@ -65,12 +65,12 @@ use std::marker::PhantomData;
 #[cfg(feature = "serde-extras")]
 use std::path::Path;
 
-// `DynamicDawgChar` backs the serialized n-gram model in `from_checkpoint`
-// (serde-extras) and the small static fixtures in the test module; it is not on
-// the default correction path, which traverses the persistent vocabulary trie.
-#[cfg(any(test, feature = "serde-extras"))]
+// `DynamicDawgChar` backs the small static spelling fixtures in the test module;
+// it is not on the default correction path, which traverses the persistent
+// vocabulary trie.
+#[cfg(test)]
 use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
-use libdictenstein::{Dictionary, DictionaryNode, MutableMappedDictionary};
+use libdictenstein::{Dictionary, DictionaryNode};
 use liblevenshtein::transducer::{Algorithm, Candidate, Transducer};
 
 use lling_llang::backend::{HashMapBackend, LatticeBackend};
@@ -82,6 +82,7 @@ use lling_llang::path::{nbest, viterbi};
 use lling_llang::semiring::{Semiring, TropicalWeight};
 
 use crate::integration::GrammsteinLanguageModel;
+use crate::ngram::store::NgramLookup;
 use crate::ngram::vocabulary::{SharedVocabARTrie, VocabularyError};
 use crate::ngram::{NgramEntry, NgramModel};
 
@@ -228,12 +229,15 @@ where
             .collect();
 
         // Deterministic ordering: closest first, then lexicographic.
-        candidates.sort_by(|a, b| a.distance.cmp(&b.distance).then_with(|| a.term.cmp(&b.term)));
+        candidates.sort_by(|a, b| {
+            a.distance
+                .cmp(&b.distance)
+                .then_with(|| a.term.cmp(&b.term))
+        });
 
         let mut seen: HashSet<&str> = HashSet::with_capacity(candidates.len());
-        let mut selected: Vec<Candidate> = Vec::with_capacity(
-            candidates.len().min(self.config.max_corrections_per_word),
-        );
+        let mut selected: Vec<Candidate> =
+            Vec::with_capacity(candidates.len().min(self.config.max_corrections_per_word));
         for candidate in &candidates {
             if selected.len() >= self.config.max_corrections_per_word {
                 break;
@@ -478,13 +482,13 @@ impl HierarchicalCorrector {
     /// `vocabulary` supplies the spelling dictionary (both the membership test
     /// and the fuzzy candidate source). `language_model` may wrap either a pure
     /// n-gram model or a hybrid n-gram + embedding model.
-    pub fn from_parts<D>(
+    pub fn from_parts<S>(
         vocabulary: SharedVocabARTrie,
-        language_model: GrammsteinLanguageModel<D>,
+        language_model: GrammsteinLanguageModel<S>,
         config: CorrectorConfig,
     ) -> Self
     where
-        D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync + 'static,
+        S: NgramLookup + Send + Sync + 'static,
     {
         // The Levenshtein automaton runs directly over the persistent vocabulary
         // trie — moving the cheap `Arc` handle in, never materializing the terms.
@@ -500,15 +504,19 @@ impl HierarchicalCorrector {
     }
 
     /// Convenience constructor for a pure n-gram language model.
-    pub fn from_ngram_model<D>(
+    pub fn from_ngram_model<S>(
         vocabulary: SharedVocabARTrie,
-        model: NgramModel<D>,
+        model: NgramModel<S>,
         config: CorrectorConfig,
     ) -> Self
     where
-        D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync + 'static,
+        S: NgramLookup + Send + Sync + 'static,
     {
-        Self::from_parts(vocabulary, GrammsteinLanguageModel::from_ngram(model), config)
+        Self::from_parts(
+            vocabulary,
+            GrammsteinLanguageModel::from_ngram(model),
+            config,
+        )
     }
 
     /// Attach a CFG grammar. When present, a `CfgFilterLayer` runs between the
@@ -548,8 +556,11 @@ impl HierarchicalCorrector {
         }
 
         // Build the linear input lattice: one zero-cost original edge per token.
-        let mut builder =
-            LatticeBuilder::<TropicalWeight, _>::with_capacity(HashMapBackend::new(), tokens.len() + 1, 1);
+        let mut builder = LatticeBuilder::<TropicalWeight, _>::with_capacity(
+            HashMapBackend::new(),
+            tokens.len() + 1,
+            1,
+        );
         for (index, token) in tokens.iter().enumerate() {
             builder.add_correction(
                 index,
@@ -616,14 +627,22 @@ impl HierarchicalCorrector {
     /// The directory is expected to contain:
     /// - a persistent vocabulary at `config.vocabulary_filename`
     ///   (default `"vocabulary"`), opened via [`open_vocabulary`]; and
-    /// - a bincode-serialized [`NgramModel`] at `config.model_filename`
-    ///   (default `"model.bin"`), using the serde-friendly `DynamicDawgChar`
-    ///   backend.
+    /// - a portable [`NgramModel`] at `config.model_filename` (default
+    ///   `"model.bin"`), written by [`NgramModel::save_portable`].
+    ///
+    /// The language model is reconstructed as a byte-native
+    /// `TermIdStore<DynamicDawg<NgramEntry>>` **over the same persistent
+    /// vocabulary** used for spelling, so both share one term-id space. The
+    /// model's stamped vocabulary fingerprint is verified against that
+    /// vocabulary, rejecting a mismatched `(model, vocabulary)` pair rather than
+    /// scoring against the wrong vocabulary (see
+    /// [`NgramModel::from_portable_with_vocabulary`]).
     pub fn from_checkpoint(
         checkpoint_dir: &Path,
         config: CorrectorConfig,
     ) -> Result<Self, CorrectorError> {
         use crate::ngram::vocabulary::open_vocabulary;
+        use libdictenstein::dynamic_dawg::DynamicDawg;
 
         let vocabulary_path = checkpoint_dir.join(&config.vocabulary_filename);
         let model_path = checkpoint_dir.join(&config.model_filename);
@@ -635,7 +654,21 @@ impl HierarchicalCorrector {
         }
 
         let vocabulary = open_vocabulary(&vocabulary_path)?;
-        let model: NgramModel<DynamicDawgChar<NgramEntry>> = NgramModel::load(&model_path)?;
+
+        // Read the portable model and rebuild it over the *shared* persistent
+        // vocabulary (fingerprint-checked), rather than a private copy.
+        let portable = {
+            let file = std::fs::File::open(&model_path).map_err(crate::Error::from)?;
+            let reader = std::io::BufReader::new(file);
+            bincode::deserialize_from::<_, crate::ngram::PortableNgramModel>(reader)
+                .map_err(crate::Error::from)?
+        };
+        let model = NgramModel::from_portable_with_vocabulary(
+            portable,
+            DynamicDawg::<NgramEntry>::new(),
+            vocabulary.clone(),
+        )?;
+
         Ok(Self::from_ngram_model(vocabulary, model, config))
     }
 }
@@ -646,7 +679,7 @@ mod tests {
     use crate::corpus::PlaintextReader;
     use crate::ngram::vocabulary::create_vocabulary;
     use crate::ngram::TrainerBuilder;
-    use libdictenstein::pathmap::PathMapDictionary;
+    use libdictenstein::dynamic_dawg::DynamicDawg;
     use std::io::Write;
     use std::path::Path;
     use tempfile::TempDir;
@@ -655,21 +688,14 @@ mod tests {
     /// real word "the" when fed the OOV token "teh".
     #[test]
     fn levenshtein_layer_adds_correction_edge() {
-        let dictionary = DynamicDawgChar::<()>::from_terms(vec![
-            "the", "ten", "tea", "quick", "brown", "fox",
-        ]);
+        let dictionary =
+            DynamicDawgChar::<()>::from_terms(vec!["the", "ten", "tea", "quick", "brown", "fox"]);
         let layer: LevenshteinCorrectionLayer<TropicalWeight, HashMapBackend, _> =
             LevenshteinCorrectionLayer::new(dictionary, EditConfig::default());
 
         // Single-token lattice for the misspelling "teh".
         let mut builder = LatticeBuilder::<TropicalWeight, _>::new(HashMapBackend::new());
-        builder.add_correction(
-            0,
-            1,
-            "teh",
-            TropicalWeight::one(),
-            EdgeMetadata::original(),
-        );
+        builder.add_correction(0, 1, "teh", TropicalWeight::one(), EdgeMetadata::original());
         let input = builder.build(1);
 
         let output = layer.apply(&input).expect("spelling layer applies");
@@ -751,7 +777,13 @@ mod tests {
             LevenshteinCorrectionLayer::new(vocabulary, EditConfig::default());
 
         let mut builder = LatticeBuilder::<TropicalWeight, _>::new(HashMapBackend::new());
-        builder.add_correction(0, 1, "quikc", TropicalWeight::one(), EdgeMetadata::original());
+        builder.add_correction(
+            0,
+            1,
+            "quikc",
+            TropicalWeight::one(),
+            EdgeMetadata::original(),
+        );
         let input = builder.build(1);
 
         let output = layer.apply(&input).expect("spelling layer applies");
@@ -786,7 +818,7 @@ mod tests {
 
         // Train a trigram model over a PathMap-backed dictionary.
         let reader = PlaintextReader::from_file(&corpus_path).expect("open corpus");
-        let dictionary = PathMapDictionary::<NgramEntry>::new();
+        let dictionary = DynamicDawg::<NgramEntry>::new();
         let model = TrainerBuilder::new(dictionary)
             .order(3)
             .train(reader)
@@ -795,7 +827,9 @@ mod tests {
         // Spelling vocabulary: the correct words of the sentence.
         let vocabulary = build_vocabulary(
             dir.path(),
-            &["the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog"],
+            &[
+                "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog",
+            ],
         );
 
         let corrector =
@@ -824,7 +858,7 @@ mod tests {
         }
 
         let reader = PlaintextReader::from_file(&corpus_path).expect("open corpus");
-        let dictionary = PathMapDictionary::<NgramEntry>::new();
+        let dictionary = DynamicDawg::<NgramEntry>::new();
         let model = TrainerBuilder::new(dictionary)
             .order(3)
             .train(reader)
@@ -832,7 +866,9 @@ mod tests {
 
         let vocabulary = build_vocabulary(
             dir.path(),
-            &["the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog"],
+            &[
+                "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog",
+            ],
         );
 
         let config = CorrectorConfig {
@@ -864,10 +900,11 @@ mod tests {
         let corpus_path = dir.path().join("corpus.txt");
         {
             let mut file = std::fs::File::create(&corpus_path).expect("create corpus");
-            file.write_all(b"the quick brown fox\n").expect("write corpus");
+            file.write_all(b"the quick brown fox\n")
+                .expect("write corpus");
         }
         let reader = PlaintextReader::from_file(&corpus_path).expect("open corpus");
-        let dictionary = PathMapDictionary::<NgramEntry>::new();
+        let dictionary = DynamicDawg::<NgramEntry>::new();
         let model = TrainerBuilder::new(dictionary)
             .order(2)
             .train(reader)

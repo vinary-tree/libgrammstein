@@ -4,7 +4,9 @@ use std::path::Path;
 
 use console::style;
 
-use crate::cli::args::{ConvertCommands, ConvertInfoArgs, ConvertToStaticArgs};
+use crate::cli::args::{
+    ConvertCommands, ConvertInfoArgs, ConvertToStaticArgs, ConvertToTermidArgs,
+};
 #[cfg(feature = "google-books")]
 use crate::cli::args::{ConvertToPathmapArgs, ExtractDictArgs};
 use crate::cli::error::{CliError, CliResult};
@@ -13,12 +15,77 @@ use crate::cli::error::{CliError, CliResult};
 pub fn run(cmd: ConvertCommands, verbose: bool) -> CliResult<()> {
     match cmd {
         ConvertCommands::ToStatic(args) => convert_to_static(args, verbose),
+        ConvertCommands::ToTermid(args) => convert_to_termid(args, verbose),
         #[cfg(feature = "google-books")]
         ConvertCommands::ToPathmap(args) => convert_to_pathmap(args, verbose),
         #[cfg(feature = "google-books")]
         ConvertCommands::ExtractDict(args) => extract_dict(args, verbose),
         ConvertCommands::Info(args) => convert_info(args, verbose),
     }
+}
+
+/// Transcode any portable n-gram model to the byte-native term-id (LEB128)
+/// portable format (parallel to `--to-static`).
+///
+/// A legacy `'|'`-joined model is losslessly re-keyed onto term-id byte keys
+/// (with a freshly assigned, embedded, fingerprinted vocabulary); an
+/// already-term-id model is normalized. Hybrid and embedding inputs are rejected
+/// with a clear message (only the n-gram half is term-id-encoded).
+fn convert_to_termid(args: ConvertToTermidArgs, verbose: bool) -> CliResult<()> {
+    use crate::ngram::{InMemoryTermIdModel, NgramEntry};
+    use libdictenstein::dynamic_dawg::DynamicDawg;
+
+    if !args.input.exists() {
+        return Err(CliError::file_not_found(&args.input));
+    }
+
+    if verbose {
+        eprintln!("Transcoding model to byte-native term-id format");
+        eprintln!("  Input:  {}", args.input.display());
+        eprintln!("  Output: {}", args.output.display());
+    }
+
+    // Load through the unified term-id loader (dispatches on the source encoding
+    // and transcodes legacy keys into term-id byte keys).
+    let model: InMemoryTermIdModel =
+        InMemoryTermIdModel::load_portable(&args.input, DynamicDawg::<NgramEntry>::new).map_err(
+            |e| {
+                CliError::model_load(
+                    args.input.clone(),
+                    format!(
+                        "failed to load as an n-gram model (hybrid/embedding inputs are not \
+                         term-id-transcodable): {e}"
+                    ),
+                )
+            },
+        )?;
+
+    if verbose {
+        eprintln!(
+            "  Order: {}, vocab: {}, n-grams: {}",
+            model.order(),
+            model.vocab_size(),
+            model.ngram_count()
+        );
+    }
+
+    let ngrams = model.ngram_count();
+    model
+        .save_portable(&args.output)
+        .map_err(|e| CliError::io(format!("Failed to save term-id model: {}", e)))?;
+
+    // Validate: reloading the output yields the same n-gram count.
+    let reloaded: InMemoryTermIdModel =
+        InMemoryTermIdModel::load_portable(&args.output, DynamicDawg::<NgramEntry>::new)
+            .map_err(|e| CliError::io(format!("term-id conversion validation failed: {}", e)))?;
+    if reloaded.ngram_count() != ngrams {
+        return Err(CliError::io(
+            "term-id conversion validation failed: n-gram count differs".to_string(),
+        ));
+    }
+
+    print_conversion_success(&args.input, &args.output, "ngram (byte-native term-id)");
+    Ok(())
 }
 
 /// Detected source model type.
@@ -32,16 +99,18 @@ enum SourceModel {
 fn detect_source_type(path: &Path) -> Option<SourceModel> {
     use crate::embedding::SubwordEmbedding;
     use crate::hybrid::HybridLanguageModel;
-    use crate::ngram::{NgramEntry, NgramModel};
-    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+    use crate::ngram::NgramEntry;
+    use libdictenstein::dynamic_dawg::DynamicDawg;
 
     // Try hybrid first
-    if HybridLanguageModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new).is_ok() {
+    if HybridLanguageModel::load_portable(path, DynamicDawg::<NgramEntry>::new).is_ok() {
         return Some(SourceModel::Hybrid);
     }
 
     // Try n-gram
-    if NgramModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new).is_ok() {
+    if crate::ngram::InMemoryTermIdModel::load_portable(path, DynamicDawg::<NgramEntry>::new)
+        .is_ok()
+    {
         return Some(SourceModel::Ngram);
     }
 
@@ -53,25 +122,24 @@ fn detect_source_type(path: &Path) -> Option<SourceModel> {
     None
 }
 
-/// Convert model to static format for faster inference.
+/// Convert a model to the normalized inference format.
 ///
-/// Rebuilds the n-gram model on an immutable `DoubleArrayTrieChar` backend (optimized for
-/// read-only query speed) and saves a validated portable artifact. The output loads as a
-/// fast static model via `NgramModel::load_static_portable`, and still loads through the
-/// regular `load_portable` path for compatibility with `query`/`eval`/`repl`.
+/// The fast read-only inference format is the byte-native term-id portable model
+/// (LEB128 term-id keys + embedded vocabulary). This normalizes any n-gram/hybrid
+/// input to that encoding (transcoding a legacy `'|'`-joined source in the
+/// process) and re-saves; embedding models are re-saved verbatim.
 fn convert_to_static(args: ConvertToStaticArgs, verbose: bool) -> CliResult<()> {
     use crate::embedding::SubwordEmbedding;
     use crate::hybrid::HybridLanguageModel;
-    use crate::ngram::{NgramEntry, NgramModel};
-    use libdictenstein::double_array_trie::char::DoubleArrayTrieChar;
-    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+    use crate::ngram::{InMemoryTermIdModel, NgramEntry};
+    use libdictenstein::dynamic_dawg::DynamicDawg;
 
     if !args.input.exists() {
         return Err(CliError::file_not_found(&args.input));
     }
 
     if verbose {
-        eprintln!("Converting model to static format");
+        eprintln!("Converting model to the normalized term-id inference format");
         eprintln!("  Input:  {}", args.input.display());
         eprintln!("  Output: {}", args.output.display());
     }
@@ -89,7 +157,7 @@ fn convert_to_static(args: ConvertToStaticArgs, verbose: bool) -> CliResult<()> 
     match source_type {
         SourceModel::Hybrid => {
             let model =
-                HybridLanguageModel::load_portable(&args.input, DynamicDawgChar::<NgramEntry>::new)
+                HybridLanguageModel::load_portable(&args.input, DynamicDawg::<NgramEntry>::new)
                     .map_err(|e| CliError::model_load(args.input.clone(), e.to_string()))?;
 
             if verbose {
@@ -99,17 +167,7 @@ fn convert_to_static(args: ConvertToStaticArgs, verbose: bool) -> CliResult<()> 
                 eprintln!("  Embedding dim: {}", model.embedding_model().dim());
             }
 
-            // Validate the n-gram half is DoubleArrayTrie-constructible (the static fast path).
-            let ngram_count = model.ngram_model().ngram_count();
-            let static_ngram: NgramModel<DoubleArrayTrieChar<NgramEntry>> =
-                NgramModel::from_portable_static(model.ngram_model().to_portable());
-            if static_ngram.ngram_count() != ngram_count {
-                return Err(CliError::io(
-                    "static conversion validation failed: n-gram statistics differ".to_string(),
-                ));
-            }
-
-            eprintln!("Saving to portable format...");
+            eprintln!("Saving to term-id portable format...");
             model
                 .save_portable(&args.output)
                 .map_err(|e| CliError::io(format!("Failed to save model: {}", e)))?;
@@ -117,8 +175,9 @@ fn convert_to_static(args: ConvertToStaticArgs, verbose: bool) -> CliResult<()> 
             print_conversion_success(&args.input, &args.output, "hybrid");
         }
         SourceModel::Ngram => {
-            let model = NgramModel::load_portable(&args.input, DynamicDawgChar::<NgramEntry>::new)
-                .map_err(|e| CliError::model_load(args.input.clone(), e.to_string()))?;
+            let model =
+                InMemoryTermIdModel::load_portable(&args.input, DynamicDawg::<NgramEntry>::new)
+                    .map_err(|e| CliError::model_load(args.input.clone(), e.to_string()))?;
 
             if verbose {
                 eprintln!("  Type: NgramModel");
@@ -127,27 +186,12 @@ fn convert_to_static(args: ConvertToStaticArgs, verbose: bool) -> CliResult<()> 
                 eprintln!("  N-grams: {}", model.ngram_count());
             }
 
-            // Rebuild on the immutable DoubleArrayTrie backend, validating it is
-            // constructible and preserves the model's statistics.
-            eprintln!("Building static DoubleArrayTrie model...");
-            let (ngrams, vocab, order) = (model.ngram_count(), model.vocab_size(), model.order());
-            let static_model: NgramModel<DoubleArrayTrieChar<NgramEntry>> =
-                NgramModel::from_portable_static(model.to_portable());
-            if static_model.ngram_count() != ngrams
-                || static_model.vocab_size() != vocab
-                || static_model.order() != order
-            {
-                return Err(CliError::io(
-                    "static conversion validation failed: model statistics differ".to_string(),
-                ));
-            }
-
-            eprintln!("Saving static model to portable format...");
-            static_model
+            eprintln!("Saving to term-id portable format...");
+            model
                 .save_portable(&args.output)
                 .map_err(|e| CliError::io(format!("Failed to save model: {}", e)))?;
 
-            print_conversion_success(&args.input, &args.output, "ngram (static DoubleArrayTrie)");
+            print_conversion_success(&args.input, &args.output, "ngram (byte-native term-id)");
         }
         SourceModel::Embedding => {
             let model = SubwordEmbedding::load(&args.input)
@@ -206,12 +250,10 @@ fn print_conversion_success(input: &Path, output: &Path, model_type: &str) {
 
     println!();
     println!(
-        "{}: The output is a portable model validated against the DoubleArrayTrie backend.",
+        "{}: The output is a byte-native term-id portable model.",
         style("note").cyan()
     );
-    println!(
-        "    Load it with NgramModel::load_static_portable for the fast read-only static backend."
-    );
+    println!("    Load it with InMemoryTermIdModel::load_portable (DynamicDawg backend).");
 }
 
 /// Display model info (delegates to models info command).

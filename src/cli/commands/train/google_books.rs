@@ -136,7 +136,7 @@ pub(super) fn import_google_books(
         let file_count = std::fs::read_dir(local_dir)
             .map_err(|e| CliError::io(format!("Failed to read directory: {}", e)))?
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "gz"))
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "gz"))
             .count();
 
         if file_count == 0 {
@@ -408,7 +408,7 @@ pub(super) fn import_google_books(
             }
 
             // Wait for import to finish (normal completion path)
-            let import_result = runtime.block_on(async { import_handle.await });
+            let import_result = runtime.block_on(import_handle);
 
             // Handle import result
             let import_result =

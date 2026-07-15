@@ -147,7 +147,7 @@ fn decode_vu128_bulk(bytes: &[u8]) -> Vec<u64> {
 fn stream_vbyte_max_size(count: usize) -> usize {
     // Control bytes: 1 byte per 4 values (2 bits each)
     // Data bytes: up to 4 bytes per value
-    let control_bytes = (count + 3) / 4;
+    let control_bytes = count.div_ceil(4);
     let data_bytes = count * 4;
     control_bytes + data_bytes
 }

@@ -147,7 +147,11 @@ impl CheckpointState {
 ///     5000, // Checkpoint every 5 seconds
 /// ).await?;
 /// ```
+// `await_holding_lock` is allowed here: the importer guard is intentionally
+// held across `import_http().await` so the cron/shutdown task's `try_lock()`
+// observes the import as in-progress (guard held) rather than racing it.
 #[cfg(feature = "google-books")]
+#[allow(clippy::await_holding_lock)]
 pub async fn run_import_with_periodic_checkpoints<F>(
     importer: GoogleBooksImporter,
     progress: F,
@@ -227,6 +231,9 @@ where
 
     // Run import
     let result = {
+        // The importer guard is intentionally held across `import_http().await`
+        // below: the cron/shutdown task uses `try_lock()` and must observe the
+        // import as in-progress (guard held) rather than racing it.
         let mut importer = importer_ref.lock();
 
         // Wrap progress callback to update checkpoint state atomics

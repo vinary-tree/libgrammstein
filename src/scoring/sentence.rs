@@ -1,22 +1,22 @@
 //! Sentence-level scoring utilities.
 
+use crate::ngram::store::NgramLookup;
 use crate::ngram::NgramModel;
-use libdictenstein::MutableMappedDictionary;
 
 /// Sentence scorer providing various scoring methods.
-pub struct SentenceScorer<'a, D>
+pub struct SentenceScorer<'a, S>
 where
-    D: MutableMappedDictionary<Value = crate::ngram::NgramEntry>,
+    S: NgramLookup,
 {
-    model: &'a NgramModel<D>,
+    model: &'a NgramModel<S>,
 }
 
-impl<'a, D> SentenceScorer<'a, D>
+impl<'a, S> SentenceScorer<'a, S>
 where
-    D: MutableMappedDictionary<Value = crate::ngram::NgramEntry>,
+    S: NgramLookup,
 {
     /// Create a new sentence scorer.
-    pub fn new(model: &'a NgramModel<D>) -> Self {
+    pub fn new(model: &'a NgramModel<S>) -> Self {
         Self { model }
     }
 

@@ -4,10 +4,33 @@
 //! across sharded n-gram storage.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use libgrammstein::ngram::vocabulary::{create_vocabulary, encode_varint, SharedVocabARTrie};
 use libgrammstein::sources::google_books::sharding::{
-    ShardConfig, ShardCoordinator, ShardGranularity,
+    compute_shard_key_from_token, ShardConfig, ShardCoordinator, ShardGranularity,
 };
 use tempfile::TempDir;
+
+/// Store one n-gram the importer's way: first-token route + term-id varint key.
+fn store_ngram(
+    coordinator: &ShardCoordinator,
+    vocab: &SharedVocabARTrie,
+    tokens: &[&str],
+    count: u64,
+) {
+    let shard_key = compute_shard_key_from_token(
+        tokens[0],
+        tokens.len() as u8,
+        &coordinator.config().granularity,
+    );
+    let mut key = Vec::with_capacity(tokens.len() * 2);
+    for token in tokens {
+        let id = vocab.as_ref().insert(token).expect("vocab insert");
+        encode_varint(id, &mut key);
+    }
+    coordinator
+        .store_in_shard(&shard_key, &key, count)
+        .expect("store_in_shard");
+}
 
 /// Create test coordinator with synthetic data.
 fn create_test_coordinator(num_ngrams: usize) -> (TempDir, ShardCoordinator) {
@@ -17,28 +40,37 @@ fn create_test_coordinator(num_ngrams: usize) -> (TempDir, ShardCoordinator) {
         .with_max_open_shards(100);
 
     let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
+    // The vocabulary assigns the term-ids that form the byte keys; MKN later reads
+    // those keys directly (byte-native), so the vocabulary is only needed here.
+    let vocab = create_vocabulary(&dir.path().join("vocab")).expect("vocabulary");
 
     // Generate synthetic n-grams with Zipf-like distribution
     for i in 0..num_ngrams {
         // 1-grams
         let word = format!("word{}", i % 1000);
         let count = ((num_ngrams - i) / 100 + 1) as u64; // Zipf-like
-        coordinator.store_ngram(&word, count).expect("store");
+        store_ngram(&coordinator, &vocab, &[word.as_str()], count);
 
         // 2-grams (every 5th)
         if i % 5 == 0 {
-            let bigram = format!("{}|suffix{}", word, i % 100);
-            coordinator
-                .store_ngram(&bigram, count / 2 + 1)
-                .expect("store");
+            let suffix = format!("suffix{}", i % 100);
+            store_ngram(
+                &coordinator,
+                &vocab,
+                &[word.as_str(), suffix.as_str()],
+                count / 2 + 1,
+            );
         }
 
         // 3-grams (every 20th)
         if i % 20 == 0 {
-            let trigram = format!("prefix{}|{}|end", i % 50, word);
-            coordinator
-                .store_ngram(&trigram, count / 3 + 1)
-                .expect("store");
+            let prefix = format!("prefix{}", i % 50);
+            store_ngram(
+                &coordinator,
+                &vocab,
+                &[prefix.as_str(), word.as_str(), "end"],
+                count / 3 + 1,
+            );
         }
     }
 

@@ -29,7 +29,10 @@
 //!
 //! Run: `cargo bench --features google-books --bench google_books_import [N] [budget_bytes]`.
 
-use libgrammstein::sources::google_books::sharding::{ShardConfig, ShardCoordinator};
+use libgrammstein::ngram::vocabulary::{create_vocabulary, encode_varint, SharedVocabARTrie};
+use libgrammstein::sources::google_books::sharding::{
+    compute_shard_key_from_token, ShardConfig, ShardCoordinator,
+};
 use std::time::Instant;
 use tempfile::TempDir;
 
@@ -40,18 +43,42 @@ const PREFIXES: &[&str] = &[
     "out", "are", "who", "she", "him", "has", "can",
 ];
 
+/// Store one n-gram the importer's way: route by the first token's characters +
+/// sequence length, key by concatenated LEB128 term-id varints.
+fn store_ngram(
+    coordinator: &ShardCoordinator,
+    vocab: &SharedVocabARTrie,
+    tokens: &[&str],
+    count: u64,
+) {
+    let shard_key = compute_shard_key_from_token(
+        tokens[0],
+        tokens.len() as u8,
+        &coordinator.config().granularity,
+    );
+    let mut key = Vec::with_capacity(tokens.len() * 2);
+    for token in tokens {
+        let id = vocab.as_ref().insert(token).expect("vocab insert");
+        encode_varint(id, &mut key);
+    }
+    coordinator
+        .store_in_shard(&shard_key, &key, count)
+        .expect("store_in_shard");
+}
+
 /// Stream `n` synthetic n-grams through the coordinator with the given overlay budget,
 /// checkpointing every 100K, and report throughput + the import-wide eviction stats.
 fn run(label: &str, budget: Option<usize>, n: u64) {
     let dir = TempDir::new().expect("tempdir");
     let config = ShardConfig::new(dir.path()).with_overlay_budget_bytes(budget);
     let coordinator = ShardCoordinator::new(config).expect("create coordinator");
+    let vocab = create_vocabulary(&dir.path().join("vocab")).expect("vocabulary");
 
     let t0 = Instant::now();
     for i in 0..n {
         let prefix = PREFIXES[(i as usize) % PREFIXES.len()];
-        let ngram = format!("{prefix} w{:08}", i);
-        coordinator.store_ngram(&ngram, 1).expect("store ngram");
+        let suffix = format!("w{:08}", i);
+        store_ngram(&coordinator, &vocab, &[prefix, suffix.as_str()], 1);
         if i % 100_000 == 99_999 {
             coordinator.checkpoint_all().expect("periodic checkpoint");
         }

@@ -10,13 +10,13 @@
 //! This module uses lock-free caching via `DashMap` for concurrent scoring.
 
 use crate::embedding::SubwordEmbedding;
-use crate::ngram::{NgramEntry, NgramModel};
+use crate::ngram::store::NgramLookup;
+use crate::ngram::NgramModel;
 use dashmap::DashMap;
-use libdictenstein::MappedDictionary;
-// Only the `serde-extras` portable-load impl below needs the mutable trait; gating the
-// import to match keeps the default-feature build warning-free.
+// The portable export/load impls below are specialized to the byte-native
+// `TermIdStore` backend (the only store hybrid models are built over in practice).
 #[cfg(feature = "serde-extras")]
-use libdictenstein::MutableMappedDictionary;
+use crate::ngram::store::{MutableByteMappedDictionary, TermIdStore};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -211,13 +211,13 @@ fn default_cache() -> ScoreCache {
 /// let score = hybrid.score("fox", &["the", "quick", "brown"]);
 /// ```
 #[derive(serde::Serialize, serde::Deserialize)]
-#[serde(bound = "D: serde::Serialize + serde::de::DeserializeOwned")]
-pub struct HybridLanguageModel<D>
+#[serde(bound = "S: serde::Serialize + serde::de::DeserializeOwned")]
+pub struct HybridLanguageModel<S>
 where
-    D: MappedDictionary<Value = NgramEntry> + Send + Sync,
+    S: NgramLookup + Send + Sync,
 {
     /// N-gram model.
-    ngram: NgramModel<D>,
+    ngram: NgramModel<S>,
 
     /// Embedding model.
     embedding: SubwordEmbedding,
@@ -231,12 +231,12 @@ where
     cache: ScoreCache,
 }
 
-impl<D> HybridLanguageModel<D>
+impl<S> HybridLanguageModel<S>
 where
-    D: MappedDictionary<Value = NgramEntry> + Send + Sync,
+    S: NgramLookup + Send + Sync,
 {
     /// Create a new hybrid model.
-    pub fn new(ngram: NgramModel<D>, embedding: SubwordEmbedding, config: HybridConfig) -> Self {
+    pub fn new(ngram: NgramModel<S>, embedding: SubwordEmbedding, config: HybridConfig) -> Self {
         let cache = ScoreCache::new(config.cache_size.max(1));
         Self {
             ngram,
@@ -247,12 +247,12 @@ where
     }
 
     /// Create with default configuration.
-    pub fn with_defaults(ngram: NgramModel<D>, embedding: SubwordEmbedding) -> Self {
+    pub fn with_defaults(ngram: NgramModel<S>, embedding: SubwordEmbedding) -> Self {
         Self::new(ngram, embedding, HybridConfig::default())
     }
 
     /// Get the n-gram model.
-    pub fn ngram_model(&self) -> &NgramModel<D> {
+    pub fn ngram_model(&self) -> &NgramModel<S> {
         &self.ngram
     }
 
@@ -403,7 +403,7 @@ where
         for (i, word) in words.iter().enumerate() {
             // Get context (up to order-1 previous words)
             let context_start = i.saturating_sub(order - 1);
-            let context: Vec<&str> = words[context_start..i].iter().copied().collect();
+            let context: Vec<&str> = words[context_start..i].to_vec();
 
             total_log_prob += self.score(word, &context);
         }
@@ -452,30 +452,20 @@ where
 }
 
 // Implement Send + Sync for the hybrid model
-unsafe impl<D> Send for HybridLanguageModel<D> where
-    D: MappedDictionary<Value = NgramEntry> + Send + Sync
-{
-}
+unsafe impl<S> Send for HybridLanguageModel<S> where S: NgramLookup + Send + Sync {}
 
-unsafe impl<D> Sync for HybridLanguageModel<D> where
-    D: MappedDictionary<Value = NgramEntry> + Send + Sync
-{
-}
+unsafe impl<S> Sync for HybridLanguageModel<S> where S: NgramLookup + Send + Sync {}
 
-// Serialization support (requires D: Serialize + DeserializeOwned and bincode via serde-extras)
+// Serialization support (requires S: Serialize + DeserializeOwned and bincode via serde-extras)
 #[cfg(feature = "serde-extras")]
-impl<D> HybridLanguageModel<D>
+impl<S> HybridLanguageModel<S>
 where
-    D: MappedDictionary<Value = NgramEntry>
-        + Send
-        + Sync
-        + serde::Serialize
-        + serde::de::DeserializeOwned,
+    S: NgramLookup + Send + Sync + serde::Serialize + serde::de::DeserializeOwned,
 {
     /// Save the hybrid model to a binary file.
     ///
     /// Uses bincode for efficient binary serialization.
-    /// Requires the dictionary to implement serde traits.
+    /// Requires the store to implement serde traits.
     ///
     /// # Example
     ///
@@ -519,20 +509,20 @@ pub struct PortableHybridModel {
     pub config: HybridConfig,
 }
 
-// Portable serialization support (works with any dictionary, requires bincode via serde-extras)
+// Portable serialization support, specialized to the byte-native `TermIdStore`
+// backend (the store every hybrid model is built over post-migration). Requires
+// bincode via serde-extras.
 #[cfg(feature = "serde-extras")]
-impl<D> HybridLanguageModel<D>
+impl<B> HybridLanguageModel<TermIdStore<B>>
 where
-    D: MappedDictionary<Value = NgramEntry> + Send + Sync,
+    B: MutableByteMappedDictionary + Send + Sync,
 {
     /// Export to portable format for serialization.
     ///
-    /// This method exports the model in a format that doesn't require
-    /// the dictionary type to implement serde traits.
-    pub fn to_portable(&self) -> PortableHybridModel
-    where
-        D: crate::ngram::IterableDictionary,
-    {
+    /// This method exports the model in a format that doesn't require the
+    /// backend to implement serde traits (the term-id keys + vocabulary are
+    /// written out instead).
+    pub fn to_portable(&self) -> PortableHybridModel {
         PortableHybridModel {
             ngram: self.ngram.to_portable(),
             embedding: self.embedding.clone(),
@@ -542,56 +532,41 @@ where
 
     /// Save model to a portable binary file.
     ///
-    /// This format can be loaded into any dictionary backend.
-    ///
     /// # Example
     ///
     /// ```ignore
     /// model.save_portable("hybrid_model.bin")?;
     /// ```
-    pub fn save_portable<P: AsRef<Path>>(&self, path: P) -> crate::Result<()>
-    where
-        D: crate::ngram::IterableDictionary,
-    {
+    pub fn save_portable<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
         let portable = self.to_portable();
         let file = std::fs::File::create(path)?;
         let writer = std::io::BufWriter::new(file);
         bincode::serialize_into(writer, &portable)?;
         Ok(())
     }
-}
 
-// Loading from a portable snapshot reconstructs the N-gram model via insert, so it
-// requires a writable (mutable) backend. Kept separate from the read-only export surface.
-#[cfg(feature = "serde-extras")]
-impl<D> HybridLanguageModel<D>
-where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
-{
-    /// Load model from a portable binary file.
-    ///
-    /// Reconstructs the model using the provided dictionary factory.
+    /// Load model from a portable binary file, reconstructing the n-gram half on
+    /// a fresh byte backend produced by `backend_factory` (transcoding legacy
+    /// encodings as needed — see [`NgramModel::from_portable`](crate::ngram::NgramModel)).
     ///
     /// # Example
     ///
     /// ```ignore
-    /// let model: HybridLanguageModel<DynamicDawgChar<NgramEntry>> =
-    ///     HybridLanguageModel::load_portable("hybrid_model.bin", DynamicDawgChar::new)?;
+    /// use libdictenstein::dynamic_dawg::DynamicDawg;
+    /// let model: HybridLanguageModel<TermIdStore<DynamicDawg<NgramEntry>>> =
+    ///     HybridLanguageModel::load_portable("hybrid_model.bin", DynamicDawg::new)?;
     /// ```
-    pub fn load_portable<P, F>(path: P, dictionary_factory: F) -> crate::Result<Self>
+    pub fn load_portable<P, F>(path: P, backend_factory: F) -> crate::Result<Self>
     where
         P: AsRef<Path>,
-        F: FnOnce() -> D,
+        F: FnOnce() -> B,
     {
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
         let portable: PortableHybridModel = bincode::deserialize_from(reader)?;
 
         // Reconstruct N-gram model
-        let ngram = crate::ngram::NgramModel::load_portable_from_portable(
-            portable.ngram,
-            dictionary_factory,
-        )?;
+        let ngram = NgramModel::from_portable(portable.ngram, backend_factory)?;
 
         let cache = ScoreCache::new(portable.config.cache_size.max(1));
 
@@ -609,10 +584,14 @@ mod tests {
     use super::*;
     use crate::corpus::PlaintextReader;
     use crate::embedding::EmbeddingTrainerBuilder;
-    use crate::ngram::TrainerBuilder;
-    use libdictenstein::pathmap::PathMapDictionary;
+    use crate::ngram::store::TermIdStore;
+    use crate::ngram::{NgramEntry, TrainerBuilder};
+    use libdictenstein::dynamic_dawg::DynamicDawg;
     use std::io::Write;
     use tempfile::TempDir;
+
+    /// In-memory byte-native store used by the hybrid tests.
+    type TestStore = TermIdStore<DynamicDawg<NgramEntry>>;
 
     fn create_test_corpus(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
         let path = dir.join("test.txt");
@@ -621,7 +600,7 @@ mod tests {
         path
     }
 
-    fn create_test_models() -> (NgramModel<PathMapDictionary<NgramEntry>>, SubwordEmbedding) {
+    fn create_test_models() -> (NgramModel<TestStore>, SubwordEmbedding) {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let content = "the quick brown fox the quick brown dog the lazy fox \
                        the quick brown fox the quick brown dog the lazy fox \
@@ -630,7 +609,7 @@ mod tests {
         let reader = PlaintextReader::from_file(&path).expect("Failed to create reader");
 
         // Train n-gram model
-        let dictionary = PathMapDictionary::<NgramEntry>::new();
+        let dictionary = DynamicDawg::<NgramEntry>::new();
         let ngram_model = TrainerBuilder::new(dictionary)
             .order(3)
             .train(reader)
@@ -752,10 +731,8 @@ mod tests {
     #[cfg(feature = "serde-extras")]
     mod serde_tests {
         use super::*;
-        use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
-        fn create_serializable_test_models(
-        ) -> (NgramModel<DynamicDawgChar<NgramEntry>>, SubwordEmbedding) {
+        fn create_serializable_test_models() -> (NgramModel<TestStore>, SubwordEmbedding) {
             let dir = TempDir::new().expect("Failed to create temp dir");
             let content = "the quick brown fox the quick brown dog the lazy fox \
                            the quick brown fox the quick brown dog the lazy fox \
@@ -763,8 +740,8 @@ mod tests {
             let path = create_test_corpus(dir.path(), content);
             let reader = PlaintextReader::from_file(&path).expect("Failed to create reader");
 
-            // Train n-gram model with DynamicDawgChar (serializable backend)
-            let dictionary = DynamicDawgChar::<NgramEntry>::new();
+            // Train n-gram model over the in-memory byte-native backend.
+            let dictionary = DynamicDawg::<NgramEntry>::new();
             let ngram_model = TrainerBuilder::new(dictionary)
                 .order(3)
                 .train(reader)
@@ -794,9 +771,9 @@ mod tests {
             let hybrid = HybridLanguageModel::new(ngram, embedding, config);
             let temp_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
 
-            // Save the model
+            // Save the model in the portable (term-id) format.
             hybrid
-                .save(temp_file.path())
+                .save_portable(temp_file.path())
                 .expect("Failed to save hybrid model");
 
             // Verify file was created with content
@@ -804,9 +781,12 @@ mod tests {
                 std::fs::metadata(temp_file.path()).expect("Failed to get file metadata");
             assert!(metadata.len() > 0, "Saved model file should not be empty");
 
-            // Load the model
-            let loaded: HybridLanguageModel<DynamicDawgChar<NgramEntry>> =
-                HybridLanguageModel::load(temp_file.path()).expect("Failed to load hybrid model");
+            // Load the model back into a fresh byte-native store.
+            let loaded: HybridLanguageModel<TestStore> = HybridLanguageModel::load_portable(
+                temp_file.path(),
+                DynamicDawg::<NgramEntry>::new,
+            )
+            .expect("Failed to load hybrid model");
 
             // Verify config matches
             assert_eq!(hybrid.config().cache_size, loaded.config().cache_size);

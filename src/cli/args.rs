@@ -663,6 +663,9 @@ pub enum ConvertCommands {
     /// Convert to static DoubleArrayTrie (fast inference).
     ToStatic(ConvertToStaticArgs),
 
+    /// Transcode a model to the byte-native term-id (LEB128) portable format.
+    ToTermid(ConvertToTermidArgs),
+
     /// Translate trained model to PathMap for production deployment.
     #[cfg(feature = "google-books")]
     ToPathmap(ConvertToPathmapArgs),
@@ -683,6 +686,18 @@ pub struct ConvertToStaticArgs {
     pub input: PathBuf,
 
     /// Output model path.
+    #[arg(value_name = "OUTPUT")]
+    pub output: PathBuf,
+}
+
+/// Arguments for term-id transcoding.
+#[derive(Args, Debug)]
+pub struct ConvertToTermidArgs {
+    /// Input model path (any portable n-gram model).
+    #[arg(value_name = "INPUT")]
+    pub input: PathBuf,
+
+    /// Output model path (byte-native term-id portable model).
     #[arg(value_name = "OUTPUT")]
     pub output: PathBuf,
 }

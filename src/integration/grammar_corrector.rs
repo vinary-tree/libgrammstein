@@ -288,6 +288,34 @@ pub trait NgramViewSource: Clone + Send + Sync + 'static {
     ///
     /// [`grammar_neighbors_fanout`]: #
     fn whole_view(&self) -> Option<Self::View>;
+
+    /// The successor term-ids of `history`: every `v` such that `history · v` is a
+    /// stored path (a known n-gram continuation). At an EMPTY history this is the
+    /// whole-store root fan-out — every stored first-token (unigram).
+    ///
+    /// The insertion oracle consumes only the ids; it re-routes the bridge check and
+    /// the score per successor itself, so only the term-ids (not the child nodes) are
+    /// needed here. The default routes by `(history[0], history.len()+1)` — the
+    /// *produced* length (the Adaptive-granularity caveat) — or, at an empty history,
+    /// uses [`whole_view`](Self::whole_view), walks to the `history` node, and
+    /// collects its edge ids. It is therefore bit-identical to the pre-existing
+    /// `view_for`/`whole_view` oracle path, so a single store inherits it unchanged.
+    /// A *sharded* source overrides only the empty-history case with an all-shards
+    /// root fan-out, because it has no single whole view (see
+    /// `ShardedView::all_shards_root_successors`).
+    fn successors(&self, history: &[u64]) -> Vec<u64> {
+        let view = match history.first() {
+            Some(&first) => self.view_for(first, history.len() + 1),
+            None => self.whole_view(),
+        };
+        let Some(view) = view else {
+            return Vec::new();
+        };
+        match node_after(&view, history) {
+            Some(node) => node.edges().map(|(id, _child)| id).collect(),
+            None => Vec::new(),
+        }
+    }
 }
 
 /// A [`NgramViewSource`] over a single, whole count store `D` — the non-sharded
@@ -679,7 +707,14 @@ impl<P: NgramViewSource> GrammarCore<P> {
                 }
             }
 
-            next.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+            // Deterministic order: cost, then emitted words. The secondary key makes
+            // the decode independent of the view's edge-iteration order, so the
+            // single-store and sharded backends produce identical output on ties.
+            next.sort_by(|a, b| {
+                a.cost
+                    .total_cmp(&b.cost)
+                    .then_with(|| a.emitted.cmp(&b.emitted))
+            });
             next.truncate(beam_width);
             beam = next;
         }
@@ -694,7 +729,11 @@ impl<P: NgramViewSource> GrammarCore<P> {
             }
         }
 
-        beam.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+        beam.sort_by(|a, b| {
+            a.cost
+                .total_cmp(&b.cost)
+                .then_with(|| a.emitted.cmp(&b.emitted))
+        });
         beam.into_iter()
             .take(self.config.k_best.max(1))
             .map(|hypothesis| GrammarCorrection {
@@ -731,27 +770,16 @@ impl<P: NgramViewSource> GrammarCore<P> {
             for current in &frontier {
                 let history = self.effective_history(&current.ids, history_len);
 
-                // Successor view: the produced n-gram `history · v` has length
-                // `history.len() + 1`, so fetch the view for THAT length (the
-                // Adaptive-granularity caveat), then walk to the `history` node and
-                // read its edges. An empty history routes to no shard, so a
-                // boundary-less insertion before the first token uses the whole store
-                // (single sources only; `None` disables it for a sharded source).
-                let successor_view = match history.first() {
-                    Some(&first) => self.source.view_for(first, history.len() + 1),
-                    None => self.source.whole_view(),
-                };
-                let Some(successor_view) = successor_view else {
-                    continue;
-                };
-                let node = match node_after(&successor_view, &history) {
-                    Some(node) => node,
-                    None => continue,
-                };
-
-                // `node.edges()` are exactly the known continuations `v` of the
-                // history (`history · v` is a stored path — the successor oracle).
-                for (candidate_id, _child) in node.edges() {
+                // Successor term-ids of the current history — the known continuations
+                // `v` (`history · v` is a stored path). Self-routes per source: a
+                // single store answers from the whole store; a sharded store routes to
+                // the `(history[0], history.len()+1)` shard (the produced-length /
+                // Adaptive caveat), or — at an EMPTY history, i.e. a boundary-less
+                // sentence start — fans out over every shard's root unigrams. That
+                // fan-out yields the SAME set the single store enumerates from
+                // `whole_view().root().edges()`, so the two backends stay at parity
+                // (no first-position-insertion gap, no gate).
+                for candidate_id in self.source.successors(&history) {
                     // Bridge check: after inserting `v`, the (order−1)-suffix of
                     // `history · v` followed by some candidate `c` must be a stored
                     // n-gram — i.e. `v` connects forward to what we are about to
@@ -796,7 +824,11 @@ impl<P: NgramViewSource> GrammarCore<P> {
             if grown.is_empty() {
                 break;
             }
-            grown.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+            grown.sort_by(|a, b| {
+                a.cost
+                    .total_cmp(&b.cost)
+                    .then_with(|| a.emitted.cmp(&b.emitted))
+            });
             grown.truncate(beam_width);
             result.extend(grown.iter().cloned());
             frontier = grown;
@@ -808,8 +840,9 @@ impl<P: NgramViewSource> GrammarCore<P> {
 
 /// Walk the term-id sequence `ids` from a view's root, returning the node reached or
 /// `None` if that sequence is not a path. A free function (not a method) so it stays
-/// generic over the view type produced by any [`NgramViewSource`].
-fn node_after<Vw>(view: &Vw, ids: &[u64]) -> Option<<Vw as Dictionary>::Node>
+/// generic over the view type produced by any [`NgramViewSource`], and `pub(crate)`
+/// so the sharded module's `successors` override can reuse the same walk.
+pub(crate) fn node_after<Vw>(view: &Vw, ids: &[u64]) -> Option<<Vw as Dictionary>::Node>
 where
     Vw: Dictionary,
     <Vw as Dictionary>::Node: DictionaryNode<Unit = u64>,

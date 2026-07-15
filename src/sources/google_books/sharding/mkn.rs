@@ -404,7 +404,7 @@ impl<'a> MknAggregator<'a> {
         let shard_files = self
             .coordinator
             .discover_shard_files()
-            .map_err(|e| MknError::Coordinator(e))?;
+            .map_err(MknError::Coordinator)?;
         let shard_keys: Vec<_> = shard_files.into_iter().map(|(key, _)| key).collect();
 
         shard_keys.par_iter().for_each(|key| {
@@ -496,7 +496,7 @@ impl<'a> MknAggregator<'a> {
         let shard_files = self
             .coordinator
             .discover_shard_files()
-            .map_err(|e| MknError::Coordinator(e))?;
+            .map_err(MknError::Coordinator)?;
         let shard_keys: Vec<_> = shard_files.into_iter().map(|(key, _)| key).collect();
 
         for key in &shard_keys {
@@ -676,16 +676,48 @@ impl MknStats {
 #[cfg(test)]
 mod tests {
     use super::super::config::{ShardConfig, ShardGranularity};
+    use super::super::routing::compute_shard_key_from_token;
     use super::*;
     use crate::ngram::vocabulary::{
-        create_vocabulary, encode_indices_to_key_bytes, SharedVocabARTrie,
+        create_vocabulary, encode_indices_to_key_bytes, encode_varint, SharedVocabARTrie,
     };
     use proptest::prelude::*;
     use tempfile::TempDir;
 
-    /// Create a test coordinator with varint-encoded n-grams.
+    /// Store one n-gram exactly as the importer does: intern the tokens to
+    /// term-ids, route by the FIRST TOKEN's characters + sequence length, key by
+    /// concatenated LEB128 varints, then `store_in_shard`.
     ///
-    /// N-grams are properly encoded using the vocabulary, matching
+    /// (The former helper routed the varint *bytes* through the now-deleted `'|'`
+    /// string router; because varint bytes are non-alphabetic, that router
+    /// produced an empty prefix and dumped EVERY n-gram into the `"__"` shard —
+    /// silently defeating distribution. Routing by the first token fixes that,
+    /// while MKN still discovers and aggregates all shard files identically.)
+    fn store_ngram(
+        coordinator: &ShardCoordinator,
+        vocab: &SharedVocabARTrie,
+        words: &[&str],
+        count: u64,
+    ) {
+        let ids: Vec<u64> = words
+            .iter()
+            .map(|word| vocab.as_ref().insert(word).expect("test vocab insert"))
+            .collect();
+        let shard_key = compute_shard_key_from_token(
+            words[0],
+            words.len() as u8,
+            &coordinator.config().granularity,
+        );
+        let mut key = Vec::with_capacity(ids.len() * 2);
+        for id in &ids {
+            encode_varint(*id, &mut key);
+        }
+        coordinator
+            .store_in_shard(&shard_key, &key, count)
+            .expect("store_in_shard");
+    }
+
+    /// Create a test coordinator with varint-encoded (term-id) n-grams matching
     /// the production format (LEB128 varint-encoded byte keys).
     fn create_test_coordinator() -> (TempDir, ShardCoordinator, SharedVocabARTrie) {
         let dir = TempDir::new().expect("Failed to create temp dir");
@@ -698,61 +730,27 @@ mod tests {
         let vocab_path = dir.path().join("vocab.artrie");
         let vocab = create_vocabulary(&vocab_path).expect("Failed to create vocab");
 
-        // Helper to encode n-gram using vocabulary.
-        // Returns a String whose bytes are the raw varint encoding (indices < 128
-        // so each varint byte is ASCII and the UTF-8 representation is identical).
-        let encode = |words: &[&str]| -> String {
-            let mut buf = Vec::with_capacity(words.len() * 2);
-            let guard = vocab.as_ref();
-            for word in words {
-                let idx = guard.insert(word).expect("test vocab insert");
-                crate::ngram::vocabulary::encode_varint(idx, &mut buf);
-            }
-            // Safety: all indices < 128, so all bytes are valid ASCII/UTF-8
-            String::from_utf8(buf).expect("varint bytes should be valid UTF-8 for small indices")
-        };
+        // Add test data with various counts.
+        // 1-grams (single varint)
+        store_ngram(&coordinator, &vocab, &["the"], 100);
+        store_ngram(&coordinator, &vocab, &["a"], 50);
+        store_ngram(&coordinator, &vocab, &["an"], 1); // count=1
+        store_ngram(&coordinator, &vocab, &["is"], 2); // count=2
+        store_ngram(&coordinator, &vocab, &["at"], 3); // count=3
+        store_ngram(&coordinator, &vocab, &["in"], 4); // count=4
 
-        // Add test data with various counts
-        // 1-grams (encoded as single varint)
-        coordinator
-            .store_ngram(&encode(&["the"]), 100)
-            .expect("store");
-        coordinator.store_ngram(&encode(&["a"]), 50).expect("store");
-        coordinator.store_ngram(&encode(&["an"]), 1).expect("store"); // count=1
-        coordinator.store_ngram(&encode(&["is"]), 2).expect("store"); // count=2
-        coordinator.store_ngram(&encode(&["at"]), 3).expect("store"); // count=3
-        coordinator.store_ngram(&encode(&["in"]), 4).expect("store"); // count=4
+        // 2-grams (two varints)
+        store_ngram(&coordinator, &vocab, &["the", "quick"], 10);
+        store_ngram(&coordinator, &vocab, &["the", "slow"], 5);
+        store_ngram(&coordinator, &vocab, &["a", "big"], 1); // count=1
+        store_ngram(&coordinator, &vocab, &["a", "small"], 2); // count=2
+        store_ngram(&coordinator, &vocab, &["is", "very"], 3); // count=3
+        store_ngram(&coordinator, &vocab, &["in", "the"], 4); // count=4
 
-        // 2-grams (encoded as two varints)
-        coordinator
-            .store_ngram(&encode(&["the", "quick"]), 10)
-            .expect("store");
-        coordinator
-            .store_ngram(&encode(&["the", "slow"]), 5)
-            .expect("store");
-        coordinator
-            .store_ngram(&encode(&["a", "big"]), 1)
-            .expect("store"); // count=1
-        coordinator
-            .store_ngram(&encode(&["a", "small"]), 2)
-            .expect("store"); // count=2
-        coordinator
-            .store_ngram(&encode(&["is", "very"]), 3)
-            .expect("store"); // count=3
-        coordinator
-            .store_ngram(&encode(&["in", "the"]), 4)
-            .expect("store"); // count=4
-
-        // 3-grams (encoded as three varints)
-        coordinator
-            .store_ngram(&encode(&["the", "quick", "brown"]), 5)
-            .expect("store");
-        coordinator
-            .store_ngram(&encode(&["the", "quick", "red"]), 1)
-            .expect("store"); // count=1
-        coordinator
-            .store_ngram(&encode(&["the", "slow", "green"]), 2)
-            .expect("store"); // count=2
+        // 3-grams (three varints)
+        store_ngram(&coordinator, &vocab, &["the", "quick", "brown"], 5);
+        store_ngram(&coordinator, &vocab, &["the", "quick", "red"], 1); // count=1
+        store_ngram(&coordinator, &vocab, &["the", "slow", "green"], 2); // count=2
 
         (dir, coordinator, vocab)
     }

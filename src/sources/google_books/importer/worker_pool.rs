@@ -520,7 +520,7 @@ async fn process_single_attempt(
 
                 // Update per-worker atomic with count (for progress display)
                 if worker_id < shared.worker_stats.len() {
-                    let packed = (count as u64) << 32;
+                    let packed = count << 32;
                     shared.worker_stats[worker_id].store(packed, Ordering::Relaxed);
                 }
             }
@@ -566,7 +566,7 @@ async fn process_single_attempt(
 
             // Update per-worker atomic with packed counts (race-free, no batching needed)
             if worker_id < shared.worker_stats.len() {
-                let packed = ((count as u64) << 32) | (unique_count as u64 & 0xFFFFFFFF);
+                let packed = (count << 32) | (unique_count & 0xFFFFFFFF);
                 shared.worker_stats[worker_id].store(packed, Ordering::Relaxed);
             }
         }
@@ -692,7 +692,7 @@ async fn process_single_attempt_cached(
                 }
 
                 if worker_id < shared.worker_stats.len() {
-                    let packed = (count as u64) << 32;
+                    let packed = count << 32;
                     shared.worker_stats[worker_id].store(packed, Ordering::Relaxed);
                 }
             }
@@ -734,7 +734,7 @@ async fn process_single_attempt_cached(
             }
 
             if worker_id < shared.worker_stats.len() {
-                let packed = ((count as u64) << 32) | (unique_count as u64 & 0xFFFFFFFF);
+                let packed = (count << 32) | (unique_count & 0xFFFFFFFF);
                 shared.worker_stats[worker_id].store(packed, Ordering::Relaxed);
             }
         }
@@ -1459,7 +1459,7 @@ pub(super) async fn process_prefix_file_cached(
 
         if let Some(tx) = maybe_tx {
             // Sharded mode: delegate chunked-tx body to shared helper
-            process_aggregated_stream(stream, tx, &ctx, &prefix, order, worker_id, "cached prefix")
+            process_aggregated_stream(stream, tx, ctx, &prefix, order, worker_id, "cached prefix")
                 .await
         } else {
             // Single-trie mode

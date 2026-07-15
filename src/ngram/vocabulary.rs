@@ -359,7 +359,7 @@ pub fn encode_ngram_key(words: &[&str], vocab: &SharedVocabARTrie) -> String {
         encode_varint(index, &mut buf);
     }
     // Convert bytes to Latin-1 string (each byte → char U+00XX)
-    buf.into_iter().map(|b| char::from(b)).collect()
+    buf.into_iter().map(char::from).collect()
 }
 
 /// Try to encode an n-gram as a varint-encoded Latin-1 string (fallible version).
@@ -374,7 +374,7 @@ pub fn try_encode_ngram_key(words: &[&str], vocab: &SharedVocabARTrie) -> Vocabu
         let index = guard.insert(word)?;
         encode_varint(index, &mut buf);
     }
-    Ok(buf.into_iter().map(|b| char::from(b)).collect())
+    Ok(buf.into_iter().map(char::from).collect())
 }
 
 /// Encode an n-gram using batch insert for vocabulary terms.
@@ -413,7 +413,7 @@ pub fn encode_ngram_key_batch(words: &[&str], vocab: &SharedVocabARTrie) -> Stri
     for index in indices {
         encode_varint(index, &mut buf);
     }
-    buf.into_iter().map(|b| char::from(b)).collect()
+    buf.into_iter().map(char::from).collect()
 }
 
 /// Try to encode an n-gram using batch insert (fallible version).
@@ -434,7 +434,7 @@ pub fn try_encode_ngram_key_batch(
     for index in indices {
         encode_varint(index, &mut buf);
     }
-    Ok(buf.into_iter().map(|b| char::from(b)).collect())
+    Ok(buf.into_iter().map(char::from).collect())
 }
 
 // ============================================================================
@@ -500,7 +500,7 @@ pub fn encode_ngram_key_lockfree(words: &[&str], vocab: &PersistentVocabARTrie) 
     for index in indices {
         encode_varint(index, &mut buf);
     }
-    buf.into_iter().map(|b| char::from(b)).collect()
+    buf.into_iter().map(char::from).collect()
 }
 
 /// Try to encode an n-gram using lock-free CAS operations (fallible version).
@@ -544,7 +544,7 @@ pub fn encode_ngram_key_with_lockfree_vocab(
     for index in indices {
         encode_varint(index, &mut buf);
     }
-    buf.into_iter().map(|b| char::from(b)).collect()
+    buf.into_iter().map(char::from).collect()
 }
 
 use std::cell::RefCell;
@@ -592,7 +592,7 @@ pub fn with_encoded_ngram_key_lockfree<R>(
             .insert_batch(words)
             .expect("vocab insert_batch failed");
         for index in indices {
-            encode_varint(index, &mut *buf);
+            encode_varint(index, &mut buf);
         }
         f(&buf)
     })
@@ -618,7 +618,7 @@ pub fn encode_ngram_key_existing(words: &[&str], vocab: &SharedVocabARTrie) -> O
         let index = guard.get_index(word)?;
         encode_varint(index, &mut buf);
     }
-    Some(buf.into_iter().map(|b| char::from(b)).collect())
+    Some(buf.into_iter().map(char::from).collect())
 }
 
 /// Encode an n-gram as raw varint bytes, inserting new words into vocab.
@@ -705,7 +705,7 @@ pub fn encode_indices_to_key(indices: &[u64]) -> String {
         encode_varint(index, &mut buf);
     }
     // Convert bytes to Latin-1 string (each byte → char U+00XX)
-    buf.into_iter().map(|b| char::from(b)).collect()
+    buf.into_iter().map(char::from).collect()
 }
 
 // ============================================================================
@@ -1294,7 +1294,7 @@ mod tests {
         // Each thread inserts (terms_per_thread + 1) unique words
         // Total = num_threads * (terms_per_thread + 1)
         let expected_vocab_size = num_threads * (terms_per_thread + 1);
-        assert!(concurrent.next_index() >= expected_vocab_size as u64 + 1);
+        assert!(concurrent.next_index() > expected_vocab_size as u64);
     }
 
     #[test]

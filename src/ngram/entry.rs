@@ -1,11 +1,10 @@
 //! N-gram entry type for dictionary storage.
 //!
 //! This module defines the `NgramEntry` struct that stores n-gram statistics
-//! in liblevenshtein-rust dictionary backends.
+//! in libdictenstein dictionary backends.
 
 use libdictenstein::value::DictionaryValue;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use serde::{Deserialize, Serialize};
 
 /// Entry stored for each n-gram in the dictionary.
 ///
@@ -20,34 +19,38 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 /// - `unique_continuations`: Number of unique words that follow this n-gram
 ///   (used for computing interpolation weights)
 ///
-/// # Thread Safety
+/// # Concurrency
 ///
-/// `NgramEntry` uses atomic operations for thread-safe counting during parallel
-/// corpus processing. The `Sync` and `Send` traits are automatically derived.
+/// `NgramEntry` is a plain, `Copy` value with no interior atomics. Concurrent
+/// updates are the *store's* responsibility: the byte-keyed backends apply an
+/// update closure to a private clone and publish it with a lock-free
+/// compare-and-swap (`update_or_insert_bytes`), so the entry itself carries no
+/// synchronization. This mirrors the value-CAS model exactly — an interior
+/// atomic would be snapshotted by the per-attempt clone and buy nothing.
 ///
 /// # Example
 ///
 /// ```
 /// use libgrammstein::ngram::NgramEntry;
 ///
-/// let entry = NgramEntry::new(5);
+/// let mut entry = NgramEntry::new(5);
 /// assert_eq!(entry.count(), 5);
 ///
 /// entry.increment();
 /// assert_eq!(entry.count(), 6);
 /// ```
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NgramEntry {
     /// Raw corpus count of this n-gram.
-    count: AtomicU64,
+    count: u64,
 
     /// Number of unique preceding contexts (for continuation probability).
     /// Used in Modified Kneser-Ney for lower-order probability estimation.
-    continuation_count: AtomicU32,
+    continuation_count: u32,
 
     /// Number of unique following words.
     /// Used to compute interpolation weights in MKN.
-    unique_continuations: AtomicU32,
+    unique_continuations: u32,
 }
 
 impl NgramEntry {
@@ -55,9 +58,9 @@ impl NgramEntry {
     #[inline]
     pub fn new(count: u64) -> Self {
         Self {
-            count: AtomicU64::new(count),
-            continuation_count: AtomicU32::new(0),
-            unique_continuations: AtomicU32::new(0),
+            count,
+            continuation_count: 0,
+            unique_continuations: 0,
         }
     }
 
@@ -65,129 +68,76 @@ impl NgramEntry {
     #[inline]
     pub fn with_stats(count: u64, continuation_count: u32, unique_continuations: u32) -> Self {
         Self {
-            count: AtomicU64::new(count),
-            continuation_count: AtomicU32::new(continuation_count),
-            unique_continuations: AtomicU32::new(unique_continuations),
+            count,
+            continuation_count,
+            unique_continuations,
         }
     }
 
     /// Get the raw corpus count.
     #[inline]
     pub fn count(&self) -> u64 {
-        self.count.load(Ordering::Relaxed)
+        self.count
     }
 
     /// Get the continuation count (unique preceding contexts).
     #[inline]
     pub fn continuation_count(&self) -> u32 {
-        self.continuation_count.load(Ordering::Relaxed)
+        self.continuation_count
     }
 
     /// Get the number of unique continuations (following words).
     #[inline]
     pub fn unique_continuations(&self) -> u32 {
-        self.unique_continuations.load(Ordering::Relaxed)
+        self.unique_continuations
     }
 
-    /// Atomically increment the count by 1.
+    /// Increment the count by 1.
     #[inline]
-    pub fn increment(&self) {
-        self.count.fetch_add(1, Ordering::Relaxed);
+    pub fn increment(&mut self) {
+        self.count += 1;
     }
 
-    /// Atomically increment the count by a given amount.
+    /// Increment the count by a given amount.
     #[inline]
-    pub fn increment_by(&self, amount: u64) {
-        self.count.fetch_add(amount, Ordering::Relaxed);
+    pub fn increment_by(&mut self, amount: u64) {
+        self.count += amount;
     }
 
-    /// Atomically increment the continuation count by 1.
+    /// Increment the continuation count by 1.
     #[inline]
-    pub fn increment_continuation(&self) {
-        self.continuation_count.fetch_add(1, Ordering::Relaxed);
+    pub fn increment_continuation(&mut self) {
+        self.continuation_count += 1;
     }
 
-    /// Atomically increment the unique continuations count by 1.
+    /// Increment the unique continuations count by 1.
     #[inline]
-    pub fn increment_unique_continuations(&self) {
-        self.unique_continuations.fetch_add(1, Ordering::Relaxed);
+    pub fn increment_unique_continuations(&mut self) {
+        self.unique_continuations += 1;
     }
 
-    /// Set the continuation count (typically done after initial counting pass).
+    /// Set the continuation count (typically done after the initial counting pass).
     #[inline]
-    pub fn set_continuation_count(&self, value: u32) {
-        self.continuation_count.store(value, Ordering::Relaxed);
+    pub fn set_continuation_count(&mut self, value: u32) {
+        self.continuation_count = value;
     }
 
     /// Set the unique continuations count.
     #[inline]
-    pub fn set_unique_continuations(&self, value: u32) {
-        self.unique_continuations.store(value, Ordering::Relaxed);
+    pub fn set_unique_continuations(&mut self, value: u32) {
+        self.unique_continuations = value;
     }
 }
 
-impl Clone for NgramEntry {
-    fn clone(&self) -> Self {
-        Self {
-            count: AtomicU64::new(self.count.load(Ordering::Relaxed)),
-            continuation_count: AtomicU32::new(self.continuation_count.load(Ordering::Relaxed)),
-            unique_continuations: AtomicU32::new(self.unique_continuations.load(Ordering::Relaxed)),
-        }
-    }
-}
-
-// Custom Serialize implementation for NgramEntry.
-// Atomics don't implement Serialize by default, so we serialize their values.
-impl Serialize for NgramEntry {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("NgramEntry", 3)?;
-        state.serialize_field("count", &self.count.load(Ordering::Relaxed))?;
-        state.serialize_field(
-            "continuation_count",
-            &self.continuation_count.load(Ordering::Relaxed),
-        )?;
-        state.serialize_field(
-            "unique_continuations",
-            &self.unique_continuations.load(Ordering::Relaxed),
-        )?;
-        state.end()
-    }
-}
-
-// Custom Deserialize implementation for NgramEntry.
-impl<'de> Deserialize<'de> for NgramEntry {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct NgramEntryData {
-            count: u64,
-            continuation_count: u32,
-            unique_continuations: u32,
-        }
-
-        let data = NgramEntryData::deserialize(deserializer)?;
-        Ok(NgramEntry {
-            count: AtomicU64::new(data.count),
-            continuation_count: AtomicU32::new(data.continuation_count),
-            unique_continuations: AtomicU32::new(data.unique_continuations),
-        })
-    }
-}
-
-// Implement DictionaryValue for storage in liblevenshtein dictionaries.
+// Implement DictionaryValue for storage in libdictenstein dictionaries.
 // DictionaryValue requires Clone + Send + Sync + Unpin + Serialize + DeserializeOwned + 'static.
 impl DictionaryValue for NgramEntry {}
 
-/// Snapshot of NgramEntry for non-atomic access.
+/// Snapshot of `NgramEntry` for the portable serialization format.
 ///
-/// Used when we need to pass n-gram data across thread boundaries
-/// or when atomic operations are not needed.
+/// Structurally identical to `NgramEntry`; kept as a distinct name so the
+/// on-disk portable model schema (`PortableNgramModel::entries`) stays stable
+/// and self-documenting.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NgramEntrySnapshot {
     /// Raw corpus count.
@@ -240,7 +190,7 @@ mod tests {
 
     #[test]
     fn test_increment() {
-        let entry = NgramEntry::new(0);
+        let mut entry = NgramEntry::new(0);
         entry.increment();
         entry.increment();
         entry.increment();
@@ -249,18 +199,31 @@ mod tests {
 
     #[test]
     fn test_increment_by() {
-        let entry = NgramEntry::new(10);
+        let mut entry = NgramEntry::new(10);
         entry.increment_by(5);
         assert_eq!(entry.count(), 15);
     }
 
     #[test]
-    fn test_clone() {
+    fn test_continuation_stats_mutation() {
+        let mut entry = NgramEntry::new(7);
+        entry.set_continuation_count(4);
+        entry.increment_unique_continuations();
+        entry.increment_unique_continuations();
+        assert_eq!(entry.count(), 7);
+        assert_eq!(entry.continuation_count(), 4);
+        assert_eq!(entry.unique_continuations(), 2);
+    }
+
+    #[test]
+    fn test_clone_is_copy() {
         let entry = NgramEntry::with_stats(50, 8, 3);
-        let cloned = entry.clone();
-        assert_eq!(cloned.count(), 50);
-        assert_eq!(cloned.continuation_count(), 8);
-        assert_eq!(cloned.unique_continuations(), 3);
+        let copied = entry; // Copy
+        assert_eq!(copied.count(), 50);
+        assert_eq!(copied.continuation_count(), 8);
+        assert_eq!(copied.unique_continuations(), 3);
+        // original still usable (Copy, not moved)
+        assert_eq!(entry.count(), 50);
     }
 
     #[test]
@@ -276,29 +239,5 @@ mod tests {
         assert_eq!(restored.count(), 100);
         assert_eq!(restored.continuation_count(), 20);
         assert_eq!(restored.unique_continuations(), 10);
-    }
-
-    #[test]
-    fn test_thread_safety() {
-        use std::sync::Arc;
-        use std::thread;
-
-        let entry = Arc::new(NgramEntry::new(0));
-        let mut handles = vec![];
-
-        for _ in 0..10 {
-            let entry = Arc::clone(&entry);
-            handles.push(thread::spawn(move || {
-                for _ in 0..1000 {
-                    entry.increment();
-                }
-            }));
-        }
-
-        for handle in handles {
-            handle.join().expect("Thread panicked");
-        }
-
-        assert_eq!(entry.count(), 10000);
     }
 }

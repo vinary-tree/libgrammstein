@@ -6,9 +6,10 @@
 //! cover query cost, not training.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use libdictenstein::dynamic_dawg::DynamicDawg;
 use libgrammstein::corpus::PlaintextReader;
+use libgrammstein::ngram::store::TermIdStore;
 use libgrammstein::ngram::{NgramEntry, NgramModel, TrainerBuilder};
-use liblevenshtein::dictionary::pathmap::PathMapDictionary;
 use std::io::Write;
 use tempfile::TempDir;
 
@@ -17,7 +18,7 @@ use tempfile::TempDir;
 /// The corpus repeats short sentences so the trained trie has ~50 unique
 /// 1-grams and ~150 unique 3-grams — small enough for sub-millisecond
 /// queries while still exercising the smoothing / backoff path.
-fn build_test_model() -> (TempDir, NgramModel<PathMapDictionary<NgramEntry>>) {
+fn build_test_model() -> (TempDir, NgramModel<TermIdStore<DynamicDawg<NgramEntry>>>) {
     let tmp = TempDir::new().expect("tempdir");
     let path = tmp.path().join("corpus.txt");
     let mut file = std::fs::File::create(&path).expect("create corpus");
@@ -43,7 +44,7 @@ fn build_test_model() -> (TempDir, NgramModel<PathMapDictionary<NgramEntry>>) {
     drop(file);
 
     let reader = PlaintextReader::from_file(&path).expect("reader");
-    let dictionary = PathMapDictionary::<NgramEntry>::new();
+    let dictionary = DynamicDawg::<NgramEntry>::new();
     let model = TrainerBuilder::new(dictionary)
         .order(3)
         .train(reader)

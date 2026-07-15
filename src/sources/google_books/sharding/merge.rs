@@ -224,10 +224,9 @@ impl<'a> MergeCoordinator<'a> {
             .map_err(|e| MergeError::Trie(format!("Failed to create output trie: {}", e)))?;
 
         let mut ngrams_merged = 0u64;
-        let mut shards_processed = 0usize;
 
         // Iterate through each shard and copy data to output
-        for key in &shard_keys {
+        for (shards_processed, key) in shard_keys.iter().enumerate() {
             progress_callback(MergeProgress {
                 phase: 1,
                 total_phases: 1,
@@ -265,8 +264,6 @@ impl<'a> MergeCoordinator<'a> {
                     .map_err(|e| MergeError::Trie(format!("Increment failed: {}", e)))?;
                 ngrams_merged += 1;
             }
-
-            shards_processed += 1;
         }
 
         // Checkpoint output trie
@@ -450,46 +447,83 @@ impl<'a> MergeBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::super::config::{ShardConfig, ShardGranularity};
+    use super::super::routing::compute_shard_key_from_token;
     use super::*;
+    use crate::ngram::vocabulary::{create_vocabulary, encode_varint, SharedVocabARTrie};
     use tempfile::TempDir;
 
-    fn create_test_coordinator() -> (TempDir, ShardCoordinator) {
+    /// Concatenated LEB128 term-id byte key for a token sequence (interning the
+    /// tokens in the vocabulary; `insert` is idempotent so recomputing a key for
+    /// an already-stored n-gram yields the same bytes).
+    fn ngram_key(vocab: &SharedVocabARTrie, tokens: &[&str]) -> Vec<u8> {
+        let mut key = Vec::with_capacity(tokens.len() * 2);
+        for token in tokens {
+            let id = vocab.as_ref().insert(token).expect("vocab insert");
+            encode_varint(id, &mut key);
+        }
+        key
+    }
+
+    /// Store one n-gram exactly as the importer does: route by the first token's
+    /// characters + sequence length, key by concatenated term-id varints.
+    fn store_ngram(
+        coordinator: &ShardCoordinator,
+        vocab: &SharedVocabARTrie,
+        tokens: &[&str],
+        count: u64,
+    ) {
+        let shard_key = compute_shard_key_from_token(
+            tokens[0],
+            tokens.len() as u8,
+            &coordinator.config().granularity,
+        );
+        coordinator
+            .store_in_shard(&shard_key, &ngram_key(vocab, tokens), count)
+            .expect("store_in_shard");
+    }
+
+    fn create_test_coordinator() -> (TempDir, ShardCoordinator, SharedVocabARTrie) {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let config =
             ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
         let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
+        let vocab = create_vocabulary(&dir.path().join("vocab")).expect("vocabulary");
 
-        // Add test data across multiple shards
-        coordinator.store_ngram("the|quick", 100).expect("store");
-        coordinator.store_ngram("the|slow", 50).expect("store");
-        coordinator.store_ngram("apple|pie", 30).expect("store");
-        coordinator.store_ngram("apple|cider", 20).expect("store");
-        coordinator.store_ngram("banana|split", 15).expect("store");
-        coordinator
-            .store_ngram("cherry|blossom", 10)
-            .expect("store");
-        coordinator.store_ngram("zebra|crossing", 5).expect("store");
+        // Add test data across multiple shards (first-token prefixes: th, ap, ba, ch, ze).
+        store_ngram(&coordinator, &vocab, &["the", "quick"], 100);
+        store_ngram(&coordinator, &vocab, &["the", "slow"], 50);
+        store_ngram(&coordinator, &vocab, &["apple", "pie"], 30);
+        store_ngram(&coordinator, &vocab, &["apple", "cider"], 20);
+        store_ngram(&coordinator, &vocab, &["banana", "split"], 15);
+        store_ngram(&coordinator, &vocab, &["cherry", "blossom"], 10);
+        store_ngram(&coordinator, &vocab, &["zebra", "crossing"], 5);
 
-        (dir, coordinator)
+        (dir, coordinator, vocab)
     }
 
     #[test]
     fn test_merge_to_memory() {
-        let (_dir, coordinator) = create_test_coordinator();
+        let (_dir, coordinator, vocab) = create_test_coordinator();
         let merger = MergeCoordinator::new(&coordinator);
 
         let merged = merger.merge_to_memory().expect("merge");
 
         assert_eq!(merged.len(), 7);
-        assert_eq!(merged.get(b"the|quick".as_slice()), Some(&100));
-        assert_eq!(merged.get(b"apple|pie".as_slice()), Some(&30));
-        assert_eq!(merged.get(b"zebra|crossing".as_slice()), Some(&5));
+        assert_eq!(
+            merged.get(&ngram_key(&vocab, &["the", "quick"])),
+            Some(&100)
+        );
+        assert_eq!(merged.get(&ngram_key(&vocab, &["apple", "pie"])), Some(&30));
+        assert_eq!(
+            merged.get(&ngram_key(&vocab, &["zebra", "crossing"])),
+            Some(&5)
+        );
     }
 
     #[test]
     fn test_iter_all() {
-        let (_dir, coordinator) = create_test_coordinator();
+        let (_dir, coordinator, _vocab) = create_test_coordinator();
         let merger = MergeCoordinator::new(&coordinator);
 
         let all: Vec<_> = merger.iter_all().expect("iter_all").collect();
@@ -499,7 +533,7 @@ mod tests {
 
     #[test]
     fn test_estimated_size() {
-        let (_dir, coordinator) = create_test_coordinator();
+        let (_dir, coordinator, _vocab) = create_test_coordinator();
         let merger = MergeCoordinator::new(&coordinator);
 
         let size = merger.estimated_final_size();
@@ -508,7 +542,7 @@ mod tests {
 
     #[test]
     fn test_merge_to_trie() {
-        let (dir, coordinator) = create_test_coordinator();
+        let (dir, coordinator, vocab) = create_test_coordinator();
         let merger =
             MergeCoordinator::new(&coordinator).with_work_dir(dir.path().join("merge_work"));
 
@@ -521,15 +555,21 @@ mod tests {
         assert_eq!(stats.shards_merged, 5); // th, ap, ba, ch, ze
         assert!(stats.total_ngrams > 0);
 
-        // Verify merged trie contents
+        // Verify merged trie contents (term-id byte keys).
         let merged_trie = PersistentARTrie::<u64>::open(&output_path).expect("open");
-        assert_eq!(merged_trie.get_value_bytes(b"the|quick"), Some(100));
-        assert_eq!(merged_trie.get_value_bytes(b"apple|pie"), Some(30));
+        assert_eq!(
+            merged_trie.get_value_bytes(&ngram_key(&vocab, &["the", "quick"])),
+            Some(100)
+        );
+        assert_eq!(
+            merged_trie.get_value_bytes(&ngram_key(&vocab, &["apple", "pie"])),
+            Some(30)
+        );
     }
 
     #[test]
     fn test_merge_progress() {
-        let (dir, coordinator) = create_test_coordinator();
+        let (dir, coordinator, _vocab) = create_test_coordinator();
         let merger =
             MergeCoordinator::new(&coordinator).with_work_dir(dir.path().join("merge_work"));
 
@@ -552,7 +592,7 @@ mod tests {
 
     #[test]
     fn test_merge_builder() {
-        let (_dir, coordinator) = create_test_coordinator();
+        let (_dir, coordinator, _vocab) = create_test_coordinator();
 
         let merger = MergeBuilder::new(&coordinator)
             .parallelism(4)

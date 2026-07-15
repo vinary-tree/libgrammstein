@@ -23,6 +23,7 @@ use clap::Parser;
 use libdictenstein::persistent_artrie::vocab::PersistentVocabARTrie;
 use libdictenstein::persistent_artrie::PersistentARTrie;
 use libdictenstein::Dictionary;
+use libgrammstein::ngram::vocabulary::decode_ngram_key_bytes;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -47,6 +48,15 @@ struct Args {
     /// Show raw checkpoint keys from trie
     #[arg(long)]
     raw_keys: bool,
+
+    /// Decode a sample of byte-keyed n-gram entries (term-id → word) using the
+    /// directory's vocabulary, so byte-native dumps stay human-readable.
+    #[arg(long)]
+    decode_ngrams: bool,
+
+    /// Maximum number of decoded n-grams to print (with `--decode-ngrams`).
+    #[arg(long, default_value_t = 20)]
+    decode_limit: usize,
 
     /// Verbose output
     #[arg(long, short = 'v')]
@@ -136,7 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn inspect_directory(dir: &PathBuf, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+fn inspect_directory(dir: &Path, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // Check for WAL files first - this is crucial
     println!("\n--- WAL Files ---");
     check_wal_files(dir, &args.prefix)?;
@@ -168,6 +178,20 @@ fn inspect_directory(dir: &PathBuf, args: &Args) -> Result<(), Box<dyn std::erro
         inspect_vocabulary(&vocab_path)?;
     }
 
+    // Term-id decode view: render byte-keyed n-gram entries as words.
+    if args.decode_ngrams {
+        println!("\n--- Decoded N-grams (term-id → words) ---");
+        if trie_path.exists() && vocab_path.exists() {
+            decode_ngram_view(&trie_path, &vocab_path, args.decode_limit)?;
+        } else {
+            println!(
+                "  Requires both {trie:?} and {vocab:?}",
+                trie = trie_path.display(),
+                vocab = vocab_path.display()
+            );
+        }
+    }
+
     // Check sharding checkpoint if it exists
     let shard_checkpoint = dir
         .join(format!("{}_shards", args.prefix))
@@ -180,7 +204,7 @@ fn inspect_directory(dir: &PathBuf, args: &Args) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-fn check_wal_files(dir: &PathBuf, prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn check_wal_files(dir: &Path, prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
     let wal_patterns = [
         format!("{}.wal", prefix),
         format!("{}.vocab.wal", prefix),
@@ -442,19 +466,17 @@ fn inspect_trie_checkpoint_inner(
                 is_complete
             );
 
-            if args.all_prefixes || args.verbose {
-                if !completed.is_empty() {
-                    let prefix_str = if completed.len() > 20 {
-                        format!(
-                            "{} (and {} more)",
-                            completed[..20].join(", "),
-                            completed.len() - 20
-                        )
-                    } else {
-                        completed.join(", ")
-                    };
-                    println!("      Completed: {}", prefix_str);
-                }
+            if (args.all_prefixes || args.verbose) && !completed.is_empty() {
+                let prefix_str = if completed.len() > 20 {
+                    format!(
+                        "{} (and {} more)",
+                        completed[..20].join(", "),
+                        completed.len() - 20
+                    )
+                } else {
+                    completed.join(", ")
+                };
+                println!("      Completed: {}", prefix_str);
             }
 
             if !in_progress.is_empty() {
@@ -509,16 +531,16 @@ fn load_bitmap_states(
 ) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
     let max_index: u16 = if prefix_len == 1 { 26 } else { 676 };
     let prefixes_per_chunk = 32usize;
-    let num_chunks = (max_index as usize + prefixes_per_chunk - 1) / prefixes_per_chunk;
+    let num_chunks = (max_index as usize).div_ceil(prefixes_per_chunk);
 
     // Load chunks
     let mut chunks = vec![0u64; num_chunks];
     let mut has_any = false;
 
-    for chunk_idx in 0..num_chunks {
+    for (chunk_idx, chunk_slot) in chunks.iter_mut().enumerate() {
         let key = format!("{}{}:{}", CHECKPOINT_BITMAP_PREFIX, order, chunk_idx);
         if let Some(value) = get_checkpoint_value(store, &key) {
-            chunks[chunk_idx] = value;
+            *chunk_slot = value;
             if value != 0 {
                 has_any = true;
             }
@@ -609,6 +631,52 @@ fn inspect_vocabulary(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> 
     // O(1) NodeRef → term backtrack).
     for (idx, term) in vocab.iter_terms().take(5).enumerate() {
         println!("    [{}] {}", idx, term);
+    }
+    Ok(())
+}
+
+/// Render a sample of byte-keyed n-gram entries as decoded words.
+///
+/// Each stored key is a raw LEB128 term-id sequence; this decodes it with
+/// [`decode_ngram_key_bytes`] and resolves each term-id to its word through the
+/// vocabulary's reverse index (`get_term`), so byte-native dumps stay readable.
+/// Metadata keys (those beginning with `\x00`) are skipped — they are not
+/// n-grams.
+fn decode_ngram_view(
+    trie_path: &Path,
+    vocab_path: &Path,
+    limit: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !looks_like_byte_artrie(trie_path)? {
+        println!(
+            "  {} is not a current byte-trie — skipping decode",
+            trie_path.display()
+        );
+        return Ok(());
+    }
+    let trie = PersistentARTrie::<u64>::open(trie_path)?;
+    let vocab = PersistentVocabARTrie::open(vocab_path)?;
+
+    println!("  Showing up to {limit} decoded n-gram entries:");
+    let mut shown = 0usize;
+    for (key, count) in trie.iter_bytes_with_values() {
+        // Skip metadata / checkpoint keys (prefixed with \x00).
+        if key.first() == Some(&0x00) {
+            continue;
+        }
+        if shown >= limit {
+            break;
+        }
+        let ids = decode_ngram_key_bytes(&key);
+        let words: Vec<String> = ids
+            .iter()
+            .map(|&id| vocab.get_term(id).unwrap_or_else(|| format!("<{id}>")))
+            .collect();
+        println!("    {} = {}", words.join(" "), count);
+        shown += 1;
+    }
+    if shown == 0 {
+        println!("    (no term-id n-gram entries found)");
     }
     Ok(())
 }

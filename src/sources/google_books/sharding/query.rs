@@ -1,17 +1,25 @@
-//! Unified query interface over sharded n-gram storage.
+//! Unified **byte-native** query interface over sharded n-gram storage.
 //!
-//! This module provides `ShardedTrieView` which enables transparent read access
-//! across all shards without needing to know the underlying shard distribution.
+//! This module provides `ShardedTrieView`, a cross-shard read utility over the raw
+//! term-id byte keys the shards actually store (concatenated LEB128 varints; see
+//! `crate::ngram::vocabulary`). It operates entirely on `&[u8]` keys — there is no
+//! delimited-string surface, so it is collision-free (a token containing `'|'` is
+//! part of one term-id, never a boundary).
 //!
 //! # Features
 //!
-//! - **Direct lookup**: Query any n-gram regardless of which shard contains it
-//! - **Prefix iteration**: Iterate all n-grams with a given prefix across shards
-//! - **Statistics**: Aggregate statistics across all shards
-//! - **Lazy loading**: Only opens shards when needed for queries
+//! - **Prefix iteration**: iterate all n-grams whose term-id byte key starts with a
+//!   given varint byte prefix, across shards ([`ShardedTrieView::prefix_search`]).
+//! - **Statistics**: aggregate statistics across all shards ([`ShardedTrieView::stats`]).
+//! - **Distribution / top-N / full iteration**: byte-key aggregates over open shards.
+//! - **Lazy loading**: only opens shards when needed for queries.
+//!
+//! Point lookups by a known key route through the coordinator's byte API
+//! (`ShardCoordinator::get_in_shard` with `compute_shard_key_from_token`) where the
+//! first token's characters are in scope; the view deliberately exposes only the
+//! cross-shard aggregates that do not require a vocabulary.
 
 use super::coordinator::ShardCoordinator;
-use super::routing::{compute_shard_key, ngram_order, ShardKey};
 use std::collections::BTreeMap;
 
 /// Read-only view over sharded n-gram storage.
@@ -28,18 +36,6 @@ impl<'a> ShardedTrieView<'a> {
         Self { coordinator }
     }
 
-    /// Get the count for an n-gram.
-    ///
-    /// Automatically routes to the correct shard.
-    pub fn get(&self, ngram: &str) -> Option<u64> {
-        self.coordinator.get(ngram)
-    }
-
-    /// Check if an n-gram exists.
-    pub fn contains(&self, ngram: &str) -> bool {
-        self.coordinator.contains(ngram)
-    }
-
     /// Get the total entry count across all shards.
     pub fn len(&self) -> u64 {
         self.coordinator.total_entry_count()
@@ -50,70 +46,29 @@ impl<'a> ShardedTrieView<'a> {
         self.len() == 0
     }
 
-    /// Get all n-grams with a specific prefix.
+    /// Get all n-grams whose term-id byte key starts with `prefix`.
     ///
-    /// This operation may need to query multiple shards depending on the prefix
-    /// and the sharding granularity.
+    /// `prefix` is a **term-id varint byte prefix** — a leading slice of a
+    /// concatenated-LEB128 n-gram key (e.g. the encoding of the first one or two
+    /// term-ids), NOT delimited text. Because the first token's characters (needed
+    /// to route to a single shard) are not recoverable from a bare varint prefix
+    /// without the vocabulary, this scans every open shard and keeps the entries
+    /// whose key `starts_with(prefix)`. This is collision-free by construction: a
+    /// varint boundary is unambiguous, unlike a `'|'` join.
     ///
     /// # Arguments
     ///
-    /// * `prefix` - The prefix to search for (e.g., "the|" for all bigrams starting with "the")
+    /// * `prefix` - Term-id varint byte prefix (e.g. `encode_varint(id("the"))` for
+    ///   all n-grams beginning with the term "the").
     ///
     /// # Returns
     ///
-    /// A vector of (n-gram, count) pairs sorted by n-gram.
+    /// A vector of (term-id byte key, count) pairs sorted by key.
     pub fn prefix_search(&self, prefix: &[u8]) -> Vec<(Vec<u8>, u64)> {
-        // Determine which shard(s) to query based on prefix
-        let config = self.coordinator.config();
-        let granularity = &config.granularity;
-
-        // Convert prefix to str for routing (routing operates on text)
-        let prefix_str = std::str::from_utf8(prefix).unwrap_or("");
-
-        // If prefix is long enough, we can route to a specific shard
-        let first_word = prefix_str.split('|').next().unwrap_or("");
-        let prefix_chars: String = first_word
-            .chars()
-            .filter(|c| c.is_alphabetic())
-            .flat_map(|c| c.to_lowercase())
-            .collect();
-
-        // Estimate order from prefix
-        let order = ngram_order(prefix_str).max(1);
-        let required_len = granularity.prefix_len_for_order(order);
-
-        if prefix_chars.len() >= required_len {
-            // We can route to a specific shard
-            let shard_key = compute_shard_key(prefix_str, order, granularity);
-            self.prefix_search_shard(&shard_key, prefix)
-        } else {
-            // Need to search multiple shards
-            self.prefix_search_all_shards(prefix)
-        }
+        self.prefix_search_all_shards(prefix)
     }
 
-    /// Search for prefix in a specific shard.
-    fn prefix_search_shard(&self, key: &ShardKey, prefix: &[u8]) -> Vec<(Vec<u8>, u64)> {
-        if let Ok(shard) = self.coordinator.get_or_create_shard(key) {
-            // Overlay-default: iteration reads the overlay directly, so no
-            // pre-iteration flush is needed and a shared read guard suffices.
-            let guard = shard.read();
-            match guard.iter_with_counts() {
-                Ok(entries) => entries
-                    .into_iter()
-                    .filter(|(ngram, _)| ngram.starts_with(prefix))
-                    .collect(),
-                Err(e) => {
-                    log::warn!("Failed to iterate shard {}: {}", key, e);
-                    Vec::new()
-                }
-            }
-        } else {
-            Vec::new()
-        }
-    }
-
-    /// Search all open shards for prefix.
+    /// Search all open shards for a term-id byte prefix.
     fn prefix_search_all_shards(&self, prefix: &[u8]) -> Vec<(Vec<u8>, u64)> {
         let mut results: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
@@ -153,11 +108,6 @@ impl<'a> ShardedTrieView<'a> {
                 .load(std::sync::atomic::Ordering::Relaxed),
             total_entries: self.len(),
         }
-    }
-
-    /// Get the shard key for an n-gram (for debugging/analysis).
-    pub fn shard_key_for(&self, ngram: &str) -> ShardKey {
-        self.coordinator.route_ngram(ngram)
     }
 
     /// Get the distribution of entries across shards.
@@ -238,7 +188,7 @@ impl<'a> ShardedTrieView<'a> {
             .into_iter()
             .map(|Reverse((count, ngram))| (ngram, count))
             .collect();
-        result.sort_by(|a, b| b.1.cmp(&a.1));
+        result.sort_by_key(|r| std::cmp::Reverse(r.1));
         result
     }
 }
@@ -262,61 +212,123 @@ pub struct ViewStats {
 #[cfg(test)]
 mod tests {
     use super::super::config::{ShardConfig, ShardGranularity};
+    use super::super::routing::compute_shard_key_from_token;
     use super::*;
+    use crate::ngram::vocabulary::{create_vocabulary, encode_varint, SharedVocabARTrie};
     use tempfile::TempDir;
 
-    fn create_test_coordinator() -> (TempDir, ShardCoordinator) {
+    /// Store one n-gram exactly as the importer does: route by the first token's
+    /// characters + sequence length, key by concatenated LEB128 term-id varints.
+    fn store_ngram(
+        coordinator: &ShardCoordinator,
+        vocab: &SharedVocabARTrie,
+        tokens: &[&str],
+        count: u64,
+    ) {
+        let ids: Vec<u64> = tokens
+            .iter()
+            .map(|t| vocab.as_ref().insert(t).expect("vocab insert"))
+            .collect();
+        let shard_key = compute_shard_key_from_token(
+            tokens[0],
+            tokens.len() as u8,
+            &coordinator.config().granularity,
+        );
+        let mut key = Vec::with_capacity(ids.len() * 2);
+        for id in &ids {
+            encode_varint(*id, &mut key);
+        }
+        coordinator
+            .store_in_shard(&shard_key, &key, count)
+            .expect("store_in_shard");
+    }
+
+    /// Recompute the term-id byte key for an already-interned token sequence.
+    fn ngram_key(vocab: &SharedVocabARTrie, tokens: &[&str]) -> Vec<u8> {
+        let mut key = Vec::with_capacity(tokens.len() * 2);
+        for t in tokens {
+            let id = vocab.as_ref().get_index(t).expect("token already in vocab");
+            encode_varint(id, &mut key);
+        }
+        key
+    }
+
+    /// Look up a token sequence via the coordinator's byte API (first-token route
+    /// + term-id key), the read path the view's aggregates complement.
+    fn get_ngram(
+        coordinator: &ShardCoordinator,
+        vocab: &SharedVocabARTrie,
+        tokens: &[&str],
+    ) -> Option<u64> {
+        let shard_key = compute_shard_key_from_token(
+            tokens[0],
+            tokens.len() as u8,
+            &coordinator.config().granularity,
+        );
+        coordinator.get_in_shard(&shard_key, &ngram_key(vocab, tokens))
+    }
+
+    fn create_test_coordinator() -> (TempDir, ShardCoordinator, SharedVocabARTrie) {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let config =
             ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
         let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
+        let vocab = create_vocabulary(&dir.path().join("vocab")).expect("vocabulary");
 
-        // Add test data
-        coordinator.store_ngram("the|quick", 100).expect("store");
-        coordinator.store_ngram("the|slow", 50).expect("store");
-        coordinator.store_ngram("apple|pie", 30).expect("store");
-        coordinator.store_ngram("apple|cider", 20).expect("store");
-        coordinator
-            .store_ngram("zebra|crossing", 10)
-            .expect("store");
+        // Term-id-encoded bigrams (routing prefixes: th, th, ap, ap, ze).
+        store_ngram(&coordinator, &vocab, &["the", "quick"], 100);
+        store_ngram(&coordinator, &vocab, &["the", "slow"], 50);
+        store_ngram(&coordinator, &vocab, &["apple", "pie"], 30);
+        store_ngram(&coordinator, &vocab, &["apple", "cider"], 20);
+        store_ngram(&coordinator, &vocab, &["zebra", "crossing"], 10);
 
-        (dir, coordinator)
+        (dir, coordinator, vocab)
     }
 
     #[test]
     fn test_view_basic_queries() {
-        let (_dir, coordinator) = create_test_coordinator();
+        let (_dir, coordinator, vocab) = create_test_coordinator();
+        // Point lookups go through the coordinator's byte API; the view provides
+        // the cross-shard aggregates.
+        assert_eq!(
+            get_ngram(&coordinator, &vocab, &["the", "quick"]),
+            Some(100)
+        );
+        assert_eq!(get_ngram(&coordinator, &vocab, &["apple", "pie"]), Some(30));
+        assert_eq!(
+            get_ngram(&coordinator, &vocab, &["zebra", "crossing"]),
+            Some(10)
+        );
+
         let view = ShardedTrieView::new(&coordinator);
-
-        assert_eq!(view.get("the|quick"), Some(100));
-        assert_eq!(view.get("apple|pie"), Some(30));
-        assert_eq!(view.get("nonexistent"), None);
-
-        assert!(view.contains("the|quick"));
-        assert!(!view.contains("nonexistent"));
+        assert!(!view.is_empty());
+        assert_eq!(view.len(), 5);
     }
 
     #[test]
     fn test_view_prefix_search() {
-        let (_dir, coordinator) = create_test_coordinator();
+        let (_dir, coordinator, vocab) = create_test_coordinator();
         let view = ShardedTrieView::new(&coordinator);
 
-        let results = view.prefix_search(b"the|");
+        // A term-id varint byte prefix: the leading varint of "the" matches both
+        // ["the","quick"] and ["the","slow"] (collision-free — a varint boundary).
+        let the_prefix = ngram_key(&vocab, &["the"]);
+        let results = view.prefix_search(&the_prefix);
         assert_eq!(results.len(), 2);
 
-        // Should contain both "the|quick" and "the|slow"
-        let ngrams: Vec<_> = results.iter().map(|(n, _)| n.as_slice()).collect();
-        assert!(ngrams.contains(&b"the|quick".as_slice()));
-        assert!(ngrams.contains(&b"the|slow".as_slice()));
+        let keys: Vec<_> = results.iter().map(|(k, _)| k.as_slice()).collect();
+        assert!(keys.contains(&ngram_key(&vocab, &["the", "quick"]).as_slice()));
+        assert!(keys.contains(&ngram_key(&vocab, &["the", "slow"]).as_slice()));
 
-        let results = view.prefix_search(b"apple|");
+        let apple_prefix = ngram_key(&vocab, &["apple"]);
+        let results = view.prefix_search(&apple_prefix);
         assert_eq!(results.len(), 2);
     }
 
     #[test]
     fn test_view_stats() {
-        let (_dir, coordinator) = create_test_coordinator();
+        let (_dir, coordinator, _vocab) = create_test_coordinator();
         let view = ShardedTrieView::new(&coordinator);
 
         let stats = view.stats();
@@ -326,44 +338,32 @@ mod tests {
 
     #[test]
     fn test_view_distribution() {
-        let (_dir, coordinator) = create_test_coordinator();
+        let (_dir, coordinator, _vocab) = create_test_coordinator();
         let view = ShardedTrieView::new(&coordinator);
 
         let dist = view.shard_distribution();
 
-        // Should have multiple shards (th, ap, ze)
+        // Should have multiple shards (th, ap, ze).
         assert!(dist.len() >= 2);
 
-        // "th" shard should have 2 entries
+        // "th" shard should have 2 entries (the/quick, the/slow).
         assert_eq!(dist.get("th"), Some(&2));
 
-        // "ap" shard should have 2 entries
+        // "ap" shard should have 2 entries (apple/pie, apple/cider).
         assert_eq!(dist.get("ap"), Some(&2));
     }
 
     #[test]
     fn test_view_top_n() {
-        let (_dir, coordinator) = create_test_coordinator();
+        let (_dir, coordinator, vocab) = create_test_coordinator();
         let view = ShardedTrieView::new(&coordinator);
 
         let top = view.top_n(3);
 
         assert_eq!(top.len(), 3);
-        // Highest should be "the|quick" with 100
-        assert_eq!(top[0], (b"the|quick".to_vec(), 100));
-        // Second should be "the|slow" with 50
-        assert_eq!(top[1], (b"the|slow".to_vec(), 50));
-    }
-
-    #[test]
-    fn test_view_shard_key() {
-        let (_dir, coordinator) = create_test_coordinator();
-        let view = ShardedTrieView::new(&coordinator);
-
-        let key = view.shard_key_for("the|quick");
-        assert_eq!(key.prefix, "th");
-
-        let key = view.shard_key_for("apple|pie");
-        assert_eq!(key.prefix, "ap");
+        // Highest is ["the","quick"] with 100.
+        assert_eq!(top[0], (ngram_key(&vocab, &["the", "quick"]), 100));
+        // Second is ["the","slow"] with 50.
+        assert_eq!(top[1], (ngram_key(&vocab, &["the", "slow"]), 50));
     }
 }

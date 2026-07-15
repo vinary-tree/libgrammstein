@@ -31,9 +31,7 @@ trait ScoringModel {
 
 /// N-gram model wrapper for scoring.
 struct NgramScoringModel {
-    model: crate::ngram::NgramModel<
-        libdictenstein::dynamic_dawg::char::DynamicDawgChar<crate::ngram::NgramEntry>,
-    >,
+    model: crate::ngram::InMemoryTermIdModel,
 }
 
 impl ScoringModel for NgramScoringModel {
@@ -56,9 +54,7 @@ impl ScoringModel for NgramScoringModel {
 
 /// Hybrid model wrapper for scoring.
 struct HybridScoringModel {
-    model: crate::hybrid::HybridLanguageModel<
-        libdictenstein::dynamic_dawg::char::DynamicDawgChar<crate::ngram::NgramEntry>,
-    >,
+    model: crate::hybrid::InMemoryTermIdHybrid,
 }
 
 impl ScoringModel for HybridScoringModel {
@@ -84,16 +80,20 @@ impl ScoringModel for HybridScoringModel {
 /// Load a model for scoring.
 fn load_model_for_scoring(path: &Path) -> CliResult<Box<dyn ScoringModel>> {
     use crate::hybrid::HybridLanguageModel;
-    use crate::ngram::NgramModel;
-    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::DynamicDawg;
 
     // Try to load as hybrid model first (more complex)
-    if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::new) {
+    if let Ok(model) =
+        HybridLanguageModel::load_portable(path, DynamicDawg::<crate::ngram::NgramEntry>::new)
+    {
         return Ok(Box::new(HybridScoringModel { model }));
     }
 
     // Try to load as N-gram model
-    if let Ok(model) = NgramModel::load_portable(path, DynamicDawgChar::new) {
+    if let Ok(model) = crate::ngram::InMemoryTermIdModel::load_portable(
+        path,
+        DynamicDawg::<crate::ngram::NgramEntry>::new,
+    ) {
         return Ok(Box::new(NgramScoringModel { model }));
     }
 
@@ -140,9 +140,7 @@ impl SimilarityModel for EmbeddingSimilarityModel {
 
 /// Hybrid model wrapper for similarity (uses embedding component).
 struct HybridSimilarityModel {
-    model: crate::hybrid::HybridLanguageModel<
-        libdictenstein::dynamic_dawg::char::DynamicDawgChar<crate::ngram::NgramEntry>,
-    >,
+    model: crate::hybrid::InMemoryTermIdHybrid,
 }
 
 impl SimilarityModel for HybridSimilarityModel {
@@ -167,10 +165,12 @@ impl SimilarityModel for HybridSimilarityModel {
 fn load_model_for_similarity(path: &Path) -> CliResult<Box<dyn SimilarityModel>> {
     use crate::embedding::SubwordEmbedding;
     use crate::hybrid::HybridLanguageModel;
-    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::DynamicDawg;
 
     // Try to load as hybrid model first
-    if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::new) {
+    if let Ok(model) =
+        HybridLanguageModel::load_portable(path, DynamicDawg::<crate::ngram::NgramEntry>::new)
+    {
         return Ok(Box::new(HybridSimilarityModel { model }));
     }
 
@@ -197,9 +197,7 @@ trait CompletionModel {
 
 /// Hybrid model wrapper for completions (can iterate vocabulary).
 struct HybridCompletionModel {
-    model: crate::hybrid::HybridLanguageModel<
-        libdictenstein::dynamic_dawg::char::DynamicDawgChar<crate::ngram::NgramEntry>,
-    >,
+    model: crate::hybrid::InMemoryTermIdHybrid,
 }
 
 impl CompletionModel for HybridCompletionModel {
@@ -240,20 +238,17 @@ impl CompletionModel for HybridCompletionModel {
 /// N-gram model wrapper for completions.
 /// Note: This is slower because we need to iterate the trie.
 struct NgramCompletionModel {
-    model: crate::ngram::NgramModel<
-        libdictenstein::dynamic_dawg::char::DynamicDawgChar<crate::ngram::NgramEntry>,
-    >,
+    model: crate::ngram::InMemoryTermIdModel,
 }
 
 impl CompletionModel for NgramCompletionModel {
     fn top_completions(&self, context: &[&str], k: usize) -> Vec<(String, f64)> {
-        // Get unique unigrams from the trie
+        // Get unique unigrams (single-word n-grams) from the model.
         let mut unigrams: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        for (key, _) in self.model.trie().iter_entries() {
-            // Extract the first/only token from unigram keys (no separator)
-            if !key.contains('|') {
-                unigrams.insert(key);
+        for (words, _) in self.model.iter_ngrams() {
+            if words.len() == 1 {
+                unigrams.insert(words.into_iter().next().expect("unigram has one word"));
             }
         }
 
@@ -286,16 +281,20 @@ impl CompletionModel for NgramCompletionModel {
 /// Load a model for completion queries.
 fn load_model_for_completions(path: &Path) -> CliResult<Box<dyn CompletionModel>> {
     use crate::hybrid::HybridLanguageModel;
-    use crate::ngram::NgramModel;
-    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::DynamicDawg;
 
     // Try to load as hybrid model first (preferred - has vocabulary from embedding)
-    if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::new) {
+    if let Ok(model) =
+        HybridLanguageModel::load_portable(path, DynamicDawg::<crate::ngram::NgramEntry>::new)
+    {
         return Ok(Box::new(HybridCompletionModel { model }));
     }
 
     // Try to load as N-gram model
-    if let Ok(model) = NgramModel::load_portable(path, DynamicDawgChar::new) {
+    if let Ok(model) = crate::ngram::InMemoryTermIdModel::load_portable(
+        path,
+        DynamicDawg::<crate::ngram::NgramEntry>::new,
+    ) {
         return Ok(Box::new(NgramCompletionModel { model }));
     }
 

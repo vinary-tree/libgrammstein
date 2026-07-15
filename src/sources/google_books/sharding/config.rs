@@ -39,7 +39,7 @@ pub enum ShardGranularity {
         prefix_len: usize,
     },
 
-    /// CPU-proportional sharding with consistent hashing.
+    /// CPU-proportional sharding with hash-modulo routing.
     ///
     /// Creates `max(num_cpus * multiplier, minimum)` shards and distributes
     /// n-grams using hash-based routing. This is the recommended option as it:
@@ -116,7 +116,7 @@ impl ShardGranularity {
 
     /// Check if this granularity uses hash-based routing.
     ///
-    /// Hash-based routing distributes n-grams using consistent hashing
+    /// Hash-based routing distributes n-grams by hash-modulo
     /// rather than prefix matching.
     pub fn is_hash_based(&self) -> bool {
         matches!(self, Self::CpuProportional { .. })
@@ -137,10 +137,11 @@ impl ShardGranularity {
 }
 
 /// Merge mode for combining shards after import.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum MergeMode {
     /// Merge only after import completes (default).
     /// Simplest mode with best import throughput.
+    #[default]
     PostImport,
 
     /// Merge periodically during import when shards become full.
@@ -153,12 +154,6 @@ pub enum MergeMode {
         /// Number of merge levels.
         levels: usize,
     },
-}
-
-impl Default for MergeMode {
-    fn default() -> Self {
-        Self::PostImport
-    }
 }
 
 /// Configuration for shard merging.

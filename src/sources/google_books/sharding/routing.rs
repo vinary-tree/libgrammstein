@@ -1,14 +1,28 @@
 //! Shard routing logic for distributing n-grams across shards.
 //!
+//! # Term-id / first-token routing model
+//!
+//! An n-gram's live representation is **never** a delimited string. It is a
+//! `&[&str]` token slice (at the labeled input boundary) or a concatenated
+//! LEB128 varint **term-id** byte key (`crate::ngram::vocabulary`). Routing is a
+//! pure function of the **first token's characters** and the **sequence length**
+//! — [`compute_shard_key_from_token`] — never of a term-id *value* (term-ids are
+//! vocabulary-assignment-order dependent, so value-routing would be unstable
+//! across vocabularies) and never of a `'|'`-joined string.
+//!
 //! N-grams are routed to shards using one of two strategies:
 //!
 //! 1. **Prefix-based routing** (FirstChar, TwoChar, Adaptive, Custom):
-//!    Routes based on the first character(s) of the first word.
+//!    Routes based on the first character(s) of the first token.
 //!    Matches Google Books file partitioning.
 //!
-//! 2. **Hash-based routing** (CpuProportional):
-//!    Routes using consistent hashing for even distribution across
+//! 2. **Hash-based routing** (CpuProportional, the default):
+//!    Routes by `hash(first_token) % num_shards` for even distribution across
 //!    a CPU-proportional number of shards.
+//!
+//! At the query seam (`crate::integration::ShardedView`) the first token's
+//! characters are recovered from the leading term-id via `vocabulary.get_term`,
+//! so the very same pure function co-locates a stored n-gram and its query.
 
 use super::config::ShardGranularity;
 use std::collections::hash_map::DefaultHasher;
@@ -114,95 +128,31 @@ impl fmt::Display for ShardKey {
     }
 }
 
-/// Compute the shard key for an n-gram.
+/// Hash a routing token to a shard index by hash-modulo:
+/// `hash(token) % num_shards`.
 ///
-/// For prefix-based granularities (FirstChar, TwoChar, Adaptive, Custom):
-///   Extracts the first word from the n-gram and takes the first N characters
-///   as the shard prefix.
+/// The `token` is always a **first token** (from `compute_shard_key_from_token`)
+/// or a **file prefix** (from `shard_key_for_file_prefix`) — never a joined
+/// n-gram string. Hashing the first token (not the whole sequence) is what makes
+/// import-time and query-time routing agree: the query seam only knows the first
+/// token's characters (recovered via `vocabulary.get_term`).
 ///
-/// For hash-based granularities (CpuProportional):
-///   Uses consistent hashing to distribute n-grams evenly across shards.
-///
-/// # Arguments
-///
-/// * `ngram` - The n-gram string (pipe-separated tokens, e.g., "the|quick|brown")
-/// * `order` - The n-gram order (1-5), used for Adaptive granularity
-/// * `granularity` - The sharding granularity configuration
-///
-/// # Returns
-///
-/// A `ShardKey` identifying which shard should store this n-gram.
-///
-/// # Examples
-///
-/// ```ignore
-/// use libgrammstein::sources::google_books::sharding::routing::compute_shard_key;
-/// use libgrammstein::sources::google_books::sharding::config::ShardGranularity;
-///
-/// // Prefix-based routing
-/// let key = compute_shard_key("the|quick|brown", 3, &ShardGranularity::TwoChar);
-/// assert_eq!(key.prefix, "th");
-///
-/// // Hash-based routing (index-based key)
-/// let g = ShardGranularity::CpuProportional { multiplier: 2, minimum: 8 };
-/// let key = compute_shard_key("the|quick|brown", 3, &g);
-/// assert!(key.is_index_based());
-/// ```
-pub fn compute_shard_key(ngram: &str, order: u8, granularity: &ShardGranularity) -> ShardKey {
-    // Handle hash-based routing
-    if let ShardGranularity::CpuProportional {
-        multiplier: _,
-        minimum: _,
-    } = granularity
-    {
-        let num_shards = granularity.num_shards();
-        let index = hash_to_shard(ngram, num_shards);
-        return ShardKey::from_index(index);
-    }
-
-    // Prefix-based routing
-    let prefix_len = granularity.prefix_len_for_order(order);
-
-    // Extract the first word (before first pipe separator)
-    let first_word = ngram.split('|').next().unwrap_or("");
-
-    // Get prefix characters, lowercase
-    let prefix: String = first_word
-        .chars()
-        .filter(|c| c.is_alphabetic())
-        .take(prefix_len)
-        .flat_map(|c| c.to_lowercase())
-        .collect();
-
-    // Handle edge cases: non-alphabetic or short words
-    let prefix = if prefix.is_empty() {
-        // Non-alphabetic first word (numbers, symbols) → use special shard
-        "_".repeat(prefix_len)
-    } else if prefix.len() < prefix_len {
-        // Short word → pad with 'a' (keeps lexicographic ordering)
-        format!("{:a<width$}", prefix, width = prefix_len)
-    } else {
-        prefix
-    };
-
-    ShardKey::new(prefix)
-}
-
-/// Hash an n-gram to a shard index using consistent hashing.
-///
-/// Uses the default hasher for deterministic distribution.
+/// This is plain modulo hashing (NOT consistent hashing): deterministic for a fixed
+/// `num_shards`, but a change in shard count reshuffles the mapping — so importing and
+/// querying must use the same `num_shards` (the multi-shard corrector's cross-host
+/// deployment precondition). Uses the default hasher.
 ///
 /// # Arguments
 ///
-/// * `ngram` - The n-gram string to hash
+/// * `token` - The first token / file prefix to hash
 /// * `num_shards` - Total number of shards
 ///
 /// # Returns
 ///
-/// The shard index (0..num_shards) for this n-gram.
-fn hash_to_shard(ngram: &str, num_shards: usize) -> usize {
+/// The shard index (0..num_shards) for this token.
+fn hash_to_shard(token: &str, num_shards: usize) -> usize {
     let mut hasher = DefaultHasher::new();
-    ngram.hash(&mut hasher);
+    token.hash(&mut hasher);
     (hasher.finish() as usize) % num_shards
 }
 
@@ -213,8 +163,8 @@ fn hash_to_shard(ngram: &str, num_shards: usize) -> usize {
 ///
 /// **Note**: For hash-based granularities (CpuProportional), this function
 /// cannot determine a single shard key since n-grams from one file may be
-/// distributed across multiple shards. In that case, use `compute_shard_key`
-/// for each individual n-gram.
+/// distributed across multiple shards. In that case, use
+/// [`compute_shard_key_from_token`] for each individual n-gram.
 ///
 /// # Arguments
 ///
@@ -281,7 +231,7 @@ pub fn all_shard_keys(granularity: &ShardGranularity, order: u8) -> Vec<ShardKey
         prefix_len,
         current: None,
     }
-    .map(|prefix| ShardKey::new(prefix))
+    .map(ShardKey::new)
     .collect()
 }
 
@@ -309,9 +259,7 @@ impl Iterator for AllPrefixIter {
                     if chars[i] < b'z' {
                         chars[i] += 1;
                         // Reset all following positions to 'a'
-                        for j in (i + 1)..self.prefix_len {
-                            chars[j] = b'a';
-                        }
+                        chars[(i + 1)..self.prefix_len].fill(b'a');
                         return Some(String::from_utf8(chars.clone()).unwrap());
                     }
                 }
@@ -322,24 +270,16 @@ impl Iterator for AllPrefixIter {
     }
 }
 
-/// Get the n-gram order from a pipe-separated n-gram string.
-///
-/// # Arguments
-///
-/// * `ngram` - The n-gram string (pipe-separated tokens)
-///
-/// # Returns
-///
-/// The number of tokens (order) in the n-gram.
-pub fn ngram_order(ngram: &str) -> u8 {
-    ngram.split('|').count() as u8
-}
-
 /// Compute the shard key from the first token of an n-gram.
 ///
-/// This is used for vocabulary-indexed encoding where the n-gram key is a
-/// sequence of PUA characters (not pipe-separated). Routing is based on
-/// the original first token before encoding.
+/// This is the single routing surface for vocabulary-indexed n-grams, whose live
+/// key is a concatenated LEB128 varint term-id byte sequence (not a delimited
+/// string). Routing is based on the original **first token's characters** and the
+/// sequence length — recovered at query time via `vocabulary.get_term` — so an
+/// n-gram and its query co-locate regardless of term-id assignment order.
+/// The order (sequence length) comes from `tokens.len()` at store time and
+/// `crate::ngram::vocabulary::ngram_order_bytes` at query/MKN time; there is no
+/// delimiter to count.
 ///
 /// # Arguments
 ///
@@ -402,72 +342,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_compute_shard_key_first_char() {
-        let g = ShardGranularity::FirstChar;
-
-        let key = compute_shard_key("the|quick|brown", 3, &g);
-        assert_eq!(key.prefix, "t");
-
-        let key = compute_shard_key("APPLE", 1, &g);
-        assert_eq!(key.prefix, "a"); // Lowercase
-
-        let key = compute_shard_key("123", 1, &g);
-        assert_eq!(key.prefix, "_"); // Non-alphabetic
-    }
-
-    #[test]
-    fn test_compute_shard_key_two_char() {
-        let g = ShardGranularity::TwoChar;
-
-        let key = compute_shard_key("the|quick|brown", 3, &g);
-        assert_eq!(key.prefix, "th");
-
-        let key = compute_shard_key("a|b|c", 3, &g);
-        assert_eq!(key.prefix, "aa"); // Padded
-
-        let key = compute_shard_key("ZEBRA", 1, &g);
-        assert_eq!(key.prefix, "ze"); // Lowercase
-    }
-
-    #[test]
-    fn test_compute_shard_key_adaptive() {
-        let g = ShardGranularity::Adaptive;
-
-        // 1-grams: single char
-        let key = compute_shard_key("apple", 1, &g);
-        assert_eq!(key.prefix, "a");
-
-        // 2-grams: two chars
-        let key = compute_shard_key("apple|pie", 2, &g);
-        assert_eq!(key.prefix, "ap");
-
-        // 5-grams: two chars
-        let key = compute_shard_key("the|quick|brown|fox|jumps", 5, &g);
-        assert_eq!(key.prefix, "th");
-    }
-
-    #[test]
-    fn test_compute_shard_key_cpu_proportional() {
-        let g = ShardGranularity::CpuProportional {
-            multiplier: 2,
-            minimum: 8,
-        };
-
-        // Hash-based routing should produce index-based keys
-        let key = compute_shard_key("the|quick|brown", 3, &g);
-        assert!(key.is_index_based());
-
-        // Same n-gram should always route to same shard (deterministic)
-        let key2 = compute_shard_key("the|quick|brown", 3, &g);
-        assert_eq!(key.prefix, key2.prefix);
-
-        // Different n-grams may route to different shards
-        let key3 = compute_shard_key("apple|pie", 2, &g);
-        assert!(key3.is_index_based());
-    }
-
-    #[test]
     fn test_hash_distribution() {
+        // Distribution over FIRST TOKENS (the routing input) — never joined
+        // n-gram strings. Feeds `compute_shard_key_from_token`, the sole router.
         let g = ShardGranularity::CpuProportional {
             multiplier: 1,
             minimum: 16, // Fixed 16 shards for testing
@@ -476,8 +353,7 @@ mod tests {
         let num_shards = g.num_shards();
         let mut shard_counts = vec![0usize; num_shards];
 
-        // Hash many n-grams and check distribution
-        let test_ngrams = [
+        let first_tokens = [
             "the",
             "quick",
             "brown",
@@ -493,15 +369,15 @@ mod tests {
             "elderberry",
             "fig",
             "grape",
-            "hello|world",
-            "foo|bar",
-            "test|data",
-            "n-gram|model",
-            "machine|learning",
+            "hello",
+            "foo",
+            "test",
+            "ngram",
+            "machine",
         ];
 
-        for ngram in &test_ngrams {
-            let key = compute_shard_key(ngram, 1, &g);
+        for token in &first_tokens {
+            let key = compute_shard_key_from_token(token, 1, &g);
             let index = key.as_index().expect("Should be index-based");
             assert!(
                 index < num_shards,
@@ -642,13 +518,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ngram_order() {
-        assert_eq!(ngram_order("apple"), 1);
-        assert_eq!(ngram_order("apple|pie"), 2);
-        assert_eq!(ngram_order("the|quick|brown|fox|jumps"), 5);
-    }
-
-    #[test]
     fn test_compute_shard_key_from_token_two_char() {
         let g = ShardGranularity::TwoChar;
 
@@ -710,25 +579,48 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_shard_key_from_token_matches_compute_shard_key() {
-        // Verify that compute_shard_key_from_token gives the same result as
-        // compute_shard_key when given the first token of an n-gram
-        let granularities = [
-            ShardGranularity::FirstChar,
+    fn test_compute_shard_key_from_token_routes_by_characters_not_term_id() {
+        // Cross-vocabulary determinism: routing is a pure function of the first
+        // token's CHARACTERS and the sequence length — never of a term-id VALUE.
+        //
+        // Two "vocabularies" assign different term-ids to the same words (ids are
+        // vocabulary-assignment-order dependent). We simulate that by pairing each
+        // word with two unrelated ids. The routing decision must be byte-identical
+        // for both, because it consults only the word string, so an import
+        // vocabulary and any re-derived vocabulary co-locate the same n-gram.
+        let vocab_a: [(&str, u64); 3] = [("the", 1), ("apple", 2), ("zebra", 3)];
+        let vocab_b: [(&str, u64); 3] = [("the", 97), ("apple", 12), ("zebra", 5000)];
+
+        for granularity in [
             ShardGranularity::TwoChar,
-            ShardGranularity::Adaptive,
-        ];
+            ShardGranularity::CpuProportional {
+                multiplier: 2,
+                minimum: 8,
+            },
+        ] {
+            for order in 1u8..=3 {
+                for ((word_a, id_a), (word_b, id_b)) in vocab_a.iter().zip(vocab_b.iter()) {
+                    assert_eq!(
+                        word_a, word_b,
+                        "the two vocabularies index the SAME words (sanity)"
+                    );
+                    assert_ne!(
+                        id_a, id_b,
+                        "but assign DIFFERENT term-ids to '{word_a}' (the property under test)"
+                    );
 
-        for g in &granularities {
-            // "the|quick|brown" -> first token is "the"
-            let key_from_ngram = compute_shard_key("the|quick|brown", 3, g);
-            let key_from_token = compute_shard_key_from_token("the", 3, g);
-            assert_eq!(key_from_ngram, key_from_token, "Mismatch for {:?}", g);
-
-            // "apple|pie" -> first token is "apple"
-            let key_from_ngram = compute_shard_key("apple|pie", 2, g);
-            let key_from_token = compute_shard_key_from_token("apple", 2, g);
-            assert_eq!(key_from_ngram, key_from_token, "Mismatch for {:?}", g);
+                    // Routing consults the word string only; the ids are never
+                    // passed to the router.
+                    let key_a = compute_shard_key_from_token(word_a, order, &granularity);
+                    let key_b = compute_shard_key_from_token(word_b, order, &granularity);
+                    assert_eq!(
+                        key_a, key_b,
+                        "routing for '{word_a}' must be identical across vocabularies \
+                         (order {order}, {granularity:?}) — proving it is a function of the \
+                         token characters, not the term-id value"
+                    );
+                }
+            }
         }
     }
 }

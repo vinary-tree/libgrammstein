@@ -257,31 +257,41 @@ fn save_ngram_checkpoint(
     Ok(())
 }
 
-/// Finalize N-gram model from accumulator.
+/// Finalize the n-gram model from the accumulator.
+///
+/// Reads the accumulator's persisted (`'|'`-joined) count keys once — via the
+/// accumulator's own `key_format::parse_key` — and re-keys them onto a
+/// byte-native [`TermIdStore`] (LEB128 term-id keys), which is then saved in the
+/// portable term-id format. No `'|'`-delimited store is ever live.
 fn finalize_ngram_model(
     accumulator: &NgramAccumulator,
     args: &TrainNgramArgs,
     quiet: bool,
 ) -> CliResult<()> {
-    use crate::ngram::{NgramModel, NgramTrie};
-    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+    use crate::ngram::store::{MutableNgramStore, TermIdStore};
+    use crate::ngram::vocabulary::create_vocabulary;
+    use crate::ngram::NgramModel;
+    use libdictenstein::dynamic_dawg::DynamicDawg;
 
     if !quiet {
-        eprintln!("Finalizing model (converting to inference format)...");
+        eprintln!("Finalizing model (converting to term-id inference format)...");
     }
 
-    // Create DynamicDawgChar dictionary for final model (serde-compatible)
-    let dictionary = DynamicDawgChar::<NgramEntry>::new();
+    // Fresh ephemeral vocabulary + in-memory byte-native store. The vocabulary
+    // is embedded into the portable model on save, so the temp directory only
+    // needs to outlive `save_portable` (it does — dropped at function return).
+    let vocab_dir = tempfile::TempDir::new()
+        .map_err(|e| CliError::io(format!("Failed to create vocabulary directory: {}", e)))?;
+    let vocabulary = create_vocabulary(&vocab_dir.path().join("vocabulary"))
+        .map_err(|e| CliError::io(format!("Failed to create vocabulary: {}", e)))?;
+    let store = TermIdStore::new(DynamicDawg::<NgramEntry>::new(), vocabulary, args.order);
 
-    // Export from accumulator to dictionary
+    // Export from accumulator to the term-id store.
     let mut entry_count = 0u64;
     for (ngram_key, count) in accumulator.iter_with_counts() {
         if count >= args.min_count as i64 {
-            // Create entry using constructor (fields are private atomics)
-            let entry = NgramEntry::new(count as u64);
-
-            // Insert into DynamicDawgChar
-            dictionary.insert_with_value(&ngram_key, entry);
+            let tokens = key_format::parse_key(&ngram_key);
+            store.bump(&tokens, count as u64);
             entry_count += 1;
         }
     }
@@ -293,8 +303,6 @@ fn finalize_ngram_model(
         );
     }
 
-    // Build final model with smoothing
-    let trie = NgramTrie::new(dictionary, args.order);
     let smoothing = crate::ngram::smoothing::KneserNeySmoothing::new(args.order);
 
     // Compute vocabulary size (unique unigrams)
@@ -309,9 +317,9 @@ fn finalize_ngram_model(
         .map(|(_, count)| count as u64)
         .sum();
 
-    let model = NgramModel::new(trie, smoothing, vocab_size, total_tokens);
+    let model = NgramModel::new(store, smoothing, vocab_size, total_tokens);
 
-    // Save model using portable format (doesn't require D: Serialize)
+    // Save model using the portable term-id format (embeds the vocabulary).
     model
         .save_portable(&args.output)
         .map_err(|e| CliError::io(format!("Failed to save model: {}", e)))?;
@@ -329,7 +337,7 @@ fn train_ngram_inmemory(
     _stats: Arc<TrainingStats>,
 ) -> CliResult<()> {
     use crate::ngram::TrainerBuilder;
-    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+    use libdictenstein::dynamic_dawg::DynamicDawg;
 
     if verbose {
         eprintln!("Using in-memory training (no checkpointing)");
@@ -339,8 +347,8 @@ fn train_ngram_inmemory(
         progress.set_message("Training N-gram model...");
     }
 
-    // Use DynamicDawgChar for serde compatibility
-    let dictionary = DynamicDawgChar::<NgramEntry>::new();
+    // In-memory byte-native backend for the term-id store.
+    let dictionary = DynamicDawg::<NgramEntry>::new();
 
     let model = TrainerBuilder::new(dictionary)
         .order(args.order)

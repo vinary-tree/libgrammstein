@@ -17,7 +17,7 @@
 //! use libgrammstein::integration::wfst_export::{FromLogProb, NgramWfstExporter};
 //! use lling_llang::semiring::LogWeight;
 //!
-//! let model: NgramModel<D> = /* ... */;
+//! let model: NgramModel<S> = /* ... */;
 //! let wfst = model.to_wfst::<LogWeight>();
 //!
 //! // Use in lling-llang pipeline
@@ -31,9 +31,8 @@ use lling_llang::asr::{NgramBuilder, NgramConfig, NgramTransducer};
 use lling_llang::semiring::{LogWeight, ProbabilityWeight, Semiring, TropicalWeight};
 use lling_llang::wfst::{MutableWfst, StateId, VectorWfst};
 
-#[allow(deprecated)]
-use crate::ngram::{IterableDictionary, NgramEntry, NgramModel, NGRAM_SEPARATOR};
-use libdictenstein::MutableMappedDictionary;
+use crate::ngram::store::IterableNgramStore;
+use crate::ngram::NgramModel;
 
 use super::vocabulary::{WordId, WordVocabulary, EOS_WORD_ID, UNK_WORD_ID};
 
@@ -110,13 +109,13 @@ impl FromLogProb for ProbabilityWeight {
 /// Builder for creating WFST from n-gram model.
 ///
 /// This struct encapsulates the state needed during WFST construction.
-pub struct NgramWfstBuilder<D, W>
+pub struct NgramWfstBuilder<S, W>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary,
+    S: IterableNgramStore,
     W: Semiring + FromLogProb,
 {
     /// The n-gram model being exported.
-    model: Arc<NgramModel<D>>,
+    model: Arc<NgramModel<S>>,
     /// Vocabulary mapping words to IDs.
     vocabulary: WordVocabulary,
     /// The WFST being constructed.
@@ -129,13 +128,13 @@ where
     backoff_state: StateId,
 }
 
-impl<D, W> NgramWfstBuilder<D, W>
+impl<S, W> NgramWfstBuilder<S, W>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary,
+    S: IterableNgramStore,
     W: Semiring + FromLogProb,
 {
     /// Create a new WFST builder from an n-gram model.
-    pub fn new(model: Arc<NgramModel<D>>) -> Self {
+    pub fn new(model: Arc<NgramModel<S>>) -> Self {
         let vocab_size = model.vocab_size();
         let vocabulary = Self::build_vocabulary(&model);
 
@@ -168,15 +167,13 @@ where
     }
 
     /// Build vocabulary from the n-gram model.
-    #[allow(deprecated)]
-    fn build_vocabulary(model: &NgramModel<D>) -> WordVocabulary {
+    fn build_vocabulary(model: &NgramModel<S>) -> WordVocabulary {
         let mut vocab = WordVocabulary::with_capacity(model.vocab_size());
 
-        // Iterate over all entries in the trie to collect unigrams
-        for (key, _entry) in model.trie().iter_entries() {
-            // Unigrams have no separator
-            if !key.contains(NGRAM_SEPARATOR) {
-                vocab.add_word(&key);
+        // Iterate over all n-grams to collect unigrams (single-word n-grams).
+        for (words, _entry) in model.iter_ngrams() {
+            if words.len() == 1 {
+                vocab.add_word(&words[0]);
             }
         }
 
@@ -267,24 +264,17 @@ where
     }
 
     /// Add higher-order n-gram transitions.
-    #[allow(deprecated)]
     fn add_higher_order_ngrams(&mut self) {
         let order = self.model.order();
 
-        // Collect all n-grams from the trie
+        // Collect all n-grams (as decoded word sequences) from the model.
         let ngrams: Vec<(Vec<String>, String)> = self
             .model
-            .trie()
-            .iter_entries()
-            .filter_map(|(key, _entry)| {
-                let tokens: Vec<&str> = key.split(NGRAM_SEPARATOR).collect();
-                if tokens.len() >= 2 && tokens.len() <= order {
-                    let history: Vec<String> = tokens[..tokens.len() - 1]
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
-                    let word = tokens.last().unwrap().to_string();
-                    Some((history, word))
+            .iter_ngrams()
+            .filter_map(|(mut words, _entry)| {
+                if words.len() >= 2 && words.len() <= order {
+                    let word = words.pop().expect("n-gram has at least one word");
+                    Some((words, word))
                 } else {
                     None
                 }
@@ -371,9 +361,9 @@ where
 }
 
 /// Extension trait for NgramModel to provide WFST export.
-pub trait NgramWfstExport<D>
+pub trait NgramWfstExport<S>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary,
+    S: IterableNgramStore + Clone,
 {
     /// Export the n-gram model as a VectorWfst.
     ///
@@ -396,7 +386,7 @@ where
     /// use libgrammstein::integration::wfst_export::NgramWfstExport;
     /// use lling_llang::semiring::LogWeight;
     ///
-    /// let model: NgramModel<D> = /* ... */;
+    /// let model: NgramModel<S> = /* ... */;
     /// let (wfst, vocab) = model.to_wfst::<LogWeight>();
     /// ```
     fn to_wfst<W>(&self) -> (VectorWfst<WordId, W>, WordVocabulary)
@@ -434,7 +424,7 @@ where
     /// use lling_llang::semiring::LogWeight;
     /// use lling_llang::asr::CascadeBuilder;
     ///
-    /// let model: NgramModel<D> = /* ... */;
+    /// let model: NgramModel<S> = /* ... */;
     /// let (transducer, vocab) = model.to_ngram_transducer::<LogWeight>();
     ///
     /// // Use in ASR cascade
@@ -456,27 +446,27 @@ where
 ///
 /// This uses lling-llang's NgramBuilder to construct the transducer
 /// with proper backoff structure matching the n-gram model's smoothing.
-pub struct NgramTransducerBuilder<D, W>
+pub struct NgramTransducerBuilder<S, W>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary,
+    S: IterableNgramStore,
     W: Semiring + FromLogProb + Clone,
 {
     /// The n-gram model being exported.
-    model: Arc<NgramModel<D>>,
+    model: Arc<NgramModel<S>>,
     /// Vocabulary mapping words to IDs.
     vocabulary: WordVocabulary,
     /// The NgramBuilder for constructing the transducer.
     builder: NgramBuilder<W>,
 }
 
-impl<D, W> NgramTransducerBuilder<D, W>
+impl<S, W> NgramTransducerBuilder<S, W>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary,
+    S: IterableNgramStore,
     W: Semiring + FromLogProb + Clone,
 {
     /// Create a new NgramTransducer builder from an n-gram model.
-    pub fn new(model: Arc<NgramModel<D>>) -> Self {
-        let vocabulary = NgramWfstBuilder::<D, W>::build_vocabulary(&model);
+    pub fn new(model: Arc<NgramModel<S>>) -> Self {
+        let vocabulary = NgramWfstBuilder::<S, W>::build_vocabulary(&model);
         let mut builder = NgramBuilder::new(model.order());
 
         // Configure with EOS and UNK IDs from vocabulary
@@ -530,24 +520,17 @@ where
     }
 
     /// Add higher-order n-grams and backoff weights.
-    #[allow(deprecated)]
     fn add_higher_order_ngrams(&mut self) {
         let order = self.model.order();
 
-        // Collect all n-grams from the trie
+        // Collect all n-grams (as decoded word sequences) from the model.
         let ngrams: Vec<(Vec<String>, String)> = self
             .model
-            .trie()
-            .iter_entries()
-            .filter_map(|(key, _entry)| {
-                let tokens: Vec<&str> = key.split(NGRAM_SEPARATOR).collect();
-                if tokens.len() >= 2 && tokens.len() <= order {
-                    let history: Vec<String> = tokens[..tokens.len() - 1]
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
-                    let word = tokens.last().expect("tokens not empty").to_string();
-                    Some((history, word))
+            .iter_ngrams()
+            .filter_map(|(mut words, _entry)| {
+                if words.len() >= 2 && words.len() <= order {
+                    let word = words.pop().expect("n-gram has at least one word");
+                    Some((words, word))
                 } else {
                     None
                 }
@@ -592,7 +575,7 @@ where
         // The backoff weight accounts for probability mass reserved for unseen n-grams
         for history_ids in histories_seen {
             // Compute backoff weight
-            // In Modified Kneser-Ney, β(h) = D(h) * N1+(h•) / C(h)
+            // In Modified Kneser-Ney, β(h) = S(h) * N1+(h•) / C(h)
             // For simplicity, we use unit weight since log_prob already includes smoothing
             let backoff_weight = W::one();
 
@@ -601,9 +584,9 @@ where
     }
 }
 
-impl<D> NgramWfstExport<D> for NgramModel<D>
+impl<S> NgramWfstExport<S> for NgramModel<S>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary,
+    S: IterableNgramStore + Clone,
 {
     fn to_wfst<W>(&self) -> (VectorWfst<WordId, W>, WordVocabulary)
     where
@@ -643,9 +626,9 @@ where
     }
 }
 
-impl<D> NgramWfstExport<D> for Arc<NgramModel<D>>
+impl<S> NgramWfstExport<S> for Arc<NgramModel<S>>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary,
+    S: IterableNgramStore + Clone,
 {
     fn to_wfst<W>(&self) -> (VectorWfst<WordId, W>, WordVocabulary)
     where
@@ -684,13 +667,14 @@ where
 mod tests {
     use super::*;
     use crate::corpus::PlaintextReader;
-    use crate::ngram::TrainerBuilder;
-    use libdictenstein::pathmap::PathMapDictionary;
+    use crate::ngram::store::TermIdStore;
+    use crate::ngram::{NgramEntry, TrainerBuilder};
+    use libdictenstein::dynamic_dawg::DynamicDawg;
     use lling_llang::wfst::Wfst;
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn create_test_model() -> NgramModel<PathMapDictionary<NgramEntry>> {
+    fn create_test_model() -> NgramModel<TermIdStore<DynamicDawg<NgramEntry>>> {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let content = "the quick brown fox the quick brown dog the lazy fox \
                        the quick brown fox the quick brown dog the lazy fox";
@@ -699,7 +683,7 @@ mod tests {
         write!(file, "{}", content).expect("Failed to write test file");
 
         let reader = PlaintextReader::from_file(&path).expect("Failed to create reader");
-        let dictionary = PathMapDictionary::<NgramEntry>::new();
+        let dictionary = DynamicDawg::<NgramEntry>::new();
         TrainerBuilder::new(dictionary)
             .order(3)
             .train(reader)

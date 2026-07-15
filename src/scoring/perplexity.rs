@@ -4,10 +4,9 @@
 //! Lower perplexity indicates a better model.
 
 use crate::corpus::CorpusReader;
+use crate::ngram::store::NgramLookup;
 use crate::ngram::NgramModel;
 use crate::Result;
-
-use libdictenstein::MutableMappedDictionary;
 
 /// Perplexity evaluator for language models.
 ///
@@ -15,19 +14,19 @@ use libdictenstein::MutableMappedDictionary;
 /// PPL = exp(-1/N * Σ log P(w_i | context))
 ///
 /// where N is the total number of tokens.
-pub struct Perplexity<'a, D>
+pub struct Perplexity<'a, S>
 where
-    D: MutableMappedDictionary<Value = crate::ngram::NgramEntry>,
+    S: NgramLookup,
 {
-    model: &'a NgramModel<D>,
+    model: &'a NgramModel<S>,
 }
 
-impl<'a, D> Perplexity<'a, D>
+impl<'a, S> Perplexity<'a, S>
 where
-    D: MutableMappedDictionary<Value = crate::ngram::NgramEntry>,
+    S: NgramLookup,
 {
     /// Create a new perplexity evaluator for the given model.
-    pub fn new(model: &'a NgramModel<D>) -> Self {
+    pub fn new(model: &'a NgramModel<S>) -> Self {
         Self { model }
     }
 

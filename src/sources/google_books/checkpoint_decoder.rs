@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_format_prefix_list_short() {
-        let items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let items = ["a".to_string(), "b".to_string(), "c".to_string()];
         let prefixes: Vec<_> = items.iter().collect();
         let output = format_prefix_list("Test", &prefixes);
         assert!(output.contains("Test (3)"));

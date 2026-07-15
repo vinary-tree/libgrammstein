@@ -506,7 +506,7 @@ impl PathMapTranslator {
             entries_verified += 1;
             Ok(())
         })
-        .map_err(|e| TranslationError::Io(e))?;
+        .map_err(TranslationError::Io)?;
 
         // Check for missing entries (in source but not in PathMap)
         if entries_verified != source_count {

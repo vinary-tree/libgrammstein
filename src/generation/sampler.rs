@@ -21,9 +21,8 @@
 //! println!("Generated: {}", text.join(" "));
 //! ```
 
-#[allow(deprecated)]
-use crate::ngram::{IterableDictionary, NgramEntry, NgramModel, NGRAM_SEPARATOR};
-use libdictenstein::MutableMappedDictionary;
+use crate::ngram::store::IterableNgramStore;
+use crate::ngram::NgramModel;
 use rand::distributions::WeightedIndex;
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -120,12 +119,12 @@ impl GenerationConfig {
 ///
 /// Generates text autoregressively by sampling from the probability distribution
 /// over next tokens given the context.
-pub struct TextGenerator<D>
+pub struct TextGenerator<S>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary + Send + Sync,
+    S: IterableNgramStore + Send + Sync,
 {
     /// The language model.
-    model: Arc<NgramModel<D>>,
+    model: Arc<NgramModel<S>>,
 
     /// Generation configuration.
     config: GenerationConfig,
@@ -134,12 +133,12 @@ where
     vocabulary: Vec<String>,
 }
 
-impl<D> TextGenerator<D>
+impl<S> TextGenerator<S>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + IterableDictionary + Send + Sync,
+    S: IterableNgramStore + Send + Sync,
 {
     /// Create a new text generator.
-    pub fn new(model: NgramModel<D>, config: GenerationConfig) -> Self {
+    pub fn new(model: NgramModel<S>, config: GenerationConfig) -> Self {
         let vocabulary = Self::extract_vocabulary(&model);
         Self {
             model: Arc::new(model),
@@ -149,7 +148,7 @@ where
     }
 
     /// Create from an Arc-wrapped model.
-    pub fn from_arc(model: Arc<NgramModel<D>>, config: GenerationConfig) -> Self {
+    pub fn from_arc(model: Arc<NgramModel<S>>, config: GenerationConfig) -> Self {
         let vocabulary = Self::extract_vocabulary(&model);
         Self {
             model,
@@ -159,18 +158,25 @@ where
     }
 
     /// Extract vocabulary (unigrams) from the model.
-    #[allow(deprecated)]
-    fn extract_vocabulary(model: &NgramModel<D>) -> Vec<String> {
+    ///
+    /// The result is sorted so generation is *reproducible across model
+    /// instances*: greedy decoding breaks score ties by vocabulary order, and the
+    /// backend's raw iteration order (and term-id assignment) is not stable across
+    /// independently-trained but statistically identical models. Sorting pins the
+    /// tie-break to a deterministic (lexicographic) choice.
+    fn extract_vocabulary(model: &NgramModel<S>) -> Vec<String> {
         let mut vocab: HashSet<String> = HashSet::new();
 
-        for (key, _) in model.trie().iter_entries() {
-            // Check if this is a unigram (no separator)
-            if !key.contains(NGRAM_SEPARATOR) {
-                vocab.insert(key);
+        for (words, _) in model.iter_ngrams() {
+            // A unigram is a single-word n-gram.
+            if words.len() == 1 {
+                vocab.insert(words.into_iter().next().expect("unigram has one word"));
             }
         }
 
-        vocab.into_iter().collect()
+        let mut vocab: Vec<String> = vocab.into_iter().collect();
+        vocab.sort_unstable();
+        vocab
     }
 
     /// Get the vocabulary size.
@@ -383,12 +389,13 @@ where
 mod tests {
     use super::*;
     use crate::corpus::PlaintextReader;
-    use crate::ngram::TrainerBuilder;
-    use libdictenstein::pathmap::PathMapDictionary;
+    use crate::ngram::store::TermIdStore;
+    use crate::ngram::{NgramEntry, TrainerBuilder};
+    use libdictenstein::dynamic_dawg::DynamicDawg;
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn create_test_model() -> NgramModel<PathMapDictionary<NgramEntry>> {
+    fn create_test_model() -> NgramModel<TermIdStore<DynamicDawg<NgramEntry>>> {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let content = "the quick brown fox jumps over the lazy dog. \
                        the quick brown fox runs in the park. \
@@ -398,7 +405,7 @@ mod tests {
         write!(file, "{}", content).expect("Failed to write test file");
 
         let reader = PlaintextReader::from_file(&path).expect("Failed to create reader");
-        let dictionary = PathMapDictionary::<NgramEntry>::new();
+        let dictionary = DynamicDawg::<NgramEntry>::new();
 
         TrainerBuilder::new(dictionary)
             .order(3)
@@ -480,5 +487,4 @@ mod tests {
 
         assert!(generator.vocab_size() > 0);
     }
-
 }

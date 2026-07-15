@@ -7,28 +7,91 @@
 //! - Checkpoint and recovery
 //! - MKN statistics computation
 //! - Merge to output trie
+//!
+//! # Term-id / first-token routing
+//!
+//! N-grams are stored exactly as the importer stores them: routed by the FIRST
+//! TOKEN's characters + sequence length ([`compute_shard_key_from_token`]) and
+//! keyed by a concatenated LEB128 varint **term-id** byte sequence
+//! (`vocabulary::encode_varint`). There is no delimited-string representation
+//! anywhere — a token containing `'|'` is one term-id, never a boundary. Point
+//! lookups go through `ShardCoordinator::get_in_shard`; cross-shard aggregates go
+//! through the byte-native [`ShardedTrieView`].
 
 #![cfg(feature = "google-books")]
 
+use std::sync::Arc;
+use std::thread;
+
 use libdictenstein::persistent_artrie::PersistentARTrie;
+use libgrammstein::ngram::vocabulary::{
+    create_vocabulary, encode_indices_to_key_bytes, encode_varint, SharedVocabARTrie,
+};
 use libgrammstein::sources::google_books::sharding::{
-    MergeCoordinator, MknAggregator, ShardConfig, ShardCoordinator, ShardGranularity,
-    ShardedTrieView,
+    compute_shard_key_from_token, MergeCoordinator, MknAggregator, ShardConfig, ShardCoordinator,
+    ShardGranularity, ShardKey, ShardedTrieView,
 };
 use tempfile::TempDir;
 
-/// Create a test coordinator with sample data.
-fn create_coordinator_with_data() -> (TempDir, ShardCoordinator) {
+/// Concatenated LEB128 term-id byte key for a token sequence. `insert` is
+/// idempotent, so recomputing a key for an already-stored n-gram is stable.
+fn ngram_key(vocab: &SharedVocabARTrie, tokens: &[&str]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(tokens.len() * 2);
+    for token in tokens {
+        let id = vocab.as_ref().insert(token).expect("vocab insert");
+        encode_varint(id, &mut key);
+    }
+    key
+}
+
+/// The shard a token sequence routes to — the first token's characters +
+/// sequence length under the coordinator's configured granularity.
+fn route(coordinator: &ShardCoordinator, tokens: &[&str]) -> ShardKey {
+    compute_shard_key_from_token(
+        tokens[0],
+        tokens.len() as u8,
+        &coordinator.config().granularity,
+    )
+}
+
+/// Store one n-gram the importer's way (first-token route + term-id key).
+fn store_ngram(
+    coordinator: &ShardCoordinator,
+    vocab: &SharedVocabARTrie,
+    tokens: &[&str],
+    count: u64,
+) {
+    coordinator
+        .store_in_shard(
+            &route(coordinator, tokens),
+            &ngram_key(vocab, tokens),
+            count,
+        )
+        .expect("store_in_shard");
+}
+
+/// Look up one n-gram the importer's way.
+fn get_ngram(
+    coordinator: &ShardCoordinator,
+    vocab: &SharedVocabARTrie,
+    tokens: &[&str],
+) -> Option<u64> {
+    coordinator.get_in_shard(&route(coordinator, tokens), &ngram_key(vocab, tokens))
+}
+
+/// Create a test coordinator with sample data (term-id keys, first-token routing).
+fn create_coordinator_with_data() -> (TempDir, ShardCoordinator, SharedVocabARTrie) {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let config =
         ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
     let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
+    let vocab = create_vocabulary(&dir.path().join("vocab")).expect("vocabulary");
 
-    // Add sample n-grams simulating Google Books data
+    // Sample n-grams simulating Google Books data.
     // 1-grams
     for (word, count) in &[
-        ("the", 1_000_000),
+        ("the", 1_000_000u64),
         ("a", 500_000),
         ("is", 250_000),
         ("of", 200_000),
@@ -37,40 +100,34 @@ fn create_coordinator_with_data() -> (TempDir, ShardCoordinator) {
         ("in", 160_000),
         ("that", 150_000),
     ] {
-        coordinator
-            .store_ngram(word, *count)
-            .expect("Failed to store 1-gram");
+        store_ngram(&coordinator, &vocab, &[word], *count);
     }
 
     // 2-grams
-    for (ngram, count) in &[
-        ("the|quick", 50_000),
-        ("the|slow", 25_000),
-        ("the|big", 40_000),
-        ("a|small", 30_000),
-        ("a|large", 28_000),
-        ("is|very", 22_000),
-        ("of|the", 100_000),
-        ("in|the", 90_000),
+    for (first, second, count) in &[
+        ("the", "quick", 50_000u64),
+        ("the", "slow", 25_000),
+        ("the", "big", 40_000),
+        ("a", "small", 30_000),
+        ("a", "large", 28_000),
+        ("is", "very", 22_000),
+        ("of", "the", 100_000),
+        ("in", "the", 90_000),
     ] {
-        coordinator
-            .store_ngram(ngram, *count)
-            .expect("Failed to store 2-gram");
+        store_ngram(&coordinator, &vocab, &[first, second], *count);
     }
 
     // 3-grams
-    for (ngram, count) in &[
-        ("the|quick|brown", 10_000),
-        ("the|slow|green", 5_000),
-        ("of|the|united", 8_000),
-        ("in|the|world", 7_000),
+    for (first, second, third, count) in &[
+        ("the", "quick", "brown", 10_000u64),
+        ("the", "slow", "green", 5_000),
+        ("of", "the", "united", 8_000),
+        ("in", "the", "world", 7_000),
     ] {
-        coordinator
-            .store_ngram(ngram, *count)
-            .expect("Failed to store 3-gram");
+        store_ngram(&coordinator, &vocab, &[first, second, third], *count);
     }
 
-    (dir, coordinator)
+    (dir, coordinator, vocab)
 }
 
 // =============================================================================
@@ -79,31 +136,40 @@ fn create_coordinator_with_data() -> (TempDir, ShardCoordinator) {
 
 #[test]
 fn test_full_workflow() {
-    let (dir, coordinator) = create_coordinator_with_data();
+    let (dir, coordinator, vocab) = create_coordinator_with_data();
 
     // 1. Verify storage
-    assert!(coordinator.contains("the"));
-    assert!(coordinator.contains("the|quick"));
-    assert!(coordinator.contains("the|quick|brown"));
+    assert!(get_ngram(&coordinator, &vocab, &["the"]).is_some());
+    assert!(get_ngram(&coordinator, &vocab, &["the", "quick"]).is_some());
+    assert!(get_ngram(&coordinator, &vocab, &["the", "quick", "brown"]).is_some());
 
     // 2. Verify counts
-    assert_eq!(coordinator.get("the"), Some(1_000_000));
-    assert_eq!(coordinator.get("the|quick"), Some(50_000));
-    assert_eq!(coordinator.get("the|quick|brown"), Some(10_000));
+    assert_eq!(get_ngram(&coordinator, &vocab, &["the"]), Some(1_000_000));
+    assert_eq!(
+        get_ngram(&coordinator, &vocab, &["the", "quick"]),
+        Some(50_000)
+    );
+    assert_eq!(
+        get_ngram(&coordinator, &vocab, &["the", "quick", "brown"]),
+        Some(10_000)
+    );
 
-    // 3. Query via ShardedTrieView
+    // 3. Cross-shard aggregates via the byte-native ShardedTrieView
     let view = ShardedTrieView::new(&coordinator);
-    assert_eq!(view.get("the"), Some(1_000_000));
-    assert!(view.len() > 0);
+    assert!(!view.is_empty());
+    assert_eq!(view.len(), 20);
 
-    // 4. Prefix search
-    let the_bigrams = view.prefix_search(b"the|");
-    assert!(the_bigrams.len() >= 3); // "the|quick", "the|slow", "the|big"
+    // 4. Prefix search by a term-id byte prefix (all n-grams whose first token is
+    //    "the": the unigram plus every "the …" bi/trigram — collision-free).
+    let the_prefix = ngram_key(&vocab, &["the"]);
+    let the_ngrams = view.prefix_search(&the_prefix);
+    assert!(the_ngrams.len() >= 3); // the, the|quick, the|slow, the|big, the|quick|brown, the|slow|green
 
-    // 5. Top N
+    // 5. Top N — "the" (1,000,000) is the most frequent.
     let top = view.top_n(3);
     assert_eq!(top.len(), 3);
-    assert_eq!(top[0].0, b"the".to_vec()); // Most frequent
+    assert_eq!(top[0].0, ngram_key(&vocab, &["the"]));
+    assert_eq!(top[0].1, 1_000_000);
 
     // 6. Compute MKN statistics
     let aggregator = MknAggregator::new(&coordinator);
@@ -126,11 +192,17 @@ fn test_full_workflow() {
     assert!(output_path.exists());
     assert!(merge_stats.total_ngrams > 0);
 
-    // 8. Verify merged trie
+    // 8. Verify merged trie (term-id byte keys)
     let (merged, _) =
         PersistentARTrie::<u64>::open_with_recovery(&output_path).expect("Failed to open");
-    assert_eq!(merged.get_value_bytes(b"the"), Some(1_000_000));
-    assert_eq!(merged.get_value_bytes(b"the|quick"), Some(50_000));
+    assert_eq!(
+        merged.get_value_bytes(&ngram_key(&vocab, &["the"])),
+        Some(1_000_000)
+    );
+    assert_eq!(
+        merged.get_value_bytes(&ngram_key(&vocab, &["the", "quick"])),
+        Some(50_000)
+    );
 }
 
 // =============================================================================
@@ -141,6 +213,9 @@ fn test_full_workflow() {
 fn test_checkpoint_and_recovery() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let shard_path = dir.path().join("shards");
+    // The vocabulary lives across both phases (its in-memory term-ids are stable),
+    // so the recomputed keys match the ones written before the reopen.
+    let vocab = create_vocabulary(&dir.path().join("vocab")).expect("vocabulary");
 
     // Phase 1: Create coordinator and store data
     {
@@ -149,21 +224,27 @@ fn test_checkpoint_and_recovery() {
         let coordinator =
             ShardCoordinator::new_with_checkpoints(config).expect("Failed to create coordinator");
 
-        coordinator.store_ngram("apple|pie", 100).expect("store");
-        coordinator.store_ngram("banana|split", 50).expect("store");
+        store_ngram(&coordinator, &vocab, &["apple", "pie"], 100);
+        store_ngram(&coordinator, &vocab, &["banana", "split"], 50);
 
         coordinator.checkpoint_all().expect("Failed to checkpoint");
     }
 
-    // Phase 2: Resume and verify data persists
+    // Phase 2: Resume and verify data persists (get_in_shard lazily opens shards).
     {
         let config = ShardConfig::new(&shard_path).with_granularity(ShardGranularity::TwoChar);
 
         let coordinator =
             ShardCoordinator::resume_or_start(config).expect("Failed to resume coordinator");
 
-        assert_eq!(coordinator.get("apple|pie"), Some(100));
-        assert_eq!(coordinator.get("banana|split"), Some(50));
+        assert_eq!(
+            get_ngram(&coordinator, &vocab, &["apple", "pie"]),
+            Some(100)
+        );
+        assert_eq!(
+            get_ngram(&coordinator, &vocab, &["banana", "split"]),
+            Some(50)
+        );
     }
 }
 
@@ -173,27 +254,27 @@ fn test_checkpoint_and_recovery() {
 
 #[test]
 fn test_shard_routing() {
-    let (_dir, coordinator) = create_coordinator_with_data();
+    let (_dir, coordinator, _vocab) = create_coordinator_with_data();
 
-    // Test routing consistency
-    let key1 = coordinator.route_ngram("the|quick");
-    let key2 = coordinator.route_ngram("the|slow");
-    let key3 = coordinator.route_ngram("the|big");
+    // Routing consistency — all "the …" n-grams route to the "th" shard because
+    // routing is a function of the FIRST TOKEN's characters.
+    let key1 = route(&coordinator, &["the", "quick"]);
+    let key2 = route(&coordinator, &["the", "slow"]);
+    let key3 = route(&coordinator, &["the", "big"]);
 
-    // All "the" prefixed n-grams should route to same shard
     assert_eq!(key1.prefix, "th");
     assert_eq!(key2.prefix, "th");
     assert_eq!(key3.prefix, "th");
 
-    // Different prefix should route differently
-    let key4 = coordinator.route_ngram("apple|pie");
+    // Different first token → different shard.
+    let key4 = route(&coordinator, &["apple", "pie"]);
     assert_eq!(key4.prefix, "ap");
     assert_ne!(key1.prefix, key4.prefix);
 }
 
 #[test]
 fn test_shard_distribution() {
-    let (_dir, coordinator) = create_coordinator_with_data();
+    let (_dir, coordinator, _vocab) = create_coordinator_with_data();
     let view = ShardedTrieView::new(&coordinator);
 
     let dist = view.shard_distribution();
@@ -212,7 +293,7 @@ fn test_shard_distribution() {
 
 #[test]
 fn test_mkn_discount_computation() {
-    let (_dir, coordinator) = create_coordinator_with_data();
+    let (_dir, coordinator, _vocab) = create_coordinator_with_data();
     let aggregator = MknAggregator::new(&coordinator);
 
     let discounts = aggregator
@@ -246,18 +327,23 @@ fn test_mkn_discount_computation() {
 
 #[test]
 fn test_mkn_continuation_counts() {
-    let (_dir, coordinator) = create_coordinator_with_data();
+    let (_dir, coordinator, vocab) = create_coordinator_with_data();
     let aggregator = MknAggregator::new(&coordinator).with_continuations();
 
     let stats = aggregator
         .compute_all()
         .expect("Failed to compute MKN stats");
 
-    // For bigrams, should have continuation counts
+    // For bigrams, continuation contexts are varint-encoded term-id keys.
     let cont = &stats.continuation_counts[2];
 
-    // "the" should have multiple successors ("quick", "slow", "big")
-    if let Some(count) = cont.successor_counts.get(&b"the"[..]) {
+    // Context "the" (a single term-id) has successors quick, slow, big.
+    let the_id = vocab
+        .as_ref()
+        .get_index("the")
+        .expect("'the' should be in vocab");
+    let the_context = encode_indices_to_key_bytes(&[the_id]);
+    if let Some(count) = cont.successor_counts.get(&the_context) {
         assert!(*count >= 3, "Expected at least 3 successors for 'the'");
     }
 }
@@ -268,7 +354,7 @@ fn test_mkn_continuation_counts() {
 
 #[test]
 fn test_merge_to_memory() {
-    let (_dir, coordinator) = create_coordinator_with_data();
+    let (_dir, coordinator, vocab) = create_coordinator_with_data();
     let merger = MergeCoordinator::new(&coordinator);
 
     let merged = merger.merge_to_memory().expect("Failed to merge");
@@ -276,14 +362,17 @@ fn test_merge_to_memory() {
     // Should have all entries
     assert!(merged.len() >= 20); // 8 + 8 + 4 n-grams
 
-    // Verify some entries
-    assert_eq!(merged.get(&b"the"[..]), Some(&1_000_000));
-    assert_eq!(merged.get(&b"the|quick"[..]), Some(&50_000));
+    // Verify some entries (term-id byte keys)
+    assert_eq!(merged.get(&ngram_key(&vocab, &["the"])), Some(&1_000_000));
+    assert_eq!(
+        merged.get(&ngram_key(&vocab, &["the", "quick"])),
+        Some(&50_000)
+    );
 }
 
 #[test]
 fn test_merge_preserves_counts() {
-    let (dir, coordinator) = create_coordinator_with_data();
+    let (dir, coordinator, vocab) = create_coordinator_with_data();
     let merger = MergeCoordinator::new(&coordinator);
 
     let output_path = dir.path().join("merged_counts.artrie");
@@ -295,10 +384,22 @@ fn test_merge_preserves_counts() {
         PersistentARTrie::<u64>::open_with_recovery(&output_path).expect("Failed to open");
 
     // Verify all counts are preserved
-    assert_eq!(merged.get_value_bytes(b"the"), Some(1_000_000));
-    assert_eq!(merged.get_value_bytes(b"a"), Some(500_000));
-    assert_eq!(merged.get_value_bytes(b"the|quick"), Some(50_000));
-    assert_eq!(merged.get_value_bytes(b"the|quick|brown"), Some(10_000));
+    assert_eq!(
+        merged.get_value_bytes(&ngram_key(&vocab, &["the"])),
+        Some(1_000_000)
+    );
+    assert_eq!(
+        merged.get_value_bytes(&ngram_key(&vocab, &["a"])),
+        Some(500_000)
+    );
+    assert_eq!(
+        merged.get_value_bytes(&ngram_key(&vocab, &["the", "quick"])),
+        Some(50_000)
+    );
+    assert_eq!(
+        merged.get_value_bytes(&ngram_key(&vocab, &["the", "quick", "brown"])),
+        Some(10_000)
+    );
 }
 
 // =============================================================================
@@ -307,9 +408,6 @@ fn test_merge_preserves_counts() {
 
 #[test]
 fn test_parallel_storage() {
-    use std::sync::Arc;
-    use std::thread;
-
     let dir = TempDir::new().expect("Failed to create temp dir");
     let config = ShardConfig::new(dir.path().join("shards"))
         .with_granularity(ShardGranularity::TwoChar)
@@ -317,12 +415,15 @@ fn test_parallel_storage() {
 
     let coordinator =
         Arc::new(ShardCoordinator::new(config).expect("Failed to create coordinator"));
+    // SharedVocabARTrie is a lock-free concurrent vocabulary (Arc), safe to share.
+    let vocab = create_vocabulary(&dir.path().join("vocab")).expect("vocabulary");
 
     // Spawn multiple threads to store n-grams concurrently
     let mut handles = Vec::new();
 
     for thread_id in 0..4 {
         let coord = Arc::clone(&coordinator);
+        let vocab = vocab.clone();
         handles.push(thread::spawn(move || {
             for i in 0..100 {
                 let prefix = match thread_id {
@@ -331,8 +432,8 @@ fn test_parallel_storage() {
                     2 => "cc",
                     _ => "dd",
                 };
-                let ngram = format!("{}word{}|suffix", prefix, i);
-                coord.store_ngram(&ngram, 1).expect("Failed to store");
+                let first = format!("{}word{}", prefix, i);
+                store_ngram(&coord, &vocab, &[first.as_str(), "suffix"], 1);
             }
         }));
     }
@@ -346,10 +447,10 @@ fn test_parallel_storage() {
     assert_eq!(coordinator.total_entry_count(), 400);
 
     // Verify entries from each prefix
-    assert!(coordinator.contains("aaword0|suffix"));
-    assert!(coordinator.contains("bbword0|suffix"));
-    assert!(coordinator.contains("ccword0|suffix"));
-    assert!(coordinator.contains("ddword0|suffix"));
+    assert!(get_ngram(&coordinator, &vocab, &["aaword0", "suffix"]).is_some());
+    assert!(get_ngram(&coordinator, &vocab, &["bbword0", "suffix"]).is_some());
+    assert!(get_ngram(&coordinator, &vocab, &["ccword0", "suffix"]).is_some());
+    assert!(get_ngram(&coordinator, &vocab, &["ddword0", "suffix"]).is_some());
 }
 
 // =============================================================================
@@ -363,10 +464,10 @@ fn test_empty_coordinator() {
         ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
     let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
+    let vocab = create_vocabulary(&dir.path().join("vocab")).expect("vocabulary");
 
     // Empty coordinator should return None for queries
-    assert_eq!(coordinator.get("nonexistent"), None);
-    assert!(!coordinator.contains("anything"));
+    assert_eq!(get_ngram(&coordinator, &vocab, &["nonexistent"]), None);
     assert_eq!(coordinator.total_entry_count(), 0);
 
     // View should be empty
@@ -382,14 +483,15 @@ fn test_duplicate_storage() {
         ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
     let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
+    let vocab = create_vocabulary(&dir.path().join("vocab")).expect("vocabulary");
 
     // Store same n-gram multiple times
-    coordinator.store_ngram("test|word", 10).expect("store");
-    coordinator.store_ngram("test|word", 20).expect("store");
-    coordinator.store_ngram("test|word", 30).expect("store");
+    store_ngram(&coordinator, &vocab, &["test", "word"], 10);
+    store_ngram(&coordinator, &vocab, &["test", "word"], 20);
+    store_ngram(&coordinator, &vocab, &["test", "word"], 30);
 
     // Count should be cumulative
-    assert_eq!(coordinator.get("test|word"), Some(60));
+    assert_eq!(get_ngram(&coordinator, &vocab, &["test", "word"]), Some(60));
 }
 
 #[test]
@@ -399,14 +501,19 @@ fn test_special_characters() {
         ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
     let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
+    let vocab = create_vocabulary(&dir.path().join("vocab")).expect("vocabulary");
 
-    // Store n-grams with special characters (common in Google Books)
-    coordinator.store_ngram("don't", 1000).expect("store");
-    coordinator.store_ngram("it's|good", 500).expect("store");
-    coordinator.store_ngram("U.S.A.", 300).expect("store");
+    // Store n-grams with special characters (common in Google Books). Each token
+    // is carried intact as a term-id — apostrophes and periods never split.
+    store_ngram(&coordinator, &vocab, &["don't"], 1000);
+    store_ngram(&coordinator, &vocab, &["it's", "good"], 500);
+    store_ngram(&coordinator, &vocab, &["U.S.A."], 300);
 
     // Verify storage
-    assert_eq!(coordinator.get("don't"), Some(1000));
-    assert_eq!(coordinator.get("it's|good"), Some(500));
-    assert_eq!(coordinator.get("U.S.A."), Some(300));
+    assert_eq!(get_ngram(&coordinator, &vocab, &["don't"]), Some(1000));
+    assert_eq!(
+        get_ngram(&coordinator, &vocab, &["it's", "good"]),
+        Some(500)
+    );
+    assert_eq!(get_ngram(&coordinator, &vocab, &["U.S.A."]), Some(300));
 }

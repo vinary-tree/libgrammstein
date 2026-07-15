@@ -176,10 +176,7 @@ pub(super) async fn download_to_cache(
     let url_for_errors = url.to_string();
     let mapped_stream = byte_stream.map(move |result| {
         result.map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("HTTP stream error for {}: {}", url_for_errors, e),
-            )
+            std::io::Error::other(format!("HTTP stream error for {}: {}", url_for_errors, e))
         })
     });
     let mut reader = StreamReader::new(mapped_stream);

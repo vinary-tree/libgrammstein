@@ -5,15 +5,11 @@
 //! - OOV handling via embedding similarity
 //! - Configurable interpolation strategies
 //!
-//! # Dictionary Backend Type Aliases
+//! # Store Backend Type Alias
 //!
-//! Two type aliases are provided for common use cases:
-//!
-//! - [`SerializableHybridModel`]: Uses `DynamicDawgChar` backend for models that need
-//!   to be saved/loaded. This backend supports full serde serialization.
-//!
-//! - [`PathMapHybridModel`]: Uses `PathMapDictionary` backend for integration with
-//!   lling-llang's shared lattice architecture.
+//! - [`InMemoryTermIdHybrid`]: the hybrid model over the byte-native
+//!   [`TermIdStore`] on an in-memory `DynamicDawg<NgramEntry>` — the sole hybrid
+//!   model type.
 //!
 //! # Example
 //!
@@ -44,31 +40,13 @@ pub use model::PortableHybridModel;
 pub use model::{HybridConfig, HybridLanguageModel, InterpolationStrategy};
 pub use oov::{OovHandler, OovStrategy};
 
+use crate::ngram::store::TermIdStore;
 use crate::ngram::NgramEntry;
 
-/// Serializable hybrid model using DynamicDawgChar backend.
+/// In-memory byte-native hybrid model — the sole hybrid model type.
 ///
-/// Use this when you need to save/load models to/from disk.
-/// This backend supports full serde serialization.
-///
-/// # Example
-///
-/// ```ignore
-/// use libgrammstein::hybrid::SerializableHybridModel;
-///
-/// // Train and save
-/// model.save("hybrid_model.bin")?;
-///
-/// // Load later
-/// let model: SerializableHybridModel = SerializableHybridModel::load("hybrid_model.bin")?;
-/// ```
-pub type SerializableHybridModel =
-    HybridLanguageModel<libdictenstein::dynamic_dawg::char::DynamicDawgChar<NgramEntry>>;
-
-/// Memory-efficient hybrid model using PathMapDictionary backend.
-///
-/// Use this for lling-llang integration with shared lattice structures.
-/// This backend does NOT support serde serialization but provides
-/// better memory sharing characteristics.
-pub type PathMapHybridModel =
-    HybridLanguageModel<libdictenstein::pathmap::PathMapDictionary<NgramEntry>>;
+/// Backed by [`TermIdStore`] over an in-memory `DynamicDawg<NgramEntry>`; its
+/// portable format is the term-id encoding (with an embedded vocabulary), loaded
+/// via [`HybridLanguageModel::load_portable`] with a `DynamicDawg::new` factory.
+pub type InMemoryTermIdHybrid =
+    HybridLanguageModel<TermIdStore<libdictenstein::dynamic_dawg::DynamicDawg<NgramEntry>>>;

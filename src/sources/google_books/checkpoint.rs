@@ -865,7 +865,7 @@ fn prefix_to_index(prefix: &str) -> Option<u16> {
     match bytes.len() {
         1 => {
             let c = bytes[0];
-            if c >= b'a' && c <= b'z' {
+            if c.is_ascii_lowercase() {
                 Some((c - b'a') as u16)
             } else {
                 None
@@ -874,7 +874,7 @@ fn prefix_to_index(prefix: &str) -> Option<u16> {
         2 => {
             let c1 = bytes[0];
             let c2 = bytes[1];
-            if c1 >= b'a' && c1 <= b'z' && c2 >= b'a' && c2 <= b'z' {
+            if c1.is_ascii_lowercase() && c2.is_ascii_lowercase() {
                 Some(((c1 - b'a') as u16) * 26 + ((c2 - b'a') as u16))
             } else {
                 None
@@ -960,7 +960,7 @@ fn max_index_for_prefix_len(prefix_len: PrefixLen) -> u16 {
 /// Get the number of u64 chunks needed for a given prefix length.
 fn num_chunks_for_prefix_len(prefix_len: PrefixLen) -> usize {
     let max_index = max_index_for_prefix_len(prefix_len) as usize;
-    (max_index + PREFIXES_PER_CHUNK - 1) / PREFIXES_PER_CHUNK
+    max_index.div_ceil(PREFIXES_PER_CHUNK)
 }
 
 /// Pack prefix states into u64 bitmap chunks.
@@ -1038,10 +1038,10 @@ impl MknPhase {
             0 => MknPhase::NotStarted,
             100 => MknPhase::Pass1Complete,
             200 => MknPhase::Complete,
-            n if n >= 1 && n < 100 => MknPhase::Pass1InProgress {
+            n if (1..100).contains(&n) => MknPhase::Pass1InProgress {
                 current_order: ((n - 1) / 10) as u8,
             },
-            n if n >= 101 && n < 200 => MknPhase::Pass2InProgress {
+            n if (101..200).contains(&n) => MknPhase::Pass2InProgress {
                 current_order: ((n - 101) / 10) as u8,
             },
             _ => MknPhase::NotStarted,
@@ -1305,10 +1305,10 @@ impl ImportCheckpoint {
             let mut chunks = vec![0u64; num_chunks];
             let mut has_any_chunks = false;
 
-            for chunk_idx in 0..num_chunks {
+            for (chunk_idx, chunk_slot) in chunks.iter_mut().enumerate() {
                 let key = format!("{}{}:{}", CHECKPOINT_BITMAP_PREFIX, order, chunk_idx);
                 if let Ok(Some(chunk_value)) = trie.load_checkpoint_u64(&key) {
-                    chunks[chunk_idx] = chunk_value;
+                    *chunk_slot = chunk_value;
                     if chunk_value != 0 {
                         has_any_chunks = true;
                     }

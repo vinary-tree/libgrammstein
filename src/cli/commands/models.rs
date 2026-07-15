@@ -50,19 +50,20 @@ impl DetectedModel {
 fn detect_model(path: &Path) -> DetectedModel {
     use crate::embedding::SubwordEmbedding;
     use crate::hybrid::HybridLanguageModel;
-    use crate::ngram::{NgramEntry, NgramModel};
-    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+    use crate::ngram::NgramEntry;
+    use libdictenstein::dynamic_dawg::DynamicDawg;
 
     // Try hybrid model first (most complex)
-    if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new)
-    {
+    if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawg::<NgramEntry>::new) {
         return DetectedModel::Hybrid {
             ngram_vocab_size: model.ngram_model().vocab_size(),
         };
     }
 
     // Try n-gram model
-    if let Ok(model) = NgramModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new) {
+    if let Ok(model) =
+        crate::ngram::InMemoryTermIdModel::load_portable(path, DynamicDawg::<NgramEntry>::new)
+    {
         return DetectedModel::Ngram {
             vocab_size: model.vocab_size(),
         };
@@ -195,11 +196,8 @@ fn models_list(args: ModelsListArgs, verbose: bool) -> CliResult<()> {
     };
 
     if filtered.is_empty() {
-        if args.language.is_some() {
-            eprintln!(
-                "No models found for language: {}",
-                args.language.as_ref().unwrap()
-            );
+        if let Some(language) = args.language.as_ref() {
+            eprintln!("No models found for language: {}", language);
         } else {
             eprintln!("No models found in: {}", args.models_dir.display());
         }
@@ -288,15 +286,14 @@ fn models_info(args: ModelsInfoArgs, verbose: bool) -> CliResult<()> {
 fn load_model_info(path: &Path, file_size_bytes: u64) -> CliResult<ModelInfo> {
     use crate::embedding::SubwordEmbedding;
     use crate::hybrid::HybridLanguageModel;
-    use crate::ngram::{NgramEntry, NgramModel};
-    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+    use crate::ngram::NgramEntry;
+    use libdictenstein::dynamic_dawg::DynamicDawg;
 
     // Try hybrid model first
-    if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new)
-    {
+    if let Ok(model) = HybridLanguageModel::load_portable(path, DynamicDawg::<NgramEntry>::new) {
         return Ok(ModelInfo {
             path: path.display().to_string(),
-            model_type: "HybridLanguageModel<DynamicDawgChar>".to_string(),
+            model_type: "HybridLanguageModel<TermIdStore<DynamicDawg>>".to_string(),
             ngram_order: Some(model.ngram_model().order()),
             vocab_size: model.ngram_model().vocab_size(),
             ngram_count: Some(model.ngram_model().ngram_count() as u64),
@@ -311,10 +308,12 @@ fn load_model_info(path: &Path, file_size_bytes: u64) -> CliResult<ModelInfo> {
     }
 
     // Try n-gram model
-    if let Ok(model) = NgramModel::load_portable(path, DynamicDawgChar::<NgramEntry>::new) {
+    if let Ok(model) =
+        crate::ngram::InMemoryTermIdModel::load_portable(path, DynamicDawg::<NgramEntry>::new)
+    {
         return Ok(ModelInfo {
             path: path.display().to_string(),
-            model_type: "NgramModel<DynamicDawgChar>".to_string(),
+            model_type: "NgramModel<TermIdStore<DynamicDawg>>".to_string(),
             ngram_order: Some(model.order()),
             vocab_size: model.vocab_size(),
             ngram_count: Some(model.ngram_count() as u64),
@@ -405,14 +404,12 @@ fn print_model_info(info: &ModelInfo) {
 fn format_number(n: usize) -> String {
     let s = n.to_string();
     let mut result = String::new();
-    let mut count = 0;
 
-    for c in s.chars().rev() {
+    for (count, c) in s.chars().rev().enumerate() {
         if count > 0 && count % 3 == 0 {
             result.push(',');
         }
         result.push(c);
-        count += 1;
     }
 
     result.chars().rev().collect()

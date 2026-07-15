@@ -12,7 +12,7 @@
 //! - **Always consistent**: Dictionary is always in sync with n-gram model
 //! - **Efficient**: No separate extraction or building step required
 
-use crate::ngram::vocabulary::{encode_ngram_key_lockfree, SharedConcurrentVocab};
+use crate::ngram::vocabulary::SharedConcurrentVocab;
 use crate::sources::google_books::NgramStorage;
 
 /// A dictionary backed by shared vocabulary and n-gram storage.
@@ -82,9 +82,12 @@ impl<'a> VocabularyDictionary<'a> {
         // Check if word is in vocabulary
         self.vocabulary.get_index(word)?;
 
-        // Encode as unigram key and look up in storage
-        let key = encode_ngram_key_lockfree(&[word], &self.vocabulary);
-        self.storage.get(&key)
+        // Byte-native unigram lookup: `get_tokens` encodes `[word]` to a LEB128
+        // term-id key and routes by the token — matching exactly what
+        // `store_tokens` wrote. (The former `encode_ngram_key_lockfree` + `get`
+        // path char-lifted each varint byte into a Latin-1 `char`, whose UTF-8
+        // bytes diverged from the byte-native stored key for any term-id >= 128.)
+        self.storage.get_tokens(&[word])
     }
 
     /// Get the vocabulary size (number of unique words).

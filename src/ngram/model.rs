@@ -1,16 +1,23 @@
 //! N-gram language model with probability queries.
 //!
-//! This module provides the main `NgramModel` struct that combines the n-gram
-//! trie with smoothing algorithms for probability estimation.
+//! This module provides the main [`NgramModel`] struct that combines an n-gram
+//! store (the [`NgramLookup`] seam) with a smoothing algorithm for probability
+//! estimation. The store is always the byte-native
+//! [`TermIdStore`](super::store::TermIdStore) (LEB128 term-id keys). Old
+//! `'|'`-joined portable files are re-keyed onto term-ids by a single labelled
+//! one-shot reader ([`read_legacy_pipe_entries`]) at load time; no
+//! `'|'`-delimited store is ever live.
 
 use super::entry::NgramEntry;
 use super::smoothing::KneserNeySmoothing;
-use super::trie::NgramTrie;
-use libdictenstein::MappedDictionary;
-// Only the `serde-extras` portable-load impl below needs the mutable trait; gating the
-// import to match keeps the default-feature build warning-free.
+use super::store::{IterableNgramStore, NgramLookup};
+
 #[cfg(feature = "serde-extras")]
-use libdictenstein::MutableMappedDictionary;
+use super::entry::NgramEntrySnapshot;
+#[cfg(feature = "serde-extras")]
+use super::store::{MutableByteMappedDictionary, TermIdStore};
+#[cfg(feature = "serde-extras")]
+use super::vocabulary::{create_vocabulary, encode_ngram_key_bytes, SharedVocabARTrie};
 
 #[cfg(feature = "serde-extras")]
 use std::path::Path;
@@ -21,7 +28,10 @@ use std::path::Path;
 ///
 /// # Type Parameters
 ///
-/// * `D` - Dictionary backend type (e.g., `DynamicDawgChar<NgramEntry>`)
+/// * `S` - The n-gram store, any [`NgramLookup`]. The sole implementor is the
+///   byte-native [`TermIdStore`](super::store::TermIdStore) (LEB128 term-id
+///   keys), instantiated over an in-memory `DynamicDawg<NgramEntry>` or a
+///   disk-backed `Arc<PersistentARTrie<NgramEntry>>`.
 ///
 /// # Example
 ///
@@ -41,13 +51,13 @@ use std::path::Path;
 /// let sentence_log_prob = model.sentence_log_prob(&["the", "quick", "brown", "fox"]);
 /// ```
 #[derive(serde::Serialize, serde::Deserialize)]
-#[serde(bound = "D: serde::Serialize + serde::de::DeserializeOwned")]
-pub struct NgramModel<D>
+#[serde(bound = "S: serde::Serialize + serde::de::DeserializeOwned")]
+pub struct NgramModel<S>
 where
-    D: MappedDictionary<Value = NgramEntry>,
+    S: NgramLookup,
 {
-    /// N-gram trie storage.
-    trie: NgramTrie<D>,
+    /// N-gram store (the [`NgramLookup`] seam).
+    store: S,
 
     /// Smoothing algorithm.
     smoothing: KneserNeySmoothing,
@@ -59,21 +69,21 @@ where
     total_count: u64,
 }
 
-impl<D> NgramModel<D>
+impl<S> NgramModel<S>
 where
-    D: MappedDictionary<Value = NgramEntry>,
+    S: NgramLookup,
 {
-    /// Create a new n-gram model from a trained trie.
+    /// Create a new n-gram model from a trained store.
     ///
     /// This is typically called after the training process completes.
     pub fn new(
-        trie: NgramTrie<D>,
+        store: S,
         smoothing: KneserNeySmoothing,
         vocab_size: usize,
         total_count: u64,
     ) -> Self {
         Self {
-            trie,
+            store,
             smoothing,
             vocab_size,
             total_count,
@@ -83,7 +93,7 @@ where
     /// Get the n-gram order (maximum context length + 1).
     #[inline]
     pub fn order(&self) -> usize {
-        self.trie.max_order()
+        self.store.max_order()
     }
 
     /// Get the vocabulary size.
@@ -98,16 +108,16 @@ where
         self.total_count
     }
 
-    /// Get a reference to the underlying trie.
+    /// Get a reference to the underlying store.
     #[inline]
-    pub fn trie(&self) -> &NgramTrie<D> {
-        &self.trie
+    pub fn store(&self) -> &S {
+        &self.store
     }
 
     /// Get the raw count for an n-gram.
     #[inline]
     pub fn count(&self, tokens: &[&str]) -> u64 {
-        self.trie.count(tokens)
+        self.store.count(tokens)
     }
 
     /// Compute log probability of a word given context.
@@ -133,8 +143,13 @@ where
     /// let log_prob_unigram = model.log_prob("the", &[]);
     /// ```
     pub fn log_prob(&self, word: &str, context: &[&str]) -> f64 {
-        self.smoothing
-            .log_prob(word, context, &self.trie, self.vocab_size, self.total_count)
+        self.smoothing.log_prob(
+            word,
+            context,
+            &self.store,
+            self.vocab_size,
+            self.total_count,
+        )
     }
 
     /// The Modified Kneser-Ney smoothing parameters (discounts and the
@@ -182,13 +197,13 @@ where
     /// Check if a word is in the vocabulary (has been seen during training).
     #[inline]
     pub fn in_vocabulary(&self, word: &str) -> bool {
-        self.trie.contains(&[word])
+        self.store.entry(&[word]).is_some()
     }
 
     /// Get the number of n-grams stored in the model.
     #[inline]
     pub fn ngram_count(&self) -> usize {
-        self.trie.len()
+        self.store.len()
     }
 
     /// Get the log probability assigned to out-of-vocabulary words.
@@ -204,13 +219,29 @@ where
     }
 }
 
-impl<D> Clone for NgramModel<D>
+impl<S> NgramModel<S>
 where
-    D: MappedDictionary<Value = NgramEntry>,
+    S: IterableNgramStore,
+{
+    /// Iterate every stored n-gram as its decoded word sequence and entry.
+    ///
+    /// Storage-agnostic: the byte-native store decodes term-ids through its
+    /// vocabulary, the legacy trie splits its `'|'`-joined key. Consumers that
+    /// previously walked `model.trie().iter_entries()` (yielding a raw key)
+    /// call this instead and operate on the `words` vec.
+    #[inline]
+    pub fn iter_ngrams(&self) -> Box<dyn Iterator<Item = (Vec<String>, NgramEntry)> + '_> {
+        self.store.iter_ngrams()
+    }
+}
+
+impl<S> Clone for NgramModel<S>
+where
+    S: NgramLookup + Clone,
 {
     fn clone(&self) -> Self {
         Self {
-            trie: self.trie.clone(),
+            store: self.store.clone(),
             smoothing: self.smoothing.clone(),
             vocab_size: self.vocab_size,
             total_count: self.total_count,
@@ -218,68 +249,66 @@ where
     }
 }
 
-// Serialization support (requires bincode via serde-extras feature)
+// ============================================================================
+// Portable serialization (doesn't require the store to implement serde).
+// ============================================================================
+
+/// The key encoding of a serialized [`PortableNgramModel`].
+///
+/// `#[serde(default)]` resolves to [`KeyEncoding::LegacyPipe`] for models
+/// serialized before this tag existed, so old files keep deserializing.
 #[cfg(feature = "serde-extras")]
-impl<D> NgramModel<D>
-where
-    D: MappedDictionary<Value = NgramEntry> + serde::Serialize + serde::de::DeserializeOwned,
-{
-    /// Save the model to a binary file.
-    ///
-    /// Uses bincode for efficient binary serialization.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// model.save("model.bin")?;
-    /// ```
-    pub fn save<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
-        let file = std::fs::File::create(path)?;
-        let writer = std::io::BufWriter::new(file);
-        bincode::serialize_into(writer, self)?;
-        Ok(())
-    }
-
-    /// Load a model from a binary file.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let model: NgramModel<DynamicDawgChar<NgramEntry>> = NgramModel::load("model.bin")?;
-    /// ```
-    pub fn load<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
-        let file = std::fs::File::open(path)?;
-        let reader = std::io::BufReader::new(file);
-        let model = bincode::deserialize_from(reader)?;
-        Ok(model)
-    }
+#[derive(
+    serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash,
+)]
+pub enum KeyEncoding {
+    /// Legacy `'|'`-joined token keys (`"the|quick|brown"`). Delimiter-collision
+    /// prone; stored in [`PortableNgramModel::entries`].
+    #[default]
+    LegacyPipe,
+    /// LEB128 varint term-id keys stored as a Latin-1 `String` (each byte
+    /// `0xNN` → scalar `U+00NN`), with a companion [`PortableVocabulary`];
+    /// stored in [`PortableNgramModel::entries`].
+    Latin1Varint,
+    /// Raw LEB128 varint term-id byte keys, with a companion
+    /// [`PortableVocabulary`]; stored in [`PortableNgramModel::entries_bytes`].
+    /// The delimiter-collision class cannot occur under this encoding.
+    TermIdBytes,
 }
-
-// Portable serialization that doesn't require D: Serialize
-// This exports the model as a list of (key, entry) pairs
 
 /// Portable vocabulary format for serialization.
 ///
-/// This allows vocabulary-indexed models to be self-contained, including
-/// the mapping from PUA characters to words.
+/// Lists the vocabulary words in term-id order, so a self-contained portable
+/// model can decode its LEB128 term-id keys back to human-readable words.
+///
+/// Index `0` corresponds to term-id [`FIRST_VALID_INDEX`](super::vocabulary::FIRST_VALID_INDEX)
+/// (`1`), index `1` to term-id `2`, etc. (term-id `0` is reserved).
 #[cfg(feature = "serde-extras")]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct PortableVocabulary {
-    /// Words indexed by their PUA character offset from PUA_START.
-    ///
-    /// Index 0 corresponds to PUA_START (U+F0000), index 1 to U+F0001, etc.
+    /// Words in term-id order (`words[i]` is the word for term-id `i + 1`).
     pub words: Vec<String>,
 }
 
 /// Portable N-gram model format for serialization.
 ///
-/// This format doesn't require the dictionary to implement serde traits,
-/// making it compatible with all dictionary backends.
+/// This format doesn't require the store's backend to implement serde traits,
+/// making it compatible with all backends. It carries both the legacy string
+/// key list ([`entries`](Self::entries)) and the byte-native term-id key list
+/// ([`entries_bytes`](Self::entries_bytes)); [`key_encoding`](Self::key_encoding)
+/// selects which one is authoritative. The extra fields are all
+/// `#[serde(default)]` so files written before the byte-native migration still
+/// deserialize (as [`KeyEncoding::LegacyPipe`]).
 #[cfg(feature = "serde-extras")]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct PortableNgramModel {
-    /// N-gram entries as (key, snapshot) pairs.
-    pub entries: Vec<(String, crate::ngram::NgramEntrySnapshot)>,
+    /// N-gram entries as `('|'`-joined-or-Latin-1 `String` key, snapshot) pairs.
+    /// Authoritative for [`KeyEncoding::LegacyPipe`] / [`KeyEncoding::Latin1Varint`].
+    pub entries: Vec<(String, NgramEntrySnapshot)>,
+    /// N-gram entries as (raw LEB128 term-id byte key, snapshot) pairs.
+    /// Authoritative for [`KeyEncoding::TermIdBytes`].
+    #[serde(default)]
+    pub entries_bytes: Vec<(Vec<u8>, NgramEntrySnapshot)>,
     /// Maximum n-gram order.
     pub max_order: usize,
     /// Vocabulary size (unique unigrams).
@@ -288,170 +317,236 @@ pub struct PortableNgramModel {
     pub total_count: u64,
     /// Smoothing parameters.
     pub smoothing: KneserNeySmoothing,
-    /// Optional vocabulary for vocabulary-indexed models.
-    ///
-    /// When present, the model uses PUA character encoding. When absent,
-    /// the model uses legacy pipe-separated encoding.
+    /// Optional vocabulary for term-id-keyed models.
     #[serde(default)]
     pub vocabulary: Option<PortableVocabulary>,
+    /// Which key list is authoritative.
+    #[serde(default)]
+    pub key_encoding: KeyEncoding,
+    /// Fingerprint of the vocabulary the term-id keys were encoded against.
+    /// `None` for legacy files. Verified on load so a mismatched (model, vocab)
+    /// pair is rejected rather than silently mis-decoded.
+    #[serde(default)]
+    pub vocab_fingerprint: Option<u64>,
+}
+
+/// Deterministic, version-stable fingerprint of a vocabulary: its length mixed
+/// with an FNV-1a digest over every `(term-id, term-bytes)` pair.
+///
+/// Used to stamp a term-id model with the identity of the vocabulary its keys
+/// were encoded against, and to reject a mismatched vocabulary on load.
+#[cfg(feature = "serde-extras")]
+pub(crate) fn compute_vocab_fingerprint(vocab: &SharedVocabARTrie) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let guard = vocab.as_ref();
+    let len = guard.len() as u64;
+    let mut hash = FNV_OFFSET ^ len;
+    for index in 1..=len {
+        if let Some(term) = guard.get_term(index) {
+            for byte in term.as_bytes() {
+                hash ^= *byte as u64;
+                hash = hash.wrapping_mul(FNV_PRIME);
+            }
+            hash ^= index;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    hash
+}
+
+/// Fingerprint of the words in a [`PortableVocabulary`] (equivalent to
+/// [`compute_vocab_fingerprint`] over the vocabulary those words rebuild).
+#[cfg(feature = "serde-extras")]
+fn compute_portable_vocab_fingerprint(vocab: &PortableVocabulary) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let len = vocab.words.len() as u64;
+    let mut hash = FNV_OFFSET ^ len;
+    for (offset, term) in vocab.words.iter().enumerate() {
+        for byte in term.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash ^= offset as u64 + 1;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 #[cfg(feature = "serde-extras")]
-impl<D> NgramModel<D>
-where
-    D: MappedDictionary<Value = NgramEntry>,
-{
-    /// Export to portable format for serialization (without vocabulary).
-    ///
-    /// This method iterates over all dictionary entries and exports them
-    /// as (key, snapshot) pairs, allowing serialization without requiring
-    /// the dictionary type to implement serde traits.
-    ///
-    /// For vocabulary-indexed models, use `to_portable_with_vocabulary` instead
-    /// to include the vocabulary mapping.
-    pub fn to_portable(&self) -> PortableNgramModel
-    where
-        D: crate::ngram::trie::IterableDictionary,
-    {
-        self.to_portable_with_vocabulary(None)
+impl PortableNgramModel {
+    /// Materialize a [`PortableVocabulary`] from a live vocabulary, in term-id order.
+    fn portable_vocabulary_from(vocab: &SharedVocabARTrie) -> PortableVocabulary {
+        let guard = vocab.as_ref();
+        let len = guard.len();
+        let mut words = Vec::with_capacity(len);
+        // Term-ids are 1-based (FIRST_VALID_INDEX = 1); emit in order.
+        for index in 1..=(len as u64) {
+            if let Some(term) = guard.get_term(index) {
+                words.push(term);
+            }
+        }
+        PortableVocabulary { words }
     }
+}
 
-    /// Export to portable format with optional vocabulary.
-    ///
-    /// When a vocabulary is provided, the resulting portable model is self-contained
-    /// and can be decoded back to human-readable words.
-    ///
-    /// # Arguments
-    ///
-    /// * `vocabulary` - Optional shared vocabulary for vocabulary-indexed models
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // For vocabulary-indexed models
-    /// let portable = model.to_portable_with_vocabulary(Some(&vocab));
-    ///
-    /// // For legacy models or when vocabulary is not needed
-    /// let portable = model.to_portable_with_vocabulary(None);
-    /// ```
-    pub fn to_portable_with_vocabulary(
-        &self,
-        vocabulary: Option<&crate::ngram::SharedVocabARTrie>,
-    ) -> PortableNgramModel
-    where
-        D: crate::ngram::trie::IterableDictionary,
-    {
-        let entries: Vec<(String, crate::ngram::NgramEntrySnapshot)> = self
-            .trie
-            .iter_entries()
-            .map(|(key, entry)| (key, crate::ngram::NgramEntrySnapshot::from(&entry)))
+/// One-shot reader for the **legacy `'|'`-joined wire format**.
+///
+/// This is the *only* place in the crate's model path where a `'|'` delimiter is
+/// interpreted. It parses each historical `"a|b|c"` key exactly once, resolves
+/// (assigning as needed) each token to a term-id in `store`'s vocabulary, and
+/// inserts the varint-encoded term-id key. After it returns, no `'|'`-delimited
+/// representation exists in memory — the model is fully term-id-keyed.
+///
+/// It is lossy only for the already-corrupted legacy case where a token itself
+/// contained `'|'` (which the term-id format this loader targets represents
+/// losslessly) — exactly the bug the migration eliminates going forward.
+#[cfg(feature = "serde-extras")]
+fn read_legacy_pipe_entries<B: MutableByteMappedDictionary>(
+    entries: &[(String, NgramEntrySnapshot)],
+    store: &TermIdStore<B>,
+) {
+    for (key, snapshot) in entries {
+        let tokens: Vec<&str> = key.split('|').collect();
+        let bytes = encode_ngram_key_bytes(&tokens, store.vocabulary());
+        store.insert_raw(&bytes, NgramEntry::from(*snapshot));
+    }
+}
+
+// --- Byte-native `TermIdStore`-backed export (TermIdBytes) ---
+
+#[cfg(feature = "serde-extras")]
+impl<B> NgramModel<TermIdStore<B>>
+where
+    B: MutableByteMappedDictionary,
+{
+    /// Export a byte-native term-id model to portable [`KeyEncoding::TermIdBytes`]
+    /// form, embedding the store's vocabulary and its fingerprint.
+    pub fn to_portable(&self) -> PortableNgramModel {
+        let vocab = self.store.vocabulary();
+        let entries_bytes: Vec<(Vec<u8>, NgramEntrySnapshot)> = self
+            .store
+            .backend()
+            .iter_entries_bytes()
+            .map(|(key, entry)| (key, NgramEntrySnapshot::from(&entry)))
             .collect();
 
-        // Convert vocabulary to portable format if provided
-        // Use O(1) get_term() lookups, iterating in index order
-        let portable_vocab = vocabulary.map(|vocab| {
-            let guard = vocab.as_ref();
-            let len = guard.len();
-            let mut words = Vec::with_capacity(len);
-
-            // Indices are 1-based (FIRST_VALID_INDEX = 1), iterate in order
-            for i in 1..=(len as u64) {
-                if let Some(term) = guard.get_term(i) {
-                    words.push(term);
-                }
-            }
-
-            PortableVocabulary { words }
-        });
-
         PortableNgramModel {
-            entries,
-            max_order: self.trie.max_order(),
+            entries: Vec::new(),
+            entries_bytes,
+            max_order: self.store.max_order(),
             vocab_size: self.vocab_size,
             total_count: self.total_count,
             smoothing: self.smoothing.clone(),
-            vocabulary: portable_vocab,
+            vocabulary: Some(PortableNgramModel::portable_vocabulary_from(vocab)),
+            key_encoding: KeyEncoding::TermIdBytes,
+            vocab_fingerprint: Some(compute_vocab_fingerprint(vocab)),
         }
     }
 
-    /// Save model to a portable binary file.
-    ///
-    /// This format can be loaded into any dictionary backend.
-    /// For vocabulary-indexed models, use `save_portable_with_vocabulary` to
-    /// include the vocabulary mapping in the output.
-    pub fn save_portable<P: AsRef<Path>>(&self, path: P) -> crate::Result<()>
-    where
-        D: crate::ngram::trie::IterableDictionary,
-    {
+    /// Save a byte-native term-id model to a portable binary file.
+    pub fn save_portable<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
         let portable = self.to_portable();
-        let file = std::fs::File::create(path)?;
-        let writer = std::io::BufWriter::new(file);
-        bincode::serialize_into(writer, &portable)?;
-        Ok(())
-    }
-
-    /// Save model to a portable binary file with vocabulary included.
-    ///
-    /// The vocabulary mapping is included in the output, making the model
-    /// file self-contained and allowing decoding of PUA keys to words.
-    pub fn save_portable_with_vocabulary<P: AsRef<Path>>(
-        &self,
-        path: P,
-        vocabulary: &crate::ngram::SharedVocabARTrie,
-    ) -> crate::Result<()>
-    where
-        D: crate::ngram::trie::IterableDictionary,
-    {
-        let portable = self.to_portable_with_vocabulary(Some(vocabulary));
-        let file = std::fs::File::create(path)?;
-        let writer = std::io::BufWriter::new(file);
-        bincode::serialize_into(writer, &portable)?;
-        Ok(())
+        write_portable(&portable, path)
     }
 }
 
-// Loading from a portable snapshot fills an empty backend via `insert_with_value`, so it
-// requires a writable (mutable) dictionary. Kept separate from the read-only query/export
-// surface above.
+// --- Byte-native `TermIdStore`-backed load (unified dispatch + transcode) ---
+
 #[cfg(feature = "serde-extras")]
-impl<D> NgramModel<D>
+impl<B> NgramModel<TermIdStore<B>>
 where
-    D: MutableMappedDictionary<Value = NgramEntry>,
+    B: MutableByteMappedDictionary,
 {
-    /// Load model from a portable binary file.
+    /// Load any portable model into a byte-native term-id model, transcoding
+    /// legacy encodings as needed.
     ///
-    /// Reconstructs the model using the provided dictionary factory.
-    pub fn load_portable<P, F>(path: P, dictionary_factory: F) -> crate::Result<Self>
+    /// `backend_factory` supplies the (empty) byte backend. The vocabulary is
+    /// reconstructed in a fresh temporary [`SharedVocabARTrie`]:
+    /// - [`KeyEncoding::TermIdBytes`] / [`KeyEncoding::Latin1Varint`]: the
+    ///   embedded [`PortableVocabulary`] is replayed in term-id order (so the
+    ///   term-ids of the keys stay valid) and its fingerprint is verified; the
+    ///   byte keys are inserted directly.
+    /// - [`KeyEncoding::LegacyPipe`]: each `'|'`-joined key is split and
+    ///   re-encoded against the fresh vocabulary.
+    pub fn load_portable<P, F>(path: P, backend_factory: F) -> crate::Result<Self>
     where
         P: AsRef<Path>,
-        F: FnOnce() -> D,
+        F: FnOnce() -> B,
     {
-        let file = std::fs::File::open(path)?;
-        let reader = std::io::BufReader::new(file);
-        let portable: PortableNgramModel = bincode::deserialize_from(reader)?;
-
-        Self::load_portable_from_portable(portable, dictionary_factory)
+        let portable = read_portable(path)?;
+        Self::from_portable(portable, backend_factory)
     }
 
-    /// Reconstruct model from a portable format struct.
-    ///
-    /// This is used internally by HybridLanguageModel to load embedded N-gram models.
-    pub fn load_portable_from_portable<F>(
-        portable: PortableNgramModel,
-        dictionary_factory: F,
-    ) -> crate::Result<Self>
+    /// Reconstruct a byte-native term-id model from a portable struct, rebuilding
+    /// a fresh temporary vocabulary from the embedded [`PortableVocabulary`] (see
+    /// [`load_portable`](Self::load_portable)).
+    pub fn from_portable<F>(portable: PortableNgramModel, backend_factory: F) -> crate::Result<Self>
     where
-        F: FnOnce() -> D,
+        F: FnOnce() -> B,
     {
-        let dictionary = dictionary_factory();
-        for (key, snapshot) in portable.entries {
-            dictionary.insert_with_value(&key, NgramEntry::from(snapshot));
+        let vocab = rebuild_vocabulary(&portable)?;
+        Self::from_portable_with_vocabulary(portable, backend_factory(), vocab)
+    }
+
+    /// Reconstruct a byte-native term-id model from a portable struct against a
+    /// *caller-supplied* vocabulary — e.g. the persistent vocabulary a checkpoint
+    /// stores alongside the model, so the language model and the spelling
+    /// dictionary share one term-id space.
+    ///
+    /// For term-id encodings the vocabulary's [`compute_vocab_fingerprint`] is
+    /// verified against the model's stamped
+    /// [`PortableNgramModel::vocab_fingerprint`]; a mismatch is a typed error
+    /// (closing the silent-wrong-vocabulary hole). For a legacy `'|'`-joined
+    /// source the tokens are re-encoded against (and inserted into) `vocab`.
+    pub fn from_portable_with_vocabulary(
+        portable: PortableNgramModel,
+        backend: B,
+        vocab: SharedVocabARTrie,
+    ) -> crate::Result<Self> {
+        if matches!(
+            portable.key_encoding,
+            KeyEncoding::TermIdBytes | KeyEncoding::Latin1Varint
+        ) {
+            if let Some(expected) = portable.vocab_fingerprint {
+                let actual = compute_vocab_fingerprint(&vocab);
+                if actual != expected {
+                    return Err(crate::Error::Model(format!(
+                        "vocabulary fingerprint mismatch: model stamped {expected:#018x}, \
+                         supplied vocabulary hashes to {actual:#018x}"
+                    )));
+                }
+            }
         }
 
-        let trie = NgramTrie::new(dictionary, portable.max_order);
+        let store = TermIdStore::new(backend, vocab, portable.max_order);
+
+        match portable.key_encoding {
+            KeyEncoding::TermIdBytes => {
+                for (key, snapshot) in &portable.entries_bytes {
+                    store.insert_raw(key, NgramEntry::from(*snapshot));
+                }
+            }
+            KeyEncoding::Latin1Varint => {
+                // The Latin-1 `String` key is the raw varint byte key with each
+                // byte lifted into `U+00NN`; recover the bytes losslessly.
+                for (key, snapshot) in &portable.entries {
+                    let bytes: Vec<u8> = key.chars().map(|c| c as u8).collect();
+                    store.insert_raw(&bytes, NgramEntry::from(*snapshot));
+                }
+            }
+            KeyEncoding::LegacyPipe => {
+                // Historical `'|'`-joined wire format — read once, here, into
+                // term-id keys (see `read_legacy_pipe_entries`).
+                read_legacy_pipe_entries(&portable.entries, &store);
+            }
+        }
 
         Ok(Self {
-            trie,
+            store,
             smoothing: portable.smoothing,
             vocab_size: portable.vocab_size,
             total_count: portable.total_count,
@@ -459,56 +554,97 @@ where
     }
 }
 
-/// Static (read-only) `DoubleArrayTrieChar`-backed construction.
+/// Rebuild a [`SharedVocabARTrie`] from a portable model, verifying the
+/// fingerprint for term-id encodings.
 ///
-/// A Double-Array Trie is bulk-built and immutable — it answers queries faster than the
-/// dynamic backends but cannot be trained or updated. These constructors let `--to-static`
-/// (and downstream inference) load a portable model into the fast static backend.
+/// For [`KeyEncoding::TermIdBytes`] / [`KeyEncoding::Latin1Varint`] the embedded
+/// [`PortableVocabulary`] is replayed word-by-word (assigning term-ids
+/// `1, 2, …`, matching the original 1-based ordering) so the keys' term-ids stay
+/// valid, and the stamped [`PortableNgramModel::vocab_fingerprint`] is checked
+/// against the reconstructed vocabulary. For [`KeyEncoding::LegacyPipe`] an empty
+/// vocabulary is returned (populated lazily during transcode).
 #[cfg(feature = "serde-extras")]
-impl NgramModel<libdictenstein::double_array_trie::char::DoubleArrayTrieChar<NgramEntry>> {
-    /// Build a static `DoubleArrayTrieChar`-backed model from a portable snapshot.
-    ///
-    /// `from_terms_with_values` sorts the entries with the trie builder's own comparator,
-    /// so no manual key ordering is required. The result answers `count`/`log_prob`
-    /// identically to the source model.
-    pub fn from_portable_static(portable: PortableNgramModel) -> Self {
-        use libdictenstein::double_array_trie::char::DoubleArrayTrieChar;
+fn rebuild_vocabulary(portable: &PortableNgramModel) -> crate::Result<SharedVocabARTrie> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "libgrammstein-vocab-{}-{}",
+        std::process::id(),
+        next_vocab_seq()
+    ));
+    std::fs::create_dir_all(&temp_dir)?;
+    let vocab = create_vocabulary(&temp_dir.join("vocabulary"))
+        .map_err(|e| crate::Error::Model(format!("vocabulary rebuild failed: {e}")))?;
 
-        let entries = portable
-            .entries
-            .into_iter()
-            .map(|(key, snapshot)| (key, NgramEntry::from(snapshot)));
-        let dictionary = DoubleArrayTrieChar::from_terms_with_values(entries);
-        let trie = NgramTrie::new(dictionary, portable.max_order);
+    if matches!(
+        portable.key_encoding,
+        KeyEncoding::TermIdBytes | KeyEncoding::Latin1Varint
+    ) {
+        let portable_vocab = portable.vocabulary.as_ref().ok_or_else(|| {
+            crate::Error::Model(
+                "term-id portable model is missing its embedded vocabulary".to_string(),
+            )
+        })?;
 
-        Self {
-            trie,
-            smoothing: portable.smoothing,
-            vocab_size: portable.vocab_size,
-            total_count: portable.total_count,
+        {
+            let guard = vocab.as_ref();
+            for word in &portable_vocab.words {
+                guard
+                    .insert(word)
+                    .map_err(|e| crate::Error::Model(format!("vocabulary rebuild failed: {e}")))?;
+            }
+        }
+
+        if let Some(expected) = portable.vocab_fingerprint {
+            let actual = compute_portable_vocab_fingerprint(portable_vocab);
+            if actual != expected {
+                return Err(crate::Error::Model(format!(
+                    "vocabulary fingerprint mismatch: model stamped {expected:#018x}, \
+                     embedded vocabulary hashes to {actual:#018x}"
+                )));
+            }
         }
     }
 
-    /// Load a static `DoubleArrayTrieChar`-backed model from a portable binary file.
-    ///
-    /// The fast read-only counterpart to [`NgramModel::load_portable`].
-    pub fn load_static_portable<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
-        let file = std::fs::File::open(path)?;
-        let reader = std::io::BufReader::new(file);
-        let portable: PortableNgramModel = bincode::deserialize_from(reader)?;
-        Ok(Self::from_portable_static(portable))
-    }
+    Ok(vocab)
+}
+
+/// Monotonic counter disambiguating concurrent temp-vocabulary directories.
+#[cfg(feature = "serde-extras")]
+fn next_vocab_seq() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Serialize a portable model to `path` with bincode.
+#[cfg(feature = "serde-extras")]
+fn write_portable<P: AsRef<Path>>(portable: &PortableNgramModel, path: P) -> crate::Result<()> {
+    let file = std::fs::File::create(path)?;
+    let writer = std::io::BufWriter::new(file);
+    bincode::serialize_into(writer, portable)?;
+    Ok(())
+}
+
+/// Deserialize a portable model from `path` with bincode.
+#[cfg(feature = "serde-extras")]
+fn read_portable<P: AsRef<Path>>(path: P) -> crate::Result<PortableNgramModel> {
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    let portable = bincode::deserialize_from(reader)?;
+    Ok(portable)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::corpus::PlaintextReader;
+    use crate::ngram::store::TermIdStore;
     use crate::ngram::TrainerBuilder;
-    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
-    use libdictenstein::pathmap::PathMapDictionary;
+    use libdictenstein::dynamic_dawg::DynamicDawg;
     use std::io::Write;
     use tempfile::TempDir;
+
+    /// In-memory byte-native model produced by the trainer.
+    type TestModel = NgramModel<TermIdStore<DynamicDawg<NgramEntry>>>;
 
     fn create_test_corpus(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
         let path = dir.join("test.txt");
@@ -517,7 +653,7 @@ mod tests {
         path
     }
 
-    fn create_test_ngram_model() -> NgramModel<DynamicDawgChar<NgramEntry>> {
+    fn create_test_ngram_model() -> TestModel {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let content = "the quick brown fox the quick brown dog the lazy fox \
                        the quick brown fox the quick brown dog the lazy fox \
@@ -525,7 +661,7 @@ mod tests {
         let path = create_test_corpus(dir.path(), content);
         let reader = PlaintextReader::from_file(&path).expect("Failed to create reader");
 
-        let dictionary = DynamicDawgChar::<NgramEntry>::new();
+        let dictionary = DynamicDawg::<NgramEntry>::new();
         TrainerBuilder::new(dictionary)
             .order(3)
             .train(reader)
@@ -558,8 +694,6 @@ mod tests {
     fn test_log_prob_finite_for_unseen_ngrams() {
         // Regression for the Modified Kneser-Ney backoff bug: an unseen n-gram whose
         // context IS seen must still yield a finite (backed-off) log probability.
-        // Previously discount(0) == 0 zeroed both the discounted term and the
-        // interpolation weight, giving prob = 0 and log_prob = -inf.
         let model = create_test_ngram_model();
 
         // "lazy" is a seen context, but "lazy dog" never occurs in the corpus.
@@ -577,52 +711,9 @@ mod tests {
             "unseen trigram must be finite, got {unseen3}"
         );
 
-        // An out-of-vocabulary word and an empty-token continuation (the case that
-        // triggered the WFST weight panics) must be finite too.
+        // An out-of-vocabulary word and an empty-token continuation must be finite too.
         assert!(model.log_prob("zzz_oov", &["the"]).is_finite());
         assert!(model.log_prob("", &["the"]).is_finite());
-    }
-
-    #[cfg(feature = "serde-extras")]
-    #[test]
-    fn static_dat_model_matches_source() {
-        use libdictenstein::double_array_trie::char::DoubleArrayTrieChar;
-
-        let model = create_test_ngram_model();
-        let static_model: NgramModel<DoubleArrayTrieChar<NgramEntry>> =
-            NgramModel::from_portable_static(model.to_portable());
-
-        // Structural equality.
-        assert_eq!(static_model.order(), model.order());
-        assert_eq!(static_model.vocab_size(), model.vocab_size());
-        assert_eq!(static_model.total_count(), model.total_count());
-        assert_eq!(static_model.ngram_count(), model.ngram_count());
-
-        // The static DAT-backed model must answer counts and log-probs identically to the
-        // source for seen, unseen, and OOV n-grams.
-        let cases: &[(&str, &[&str])] = &[
-            ("fox", &["quick", "brown"]),
-            ("brown", &["quick"]),
-            ("the", &[]),
-            ("dog", &["lazy"]),
-            ("dog", &["the", "lazy"]),
-            ("zzz_oov", &["the"]),
-        ];
-        for (w, ctx) in cases {
-            let mut toks = ctx.to_vec();
-            toks.push(w);
-            assert_eq!(
-                static_model.count(&toks),
-                model.count(&toks),
-                "count mismatch for {toks:?}"
-            );
-            let a = model.log_prob(w, ctx);
-            let b = static_model.log_prob(w, ctx);
-            assert!(
-                (a - b).abs() < 1e-12,
-                "log_prob mismatch for ({w:?}, {ctx:?}): {a} vs {b}"
-            );
-        }
     }
 
     #[test]
@@ -640,40 +731,35 @@ mod tests {
         let model = create_test_ngram_model();
         let temp_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
 
-        // Save the model
-        model.save(temp_file.path()).expect("Failed to save model");
+        // Save the model in portable (term-id) format.
+        model
+            .save_portable(temp_file.path())
+            .expect("Failed to save model");
 
-        // Verify file was created with content
         let metadata = std::fs::metadata(temp_file.path()).expect("Failed to get file metadata");
         assert!(metadata.len() > 0, "Saved model file should not be empty");
 
-        // Load the model
-        let loaded: NgramModel<DynamicDawgChar<NgramEntry>> =
-            NgramModel::load(temp_file.path()).expect("Failed to load model");
+        // Load it back into a fresh byte-native store.
+        let loaded: TestModel =
+            TestModel::load_portable(temp_file.path(), DynamicDawg::<NgramEntry>::new)
+                .expect("Failed to load model");
 
-        // Verify properties match
         assert_eq!(model.order(), loaded.order());
         assert_eq!(model.vocab_size(), loaded.vocab_size());
         assert_eq!(model.total_count(), loaded.total_count());
 
-        // Verify probabilities match
         let orig_prob = model.log_prob("fox", &["the", "quick"]);
         let loaded_prob = loaded.log_prob("fox", &["the", "quick"]);
         assert!(
             probs_equal(orig_prob, loaded_prob),
-            "Log probabilities should match after roundtrip: {} vs {}",
-            orig_prob,
-            loaded_prob
+            "Log probabilities should match after roundtrip: {orig_prob} vs {loaded_prob}"
         );
 
-        // Verify sentence probabilities match
         let orig_sentence_prob = model.sentence_log_prob(&["the", "quick", "brown", "fox"]);
         let loaded_sentence_prob = loaded.sentence_log_prob(&["the", "quick", "brown", "fox"]);
         assert!(
             probs_equal(orig_sentence_prob, loaded_sentence_prob),
-            "Sentence log probabilities should match: {} vs {}",
-            orig_sentence_prob,
-            loaded_sentence_prob
+            "Sentence log probabilities should match: {orig_sentence_prob} vs {loaded_sentence_prob}"
         );
     }
 
@@ -681,7 +767,7 @@ mod tests {
     #[cfg(feature = "serde-extras")]
     fn probs_equal(a: f64, b: f64) -> bool {
         if a.is_infinite() && b.is_infinite() {
-            a.signum() == b.signum() // Both -inf or both +inf
+            a.signum() == b.signum()
         } else if a.is_nan() || b.is_nan() {
             false
         } else {
@@ -691,18 +777,19 @@ mod tests {
 
     #[test]
     fn test_pathmap_model() {
+        // A trigram model over the natural in-memory byte backend answers a finite
+        // log probability (smoke test that training + scoring compose).
         let dir = TempDir::new().expect("Failed to create temp dir");
         let content = "the quick brown fox";
         let path = create_test_corpus(dir.path(), content);
         let reader = PlaintextReader::from_file(&path).expect("Failed to create reader");
 
-        let dictionary = PathMapDictionary::<NgramEntry>::new();
+        let dictionary = DynamicDawg::<NgramEntry>::new();
         let model = TrainerBuilder::new(dictionary)
             .order(3)
             .train(reader)
             .expect("N-gram training failed");
 
-        // Basic functionality check
         let log_prob = model.log_prob("fox", &["brown"]);
         assert!(log_prob.is_finite());
     }

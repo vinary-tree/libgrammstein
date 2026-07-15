@@ -1,8 +1,68 @@
 //! Unit tests for the shard coordinator.
 
-use super::super::{ImportState, ShardGranularity};
+use super::super::{compute_shard_key_from_token, ImportState, ShardGranularity};
 use super::*;
+use crate::ngram::vocabulary::encode_varint;
+use std::collections::HashMap;
 use tempfile::TempDir;
+
+/// Process-global token → term-id interner.
+///
+/// The coordinator is deliberately **vocabulary-free**: it stores whatever
+/// term-id byte key it is handed and routes on the first token's characters. A
+/// real import assigns ids from a `SharedVocabARTrie`; these unit tests only need
+/// SELF-CONSISTENT ids to form the concatenated-LEB128 key (no assertion depends
+/// on a specific id value — routing consults the token STRING, never the id). Ids
+/// start at 1, so a varint byte is never `\x00` (which would collide with the
+/// metadata-key prefix), exactly like `vocabulary::FIRST_VALID_INDEX`.
+fn term_id(token: &str) -> u64 {
+    static INTERNER: std::sync::OnceLock<std::sync::Mutex<HashMap<String, u64>>> =
+        std::sync::OnceLock::new();
+    let mut map = INTERNER
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .expect("interner mutex");
+    if let Some(&id) = map.get(token) {
+        return id;
+    }
+    let id = map.len() as u64 + 1;
+    map.insert(token.to_string(), id);
+    id
+}
+
+/// Concatenated LEB128 term-id byte key for a token sequence (the live n-gram
+/// representation — never a delimited string).
+fn ngram_key(tokens: &[&str]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(tokens.len() * 2);
+    for token in tokens {
+        encode_varint(term_id(token), &mut key);
+    }
+    key
+}
+
+/// Route a token sequence exactly as the importer does: first token's characters
+/// + sequence length, under the coordinator's configured granularity.
+fn route(coordinator: &ShardCoordinator, tokens: &[&str]) -> ShardKey {
+    compute_shard_key_from_token(
+        tokens[0],
+        tokens.len() as u8,
+        &coordinator.config().granularity,
+    )
+}
+
+/// Store a token n-gram the importer's way: first-token route + term-id key.
+fn store_ngram(
+    coordinator: &ShardCoordinator,
+    tokens: &[&str],
+    count: u64,
+) -> CoordinatorResult<bool> {
+    coordinator.store_in_shard(&route(coordinator, tokens), &ngram_key(tokens), count)
+}
+
+/// Look up a token n-gram the importer's way.
+fn get_ngram(coordinator: &ShardCoordinator, tokens: &[&str]) -> Option<u64> {
+    coordinator.get_in_shard(&route(coordinator, tokens), &ngram_key(tokens))
+}
 
 #[test]
 fn test_coordinator_create_and_store() {
@@ -12,25 +72,19 @@ fn test_coordinator_create_and_store() {
     let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
 
     // Store some n-grams
-    let was_new = coordinator
-        .store_ngram("the|quick", 10)
-        .expect("Failed to store");
+    let was_new = store_ngram(&coordinator, &["the", "quick"], 10).expect("Failed to store");
     assert!(was_new);
 
-    let was_new = coordinator
-        .store_ngram("the|quick", 5)
-        .expect("Failed to store");
+    let was_new = store_ngram(&coordinator, &["the", "quick"], 5).expect("Failed to store");
     assert!(!was_new);
 
-    let was_new = coordinator
-        .store_ngram("apple|pie", 3)
-        .expect("Failed to store");
+    let was_new = store_ngram(&coordinator, &["apple", "pie"], 3).expect("Failed to store");
     assert!(was_new);
 
     // Query
-    assert_eq!(coordinator.get("the|quick"), Some(15));
-    assert_eq!(coordinator.get("apple|pie"), Some(3));
-    assert_eq!(coordinator.get("nonexistent"), None);
+    assert_eq!(get_ngram(&coordinator, &["the", "quick"]), Some(15));
+    assert_eq!(get_ngram(&coordinator, &["apple", "pie"]), Some(3));
+    assert_eq!(get_ngram(&coordinator, &["no", "such"]), None);
 
     // Stats
     assert_eq!(coordinator.stats().unique_ngrams.load(Ordering::Relaxed), 2);
@@ -46,23 +100,17 @@ fn test_coordinator_routing() {
     let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
 
     // Store n-grams that should go to different shards
-    coordinator
-        .store_ngram("the|quick", 1)
-        .expect("Failed to store");
-    coordinator
-        .store_ngram("apple|pie", 1)
-        .expect("Failed to store");
-    coordinator
-        .store_ngram("zebra|crossing", 1)
-        .expect("Failed to store");
+    store_ngram(&coordinator, &["the", "quick"], 1).expect("Failed to store");
+    store_ngram(&coordinator, &["apple", "pie"], 1).expect("Failed to store");
+    store_ngram(&coordinator, &["zebra", "crossing"], 1).expect("Failed to store");
 
     // Should have 3 different shards open
     assert_eq!(coordinator.open_shard_count(), 3);
 
-    // Verify routing
-    assert_eq!(coordinator.route_ngram("the|quick").prefix, "th");
-    assert_eq!(coordinator.route_ngram("apple|pie").prefix, "ap");
-    assert_eq!(coordinator.route_ngram("zebra|crossing").prefix, "ze");
+    // Verify routing is by the first token's characters (TwoChar → 2-char prefix).
+    assert_eq!(route(&coordinator, &["the", "quick"]).prefix, "th");
+    assert_eq!(route(&coordinator, &["apple", "pie"]).prefix, "ap");
+    assert_eq!(route(&coordinator, &["zebra", "crossing"]).prefix, "ze");
 }
 
 #[test]
@@ -74,11 +122,15 @@ fn test_coordinator_batch_store() {
 
     let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
 
+    // All three route to the "th" shard (first tokens the/the/this).
     let key = ShardKey::new("th");
+    let the_quick = ngram_key(&["the", "quick"]);
+    let the_slow = ngram_key(&["the", "slow"]);
+    let this_is = ngram_key(&["this", "is"]);
     let ngrams: Vec<(&[u8], u64)> = vec![
-        (b"the|quick" as &[u8], 10u64),
-        (b"the|slow" as &[u8], 5),
-        (b"this|is" as &[u8], 3),
+        (the_quick.as_slice(), 10u64),
+        (the_slow.as_slice(), 5),
+        (this_is.as_slice(), 3),
     ];
 
     let new_count = coordinator
@@ -86,31 +138,27 @@ fn test_coordinator_batch_store() {
         .expect("Failed to batch store");
 
     assert_eq!(new_count, 3);
-    assert_eq!(coordinator.get("the|quick"), Some(10));
-    assert_eq!(coordinator.get("the|slow"), Some(5));
-    assert_eq!(coordinator.get("this|is"), Some(3));
+    assert_eq!(get_ngram(&coordinator, &["the", "quick"]), Some(10));
+    assert_eq!(get_ngram(&coordinator, &["the", "slow"]), Some(5));
+    assert_eq!(get_ngram(&coordinator, &["this", "is"]), Some(3));
 }
 
 #[test]
 fn test_coordinator_checkpoint() {
     let dir = TempDir::new().expect("Failed to create temp dir");
-    let config = ShardConfig::new(dir.path().join("shards"));
+    let config =
+        ShardConfig::new(dir.path().join("shards")).with_granularity(ShardGranularity::TwoChar);
 
     {
         let coordinator = ShardCoordinator::new(config.clone()).expect("Failed to create");
-        coordinator
-            .store_ngram("the|quick", 10)
-            .expect("Failed to store");
+        store_ngram(&coordinator, &["the", "quick"], 10).expect("Failed to store");
         coordinator.checkpoint_all().expect("Failed to checkpoint");
     }
 
-    // Reopen and verify
+    // Reopen and verify — `get_in_shard` lazily opens the shard file from disk.
     {
         let coordinator = ShardCoordinator::open(config).expect("Failed to open");
-        // Need to explicitly open the shard since we didn't query it yet
-        let key = ShardKey::new("th");
-        let _ = coordinator.get_or_create_shard(&key);
-        assert_eq!(coordinator.get("the|quick"), Some(10));
+        assert_eq!(get_ngram(&coordinator, &["the", "quick"]), Some(10));
     }
 }
 
@@ -135,9 +183,7 @@ fn test_coordinator_with_global_checkpoint() {
         }
 
         // Store some data
-        coordinator
-            .store_ngram("the|quick", 10)
-            .expect("Failed to store");
+        store_ngram(&coordinator, &["the", "quick"], 10).expect("Failed to store");
 
         // Mark prefix as in-progress
         let key = ShardKey::new("th");
@@ -195,9 +241,7 @@ fn test_coordinator_recovery_detection() {
             ShardCoordinator::new_with_checkpoints(config.clone()).expect("Failed to create");
 
         coordinator.start_import().expect("Failed to start import");
-        coordinator
-            .store_ngram("the|quick", 10)
-            .expect("Failed to store");
+        store_ngram(&coordinator, &["the", "quick"], 10).expect("Failed to store");
 
         let key = ShardKey::new("th");
         coordinator
@@ -240,15 +284,9 @@ fn test_parallel_sync() {
     let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
 
     // Store n-grams in multiple shards
-    coordinator
-        .store_ngram("the|quick", 10)
-        .expect("Failed to store");
-    coordinator
-        .store_ngram("apple|pie", 5)
-        .expect("Failed to store");
-    coordinator
-        .store_ngram("zebra|crossing", 3)
-        .expect("Failed to store");
+    store_ngram(&coordinator, &["the", "quick"], 10).expect("Failed to store");
+    store_ngram(&coordinator, &["apple", "pie"], 5).expect("Failed to store");
+    store_ngram(&coordinator, &["zebra", "crossing"], 3).expect("Failed to store");
 
     // Should have 3 shards open
     assert_eq!(coordinator.open_shard_count(), 3);
@@ -295,9 +333,7 @@ fn test_is_shard_syncing() {
     let coordinator = ShardCoordinator::new(config).expect("Failed to create coordinator");
 
     // Store some data
-    coordinator
-        .store_ngram("the|quick", 10)
-        .expect("Failed to store");
+    store_ngram(&coordinator, &["the", "quick"], 10).expect("Failed to store");
 
     let key = ShardKey::new("th");
 
@@ -339,15 +375,9 @@ fn test_parallel_checkpoint() {
         .expect("Failed to create coordinator");
 
     // Store n-grams in multiple shards
-    coordinator
-        .store_ngram("the|quick", 10)
-        .expect("Failed to store");
-    coordinator
-        .store_ngram("apple|pie", 5)
-        .expect("Failed to store");
-    coordinator
-        .store_ngram("zebra|crossing", 3)
-        .expect("Failed to store");
+    store_ngram(&coordinator, &["the", "quick"], 10).expect("Failed to store");
+    store_ngram(&coordinator, &["apple", "pie"], 5).expect("Failed to store");
+    store_ngram(&coordinator, &["zebra", "crossing"], 3).expect("Failed to store");
 
     // Parallel checkpoint
     coordinator
@@ -367,9 +397,9 @@ fn test_parallel_checkpoint() {
     }
 
     // Verify data survives checkpoint
-    assert_eq!(coordinator.get("the|quick"), Some(10));
-    assert_eq!(coordinator.get("apple|pie"), Some(5));
-    assert_eq!(coordinator.get("zebra|crossing"), Some(3));
+    assert_eq!(get_ngram(&coordinator, &["the", "quick"]), Some(10));
+    assert_eq!(get_ngram(&coordinator, &["apple", "pie"]), Some(5));
+    assert_eq!(get_ngram(&coordinator, &["zebra", "crossing"]), Some(3));
 }
 
 #[test]
@@ -385,8 +415,9 @@ fn test_checkpoint_coexists_with_concurrent_writers() {
         ShardCoordinator::new_with_checkpoints(config).expect("Failed to create coordinator"),
     );
 
-    // Seed shard "th" so it exists before the writer/checkpoint race begins.
-    coordinator.store_ngram("th|seed", 1).expect("seed store");
+    // Seed shard "th" so it exists before the writer/checkpoint race begins. All
+    // writers share the first token "th", so every write lands in the "th" shard.
+    store_ngram(&coordinator, &["th", "seed"], 1).expect("seed store");
 
     const WRITERS: usize = 3;
     const PER_WRITER: usize = 30;
@@ -396,9 +427,8 @@ fn test_checkpoint_coexists_with_concurrent_writers() {
             let coord = std::sync::Arc::clone(&coordinator);
             std::thread::spawn(move || {
                 for i in 0..PER_WRITER {
-                    coord
-                        .store_ngram(&format!("th|w{}_{}", w, i), 1)
-                        .expect("concurrent store");
+                    let suffix = format!("w{}_{}", w, i);
+                    store_ngram(&coord, &["th", suffix.as_str()], 1).expect("concurrent store");
                 }
             })
         })
@@ -425,15 +455,16 @@ fn test_checkpoint_coexists_with_concurrent_writers() {
         .coordinated_checkpoint_parallel(4)
         .expect("final checkpoint");
 
-    assert_eq!(coordinator.get("th|seed"), Some(1));
+    assert_eq!(get_ngram(&coordinator, &["th", "seed"]), Some(1));
     for w in 0..WRITERS {
         for i in 0..PER_WRITER {
-            let key = format!("th|w{}_{}", w, i);
+            let suffix = format!("w{}_{}", w, i);
+            let tokens = ["th", suffix.as_str()];
             assert_eq!(
-                coordinator.get(&key),
+                get_ngram(&coordinator, &tokens),
                 Some(1),
-                "write {} lost under concurrent checkpoint",
-                key
+                "write {:?} lost under concurrent checkpoint",
+                tokens
             );
         }
     }
@@ -450,12 +481,9 @@ fn test_flush_lockfree_over_threshold_skips_under_threshold() {
 
     // Populate two shards, each with 5 entries
     for i in 0..5 {
-        coordinator
-            .store_ngram(&format!("th|w{}", i), 1)
-            .expect("store");
-        coordinator
-            .store_ngram(&format!("ap|w{}", i), 1)
-            .expect("store");
+        let suffix = format!("w{}", i);
+        store_ngram(&coordinator, &["th", suffix.as_str()], 1).expect("store");
+        store_ngram(&coordinator, &["ap", suffix.as_str()], 1).expect("store");
     }
 
     // Threshold of 10 — neither shard is over
@@ -478,14 +506,12 @@ fn test_flush_lockfree_over_threshold_flushes_over() {
 
     // Populate one shard with 15 entries (over threshold), another with 5
     for i in 0..15 {
-        coordinator
-            .store_ngram(&format!("th|w{}", i), 1)
-            .expect("store");
+        let suffix = format!("w{}", i);
+        store_ngram(&coordinator, &["th", suffix.as_str()], 1).expect("store");
     }
     for i in 0..5 {
-        coordinator
-            .store_ngram(&format!("ap|w{}", i), 1)
-            .expect("store");
+        let suffix = format!("w{}", i);
+        store_ngram(&coordinator, &["ap", suffix.as_str()], 1).expect("store");
     }
 
     let flushed = coordinator
@@ -506,19 +532,16 @@ fn test_total_lockfree_entries_aggregates() {
 
     // Three shards with 5/10/15 entries
     for i in 0..5 {
-        coordinator
-            .store_ngram(&format!("th|w{}", i), 1)
-            .expect("store");
+        let suffix = format!("w{}", i);
+        store_ngram(&coordinator, &["th", suffix.as_str()], 1).expect("store");
     }
     for i in 0..10 {
-        coordinator
-            .store_ngram(&format!("ap|w{}", i), 1)
-            .expect("store");
+        let suffix = format!("w{}", i);
+        store_ngram(&coordinator, &["ap", suffix.as_str()], 1).expect("store");
     }
     for i in 0..15 {
-        coordinator
-            .store_ngram(&format!("ze|w{}", i), 1)
-            .expect("store");
+        let suffix = format!("w{}", i);
+        store_ngram(&coordinator, &["ze", suffix.as_str()], 1).expect("store");
     }
 
     assert_eq!(coordinator.total_lockfree_entries(), 30);
@@ -540,10 +563,11 @@ fn test_commit_chunk_tx_does_not_mark_complete() {
         .begin_prefix_tx(&shard_key, "th")
         .expect("begin_prefix_tx");
 
-    // Insert 5 entries
+    // Insert 5 entries as term-id byte keys (never delimited text).
     for i in 0..5 {
-        let key = format!("the|w{}", i);
-        coordinator.tx_insert(&mut tx, key.as_bytes(), 100 + i as u64);
+        let suffix = format!("w{}", i);
+        let key = ngram_key(&["the", suffix.as_str()]);
+        coordinator.tx_insert(&mut tx, &key, 100 + i as u64);
     }
 
     let committed = coordinator

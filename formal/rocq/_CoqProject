@@ -16,3 +16,7 @@
 MknStatistics.v
 FrequencyCountsMerge.v
 MknFloatBounds.v
+
+# Correction cascade (T_lex ∘ T_gram): varint term-id view + noisy-channel decode
+VarintTermIdView.v
+NoisyChannelDecode.v

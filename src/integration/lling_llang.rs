@@ -5,8 +5,8 @@
 
 use crate::embedding::SubwordEmbedding;
 use crate::hybrid::{HybridConfig, HybridLanguageModel};
-use crate::ngram::{NgramEntry, NgramModel};
-use libdictenstein::MutableMappedDictionary;
+use crate::ngram::store::NgramLookup;
+use crate::ngram::NgramModel;
 use lling_llang::layers::LanguageModel;
 use std::sync::Arc;
 
@@ -29,20 +29,20 @@ use std::sync::Arc;
 /// // Use in lling-llang pipeline
 /// let layer = LanguageModelLayer::new(Box::new(lm));
 /// ```
-pub enum GrammsteinLanguageModel<D>
+pub enum GrammsteinLanguageModel<S>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+    S: NgramLookup + Send + Sync,
 {
     /// Pure n-gram language model.
-    Ngram(Arc<NgramModel<D>>),
+    Ngram(Arc<NgramModel<S>>),
 
     /// Hybrid model combining n-gram and embeddings.
-    Hybrid(Arc<HybridLanguageModel<D>>),
+    Hybrid(Arc<HybridLanguageModel<S>>),
 }
 
-impl<D> GrammsteinLanguageModel<D>
+impl<S> GrammsteinLanguageModel<S>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+    S: NgramLookup + Send + Sync,
 {
     /// Create from an n-gram model.
     ///
@@ -51,12 +51,12 @@ where
     /// ```ignore
     /// let lm = GrammsteinLanguageModel::from_ngram(ngram_model);
     /// ```
-    pub fn from_ngram(model: NgramModel<D>) -> Self {
+    pub fn from_ngram(model: NgramModel<S>) -> Self {
         Self::Ngram(Arc::new(model))
     }
 
     /// Create from an Arc-wrapped n-gram model.
-    pub fn from_ngram_arc(model: Arc<NgramModel<D>>) -> Self {
+    pub fn from_ngram_arc(model: Arc<NgramModel<S>>) -> Self {
         Self::Ngram(model)
     }
 
@@ -68,12 +68,12 @@ where
     /// let hybrid = HybridLanguageModel::new(ngram, embedding, config);
     /// let lm = GrammsteinLanguageModel::from_hybrid(hybrid);
     /// ```
-    pub fn from_hybrid(model: HybridLanguageModel<D>) -> Self {
+    pub fn from_hybrid(model: HybridLanguageModel<S>) -> Self {
         Self::Hybrid(Arc::new(model))
     }
 
     /// Create from an Arc-wrapped hybrid model.
-    pub fn from_hybrid_arc(model: Arc<HybridLanguageModel<D>>) -> Self {
+    pub fn from_hybrid_arc(model: Arc<HybridLanguageModel<S>>) -> Self {
         Self::Hybrid(model)
     }
 
@@ -86,7 +86,7 @@ where
     /// ```ignore
     /// let lm = GrammsteinLanguageModel::from_components(ngram, embedding);
     /// ```
-    pub fn from_components(ngram: NgramModel<D>, embedding: SubwordEmbedding) -> Self {
+    pub fn from_components(ngram: NgramModel<S>, embedding: SubwordEmbedding) -> Self {
         Self::Hybrid(Arc::new(HybridLanguageModel::with_defaults(
             ngram, embedding,
         )))
@@ -94,7 +94,7 @@ where
 
     /// Create a hybrid model with custom configuration.
     pub fn from_components_with_config(
-        ngram: NgramModel<D>,
+        ngram: NgramModel<S>,
         embedding: SubwordEmbedding,
         config: HybridConfig,
     ) -> Self {
@@ -107,7 +107,7 @@ where
     }
 
     /// Get reference to the n-gram model (if using pure n-gram mode).
-    pub fn ngram_model(&self) -> Option<&NgramModel<D>> {
+    pub fn ngram_model(&self) -> Option<&NgramModel<S>> {
         match self {
             Self::Ngram(model) => Some(model),
             Self::Hybrid(model) => Some(model.ngram_model()),
@@ -115,7 +115,7 @@ where
     }
 
     /// Get reference to the hybrid model (if using hybrid mode).
-    pub fn hybrid_model(&self) -> Option<&HybridLanguageModel<D>> {
+    pub fn hybrid_model(&self) -> Option<&HybridLanguageModel<S>> {
         match self {
             Self::Ngram(_) => None,
             Self::Hybrid(model) => Some(model),
@@ -123,9 +123,9 @@ where
     }
 }
 
-impl<D> LanguageModel for GrammsteinLanguageModel<D>
+impl<S> LanguageModel for GrammsteinLanguageModel<S>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+    S: NgramLookup + Send + Sync,
 {
     fn score_sequence(&self, tokens: &[&str]) -> f64 {
         match self {
@@ -150,9 +150,9 @@ where
 }
 
 // Implement Clone for sharing across threads
-impl<D> Clone for GrammsteinLanguageModel<D>
+impl<S> Clone for GrammsteinLanguageModel<S>
 where
-    D: MutableMappedDictionary<Value = NgramEntry> + Send + Sync,
+    S: NgramLookup + Send + Sync,
 {
     fn clone(&self) -> Self {
         match self {
@@ -167,12 +167,16 @@ mod tests {
     use super::*;
     use crate::corpus::PlaintextReader;
     use crate::embedding::EmbeddingTrainerBuilder;
-    use crate::ngram::TrainerBuilder;
-    use libdictenstein::pathmap::PathMapDictionary;
+    use crate::ngram::store::TermIdStore;
+    use crate::ngram::{NgramEntry, TrainerBuilder};
+    use libdictenstein::dynamic_dawg::DynamicDawg;
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn create_test_models() -> (NgramModel<PathMapDictionary<NgramEntry>>, SubwordEmbedding) {
+    fn create_test_models() -> (
+        NgramModel<TermIdStore<DynamicDawg<NgramEntry>>>,
+        SubwordEmbedding,
+    ) {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let content = "the quick brown fox the quick brown dog the lazy fox \
                        the quick brown fox the quick brown dog the lazy fox";
@@ -183,7 +187,7 @@ mod tests {
         let reader = PlaintextReader::from_file(&path).expect("Failed to create reader");
 
         // Train n-gram model
-        let dictionary = PathMapDictionary::<NgramEntry>::new();
+        let dictionary = DynamicDawg::<NgramEntry>::new();
         let ngram_model = TrainerBuilder::new(dictionary)
             .order(3)
             .train(reader)

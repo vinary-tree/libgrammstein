@@ -9,29 +9,24 @@
 //! - Orders 1-5 (unigrams through 5-grams)
 //! - Modified Kneser-Ney smoothing for probability estimation
 //! - Streaming corpus training with Rayon parallelism
-//! - Efficient probability queries via trie navigation
+//! - Efficient probability queries via term-id trie navigation
 //!
 //! # Key Encoding
 //!
-//! N-gram keys can be encoded in two ways:
+//! There is exactly one live n-gram store, [`TermIdStore`]: n-grams are keyed as
+//! **LEB128-varint-encoded `u64` term-id sequences stored as raw bytes** — the
+//! same self-delimiting encoding the Google-Books count store uses. Each word
+//! maps to a `u64` term-id (see the [`vocabulary`] module); the encoding is
+//! compact (1-3 bytes for common ids) and delimiter-collision-free. No
+//! `'|'`-joined string model exists; an old `'|'`-keyed portable file is re-keyed
+//! onto term-ids by a single one-shot reader at load time.
 //!
-//! 1. **Legacy (pipe-separated)**: Simple `"the|quick|brown"` encoding. Deprecated
-//!    because it can corrupt data if tokens contain `|`.
+//! # Model Type Aliases
 //!
-//! 2. **Vocabulary-indexed (varint)**: Each word maps to a u64 index, encoded as
-//!    LEB128 varint bytes stored as Latin-1 characters. This produces compact keys
-//!    and supports unlimited vocabulary size. See [`vocabulary`] module.
-//!
-//! # Dictionary Backend Type Aliases
-//!
-//! Two type aliases are provided for common use cases:
-//!
-//! - [`SerializableNgramModel`]: Uses `DynamicDawgChar` backend for models that need
-//!   to be saved/loaded. This backend supports full serde serialization.
-//!
-//! - [`PathMapNgramModel`]: Uses `PathMapDictionary` backend for integration with
-//!   lling-llang's shared lattice architecture. This backend does NOT support serde
-//!   serialization but provides better memory sharing characteristics.
+//! - [`InMemoryTermIdModel`]: the byte-native model over an in-memory
+//!   `DynamicDawg<NgramEntry>` — the training + inference target.
+//! - [`PersistentTermIdModel`]: the byte-native model over a disk-backed
+//!   `Arc<PersistentARTrie<NgramEntry>>`.
 //!
 //! # Example
 //!
@@ -49,11 +44,13 @@ mod entry;
 pub mod metadata_filtering_zipper;
 mod model;
 pub mod smoothing;
+pub mod store;
 mod trainer;
-mod trie;
 pub mod u64_view;
 pub mod vocabulary;
-pub mod vocabulary_indexed;
+
+#[cfg(test)]
+mod migration_tests;
 
 #[cfg(feature = "serde-extras")]
 pub mod accumulator;
@@ -62,12 +59,14 @@ pub use entry::{NgramEntry, NgramEntrySnapshot};
 pub use metadata_filtering_zipper::{MetadataFilteringZipper, METADATA_PREFIX};
 pub use model::NgramModel;
 #[cfg(feature = "serde-extras")]
-pub use model::{PortableNgramModel, PortableVocabulary};
+pub use model::{KeyEncoding, PortableNgramModel, PortableVocabulary};
+pub use store::{
+    ByteMappedDictionary, IterableNgramStore, MutableByteMappedDictionary, MutableNgramStore,
+    NgramLookup, TermIdStore,
+};
 pub use trainer::{
     NgramTrainer, TrainerBuilder, TrainingConfig, TrainingProgress, TrainingStats, VocabularyMode,
 };
-#[allow(deprecated)]
-pub use trie::{IterableDictionary, NgramTrie, NGRAM_SEPARATOR};
 pub use u64_view::{U64NgramNode, U64NgramView, VarintByteUnit};
 pub use vocabulary::{
     create_vocabulary, create_vocabulary_with_bloom, decode_ngram_key, decode_varint,
@@ -77,53 +76,39 @@ pub use vocabulary::{
     DurabilityPolicy, PersistentVocabARTrie, RecoveryReport, SharedVocabARTrie, VocabSyncHandle,
     VocabularyError, VocabularyResult, FIRST_VALID_INDEX,
 };
-pub use vocabulary_indexed::{
-    decode_key_to_indices, VocabularyIndexedDictionary, VocabularyIndexedNode,
-};
 
 #[cfg(feature = "serde-extras")]
 pub use accumulator::{AccumulatorError, AccumulatorResult, NgramAccumulator};
 
-// Dictionary backend type aliases for common use cases
+// Store-backend type aliases for common use cases
 
-/// Serializable n-gram model using DynamicDawgChar backend.
+/// In-memory byte-native n-gram model — the natural training + inference target.
 ///
-/// Use this when you need to save/load models to/from disk.
-/// This backend supports full serde serialization.
+/// Backed by [`TermIdStore`] over an in-memory `DynamicDawg<NgramEntry>` (byte
+/// unit): LEB128 term-id keys, 1× memory (the char-lift's ~4× gone), and
+/// delimiter-collision-free. This is what [`TrainerBuilder::new`] with a
+/// `DynamicDawg<NgramEntry>` backend produces.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use libgrammstein::ngram::SerializableNgramModel;
-/// use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+/// use libgrammstein::ngram::{InMemoryTermIdModel, TrainerBuilder};
+/// use libdictenstein::dynamic_dawg::DynamicDawg;
 ///
-/// // Train and save
-/// let dictionary = DynamicDawgChar::<NgramEntry>::new();
-/// let model = TrainerBuilder::new(dictionary).order(5).train(reader)?;
-/// model.save("model.bin")?;
+/// let model = TrainerBuilder::new(DynamicDawg::new()).order(5).train(reader)?;
+/// model.save_portable("model.bin")?; // portable term-id format (+ vocabulary)
 ///
-/// // Load later
-/// let model: SerializableNgramModel = SerializableNgramModel::load("model.bin")?;
+/// let model: InMemoryTermIdModel =
+///     InMemoryTermIdModel::load_portable("model.bin", DynamicDawg::new)?;
 /// ```
-pub type SerializableNgramModel =
-    NgramModel<libdictenstein::dynamic_dawg::char::DynamicDawgChar<NgramEntry>>;
+pub type InMemoryTermIdModel =
+    NgramModel<TermIdStore<libdictenstein::dynamic_dawg::DynamicDawg<NgramEntry>>>;
 
-/// Memory-efficient n-gram model using PathMapDictionary backend.
+/// Disk-backed byte-native n-gram model.
 ///
-/// Use this for lling-llang integration with shared lattice structures.
-/// This backend does NOT support serde serialization but provides
-/// better memory sharing characteristics.
-///
-/// # Example
-///
-/// ```ignore
-/// use libgrammstein::ngram::PathMapNgramModel;
-/// use libdictenstein::pathmap::PathMapDictionary;
-///
-/// let dictionary = PathMapDictionary::<NgramEntry>::new();
-/// let model = TrainerBuilder::new(dictionary).order(5).train(reader)?;
-///
-/// // Use with lling-llang's LanguageModelLayer
-/// let lm = GrammsteinLanguageModel::from_ngram(model);
-/// ```
-pub type PathMapNgramModel = NgramModel<libdictenstein::pathmap::PathMapDictionary<NgramEntry>>;
+/// Backed by [`TermIdStore`] over a persistent `Arc<PersistentARTrie<NgramEntry>>`
+/// (byte unit) — parallels the Google-Books count store and composes directly
+/// with [`U64NgramView`] for fuzzy term-id correction.
+pub type PersistentTermIdModel = NgramModel<
+    TermIdStore<std::sync::Arc<libdictenstein::persistent_artrie::PersistentARTrie<NgramEntry>>>,
+>;

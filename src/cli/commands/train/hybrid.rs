@@ -10,8 +10,8 @@ pub(super) fn train_hybrid(args: TrainHybridArgs, verbose: bool, quiet: bool) ->
     use crate::hybrid::{
         HybridConfig, HybridLanguageModel, InterpolationStrategy as HybridStrategy,
     };
-    use crate::ngram::NgramModel;
-    use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+    use crate::ngram::InMemoryTermIdModel;
+    use libdictenstein::dynamic_dawg::DynamicDawg;
 
     if verbose {
         eprintln!("Creating hybrid model");
@@ -35,9 +35,9 @@ pub(super) fn train_hybrid(args: TrainHybridArgs, verbose: bool, quiet: bool) ->
         eprintln!("Loading N-gram model...");
     }
 
-    // Load N-gram model using portable format (with DynamicDawgChar backend)
-    let ngram_model: NgramModel<DynamicDawgChar<NgramEntry>> =
-        NgramModel::load_portable(&args.ngram_model, DynamicDawgChar::new)
+    // Load N-gram model using the portable term-id format (byte-native backend).
+    let ngram_model: InMemoryTermIdModel =
+        InMemoryTermIdModel::load_portable(&args.ngram_model, DynamicDawg::<NgramEntry>::new)
             .map_err(|e| CliError::io(format!("Failed to load N-gram model: {}", e)))?;
 
     if verbose {

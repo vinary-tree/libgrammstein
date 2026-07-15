@@ -1,28 +1,27 @@
-//! N-gram → shard routing and direct store/get operations.
+//! N-gram → shard routing and direct store/get operations (byte-native).
 //!
-//! The methods in this file fan n-gram keys out to the right shard based on
-//! the configured [`ShardGranularity`] (prefix-based or hash-based) and
-//! delegate the actual storage to the per-shard `ShardHandle`. Used by
-//! `NgramStorage::store_*` / `get_*` and by the importer's per-record
-//! fallback path.
+//! The methods here fan **term-id byte keys** (concatenated LEB128 varints; see
+//! `crate::ngram::vocabulary`) out to the right shard based on the configured
+//! [`ShardGranularity`] (prefix-based or hash-based) and delegate the actual
+//! storage to the per-shard `ShardHandle`. Routing consults only the **first
+//! token's characters** and the **sequence length**
+//! ([`compute_shard_key_from_token`]) — never a delimited string and never a
+//! term-id *value*. The coordinator is vocabulary-free: callers that hold the
+//! vocabulary (`NgramStorage::store_*` / `get_*`, `ShardedView`, the importer's
+//! per-record fallback) encode tokens to term-ids and pass the byte key here.
 
 use std::sync::atomic::Ordering;
 
-use super::super::routing::{compute_shard_key, compute_shard_key_from_token, ngram_order};
+use super::super::routing::compute_shard_key_from_token;
 use super::{CoordinatorResult, ShardCoordinator, ShardKey};
 
 impl ShardCoordinator {
-    /// Compute the shard key for an n-gram.
-    pub fn route_ngram(&self, ngram: &str) -> ShardKey {
-        let order = ngram_order(ngram);
-        compute_shard_key(ngram, order, &self.config.granularity)
-    }
-
     /// Compute the shard key from tokens (for vocabulary-indexed encoding).
     ///
-    /// This routes based on the first token before encoding to PUA characters.
-    /// Use this when storing vocabulary-indexed n-grams where the key is a
-    /// sequence of PUA characters rather than pipe-separated tokens.
+    /// Routes on the first token's characters + sequence length, so the n-gram's
+    /// stored key can be a concatenated LEB128 varint **term-id** byte sequence
+    /// (not a delimited string). The routing decision is independent of the
+    /// term-id *values*, so it is stable across vocabularies.
     ///
     /// # Arguments
     ///
@@ -32,28 +31,9 @@ impl ShardCoordinator {
     ///
     /// A `ShardKey` identifying which shard should store this n-gram.
     pub fn route_tokens(&self, tokens: &[&str]) -> ShardKey {
-        let first_token = tokens.first().map(|s| *s).unwrap_or("");
+        let first_token = tokens.first().copied().unwrap_or("");
         let order = tokens.len() as u8;
         compute_shard_key_from_token(first_token, order, &self.config.granularity)
-    }
-
-    /// Store an n-gram count.
-    ///
-    /// Routes the n-gram to the appropriate shard and increments its count.
-    /// This method acquires a write lock on the shard, so it should be used
-    /// for batch operations where possible.
-    ///
-    /// # Arguments
-    ///
-    /// * `ngram` - The n-gram string (pipe-separated tokens)
-    /// * `count` - The count to add
-    ///
-    /// # Returns
-    ///
-    /// `true` if this was a new n-gram, `false` if it already existed.
-    pub fn store_ngram(&self, ngram: &str, count: u64) -> CoordinatorResult<bool> {
-        let key = self.route_ngram(ngram);
-        self.store_in_shard(&key, ngram.as_bytes(), count)
     }
 
     /// Store an encoded n-gram key in a specific shard.
@@ -63,7 +43,7 @@ impl ShardCoordinator {
     ///
     /// # Arguments
     ///
-    /// * `shard_key` - The shard key (from `route_tokens` or `route_ngram`)
+    /// * `shard_key` - The shard key (from `route_tokens`)
     /// * `encoded_key` - The encoded n-gram key to store
     /// * `count` - The count to add
     ///
@@ -128,34 +108,6 @@ impl ShardCoordinator {
         Ok(new_count)
     }
 
-    /// Get the count for an n-gram (text-based routing, byte-keyed lookup).
-    pub fn get(&self, ngram: &str) -> Option<u64> {
-        let key = self.route_ngram(ngram);
-        let ngram_bytes = ngram.as_bytes();
-
-        if let Some(shard) = self.shards.get(&key) {
-            let guard = shard.read();
-            return guard.get(ngram_bytes);
-        }
-
-        // Shard not loaded - check if file exists
-        let path = self.config.shard_path(&key.as_file_stem());
-        if path.exists() {
-            // Load shard and query
-            if let Ok(shard) = self.get_or_create_shard(&key) {
-                let guard = shard.read();
-                return guard.get(ngram_bytes);
-            }
-        }
-
-        None
-    }
-
-    /// Check if an n-gram exists.
-    pub fn contains(&self, ngram: &str) -> bool {
-        self.get(ngram).is_some()
-    }
-
     /// Get the count for an encoded key in a specific shard.
     ///
     /// Use this when you have already computed the shard key and the encoded
@@ -163,7 +115,7 @@ impl ShardCoordinator {
     ///
     /// # Arguments
     ///
-    /// * `shard_key` - The shard key (from `route_tokens` or `route_ngram`)
+    /// * `shard_key` - The shard key (from `route_tokens`)
     /// * `encoded_key` - The encoded n-gram key to look up
     pub fn get_in_shard(&self, shard_key: &ShardKey, encoded_key: &[u8]) -> Option<u64> {
         if let Some(shard) = self.shards.get(shard_key) {
