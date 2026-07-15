@@ -19,6 +19,15 @@ for f in docs/diagrams/*.puml; do plantuml -tsvg "$f"; done
 plantuml -tsvg docs/diagrams/correction-component-map.puml
 ```
 
+> **Render `<latex>` diagrams under an LTS JVM (Java ≤ 22).** JLaTeXMath draws some
+> symbols at their Latin-1 font codepoints, and **Java 26 regressed** the rendering
+> of the soft-hyphen codepoint `U+00AD` — it silently drops whatever glyph is mapped
+> there, which includes `\otimes` (verified: `\otimes` renders under Java 11/17/21/22
+> and is blank under Java 26). If your default `java` is 26+, run PlantUML on an LTS
+> JVM, e.g. `` `/usr/lib/jvm/java-21-openjdk/bin/java -jar` `` `/usr/share/java/plantuml/plantuml.jar -tsvg <file>.puml`
+> (or `archlinux-java set java-21-openjdk`). Diagrams without `<latex>` math render
+> identically on any JVM.
+
 ## Conventions
 
 - **House style, not `!theme`.** Each file sets explicit `skinparam`s (background

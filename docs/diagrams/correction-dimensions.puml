@@ -26,7 +26,7 @@ rectangle "**DIM 3 · Syntactic**\nCFG membership (constraint)\nlling-llang CfgF
 rectangle "**DIM 4 · Contextual**\n<latex>-\log \mathbb{P}(w \mid \text{ctx})</latex> (likelihood)\nlibgrammstein MKN n-gram" as d4 #2E7D32
 rectangle "**DIM 5 · Semantic**\ncos-similarity → pseudo-<latex>\mathbb{P}</latex>\nlibgrammstein embeddings" as d5 #388E3C
 
-rectangle "**Semiring**  <latex>(K, \oplus, \scalebox{0.55}{\bigotimes}, \bar{0}, \bar{1})</latex>\n<latex>\scalebox{0.55}{\bigotimes}</latex> combines factors along a path\n<latex>\oplus</latex> selects among competing paths\nTropical: <latex>(\min, +)</latex>   Log: <latex>(\operatorname{logsumexp}, +)</latex>" as sr #00838F
+rectangle "**Semiring**  <latex>(K, \oplus, \otimes, \bar{0}, \bar{1})</latex>\n<latex>\otimes</latex> combines factors along a path\n<latex>\oplus</latex> selects among competing paths\nTropical: <latex>(\min, +)</latex>   Log: <latex>(\operatorname{logsumexp}, +)</latex>" as sr #00838F
 rectangle "**joint score**\nbest correction = shortest / max-<latex>\mathbb{P}</latex> path" as js #455A64
 
 nc --> d1 : channel
