@@ -19,7 +19,10 @@ use super::store::{MutableByteMappedDictionary, TermIdStore};
 #[cfg(feature = "serde-extras")]
 use super::tempdir::{create_guarded_temp_vocab_dir, VocabTempDir};
 #[cfg(feature = "serde-extras")]
-use super::vocabulary::{create_vocabulary, encode_ngram_key_bytes, SharedVocabARTrie};
+use super::vocabulary::{
+    create_vocabulary, decode_ngram_key_bytes, encode_indices_to_key_bytes, encode_ngram_key_bytes,
+    SharedVocabARTrie, FIRST_VALID_INDEX,
+};
 
 #[cfg(feature = "serde-extras")]
 use std::path::Path;
@@ -332,30 +335,20 @@ pub struct PortableNgramModel {
     pub vocab_fingerprint: Option<u64>,
 }
 
-/// Deterministic, version-stable fingerprint of a vocabulary: its length mixed
-/// with an FNV-1a digest over every `(term-id, term-bytes)` pair.
+/// Deterministic, version-stable fingerprint of a vocabulary, computed over its
+/// **dense** normalized form — present terms in ascending id order, renumbered
+/// `FIRST_VALID_INDEX, +1, +2, …` — so it is invariant to the id-burning gaps
+/// that parallel interning leaves behind.
 ///
 /// Used to stamp a term-id model with the identity of the vocabulary its keys
-/// were encoded against, and to reject a mismatched vocabulary on load.
+/// were encoded against, and to reject a mismatched vocabulary on load. It
+/// delegates to [`compute_portable_vocab_fingerprint`] over the very same
+/// densified `words` that [`to_portable`](NgramModel::to_portable) emits, so a
+/// save-time stamp and a load-time check compute the identical value by
+/// construction and can never diverge.
 #[cfg(feature = "serde-extras")]
 pub(crate) fn compute_vocab_fingerprint(vocab: &SharedVocabARTrie) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    let guard = vocab.as_ref();
-    let len = guard.len() as u64;
-    let mut hash = FNV_OFFSET ^ len;
-    for index in 1..=len {
-        if let Some(term) = guard.get_term(index) {
-            for byte in term.as_bytes() {
-                hash ^= *byte as u64;
-                hash = hash.wrapping_mul(FNV_PRIME);
-            }
-            hash ^= index;
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-    }
-    hash
+    compute_portable_vocab_fingerprint(&PortableNgramModel::portable_vocabulary_from(vocab))
 }
 
 /// Fingerprint of the words in a [`PortableVocabulary`] (equivalent to
@@ -378,20 +371,45 @@ fn compute_portable_vocab_fingerprint(vocab: &PortableVocabulary) -> u64 {
     hash
 }
 
+/// Enumerate a live vocabulary's **present** terms in ascending id order,
+/// returning the dense `words` (`words[i]` is the term for dense id
+/// `FIRST_VALID_INDEX + i`) together with an `old_id → new_id` remap indexed by
+/// old id.
+///
+/// Parallel interning is only "nearly-dense": a lost write-once race in
+/// `PersistentVocabARTrie::insert` burns the id it had already reserved, so the
+/// live id space develops gaps and a *winning* term can hold an id greater than
+/// the entry count. Densifying here — enumerating the half-open
+/// `start_index()..next_index()` and renumbering the survivors
+/// `FIRST_VALID_INDEX, +1, +2, …` — restores the dense `{FIRST_VALID_INDEX ..}`
+/// space that the portable format and the load path assume. A burned/absent id
+/// maps to `0` (never a valid new id); by construction no n-gram key references
+/// one, since only the CAS winner's id is ever encoded into a key.
+#[cfg(feature = "serde-extras")]
+fn densify_vocabulary(vocab: &SharedVocabARTrie) -> (Vec<String>, Vec<u64>) {
+    let guard = vocab.as_ref();
+    let next = guard.next_index();
+    let mut old_to_new = vec![0u64; next as usize];
+    let mut words = Vec::with_capacity(guard.len());
+    let mut new_id = FIRST_VALID_INDEX;
+    for old_id in guard.start_index()..next {
+        if let Some(term) = guard.get_term(old_id) {
+            old_to_new[old_id as usize] = new_id;
+            words.push(term);
+            new_id += 1;
+        }
+    }
+    (words, old_to_new)
+}
+
 #[cfg(feature = "serde-extras")]
 impl PortableNgramModel {
-    /// Materialize a [`PortableVocabulary`] from a live vocabulary, in term-id order.
+    /// Materialize a dense [`PortableVocabulary`] from a live vocabulary — present
+    /// terms in ascending id order (see [`densify_vocabulary`]).
     fn portable_vocabulary_from(vocab: &SharedVocabARTrie) -> PortableVocabulary {
-        let guard = vocab.as_ref();
-        let len = guard.len();
-        let mut words = Vec::with_capacity(len);
-        // Term-ids are 1-based (FIRST_VALID_INDEX = 1); emit in order.
-        for index in 1..=(len as u64) {
-            if let Some(term) = guard.get_term(index) {
-                words.push(term);
-            }
+        PortableVocabulary {
+            words: densify_vocabulary(vocab).0,
         }
-        PortableVocabulary { words }
     }
 }
 
@@ -429,12 +447,34 @@ where
     /// form, embedding the store's vocabulary and its fingerprint.
     pub fn to_portable(&self) -> PortableNgramModel {
         let vocab = self.store.vocabulary();
+        // Densify the (nearly-dense) live term-ids: emit dense `words` and rewrite
+        // every raw n-gram key through the same `old_id → new_id` map, so a
+        // parallel-trained model — whose vocabulary has burned ids / gaps — round
+        // trips exactly instead of failing the fingerprint check on reload.
+        let (words, old_to_new) = densify_vocabulary(vocab);
+
         let entries_bytes: Vec<(Vec<u8>, NgramEntrySnapshot)> = self
             .store
             .backend()
             .iter_entries_bytes()
-            .map(|(key, entry)| (key, NgramEntrySnapshot::from(&entry)))
+            .map(|(key, entry)| {
+                let remapped: Vec<u64> = decode_ngram_key_bytes(&key)
+                    .into_iter()
+                    .map(|id| {
+                        let new = old_to_new[id as usize];
+                        debug_assert_ne!(new, 0, "n-gram key referenced absent term-id {id}");
+                        new
+                    })
+                    .collect();
+                (
+                    encode_indices_to_key_bytes(&remapped),
+                    NgramEntrySnapshot::from(&entry),
+                )
+            })
             .collect();
+
+        let vocabulary = PortableVocabulary { words };
+        let vocab_fingerprint = Some(compute_portable_vocab_fingerprint(&vocabulary));
 
         PortableNgramModel {
             entries: Vec::new(),
@@ -443,9 +483,9 @@ where
             vocab_size: self.vocab_size,
             total_count: self.total_count,
             smoothing: self.smoothing.clone(),
-            vocabulary: Some(PortableNgramModel::portable_vocabulary_from(vocab)),
+            vocabulary: Some(vocabulary),
             key_encoding: KeyEncoding::TermIdBytes,
-            vocab_fingerprint: Some(compute_vocab_fingerprint(vocab)),
+            vocab_fingerprint,
         }
     }
 

@@ -16,6 +16,11 @@ use libdictenstein::dynamic_dawg::DynamicDawg;
 use std::io::Write;
 use tempfile::TempDir;
 
+#[cfg(feature = "serde-extras")]
+use super::vocabulary::SharedVocabARTrie;
+#[cfg(feature = "serde-extras")]
+use std::sync::{Arc, Barrier};
+
 /// In-memory byte-native (term-id) model — the sole live model type.
 type TermIdModel = NgramModel<TermIdStore<DynamicDawg<NgramEntry>>>;
 
@@ -349,4 +354,174 @@ fn fingerprint_mismatch_is_rejected() {
         matches!(result, Err(crate::Error::Model(_))),
         "a mismatched vocabulary must be rejected with a Model error"
     );
+}
+
+/// Drive the vocabulary into its "nearly-dense" state — gaps plus a winning term
+/// whose id exceeds the entry count — by racing threads that intern the *same*
+/// fresh tokens concurrently, exactly as the parallel trainer does. Returns the
+/// backing temp dir (kept alive by the caller), the shared vocabulary, and the
+/// interned tokens.
+#[cfg(feature = "serde-extras")]
+fn force_burned_vocab() -> (TempDir, SharedVocabARTrie, Vec<String>) {
+    let dir = TempDir::new().expect("temp dir");
+    let vocab = create_vocabulary(&dir.path().join("vocab")).expect("create vocab");
+    let start = vocab.as_ref().start_index();
+    let n_threads = 8;
+    let mut tokens: Vec<String> = Vec::new();
+    let mut i = 0u64;
+
+    // Race identical fresh tokens until at least one id is burned — i.e. the ids
+    // allocated (`next_index - start`) outrun the winning inserts (`len`). Under
+    // 8-way barrier-synchronized contention a burn is essentially certain on the
+    // first token; the bound merely guarantees termination.
+    while vocab.as_ref().next_index() - start <= vocab.as_ref().len() as u64 {
+        let token = format!("burn_{i}");
+        i += 1;
+        let barrier = Arc::new(Barrier::new(n_threads));
+        let handles: Vec<_> = (0..n_threads)
+            .map(|_| {
+                let v = vocab.clone();
+                let b = barrier.clone();
+                let t = token.clone();
+                std::thread::spawn(move || {
+                    b.wait();
+                    v.as_ref().insert(&t).expect("insert token");
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("join interning thread");
+        }
+        tokens.push(token);
+        assert!(
+            i < 4096,
+            "expected a burned id within 4096 contended tokens"
+        );
+    }
+
+    // A few more distinct tokens (interned uncontended) give the trigram model
+    // richer statistics over the gapped id space.
+    for _ in 0..6 {
+        let token = format!("burn_{i}");
+        i += 1;
+        vocab.as_ref().insert(&token).expect("insert token");
+        tokens.push(token);
+    }
+
+    (dir, vocab, tokens)
+}
+
+/// A model trained over a vocabulary with **burned ids** (gaps + a winner whose id
+/// exceeds the entry count) round-trips through the portable format exactly: the
+/// dense-remap at serialization keeps the reload from failing the fingerprint
+/// check and from mis-decoding n-gram keys.
+#[cfg(feature = "serde-extras")]
+#[test]
+fn burned_id_vocabulary_portable_roundtrips() {
+    let (_vocab_dir, vocab, tokens) = force_burned_vocab();
+
+    // The setup really produced a non-dense vocabulary.
+    let start = vocab.as_ref().start_index();
+    assert!(
+        vocab.as_ref().next_index() - start > vocab.as_ref().len() as u64,
+        "test setup must burn at least one term-id"
+    );
+
+    let sentence = tokens.join(" ");
+    let corpus = format!("{sentence}\n{sentence}\n{sentence}\n");
+    let corpus_dir = TempDir::new().expect("corpus dir");
+    let path = write_corpus(corpus_dir.path(), &corpus);
+    let reader = PlaintextReader::from_file(&path).expect("open corpus");
+    let model = TrainerBuilder::new(DynamicDawg::<NgramEntry>::new())
+        .order(3)
+        .with_vocabulary(vocab.clone())
+        .batch_size(1)
+        .train(reader)
+        .expect("train over the gapped vocabulary");
+
+    let file = tempfile::NamedTempFile::new().expect("temp file");
+    model.save_portable(file.path()).expect("save portable");
+    // Before the fix this failed with "vocabulary fingerprint mismatch".
+    let loaded = TermIdModel::load_portable(file.path(), DynamicDawg::<NgramEntry>::new)
+        .expect("a burned-id model must reload");
+
+    assert_eq!(loaded.ngram_count(), model.ngram_count());
+
+    // Every decoded n-gram (words + count) must survive the dense remap.
+    let mut before: Vec<(Vec<String>, u64)> =
+        model.iter_ngrams().map(|(w, e)| (w, e.count())).collect();
+    let mut after: Vec<(Vec<String>, u64)> =
+        loaded.iter_ngrams().map(|(w, e)| (w, e.count())).collect();
+    before.sort();
+    after.sort();
+    assert_eq!(
+        before, after,
+        "decoded n-grams + counts must round-trip through the dense remap"
+    );
+
+    // Scores agree exactly.
+    let probes: &[(&str, &[&str])] = &[
+        (
+            tokens[2].as_str(),
+            &[tokens[0].as_str(), tokens[1].as_str()],
+        ),
+        (tokens[1].as_str(), &[tokens[0].as_str()]),
+        (tokens[0].as_str(), &[]),
+    ];
+    for (word, context) in probes {
+        assert_logprob_eq(
+            model.log_prob(word, context),
+            loaded.log_prob(word, context),
+            &format!("burned-id reload ({word:?}, {context:?})"),
+        );
+    }
+}
+
+/// A model trained by the **default multi-threaded** trainer over a corpus with
+/// many distinct tokens (so concurrent interning burns ids in practice) reloads
+/// and scores identically. Correctness holds whether or not a burn occurs; the
+/// `load_portable` here is exactly the round-trip that regressed under parallel
+/// training.
+#[cfg(feature = "serde-extras")]
+#[test]
+fn parallel_trained_model_portable_roundtrips() {
+    let mut corpus = String::new();
+    for s in 0..400u32 {
+        // `u{s}` is unique per sentence (drives concurrent new-token interning);
+        // `common_*` / `shared_*` recur so the MKN statistics are populated.
+        corpus.push_str(&format!(
+            "u{s} common_{} shared_{} u{s} common_{}\n",
+            s % 40,
+            s % 13,
+            s % 40
+        ));
+    }
+    let dir = TempDir::new().expect("corpus dir");
+    let path = write_corpus(dir.path(), &corpus);
+    let reader = PlaintextReader::from_file(&path).expect("open corpus");
+    // Default trainer parallelism (no `batch_size(1)`) — the burning scenario.
+    let model = TrainerBuilder::new(DynamicDawg::<NgramEntry>::new())
+        .order(3)
+        .train(reader)
+        .expect("parallel train");
+
+    let file = tempfile::NamedTempFile::new().expect("temp file");
+    model.save_portable(file.path()).expect("save portable");
+    let loaded = TermIdModel::load_portable(file.path(), DynamicDawg::<NgramEntry>::new)
+        .expect("a parallel-trained model must reload");
+
+    assert_eq!(loaded.ngram_count(), model.ngram_count());
+    let probes: &[(&str, &[&str])] = &[
+        ("common_0", &["u0"]),
+        ("shared_0", &["common_0"]),
+        ("u5", &[]),
+        ("definitely_absent_token", &["u0"]),
+    ];
+    for (word, context) in probes {
+        assert_logprob_eq(
+            model.log_prob(word, context),
+            loaded.log_prob(word, context),
+            &format!("parallel reload ({word:?}, {context:?})"),
+        );
+    }
 }
