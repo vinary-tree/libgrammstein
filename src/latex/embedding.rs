@@ -601,8 +601,10 @@ mod tests {
         ));
 
         // Modify config to match dimension
-        let mut config = EmbeddingConfig::default();
-        config.dimension = 8;
+        let config = EmbeddingConfig {
+            dimension: 8,
+            ..Default::default()
+        };
         let mut embedder = LaTeXEmbedder::with_config(config);
         embedder.add_command_embedding(CommandEmbedding::new(
             "alpha".to_string(),

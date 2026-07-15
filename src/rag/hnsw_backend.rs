@@ -511,7 +511,7 @@ impl RetrievalBackend for HnswBackend {
 
         // Serialize embeddings and IDs in batches to prevent OOM
         // For 1M docs × 768 dims = ~3GB if collected at once; batching reduces peak to ~30MB
-        let num_batches = (num_docs + SERIALIZATION_BATCH_SIZE - 1) / SERIALIZATION_BATCH_SIZE;
+        let num_batches = num_docs.div_ceil(SERIALIZATION_BATCH_SIZE);
         bincode::serialize_into(&mut writer, &num_batches)
             .map_err(|e| RagError::Serialization(e.to_string()))?;
 

@@ -207,7 +207,7 @@ impl PdfRouter {
         let path = path.as_ref();
 
         // Try to read first few KB of PDF to detect patterns
-        let content = std::fs::read(path).map_err(|e| PdfError::Io(e))?;
+        let content = std::fs::read(path).map_err(PdfError::Io)?;
 
         // Count pages (look for /Type /Page in PDF)
         let content_str = String::from_utf8_lossy(&content);

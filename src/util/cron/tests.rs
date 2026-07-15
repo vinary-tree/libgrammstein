@@ -103,7 +103,7 @@ fn test_recurring_task() {
 
     let count = counter.load(Ordering::Relaxed);
     assert!(
-        count >= 4 && count <= 7,
+        (4..=7).contains(&count),
         "Expected 4-7 executions, got {}",
         count
     );

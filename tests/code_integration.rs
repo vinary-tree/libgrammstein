@@ -390,8 +390,8 @@ fn test_correction_candidates_max_limit() {
             CorrectionKind::Spelling,
             i,
             i + 1,
-            &format!("typo{}", i),
-            &format!("fixed{}", i),
+            format!("typo{}", i),
+            format!("fixed{}", i),
         )
         .with_confidence(i as f64 * 0.1);
         candidates.add(c);

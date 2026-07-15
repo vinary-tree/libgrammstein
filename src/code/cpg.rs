@@ -314,8 +314,10 @@ impl CodePropertyGraph {
                     if edge.weight().kind == CpgEdgeKind::AstChild {
                         let target = edge.target();
                         if let Some(node) = self.graph.node_weight(target) {
-                            if !depths.contains_key(&node.id) {
-                                depths.insert(node.id, depth + 1);
+                            if let std::collections::hash_map::Entry::Vacant(e) =
+                                depths.entry(node.id)
+                            {
+                                e.insert(depth + 1);
                                 queue.push_back((target, depth + 1));
                             }
                         }
@@ -469,8 +471,7 @@ impl CodePropertyGraph {
 
         let nodes: Vec<NodeIndex> = self.graph.node_indices().collect();
 
-        for i in 0..nodes.len() {
-            let idx = nodes[i];
+        for &idx in &nodes {
             if let Some(node) = self.graph.node_weight(idx) {
                 match node.kind {
                     CpgNodeKind::Function => {

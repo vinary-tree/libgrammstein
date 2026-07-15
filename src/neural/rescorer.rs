@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn test_rescore_paths_ordering() {
         // Test that paths are sorted by final score
-        let mut paths = vec![
+        let mut paths = [
             ScoredPath::<f64> {
                 tokens: vec!["a".to_string()],
                 ngram_score: 0.5,

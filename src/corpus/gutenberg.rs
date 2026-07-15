@@ -183,7 +183,7 @@ fn collect_txt_files_recursive(dir: &Path, paths: &mut Vec<PathBuf>) -> std::io:
 
         if path.is_dir() {
             collect_txt_files_recursive(&path, paths)?;
-        } else if path.extension().map_or(false, |ext| ext == "txt") {
+        } else if path.extension().is_some_and(|ext| ext == "txt") {
             paths.push(path);
         }
     }

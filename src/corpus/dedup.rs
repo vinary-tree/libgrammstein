@@ -29,11 +29,12 @@ use std::collections::HashSet;
 use gxhash::GxBuildHasher;
 
 /// Deduplication mode.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum DeduplicationMode {
     /// Only remove exact duplicates.
     Exact,
     /// Remove duplicates after normalization (lowercase, remove punctuation).
+    #[default]
     Normalized,
     /// Fuzzy deduplication using MinHash (Jaccard similarity threshold).
     MinHash {
@@ -44,12 +45,6 @@ pub enum DeduplicationMode {
         /// N-gram size for shingling.
         shingle_size: usize,
     },
-}
-
-impl Default for DeduplicationMode {
-    fn default() -> Self {
-        Self::Normalized
-    }
 }
 
 /// Deduplicator for removing duplicate sentences from a corpus.

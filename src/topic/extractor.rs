@@ -16,8 +16,12 @@ use super::config::TopicConfig;
 use super::ctfidf::CtfIdf;
 use super::dendrogram::Dendrogram;
 use super::summarizer::TopicSummarizer;
-use super::topic::{Topic, TopicId};
+use super::types::{Topic, TopicId};
 use super::{Result, TopicError};
+
+/// Per-topic keyword lists — each `(term, weight)` — paired with the shared
+/// vocabulary terms; the two outputs of the keyword-extraction phase.
+type KeywordExtraction = (Vec<Vec<(String, f32)>>, Vec<String>);
 
 /// Topic extraction result.
 #[derive(Clone, Debug)]
@@ -135,7 +139,7 @@ impl TopicExtractor {
 
         // Check embedding dimension consistency
         let embedding_dim = embeddings[0].len();
-        for (_idx, emb) in embeddings.iter().enumerate() {
+        for emb in embeddings.iter() {
             if emb.len() != embedding_dim {
                 return Err(TopicError::DimensionMismatch {
                     expected: embedding_dim,
@@ -222,7 +226,7 @@ impl TopicExtractor {
         documents: &[String],
         assignments: &[u32],
         checkpoint: &mut TopicExtractionCheckpoint,
-    ) -> Result<(Vec<Vec<(String, f32)>>, Vec<String>)> {
+    ) -> Result<KeywordExtraction> {
         checkpoint.phase = ExtractionPhase::VocabularyBuild;
 
         // Build c-TF-IDF

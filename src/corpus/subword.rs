@@ -164,7 +164,7 @@ impl SubwordTokenizer {
         }
 
         // Set up pre-tokenizer (whitespace splitting)
-        tokenizer.with_pre_tokenizer(Some(Whitespace::default()));
+        tokenizer.with_pre_tokenizer(Some(Whitespace));
 
         // Collect texts for training
         let text_refs: Vec<String> = texts.into_iter().map(|s| s.as_ref().to_string()).collect();
@@ -238,10 +238,7 @@ impl SubwordTokenizer {
 
     /// Decode token IDs back to text.
     pub fn decode(&self, ids: &[u32]) -> String {
-        match self.tokenizer.decode(ids, true) {
-            Ok(text) => text,
-            Err(_) => String::new(),
-        }
+        self.tokenizer.decode(ids, true).unwrap_or_default()
     }
 
     /// Decode tokens back to text.
@@ -423,7 +420,7 @@ mod tests {
 
         let tokenizer = SubwordTokenizer::train_bpe(sample_texts(), config).unwrap();
 
-        let sentences = vec!["hello world", "test sentence"];
+        let sentences = ["hello world", "test sentence"];
         let tokenized: Vec<Vec<String>> = sentences.iter().tokenize(&tokenizer).collect();
 
         assert_eq!(tokenized.len(), 2);

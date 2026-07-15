@@ -229,7 +229,7 @@ impl<W: Semiring + FromLogProb> PcfgWfstBuilder<W> {
                         self.wfst.add_state()
                     };
 
-                    let arc_weight = if i == 0 { weight.clone() } else { W::one() };
+                    let arc_weight = if i == 0 { weight } else { W::one() };
 
                     self.wfst.add_arc(
                         current_state,
@@ -255,7 +255,7 @@ impl<W: Semiring + FromLogProb> PcfgWfstBuilder<W> {
                     };
 
                     // Add epsilon transition to non-terminal state
-                    let arc_weight = if i == 0 { weight.clone() } else { W::one() };
+                    let arc_weight = if i == 0 { weight } else { W::one() };
                     self.wfst.add_epsilon(current_state, next_state, arc_weight);
 
                     // Recursively unroll

@@ -52,21 +52,15 @@ impl Default for WikipediaConfig {
 
 /// Loading strategy for remote URLs.
 #[cfg(feature = "http-corpus")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum LoadStrategy {
     /// Stream directly from HTTP (slower but uses less disk).
     Stream,
     /// Download first, then process (faster but requires disk space).
     Download,
     /// Auto-select based on available disk space.
+    #[default]
     Auto,
-}
-
-#[cfg(feature = "http-corpus")]
-impl Default for LoadStrategy {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 /// Streaming Wikipedia XML dump reader with bz2 decompression.
@@ -199,7 +193,7 @@ impl WikipediaReader {
 
         // Local file
         let file = File::open(&self.path)?;
-        let is_bz2 = self.path.extension().map_or(false, |ext| ext == "bz2");
+        let is_bz2 = self.path.extension().is_some_and(|ext| ext == "bz2");
 
         if is_bz2 {
             let decoder = BzDecoder::new(file);
@@ -220,7 +214,7 @@ impl WikipediaReader {
                 // Stream directly from HTTP
                 let resp = ureq::get(&url)
                     .call()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
 
                 let reader = resp.into_reader();
                 let is_bz2 = url.ends_with(".bz2");
@@ -236,7 +230,7 @@ impl WikipediaReader {
                 // Download to temp file first
                 let resp = ureq::get(&url)
                     .call()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
 
                 let mut temp_file = tempfile::NamedTempFile::new()?;
                 let mut reader = resp.into_reader();

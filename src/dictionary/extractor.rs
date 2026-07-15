@@ -62,7 +62,7 @@ impl WordExtractor {
     /// Create a new word extractor with custom configuration.
     pub fn with_config(config: ExtractionConfig) -> Self {
         Self {
-            counts: DashMap::with_hasher(SafeGxBuildHasher::default()),
+            counts: DashMap::with_hasher(SafeGxBuildHasher),
             config,
             total_tokens: std::sync::atomic::AtomicU64::new(0),
             sentences_processed: std::sync::atomic::AtomicUsize::new(0),
@@ -163,7 +163,7 @@ impl WordExtractor {
             .map(|e| WordEntry::new(e.key().clone(), *e.value()))
             .collect();
 
-        entries.sort_by(|a, b| b.frequency.cmp(&a.frequency));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.frequency));
         entries
     }
 

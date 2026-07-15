@@ -419,7 +419,7 @@ impl<L: CodeLanguage + Clone + Send + Sync> CorrectionPipeline<L> {
 
         // Sort by position descending to apply from end to start
         let mut sorted: Vec<_> = corrections.iter().collect();
-        sorted.sort_by(|a, b| b.start_byte.cmp(&a.start_byte));
+        sorted.sort_by_key(|c| std::cmp::Reverse(c.start_byte));
 
         let mut result = source.to_string();
         for correction in sorted {

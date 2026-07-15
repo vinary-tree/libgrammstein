@@ -139,10 +139,8 @@ impl ImportTui {
             if event::poll(Duration::from_millis(16))? {
                 if let Event::Key(key) = event::read()? {
                     // Only handle key press events, not release
-                    if key.kind == KeyEventKind::Press {
-                        if self.handle_key(key.code)? {
-                            return Ok(self.state.completed);
-                        }
+                    if key.kind == KeyEventKind::Press && self.handle_key(key.code)? {
+                        return Ok(self.state.completed);
                     }
                 }
             }
@@ -657,7 +655,7 @@ impl ImportTui {
     /// Render the completion dialog.
     fn render_completion_dialog(&self, frame: &mut Frame, area: Rect) {
         // Calculate dialog size (60% width, 14 lines height)
-        let dialog_width = (area.width as f32 * 0.6).max(50.0).min(80.0) as u16;
+        let dialog_width = (area.width as f32 * 0.6).clamp(50.0, 80.0) as u16;
         let dialog_height = 14u16;
 
         // Center the dialog

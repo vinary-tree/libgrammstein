@@ -506,9 +506,10 @@ mod tests {
 
     #[test]
     fn test_graph_optimization_levels() {
-        let mut config = CodeT5Config::default();
-
-        config.optimization_level = 0;
+        let mut config = CodeT5Config {
+            optimization_level: 0,
+            ..Default::default()
+        };
         assert!(matches!(
             config.graph_optimization_level(),
             GraphOptimizationLevel::Disable

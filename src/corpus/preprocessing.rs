@@ -697,8 +697,8 @@ mod tests {
             .normalize_urls(false)
             .build();
 
-        let texts = vec!["I have 5 apples.", "You have 10 oranges."];
-        let results: Vec<String> = pp.process_batch(texts.iter().map(|s| *s)).collect();
+        let texts = ["I have 5 apples.", "You have 10 oranges."];
+        let results: Vec<String> = pp.process_batch(texts.iter().copied()).collect();
 
         assert_eq!(results[0], "I have <NUM> apples.");
         assert_eq!(results[1], "You have <NUM> oranges.");

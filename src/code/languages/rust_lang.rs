@@ -56,9 +56,7 @@ impl CodeLanguage for Rust {
             "identifier" | "field_identifier" | "type_identifier" => {
                 if self.keywords().contains(&token) {
                     TokenType::Keyword
-                } else if self.builtin_types().contains(&token) {
-                    TokenType::TypeName
-                } else if node_kind == "type_identifier" {
+                } else if self.builtin_types().contains(&token) || node_kind == "type_identifier" {
                     TokenType::TypeName
                 } else {
                     TokenType::Identifier

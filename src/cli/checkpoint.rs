@@ -208,10 +208,10 @@ impl CheckpointManager {
             let entry = entry.map_err(|e| CliError::io(format!("Directory read error: {}", e)))?;
             let path = entry.path();
 
-            if path.extension().map_or(false, |ext| ext == "bin")
+            if path.extension().is_some_and(|ext| ext == "bin")
                 && path
                     .file_stem()
-                    .map_or(false, |s| s.to_string_lossy().starts_with("ngram_ckpt_"))
+                    .is_some_and(|s| s.to_string_lossy().starts_with("ngram_ckpt_"))
             {
                 let metadata = fs::metadata(&path)
                     .map_err(|e| CliError::io(format!("Failed to read metadata: {}", e)))?;
@@ -219,13 +219,13 @@ impl CheckpointManager {
                 checkpoints.push(CheckpointInfo {
                     path,
                     size: metadata.len(),
-                    modified: metadata.modified().ok().map(|t| DateTime::<Utc>::from(t)),
+                    modified: metadata.modified().ok().map(DateTime::<Utc>::from),
                 });
             }
         }
 
         // Sort by modification time (newest first)
-        checkpoints.sort_by(|a, b| b.modified.cmp(&a.modified));
+        checkpoints.sort_by_key(|c| std::cmp::Reverse(c.modified));
 
         Ok(checkpoints)
     }

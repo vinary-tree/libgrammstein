@@ -68,7 +68,7 @@ mod extractor;
 mod model;
 pub mod paradigm;
 mod summarizer;
-mod topic;
+mod types;
 
 pub use checkpoint::*;
 pub use clustering::*;
@@ -85,7 +85,7 @@ pub use paradigm::{
     RholangPatternCatalog, RholangPatternCategory, RholangPatternMatch,
 };
 pub use summarizer::*;
-pub use topic::*;
+pub use types::*;
 
 use thiserror::Error;
 

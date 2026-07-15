@@ -346,7 +346,7 @@ impl SubwordEmbedding {
             .collect();
 
         // Sort by similarity (descending)
-        similarities.sort_by(|a, b| b.1.cmp(&a.1));
+        similarities.sort_by_key(|s| std::cmp::Reverse(s.1));
 
         // Take top k
         similarities
@@ -599,7 +599,7 @@ mod tests {
         let vec2 = model.word_vector("king");
 
         assert_eq!(vec1, vec2);
-        assert!(model.cache.len() > 0);
+        assert!(!model.cache.is_empty());
 
         // Clear cache
         model.clear_cache();

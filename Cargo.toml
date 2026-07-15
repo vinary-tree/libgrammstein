@@ -8,7 +8,9 @@ authors = ["Dylon Edwards"]
 repository = "https://github.com/vinary-tree/libgrammstein"
 keywords = ["nlp", "language-model", "ngram", "embeddings", "wfst"]
 categories = ["text-processing", "science"]
-rust-version = "1.70"
+# The code uses APIs stabilized through Rust 1.80 (e.g. `LazyLock`, 1.80-era std
+# additions), so the honest minimum supported version is 1.80.
+rust-version = "1.80"
 homepage = "https://github.com/vinary-tree/libgrammstein"
 # Keep the packed crate small (crates.io caps at 10 MB): docs, tests, benches, the
 # formal-verification assets, and sample data are not needed by downstream consumers.
@@ -203,6 +205,12 @@ lling-llang-integration = ["dep:lling-llang"]
 # WFST export for n-gram models (includes lling-llang integration)
 wfst-export = ["lling-llang-integration"]
 
+# Phonetic + word-level (grammar) correction: the T_lex ∘ T_gram cascade.
+# Enables liblevenshtein's phonetic product automaton (articulatory-weighted,
+# value-returning) for the fuzzy lexicon `T_lex`; `T_gram`'s u64 query surface is
+# unconditional. Built on the lling-llang integration (lattice/decode types).
+phonetic-correction = ["lling-llang-integration", "liblevenshtein/phonetic-rules"]
+
 # Async runtime (enable if I/O bottlenecks identified via profiling)
 async = ["dep:tokio", "dep:futures"]
 
@@ -341,6 +349,10 @@ latex-full = ["latex-neural", "latex-rag"]
 
 [[example]]
 name = "correct_sentence"
+required-features = ["lling-llang-integration"]
+
+[[example]]
+name = "grammar_correct"
 required-features = ["lling-llang-integration"]
 
 [[bin]]

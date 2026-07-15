@@ -58,9 +58,10 @@ use ndarray::{Array1, Array2};
 use ordered_float::OrderedFloat;
 
 /// Pooling strategy for aggregating frame-level features.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PoolingStrategy {
     /// Average all frame embeddings.
+    #[default]
     Mean,
     /// Take maximum across frames for each dimension.
     Max,
@@ -70,12 +71,6 @@ pub enum PoolingStrategy {
     Attention,
     /// Concatenate mean and max pooling.
     MeanMax,
-}
-
-impl Default for PoolingStrategy {
-    fn default() -> Self {
-        Self::Mean
-    }
 }
 
 /// Configuration for acoustic word embeddings.
@@ -419,7 +414,7 @@ impl AcousticWordEmbedding {
             .collect();
 
         // Sort by similarity (descending)
-        scores.sort_by(|a, b| OrderedFloat(b.1).cmp(&OrderedFloat(a.1)));
+        scores.sort_by_key(|s| std::cmp::Reverse(OrderedFloat(s.1)));
 
         scores.into_iter().take(k).collect()
     }

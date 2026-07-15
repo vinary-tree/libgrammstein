@@ -389,8 +389,8 @@ mod tests {
     #[test]
     fn test_cosine_similarity_normalized() {
         // For normalized vectors, dot product = cosine similarity
-        let a = ModernBertEmbedder::normalize(&vec![3.0, 4.0]);
-        let b = ModernBertEmbedder::normalize(&vec![4.0, 3.0]);
+        let a = ModernBertEmbedder::normalize(&[3.0, 4.0]);
+        let b = ModernBertEmbedder::normalize(&[4.0, 3.0]);
 
         let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
         let cosine = ModernBertEmbedder::cosine_similarity(&a, &b);

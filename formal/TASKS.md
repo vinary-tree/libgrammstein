@@ -509,3 +509,71 @@ Cross-repository warning cleanup plan:
   `persistent_artrie`, `persistent_artrie_char`,
   `persistent_artrie_core`, `persistent_vocab_artrie`, `scdawg`, and
   `suffix_automaton`.
+
+## Correction Cascade Verification
+
+Status: implemented; Rocq gate passing (no proof holes)
+
+Objective: machine-check the two correctness cores of the `T_lex ∘ T_gram`
+grammar corrector (`src/integration/grammar_corrector.rs`): (1) that the
+`u64`-unit view the word-level automaton `T_gram` walks over the varint-keyed
+n-gram store is faithful, and (2) that the cascade's minimum-cost beam decode is
+the noisy-channel maximum a posteriori (MAP) correction.
+
+### Reason
+
+`T_gram` reuses liblevenshtein's edit-distance automaton — already trusted in
+that crate — but over a NEW alphabet: it treats the n-gram store as a dictionary
+of term-id sequences by varint-decoding one term-id per traversal step
+(`U64NgramView`, `src/ngram/u64_view.rs`). Correctness of the correction
+therefore rests on two libgrammstein-local facts the upstream proofs do not
+cover: the varint codec is a self-delimiting bijection (so the view neither drops
+nor invents term-ids), and the additive negative-log cost the beam minimizes is
+`−ln` of the noisy-channel posterior score (so minimizing it is the MAP decision).
+
+### Delivered Artifacts
+
+1. `formal/rocq/VarintTermIdView.v` — the LEB128 varint codec modelled over
+   `nat`, with `decode_encode` (round-trip / self-delimiting), the
+   `encode_seq_decode_seq` view-faithfulness theorem (soundness + completeness of
+   the term-id-sequence enumeration), and `encode_seq_injective`.
+2. `formal/rocq/NoisyChannelDecode.v` — the log-semiring decode over `R`:
+   `cost_is_neg_log_score` (`cost = −ln score`), `min_cost_maximizes_score`
+   (argmin cost = argmax score), and `min_cost_is_map` (with channel
+   `−ln P(x|w)` and unit weight the score is `P(x|w)·P(w) ∝ P(w|x)`).
+3. Both files registered in `formal/rocq/_CoqProject` and covered by the existing
+   `make -C rocq check` no-holes gate.
+
+### Scope Boundaries
+
+1. The varint codec is proved a bijection over ALL naturals; the store's
+   reservation of term-id `0` (`FIRST_VALID_INDEX = 1`, avoiding the `\x00`
+   metadata prefix) is an orthogonal key-namespace-disjointness invariant, not
+   part of the codec bijection.
+2. liblevenshtein's edit-distance / automaton correctness (the fact that
+   `query_units*` returns exactly the dictionary entries within a word-edit
+   radius) is imported as a trusted upstream contract, not re-proved here; these
+   proofs cover only the libgrammstein-local view and decode obligations. The
+   `T_gram` soundness/completeness *over concrete stores* is additionally checked
+   at runtime by the differential property test
+   (`tests/grammar_corrector_proptest.rs`).
+3. The MAP theorem is stated for positive probabilities in the exact-arithmetic
+   real model; the stupid-backoff estimator's own floor keeps every score
+   strictly positive, so `−ln` is always defined.
+4. No new concurrency model is required: the `GrammarCorrector` is a read-only
+   consumer of an already-built vocabulary and n-gram store (correction runs
+   after import/load, not concurrently with it). Its query semantics are covered
+   by the existing `QuerySemanticsBridge` (see "liblevenshtein Query-Semantics
+   Bridge"); no query-during-import interleaving is introduced.
+
+### Acceptance Gates
+
+```bash
+cd formal/rocq
+make clean && make check   # builds all .v and fails on Admitted/admit/Axiom/Parameter/Abort
+```
+
+Latest evidence: clean rebuild compiles all five proof files
+(`MknStatistics`, `FrequencyCountsMerge`, `MknFloatBounds`, `VarintTermIdView`,
+`NoisyChannelDecode`) and the hole-scan reports "All proofs complete (no proof
+holes or trusted declarations found)".

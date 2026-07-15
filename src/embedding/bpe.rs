@@ -204,8 +204,8 @@ impl BpeTokenizer {
 
         let mut result = String::new();
         for token in tokens {
-            if token.ends_with(BPE_END_OF_WORD) {
-                result.push_str(&token[..token.len() - BPE_END_OF_WORD.len()]);
+            if let Some(stripped) = token.strip_suffix(BPE_END_OF_WORD) {
+                result.push_str(stripped);
                 result.push(' ');
             } else {
                 result.push_str(token);
@@ -295,8 +295,8 @@ impl BpeTrainer {
 
         // Add all tokens from vocab
         for token in vocab {
-            if !final_vocab.contains_key(&token) {
-                final_vocab.insert(token, idx);
+            if let std::collections::hash_map::Entry::Vacant(e) = final_vocab.entry(token) {
+                e.insert(idx);
                 idx += 1;
             }
         }

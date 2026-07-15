@@ -205,8 +205,8 @@ enum EmbedderBackend {
     ModernBert(ModernBertEmbedder),
     /// BERT/RoBERTa via Candle (used for UniXcoder, GraphCodeBERT, CodeBERT)
     Bert {
-        model: BertModel,
-        tokenizer: Tokenizer,
+        model: Box<BertModel>,
+        tokenizer: Box<Tokenizer>,
         device: CandleDevice,
         hidden_size: usize,
     },
@@ -669,8 +669,8 @@ impl CodeEmbedder {
         Ok(Self {
             config,
             backend: EmbedderBackend::Bert {
-                model,
-                tokenizer,
+                model: Box::new(model),
+                tokenizer: Box::new(tokenizer),
                 device,
                 hidden_size,
             },

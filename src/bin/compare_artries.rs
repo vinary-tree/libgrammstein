@@ -313,14 +313,12 @@ fn compare_ngrams_streaming(
                     // Lookup in trie2 (on-disk, lazy loaded)
                     match trie2.get(&key2) {
                         Some(value2) => {
-                            if value2 != value1 {
-                                if result.count_mismatches.len() < max_to_track {
-                                    result.count_mismatches.push(CountMismatch {
-                                        ngram: words,
-                                        count1: value1,
-                                        count2: value2,
-                                    });
-                                }
+                            if value2 != value1 && result.count_mismatches.len() < max_to_track {
+                                result.count_mismatches.push(CountMismatch {
+                                    ngram: words,
+                                    count1: value1,
+                                    count2: value2,
+                                });
                             }
                         }
                         None => {
@@ -386,13 +384,11 @@ fn compare_ngrams_streaming(
                 match encode_ngram_key_existing(&word_refs, vocab1) {
                     Some(key1) => {
                         // Only check existence (values already compared in forward pass)
-                        if trie1.get(&key1).is_none() {
-                            if result.missing_in_1.len() < max_to_track {
-                                result.missing_in_1.push(MissingEntry {
-                                    ngram: words,
-                                    count: value2,
-                                });
-                            }
+                        if trie1.get(&key1).is_none() && result.missing_in_1.len() < max_to_track {
+                            result.missing_in_1.push(MissingEntry {
+                                ngram: words,
+                                count: value2,
+                            });
                         }
                     }
                     None => {

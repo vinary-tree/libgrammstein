@@ -91,7 +91,7 @@ impl TopicSummarizer {
 /// Extract the first sentence from text.
 fn extract_first_sentence(text: &str) -> String {
     // Find first sentence-ending punctuation
-    if let Some(pos) = text.find(|c| c == '.' || c == '!' || c == '?') {
+    if let Some(pos) = text.find(['.', '!', '?']) {
         text[..=pos].trim().to_string()
     } else {
         text.trim().to_string()
@@ -180,8 +180,7 @@ impl CoOccurrenceCounter {
             *self.word_counts.entry(word.clone()).or_insert(0) += 1;
 
             let end = (i + self.window_size).min(tokens.len());
-            for j in (i + 1)..end {
-                let other = &tokens[j];
+            for other in &tokens[(i + 1)..end] {
                 let key = if word < other {
                     (word.clone(), other.clone())
                 } else {

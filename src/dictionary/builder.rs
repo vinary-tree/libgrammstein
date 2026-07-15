@@ -142,7 +142,7 @@ impl DictionaryBuilder {
             .collect();
 
         // Sort by frequency descending for consistent ordering
-        entries.sort_by(|a, b| b.frequency.cmp(&a.frequency));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.frequency));
 
         // Build word-to-index map for fast lookups
         let word_index: HashMap<String, usize> = entries
@@ -195,7 +195,7 @@ impl DictionaryBuilder {
             .collect();
 
         // Sort by frequency descending
-        entries.sort_by(|a, b| b.frequency.cmp(&a.frequency));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.frequency));
 
         // Build word-to-index map
         let word_index: HashMap<String, usize> = entries
@@ -414,7 +414,7 @@ impl SpellingDictionary {
             })
             .collect();
 
-        entries.sort_by(|a, b| b.frequency.cmp(&a.frequency));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.frequency));
 
         // Rebuild index
         self.word_index = entries

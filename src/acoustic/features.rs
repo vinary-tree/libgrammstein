@@ -76,9 +76,10 @@ pub const DEFAULT_HIGH_FREQ: f32 = 8000.0;
 pub const LOG_EPSILON: f32 = 1e-10;
 
 /// Window function type.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum WindowType {
     /// Hanning (Hann) window: `0.5 * (1 - cos(2πn/(N-1)))`
+    #[default]
     Hanning,
     /// Hamming window: `0.54 - 0.46 * cos(2πn/(N-1))`
     Hamming,
@@ -86,12 +87,6 @@ pub enum WindowType {
     Rectangular,
     /// Blackman window: `0.42 - 0.5*cos(2πn/(N-1)) + 0.08*cos(4πn/(N-1))`
     Blackman,
-}
-
-impl Default for WindowType {
-    fn default() -> Self {
-        Self::Hanning
-    }
 }
 
 /// Configuration for audio feature extraction.
@@ -436,19 +431,17 @@ impl DctTransform {
 
         let scale = (2.0 / num_input as f32).sqrt();
 
-        for k in 0..num_output {
-            for n in 0..num_input {
+        for (k, row) in matrix.iter_mut().enumerate() {
+            for (n, cell) in row.iter_mut().enumerate() {
                 // DCT-II formula: cos(π * k * (n + 0.5) / N)
-                matrix[k][n] = scale * (PI * k as f32 * (n as f32 + 0.5) / num_input as f32).cos();
+                *cell = scale * (PI * k as f32 * (n as f32 + 0.5) / num_input as f32).cos();
             }
         }
 
         // First coefficient has different normalization
         if !matrix.is_empty() {
             let scale0 = (1.0 / num_input as f32).sqrt();
-            for n in 0..num_input {
-                matrix[0][n] = scale0;
-            }
+            matrix[0].fill(scale0);
         }
 
         Self {
@@ -462,12 +455,12 @@ impl DctTransform {
     fn apply(&self, input: &[f32]) -> Vec<f32> {
         let mut output = vec![0.0f32; self.num_output];
 
-        for k in 0..self.num_output {
+        for (k, out) in output.iter_mut().enumerate() {
             let mut sum = 0.0f32;
             for (n, &x) in input.iter().enumerate().take(self.num_input) {
                 sum += self.matrix[k][n] * x;
             }
-            output[k] = sum;
+            *out = sum;
         }
 
         output
@@ -568,10 +561,15 @@ impl FeatureExtractor {
         let mut frame = vec![0.0f32; self.config.fft_size];
 
         // Copy audio samples and apply window
-        for i in 0..self.config.frame_size {
+        for (i, (frame_sample, &w)) in frame
+            .iter_mut()
+            .zip(&self.window)
+            .enumerate()
+            .take(self.config.frame_size)
+        {
             let sample_idx = start + i;
             if sample_idx < audio.len() {
-                frame[i] = audio[sample_idx] * self.window[i];
+                *frame_sample = audio[sample_idx] * w;
             }
         }
 
@@ -613,17 +611,17 @@ impl FeatureExtractor {
         // Normalization factor
         let norm: f32 = 2.0 * (1..=window).map(|n| (n * n) as f32).sum::<f32>();
 
-        for t in 0..num_frames {
+        for (t, delta_row) in delta.iter_mut().enumerate() {
             for d in 0..dim {
                 let mut sum = 0.0f32;
                 for n in 1..=window {
                     // Handle edge cases with padding
-                    let t_minus = if t >= n { t - n } else { 0 };
+                    let t_minus = t.saturating_sub(n);
                     let t_plus = (t + n).min(num_frames - 1);
 
                     sum += n as f32 * (features[t_plus][d] - features[t_minus][d]);
                 }
-                delta[t][d] = sum / norm;
+                delta_row[d] = sum / norm;
             }
         }
 

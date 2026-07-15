@@ -21,6 +21,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+/// Vocabulary terms, per-term frequency counts, total token count, and the
+/// collected sentences — the four outputs of the vocabulary-building pass,
+/// reused across the subsequent multi-pass training epochs.
+type VocabularyAndSentences = (Vec<String>, Vec<u64>, u64, Vec<String>);
+
 /// Training configuration for embedding model.
 #[derive(Debug, Clone)]
 pub struct EmbeddingConfig {
@@ -313,7 +318,7 @@ impl EmbeddingTrainer {
             .filter(|(_, count)| *count >= self.config.min_count)
             .collect();
 
-        vocab_entries.sort_by(|a, b| b.1.cmp(&a.1));
+        vocab_entries.sort_by_key(|e| std::cmp::Reverse(e.1));
 
         let vocab: Vec<String> = vocab_entries.iter().map(|(w, _)| w.clone()).collect();
         let counts: Vec<u64> = vocab_entries.iter().map(|(_, c)| *c).collect();
@@ -326,6 +331,10 @@ impl EmbeddingTrainer {
     }
 
     /// Train a single epoch using streaming (memory-efficient).
+    // Training kernel: the mutable model, the immutable corpus statistics
+    // (vocabulary, counts, totals), the shared sampler, and the learning rate
+    // are irreducible inputs; bundling them into a struct adds no clarity.
+    #[allow(clippy::too_many_arguments)]
     fn train_epoch_streaming<R: CorpusReader + 'static>(
         &self,
         reader: R,
@@ -382,12 +391,13 @@ impl EmbeddingTrainer {
                     let start = pos.saturating_sub(window);
                     let end = (pos + window + 1).min(words.len());
 
-                    for ctx_pos in start..end {
+                    for (ctx_pos, ctx_slot) in word_indices.iter().enumerate().take(end).skip(start)
+                    {
                         if ctx_pos == pos {
                             continue;
                         }
 
-                        let ctx_idx = match word_indices[ctx_pos] {
+                        let ctx_idx = match *ctx_slot {
                             Some(idx) => idx,
                             None => continue,
                         };
@@ -518,7 +528,7 @@ impl EmbeddingTrainer {
     fn build_vocabulary_and_collect<R: CorpusReader + 'static>(
         &self,
         reader: R,
-    ) -> Result<(Vec<String>, Vec<u64>, u64, Vec<String>)> {
+    ) -> Result<VocabularyAndSentences> {
         let mut word_counts: HashMap<String, u64> = HashMap::new();
         let mut total_words = 0u64;
         let mut sentences = Vec::new();
@@ -548,7 +558,7 @@ impl EmbeddingTrainer {
             .filter(|(_, count)| *count >= self.config.min_count)
             .collect();
 
-        vocab_entries.sort_by(|a, b| b.1.cmp(&a.1));
+        vocab_entries.sort_by_key(|e| std::cmp::Reverse(e.1));
 
         let vocab: Vec<String> = vocab_entries.iter().map(|(w, _)| w.clone()).collect();
         let counts: Vec<u64> = vocab_entries.iter().map(|(_, c)| *c).collect();
@@ -670,6 +680,9 @@ impl EmbeddingTrainer {
     }
 
     /// Train for multiple epochs on collected sentences.
+    // Training kernel: mutable model + immutable corpus statistics + sampler +
+    // starting epoch are irreducible inputs (see `train_epoch_streaming`).
+    #[allow(clippy::too_many_arguments)]
     fn train_epochs_on_sentences(
         &self,
         sentences: &[String],
@@ -713,6 +726,8 @@ impl EmbeddingTrainer {
     }
 
     /// Train for multiple epochs with progress reporting.
+    // Training kernel: as `train_epochs_on_sentences`, plus a progress channel.
+    #[allow(clippy::too_many_arguments)]
     fn train_epochs_on_sentences_with_progress(
         &self,
         sentences: &[String],
@@ -757,6 +772,9 @@ impl EmbeddingTrainer {
     }
 
     /// Train a single epoch on collected sentences.
+    // Training kernel: mutable model, vocabulary index, immutable corpus
+    // statistics, sampler, learning rate, and per-epoch stats sink.
+    #[allow(clippy::too_many_arguments)]
     fn train_epoch_on_sentences(
         &self,
         sentences: &[String],
@@ -805,12 +823,12 @@ impl EmbeddingTrainer {
                 let start = pos.saturating_sub(window);
                 let end = (pos + window + 1).min(words.len());
 
-                for ctx_pos in start..end {
+                for (ctx_pos, ctx_slot) in word_indices.iter().enumerate().take(end).skip(start) {
                     if ctx_pos == pos {
                         continue;
                     }
 
-                    let ctx_idx = match word_indices[ctx_pos] {
+                    let ctx_idx = match *ctx_slot {
                         Some(idx) => idx,
                         None => continue,
                     };
@@ -837,6 +855,10 @@ impl EmbeddingTrainer {
     }
 
     /// Perform a single skip-gram update with negative sampling.
+    // Hot per-update SGD kernel: the model, the center/context indices, the
+    // center word, the sampler, and the learning rate are per-update scalars
+    // kept flat to avoid struct overhead in the inner training loop.
+    #[allow(clippy::too_many_arguments)]
     #[inline]
     fn skipgram_update<R: Rng>(
         &self,

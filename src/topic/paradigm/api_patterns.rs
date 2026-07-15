@@ -369,8 +369,7 @@ impl ApiPatternMiner {
             };
 
             let mut seen_in_seq = std::collections::HashSet::new();
-            for i in pos.position..max_pos {
-                let item = &seq[i];
+            for (i, item) in seq.iter().enumerate().take(max_pos).skip(pos.position) {
                 if seen_in_seq.insert(Arc::clone(item)) {
                     item_counts
                         .entry(Arc::clone(item))

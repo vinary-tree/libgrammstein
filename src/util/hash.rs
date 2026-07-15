@@ -156,15 +156,8 @@ mod tests {
 
     #[test]
     fn test_safe_gx_hasher() {
-        use std::hash::Hash;
-
-        let mut hasher1 = SafeGxBuildHasher.build_hasher();
-        "hello".hash(&mut hasher1);
-        let hash1 = hasher1.finish();
-
-        let mut hasher2 = SafeGxBuildHasher.build_hasher();
-        "hello".hash(&mut hasher2);
-        let hash2 = hasher2.finish();
+        let hash1 = SafeGxBuildHasher.hash_one("hello");
+        let hash2 = SafeGxBuildHasher.hash_one("hello");
 
         assert_eq!(hash1, hash2);
     }

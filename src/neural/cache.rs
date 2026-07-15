@@ -450,6 +450,6 @@ mod tests {
 
         // Should have entries from all threads (up to max_entries)
         assert!(cache.len() <= 100);
-        assert!(cache.len() > 0);
+        assert!(!cache.is_empty());
     }
 }

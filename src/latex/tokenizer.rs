@@ -665,7 +665,7 @@ impl<'a> Lexer<'a> {
             let has_digit_after_dot = {
                 let mut lookahead = self.chars.clone();
                 lookahead.next(); // skip the '.'
-                lookahead.next().map_or(false, |c| c.is_ascii_digit())
+                lookahead.next().is_some_and(|c| c.is_ascii_digit())
             };
             if has_digit_after_dot {
                 content.push('.');

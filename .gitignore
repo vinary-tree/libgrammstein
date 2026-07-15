@@ -105,3 +105,6 @@ formal/tla/.tlacache/
 .pgmcp.toml
 
 !docs/diagrams/*.svg
+
+# Rocq nia tactic proof cache (build artifact)
+formal/rocq/.nia.cache

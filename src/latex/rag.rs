@@ -156,7 +156,7 @@ impl EquationRagIndex {
         if let Some(ref domain) = doc.domain {
             self.domain_index
                 .entry(domain.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(idx);
         }
 

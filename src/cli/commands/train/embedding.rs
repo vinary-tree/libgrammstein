@@ -183,6 +183,10 @@ pub(super) fn train_embedding(
 }
 
 /// Train embeddings with per-epoch checkpointing.
+// CLI wiring: the trainer builder, corpus reader, parsed args, checkpoint
+// manager, timer, progress sink, stats, and quiet flag are distinct
+// collaborators threaded through this entry point.
+#[allow(clippy::too_many_arguments)]
 fn train_embedding_with_checkpoints(
     trainer_builder: crate::embedding::EmbeddingTrainerBuilder,
     reader: Box<dyn CorpusReader>,

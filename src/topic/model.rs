@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::config::TopicConfig;
 use super::dendrogram::Dendrogram;
 use super::extractor::ExtractionResult;
-use super::topic::{Topic, TopicId};
+use super::types::{Topic, TopicId};
 use super::{Result, TopicError};
 
 /// A trained topic model.
@@ -186,7 +186,7 @@ impl TopicModel {
     /// Get the top N topics by document count.
     pub fn top_topics(&self, n: usize) -> Vec<&Topic> {
         let mut topics: Vec<_> = self.topics.values().collect();
-        topics.sort_by(|a, b| b.document_count.cmp(&a.document_count));
+        topics.sort_by_key(|t| std::cmp::Reverse(t.document_count));
         topics.truncate(n);
         topics
     }

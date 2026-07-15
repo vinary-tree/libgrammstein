@@ -137,9 +137,10 @@ impl ParadigmDetector {
 
         let mut profile = ParadigmProfile::new();
         let mut matches = Vec::new();
-        let mut stats = DetectionStats::default();
-
-        stats.tokens_processed = tokens.len();
+        let mut stats = DetectionStats {
+            tokens_processed: tokens.len(),
+            ..Default::default()
+        };
 
         // Match patterns
         let mut i = 0;

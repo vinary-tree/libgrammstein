@@ -146,7 +146,7 @@ fn corpus_stats(args: CorpusStatsArgs, verbose: bool) -> CliResult<()> {
 
     // Get top 10 words
     let mut word_vec: Vec<(String, u64)> = word_counts.into_iter().collect();
-    word_vec.sort_by(|a, b| b.1.cmp(&a.1));
+    word_vec.sort_by_key(|w| std::cmp::Reverse(w.1));
     let top_words: Vec<(String, u64)> = word_vec.into_iter().take(10).collect();
 
     // Calculate document statistics
@@ -405,6 +405,10 @@ fn download_http_file(url: &str, output_path: &Path, resume: bool, sample: bool)
     Ok(start + copied)
 }
 
+// `ureq::Error` is a foreign type matched on by variant at the call site (the
+// 416-range retry); boxing it would obscure that match to shrink a cold
+// error-path return, so the large-Err variant is accepted here.
+#[allow(clippy::result_large_err)]
 fn request_download(url: &str, start: u64, sample: bool) -> Result<ureq::Response, ureq::Error> {
     let mut request = ureq::get(url);
 

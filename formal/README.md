@@ -72,7 +72,9 @@ formal/
     ├── Makefile
     ├── MknStatistics.v
     ├── FrequencyCountsMerge.v
-    └── MknFloatBounds.v
+    ├── MknFloatBounds.v
+    ├── VarintTermIdView.v
+    └── NoisyChannelDecode.v
 ```
 
 ## Tools
@@ -523,6 +525,46 @@ aggregation:
 
 The bounded proofs require checked addition. Rust now panics instead of silently
 wrapping if frequency counts overflow `u64`.
+
+### VarintTermIdView.v
+
+Target: `src/ngram/vocabulary.rs` (`encode_varint`/`decode_varint`) and
+`src/ngram/u64_view.rs` (`U64NgramView`).
+
+Proves that the LEB128 varint term-id codec is a self-delimiting bijection, so
+the `u64`-unit view the word-level corrector `T_gram` walks over the n-gram store
+enumerates exactly the stored term-id sequences — no id dropped, duplicated, or
+invented:
+
+- `decode_aux_encode` — the generalized (accumulator/shift) round-trip invariant.
+- `decode_encode` — decoding `encode_varint v ++ rest` recovers `(v, rest)`
+  (injectivity of the codec together with its self-delimiting property).
+- `encode_seq_decode_seq` — VIEW FAITHFULNESS: the concatenated-varint key of a
+  term-id sequence decodes back to exactly that sequence (soundness AND
+  completeness of the view's enumeration).
+- `encode_seq_injective` — distinct term-id sequences produce distinct keys.
+
+The codec is modelled over `nat` (`& 0x7F` as `mod 128`, `& 0x80 == 0` as
+`< 128`, `<< shift` as `* 2 ^ shift`); the bijection holds for all naturals. The
+store's reservation of term-id `0` (`FIRST_VALID_INDEX = 1`) is an orthogonal
+namespace-disjointness invariant, not needed for the codec bijection.
+
+### NoisyChannelDecode.v
+
+Target: `src/integration/grammar_corrector.rs` (the beam decode).
+
+Proves that the cascade's minimum-cost decode is the noisy-channel MAXIMUM A
+POSTERIORI correction. With `cost(w) = c_channel(w) + λ·(−ln P(w))` and
+`score(w) = exp(−c_channel(w))·P(w)^λ`:
+
+- `neg_ln_reflect` — `−ln` is strictly antitone on the positives.
+- `cost_is_neg_log_score` — `cost(w) = −ln(score(w))` (the log-semiring bridge).
+- `min_cost_maximizes_score` — the least-cost hypothesis has the greatest score
+  (so argmin cost = argmax score over any candidate set).
+- `map_score_identity` / `min_cost_is_map` — with `c_channel = −ln P(x|w)` and
+  `λ = 1` the score is the joint `P(x|w)·P(w)`, which — the evidence `P(x)` being
+  constant in `w` — is proportional to the posterior `P(w|x)`; hence the min-cost
+  decode is the Bayes-optimal (MAP) correction (Kernighan, Church & Gale 1990).
 
 ## Source Alignment
 

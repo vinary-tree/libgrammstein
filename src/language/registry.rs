@@ -218,7 +218,7 @@ impl ModelRegistry {
                 if dialect_entry.file_type()?.is_dir() {
                     // Look for model files in dialect directory
                     Self::scan_model_files(&mut index, &dialect_path, &lang_name)?;
-                } else if dialect_path.extension().map_or(false, |e| e == "bin") {
+                } else if dialect_path.extension().is_some_and(|e| e == "bin") {
                     // Model file directly in language directory
                     Self::add_model_file(&mut index, &dialect_path, &lang_name, None)?;
                 }
@@ -242,7 +242,7 @@ impl ModelRegistry {
             let entry = entry?;
             let path = entry.path();
 
-            if path.extension().map_or(false, |e| e == "bin") {
+            if path.extension().is_some_and(|e| e == "bin") {
                 Self::add_model_file(index, &path, lang, dialect.as_deref())?;
             }
         }

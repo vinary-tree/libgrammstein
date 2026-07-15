@@ -485,7 +485,7 @@ impl GpuBatchDotProduct {
             });
             compute_pass.set_pipeline(&self.pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups((batch_size as u32 + 255) / 256, 1, 1);
+            compute_pass.dispatch_workgroups((batch_size as u32).div_ceil(256), 1, 1);
         }
 
         encoder.copy_buffer_to_buffer(
@@ -629,14 +629,14 @@ impl GpuSigmoid {
 
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("output"),
-            size: (batch_size * std::mem::size_of::<f32>()) as u64,
+            size: std::mem::size_of_val(input) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("staging"),
-            size: (batch_size * std::mem::size_of::<f32>()) as u64,
+            size: std::mem::size_of_val(input) as u64,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -673,7 +673,7 @@ impl GpuSigmoid {
             });
             compute_pass.set_pipeline(&self.pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups((batch_size as u32 + 255) / 256, 1, 1);
+            compute_pass.dispatch_workgroups((batch_size as u32).div_ceil(256), 1, 1);
         }
 
         encoder.copy_buffer_to_buffer(
@@ -681,7 +681,7 @@ impl GpuSigmoid {
             0,
             &staging_buffer,
             0,
-            (batch_size * std::mem::size_of::<f32>()) as u64,
+            std::mem::size_of_val(input) as u64,
         );
 
         self.queue.submit(Some(encoder.finish()));
@@ -842,7 +842,7 @@ impl GpuGradientAccum {
 
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("staging"),
-            size: (total_elements * std::mem::size_of::<f32>()) as u64,
+            size: std::mem::size_of_val(embeddings) as u64,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -879,7 +879,7 @@ impl GpuGradientAccum {
             });
             compute_pass.set_pipeline(&self.pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups((total_elements as u32 + 255) / 256, 1, 1);
+            compute_pass.dispatch_workgroups((total_elements as u32).div_ceil(256), 1, 1);
         }
 
         encoder.copy_buffer_to_buffer(
@@ -887,7 +887,7 @@ impl GpuGradientAccum {
             0,
             &staging_buffer,
             0,
-            (total_elements * std::mem::size_of::<f32>()) as u64,
+            std::mem::size_of_val(embeddings) as u64,
         );
 
         self.queue.submit(Some(encoder.finish()));
@@ -1106,7 +1106,7 @@ impl GpuSimilaritySearch {
             });
             compute_pass.set_pipeline(&self.pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups((num_rows as u32 + 255) / 256, 1, 1);
+            compute_pass.dispatch_workgroups((num_rows as u32).div_ceil(256), 1, 1);
         }
 
         encoder.copy_buffer_to_buffer(
