@@ -1,0 +1,57 @@
+@startuml acoustic-mfcc-pipeline
+' Signal-processing trunk shared by every FeatureExtractor method, with the four output taps.
+' Render: plantuml -tsvg docs/diagrams/acoustic-mfcc-pipeline.puml
+' Source of truth for Figure 1 in docs/components/acoustic/overview.md and docs/components/acoustic/features.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title Audio Feature Extraction — shared trunk and output taps
+
+legend top right
+  |= Color |= Concept |
+  |<#546E7A>     | raw audio in / feature matrix out (I/O) |
+  |<#2E7D32>     | audio feature-extraction stage |
+endlegend
+
+rectangle "**Raw audio**  x[n]\nmono · f_s Hz · [-1, 1]" as raw #546E7A
+
+rectangle "**Pre-emphasis**\ny[n] = x[n] − α·x[n−1]" as pre #2E7D32
+rectangle "**Framing**\nframe t = y[tS .. tS+N)" as frame #2E7D32
+rectangle "**Windowing**\nx̃ₜ[n] = w[n]·xₜ[n]  (Hann)" as win #2E7D32
+rectangle "**Real FFT** (realfft)\nXₜ[k], k ∈ [0, K/2]" as fft #2E7D32
+rectangle "**Power / magnitude**\nPₜ[k] = |Xₜ[k]|²" as spec #2E7D32
+rectangle "**Mel filterbank**\nEₜ[m] = Σₖ Hₘ[k]·Pₜ[k]" as mel #2E7D32
+rectangle "**Log compression**\nLₜ[m] = ln(Eₜ[m] + ε)" as logc #2E7D32
+rectangle "**DCT-II**\ncₜ[j] = Σₘ Dⱼₘ·Lₜ[m]" as dct #2E7D32
+rectangle "**CMVN + Δ / ΔΔ**\nmean/var norm · deltas" as norm #2E7D32
+
+rectangle "**Spectrogram**\n[T, K/2+1]\nextract_spectrogram" as outspec #546E7A
+rectangle "**Log-mel**\n[T, M] · no CMVN\nextract_log_mel" as outlm #546E7A
+rectangle "**Filterbank**\n[T, M(+Δ)]\nextract_filterbank" as outfb #546E7A
+rectangle "**MFCC**\n[T, J(+Δ)]\nextract_mfcc" as outmfcc #546E7A
+
+raw --> pre
+pre --> frame
+frame --> win
+win --> fft
+fft --> spec
+spec --> mel
+mel --> logc
+
+spec -[#546E7A]-> outspec : power spectrogram
+logc -[#546E7A]-> outlm : log-mel (streaming)
+logc --> norm : filterbank path
+logc --> dct : MFCC path
+dct --> norm
+norm -[#546E7A]-> outfb
+norm -[#546E7A]-> outmfcc
+
+@enduml

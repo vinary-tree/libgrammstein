@@ -1,3 +1,8 @@
+> ⚠ **Archived — historical record, not current design.**
+> A dated (2026-01-19) one-off AddressSanitizer / ThreadSanitizer / Miri evaluation across four
+> sibling repositories. The results and test counts are a point-in-time snapshot and are now stale;
+> retained for provenance only.
+
 # Sanitizer Evaluation Results
 
 **Date:** 2026-01-19

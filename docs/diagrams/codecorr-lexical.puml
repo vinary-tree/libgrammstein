@@ -1,0 +1,44 @@
+@startuml codecorr-lexical
+' LexicalCorrector: route a token to the dictionary bank for its type, fuzzy-match
+' via liblevenshtein, and emit confidence-scored spelling corrections.
+' Render: plantuml -tsvg docs/diagrams/codecorr-lexical.puml
+' Source of truth for Figure 1 in docs/components/code/correctors/lexical.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title LexicalCorrector — type-routed fuzzy dictionary match
+
+rectangle "**CodeToken**\ntext · TokenType · byte_offset" as tok #EF6C00
+
+rectangle "route by TokenType" as route #263238
+
+package "Dictionary banks (HashSet<String>)" {
+  rectangle "**keywords**" as kw #EF6C00
+  rectangle "**types**\n(builtin_types)" as ty #EF6C00
+  rectangle "**identifiers ∪ stdlib**" as id #EF6C00
+}
+
+rectangle "**liblevenshtein**\nstandard_distance(query, term)\nlength-prefilter |Δlen| ≤ d" as lev #546E7A
+
+rectangle "**FuzzyCandidate**\n{ term, distance }\n0 < distance ≤ max_edit_distance" as cand #546E7A
+rectangle "**Correction** (Spelling)\nconf = 1 − min(distance·edit_penalty, 0.9)\nsource = Lexical" as corr #455A64
+
+tok --> route
+route --> kw : Keyword
+route --> ty : TypeName
+route --> id : Identifier / other
+kw --> lev
+ty --> lev
+id --> lev
+lev --> cand : sort by distance ↑
+cand --> corr : take max_candidates
+
+@enduml

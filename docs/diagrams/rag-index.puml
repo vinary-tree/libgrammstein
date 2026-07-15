@@ -1,0 +1,78 @@
+@startuml rag-index
+' RagIndex<B>: the join of a geometric backend, a metadata map, and an optional
+' topic model — plus the on-disk layout that save/load round-trips. Colour:
+'   #6A1B9A purple = retrieval / topic      #2E7D32 green = embeddings
+'   #00838F teal   = storage / persistence  #455A64 grey  = call-site boundary
+' Containers use a LIGHT fill with a dark titled colour (the rag-hnsw idiom), so
+' that edge labels crossing them stay legible against the fill.
+' Render: plantuml -tsvg docs/diagrams/rag-index.puml
+' Source of truth for Figure 1 in docs/components/rag/index.md §2 and the
+' persistence figure in §6.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam nodesep 28
+skinparam ranksep 42
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title RagIndex<B> — geometry ⋈ metadata ⋈ topics
+
+rectangle "**add_document(doc)**\ncapacity check → backend.add → metadata insert" as add #455A64
+rectangle "**query(v_q, top_k)**" as q #455A64
+rectangle "**extract_topics(config, texts)**\nTopicExtractor over the embeddings\n(HAC + c-TF-IDF)" as extract #2E7D32
+
+rectangle "<color:#4A148C>**RagIndex<B = ExactCosineBackend>**" as index #F3E5F5 {
+  rectangle "**backend: B**\nid ↦ v̂ ∈ ℝᵈ\n//the geometry//" as backend #6A1B9A
+  rectangle "**documents:**\n**HashMap<DocumentId, DocumentMeta>**\nid ↦ (uri, title, synopsis, topic_ids, …)\n//the prose//" as meta #6A1B9A
+  rectangle "**next_id: u32**\nmonotone ID allocator" as nid #6A1B9A
+  rectangle "**config: RagIndexConfig**\nembedding_dim = 768\nmax_documents · store_content" as cfg #6A1B9A
+  rectangle "**topic_model:**\n**Option<TopicModel>**\ndendrogram + keywords" as topic #6A1B9A
+}
+
+rectangle "**Result**\nVec<(DocumentMeta, f32)>\n//only ids present in BOTH//" as out #455A64
+
+rectangle "<color:#00838F>**save(path) / load(path)**  —  the on-disk index" as io #E0F2F1 {
+  rectangle "backend/\nembeddings.bin · doc_ids.bin" as f1 #00838F
+  rectangle "metadata.json\nHashMap<DocumentId, DocumentMeta>" as f2 #00838F
+  rectangle "config.json\nRagIndexConfig" as f3 #00838F
+  rectangle "state.json\nnext_id" as f4 #00838F
+  rectangle "topic_model.json\n//written only when a model exists//" as f5 #00838F
+}
+
+add --> backend : add(id, embedding)
+add --> meta : DocumentMeta::from_document
+add --> nid : next_id ← max(next_id, id + 1)
+
+q --> backend : top-k by ⟨v̂_q , v̂_d⟩
+backend --> meta : Vec<(DocumentId, score)>
+meta --> out : **filter_map** — a hit whose id is\nabsent from the map is //dropped//
+
+extract --> backend : get_all_embeddings()
+extract --> topic : TopicModel
+topic --> meta : meta.topic_ids ←\nmodel.document_topic_ids(idx)
+
+index --> io : serialise
+io --> index : rehydrate
+
+note right of io
+  ""extract_topics"", ""save"" and ""load"" are defined
+  **only** on ""RagIndex<ExactCosineBackend>"": each
+  needs ""get_all_embeddings"", an //inherent// method of
+  the exact backend rather than a ""RetrievalBackend""
+  trait method. A generic ""RagIndex<B>"" can still add,
+  query, remove and iterate.
+end note
+
+note bottom of out
+  **Existence invariant.** ""documents"" is the source of
+  truth. ""query"" is a ""filter_map"" over the backend's
+  hits, so a document dropped from the map can never
+  surface — even if a stale backend row lingers.
+end note
+@enduml

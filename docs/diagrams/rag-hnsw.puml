@@ -1,0 +1,103 @@
+@startuml rag-hnsw
+' HNSW (Hierarchical Navigable Small World) search: a hierarchy of proximity
+' graphs, coarse at the top and complete at layer 0. The query greedily descends
+' from the entry point layer by layer, then runs a best-first beam of width
+' ef_search at layer 0. Colour:
+'   #4A148C/#6A1B9A/#8E24AA purple ramp = graph nodes, darkest at the top layer
+'   #2E7D32 green = query embedding     #00838F teal = returned neighbour
+'   #9E9E9E grey  = the same point re-appearing one layer down
+' `linetype ortho` is deliberately NOT set here: proximity-graph edges read far
+' better as straight segments than as right angles. Intra-layer links carry a
+' `right` hint so each layer lays out as a horizontal band.
+' Render: plantuml -tsvg docs/diagrams/rag-hnsw.puml
+' Source of truth for Figure 2 in docs/components/rag/backend.md §4.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam nodesep 26
+skinparam ranksep 34
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title HNSW — greedy descent through a layered proximity graph
+
+rectangle "**Query**  v̂_q ∈ ℝ⁷⁶⁸,  ‖v̂_q‖₂ = 1" as q #2E7D32
+
+rectangle "<color:#4A148C>**Layer 2** — sparsest; long-range links only" as L2 #F3E5F5 {
+  rectangle "**ep**" as e2 #4A148C
+  rectangle "b" as b2 #4A148C
+}
+
+rectangle "<color:#6A1B9A>**Layer 1** — intermediate density" as L1 #EDE7F6 {
+  rectangle "ep" as e1 #6A1B9A
+  rectangle "b" as b1 #6A1B9A
+  rectangle "c" as c1 #6A1B9A
+  rectangle "f" as f1 #6A1B9A
+}
+
+rectangle "<color:#8E24AA>**Layer 0** — every point; at most 2·M links per node" as L0 #F8E7FB {
+  rectangle "ep" as e0 #8E24AA
+  rectangle "b" as b0 #8E24AA
+  rectangle "c" as c0 #8E24AA
+  rectangle "d" as d0 #8E24AA
+  rectangle "f" as f0 #8E24AA
+  rectangle "**g**" as g0 #00838F
+  rectangle "h" as h0 #8E24AA
+}
+
+rectangle "**Top-k neighbours**\nsim = 1 − DistDot = ⟨v̂_q , v̂_d⟩" as out #00838F
+
+' ── intra-layer proximity links (right hints ⇒ horizontal bands) ──
+e2 -[#9575CD]right- b2
+
+e1 -[#9575CD]right- b1
+b1 -[#9575CD]right- c1
+c1 -[#9575CD]right- f1
+
+e0 -[#BA68C8]right- b0
+b0 -[#BA68C8]right- c0
+c0 -[#BA68C8]right- d0
+d0 -[#BA68C8]right- f0
+f0 -[#BA68C8]right- g0
+g0 -[#BA68C8]right- h0
+
+' ── the same point, one layer down ──
+b2 -[#9E9E9E,dashed]down-> b1
+b1 -[#9E9E9E,dashed]down-> b0
+f1 -[#9E9E9E,dashed]down-> f0
+
+' ── the descent ──
+q -[#2E7D32,bold]down-> e2 : **1.** enter at the\ntop-layer entry point
+e2 -[#2E7D32,bold]down-> e1 : **2.** greedy hop until\nno neighbour is closer,\nthen descend
+c1 -[#2E7D32,bold]down-> c0 : **3.** descend to L₀\ncarrying the best node
+g0 -[#00838F,bold]right-> out : **4.** beam of width\nef_search ⇒ top-k
+
+note right of L0
+  **Parameters** (""HnswConfig"")
+  ─────────────────────────────
+  **M** = max_nb_connection = 24
+     links kept per node; memory ∝ M
+  **ef_construction** = 400
+     beam width while //building// the graph
+  **ef_search** = 100
+     beam width while //searching//; recall and
+     latency both rise with it. Overridable
+     per query via ""query_with_ef"".
+  **max_layer** = 16
+     the level of a new point is drawn from a
+     geometric distribution with m_L = 1 / ln M,
+     so layer sizes decay exponentially.
+end note
+
+note left of q
+  Expected work is **Θ(d · ef · log n)**:
+  Θ(log n) layers, each a bounded greedy
+  walk, each hop one d-dimensional SIMD
+  dot product. Exact search is Θ(n · d).
+end note
+@enduml

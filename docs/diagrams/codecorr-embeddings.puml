@@ -1,0 +1,41 @@
+@startuml codecorr-embeddings
+' CodeEmbedder: format/architecture auto-detection, backend dispatch, cache,
+' and cosine similarity scoring for code snippets.
+' Render: plantuml -tsvg docs/diagrams/codecorr-embeddings.puml
+' Source of truth for Figure 1 in docs/components/code/embeddings.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title CodeEmbedder — auto-detected backend + cache (code-neural feature)
+
+rectangle "**Model directory**\nModelFormat::detect" as dir #546E7A
+
+package "Backend dispatch (EmbedderBackend)" {
+  rectangle "**ModernBert**\nSafeTensors · model_type = modernbert" as mb #2E7D32
+  rectangle "**Bert / RoBERTa**\nUniXcoder · GraphCodeBERT · CodeBERT\nCLS token via Candle" as bert #2E7D32
+  rectangle "**Onnx**\nort runtime · neural::code embedders" as onnx #2E7D32
+}
+
+rectangle "**DashMap cache**\ncode → embedding (lock-free)" as cache #00838F
+rectangle "**Embedding**  v ∈ ℝ⁷⁶⁸" as emb #2E7D32
+rectangle "**cosine_similarity**\ncos(a, b) = (a · b) / (‖a‖ ‖b‖)\nscore_completion → (cos + 1) / 2" as cos #1565C0
+
+dir --> mb : SafeTensors
+dir --> bert : SafeTensors (roberta/bert)
+dir --> onnx : ONNX
+mb --> emb
+bert --> emb
+onnx --> emb
+cache .[#00838F,dashed].> emb : hit (probe first)
+emb --> cache : insert (evict ~10% at cap)
+emb --> cos
+
+@enduml

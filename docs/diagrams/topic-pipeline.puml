@@ -1,0 +1,45 @@
+@startuml topic-pipeline
+' End-to-end BERTopic-style pipeline: embed -> cluster -> describe -> model.
+' Render: plantuml -tsvg docs/diagrams/topic-pipeline.puml
+' Source of truth for Figure 1 in docs/components/topic/overview.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+legend top right
+|= Concept |= Color |
+| embeddings / neural | <back:#2E7D32>        </back> |
+| topic / clustering | <back:#6A1B9A>        </back> |
+| persistence | <back:#00838F>        </back> |
+| corpus / I-O | <back:#546E7A>        </back> |
+endlegend
+
+rectangle "Document collection\ntexts + embeddings" as docs #546E7A
+rectangle "ModernBERT embeddings\n768-dim vectors" as emb #2E7D32
+rectangle "Cosine distance matrix\nD[i,j] = 1 − cos(u, v)\natomic u64 cells · rayon-parallel" as dist #6A1B9A
+rectangle "Hierarchical agglomerative clustering\nLance–Williams linkage\nsingle · complete · average · Ward" as hac #6A1B9A
+rectangle "Dendrogram\nbinary merge tree" as dendro #6A1B9A
+rectangle "Cut → cluster labels\ncut_to_k_clusters(k)\ncut_at_distance(τ)" as cut #6A1B9A
+rectangle "c-TF-IDF\nper-topic top-k keywords" as ctfidf #6A1B9A
+rectangle "TopicModel\ntopics · document_topics · dendrogram" as model #00838F
+
+docs --> emb : embed
+emb --> dist
+dist --> hac
+hac --> dendro
+dendro --> cut
+cut --> ctfidf : assignments
+docs --> ctfidf : texts
+ctfidf --> model : keywords
+cut --> model : document_topics
+dendro --> model : hierarchy
+@enduml

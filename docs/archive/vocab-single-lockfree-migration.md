@@ -1,3 +1,9 @@
+> ⚠ **Archived — historical record, not current design.**
+> A completed migration work-order (with line-numbered edits) for collapsing the vocabulary onto a
+> single lock-free implementation. The migration has landed — `PersistentVocabARTrie` is now the
+> sole implementation — so this checklist is obsolete. For the current persistent-storage data flow
+> see [`../architecture/data-flow.md`](../architecture/data-flow.md).
+
 # libgrammstein → libdictenstein single-lock-free vocab migration
 
 libdictenstein deleted `ConcurrentVocabARTrie` / `LockFreeVocab` (the wrappers) — `PersistentVocabARTrie`

@@ -1,0 +1,75 @@
+@startuml corpus-gutenberg-strip
+' strip_gutenberg_boilerplate: choose the half-open window [start_idx, end_idx) of
+' a Gutenberg text file from the first matching START and END marker.
+' Render: plantuml -tsvg docs/diagrams/corpus-gutenberg-strip.puml
+' Source of truth for Figure 3 in docs/components/corpus/formats.md, section "Project Gutenberg".
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam note {
+  BackgroundColor #E3F2FD
+  BorderColor #1565C0
+}
+title strip_gutenberg_boilerplate — carving the book out of the file
+
+rectangle "**pg1342.txt** — the whole file, as read by fs::read_to_string" as file #546E7A {
+  rectangle "**front matter + START marker line — discarded**\ntitle page · licence blurb · producer credits\nmarker: *** START OF THE PROJECT GUTENBERG EBOOK ***" as head #90A4AE
+  rectangle "**the book — kept**\ntext[start_idx .. end_idx]\n“It is a truth universally acknowledged, that a single man…”" as body #1565C0
+  rectangle "**END marker line + back matter — discarded**\nmarker: *** END OF THE PROJECT GUTENBERG EBOOK ***\nlicence · donation appeal · contributor index" as tail #90A4AE
+}
+
+rectangle "**Normalizer::default()**\n(all four passes off — a pass-through)" as norm #1565C0
+rectangle "**Document**\nid = file stem, leading “pg” stripped (pg1342 ⇒ 1342)\ntitle = file stem · content = normalized text\nsource = Some(path)" as doc #455A64
+
+head -[hidden]down-> body
+body -[hidden]down-> tail
+body --> norm : text[start_idx .. end_idx].to_string()
+norm --> doc
+
+note right of head
+  **start_idx** = index just past the newline that ends the
+  first matching START marker line, plus the run of
+  whitespace that follows it (blank lines are skipped).
+end note
+
+note right of tail
+  **end_idx** = length of text[..pos].trim_end(), where pos is
+  the first matching END marker **searched from start_idx**,
+  so a marker quoted inside the front matter cannot truncate
+  the book.
+end note
+
+note bottom of doc
+  **Marker sets** — first match wins, in source order.
+  START: "*** START OF THE PROJECT GUTENBERG",
+     "*** START OF THIS PROJECT GUTENBERG",
+     "***START OF THE PROJECT GUTENBERG",
+     "*END*THE SMALL PRINT"  ← the pre-2000 layout
+  END: "*** END OF THE PROJECT GUTENBERG",
+     "*** END OF THIS PROJECT GUTENBERG",
+     "***END OF THE PROJECT GUTENBERG",
+     "End of the Project Gutenberg", "End of Project Gutenberg"
+
+  **Fail-safe.** If no marker matches, or the window is empty
+  (start_idx ≥ end_idx), the **whole file** is returned rather than
+  nothing — so a non-Gutenberg .txt still trains. A document that
+  normalises to the empty string is dropped with a log::warn!.
+end note
+
+legend right
+  |= Colour |= Role |
+  |<#546E7A> | the file (corpus I-O) |
+  |<#90A4AE> | boilerplate — discarded |
+  |<#1565C0> | retained text · normalisation |
+  |<#455A64> | emitted Document |
+endlegend
+@enduml

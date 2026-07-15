@@ -1,0 +1,80 @@
+@startuml arch-threading
+' The thread inventory: which threads exist, what each owns, and WHICH SYNCHRONIZATION
+' PRIMITIVE mediates every shared edge. Colour encodes the primitive class:
+' lock-free (teal), atomic-only (blue), bounded channel (grey), lock taken (orange).
+' Colour legend (semantic, shared across all repo diagrams — see architecture.puml):
+'   #1565C0 blue = statistical LM core   #EF6C00 orange = the blocking edges
+'   #00838F teal = storage / persistence #546E7A grey = external crates / channels
+'   #C62828 red = formal verification
+' Render: plantuml -tsvg docs/diagrams/arch-threading.puml
+' Source of truth for Figure 1 in docs/architecture/threading.md §3
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam NoteBackgroundColor #FFF3E0
+skinparam NoteBorderColor #EF6C00
+title Threading model — every shared edge and the primitive that guards it
+
+legend top right
+  |= Colour |= Synchronization class |
+  |<#00838F>     | Lock-free (CAS / DashMap shard) |
+  |<#1565C0>     | Atomic-only (fetch_add · load) |
+  |<#546E7A>     | Bounded channel (backpressure) |
+  |<#EF6C00>     | Lock taken (rare — never on the hot path) |
+endlegend
+
+package "TRAINING — rayon work-stealing pool" {
+  rectangle "**Prefetch producer**  ×1\nblocks on disk I/O so the pool never has to" as producer #546E7A
+  rectangle "**rayon workers**  ×<latex>P</latex>\ntokenize · extract n-grams · encode keys\n(pure, thread-local, no shared state)" as rayon #1565C0
+  rectangle "**NgramEntry atomics**\n<latex>c(\cdot)</latex>, <latex>N_{1+}(\bullet, w)</latex>, <latex>N_{1+}(w, \bullet)</latex> — fetch_add(Relaxed)\n**commutative** ⟹ interleaving-independent" as entry #1565C0
+}
+
+package "IMPORT — tokio runtime  (feature: google-books)" {
+  rectangle "**Import workers**  ×<latex>W</latex>  (--parallel)\nHTTP stream → gunzip → parse → aggregate" as workers #1565C0
+  rectangle "**Per-shard lock-free overlay**\nincrement_cas into a DashMap-backed overlay;\nwriters hold only a **shared** read() guard" as overlay #00838F
+  rectangle "**Cron thread**  ×1\nmin-heap of due tasks; fires the periodic checkpoint" as cron #546E7A
+  rectangle "**Checkpoint rayon pool**  ×8\nper-shard checkpoint() in parallel;\nShardSyncCoordinator CAS elects **one** syncer per shard" as ckpt #00838F
+}
+
+package "QUERY — the caller's own threads" {
+  rectangle "**Scorer threads**  ×<latex>k</latex>\nread-only trie traversal" as scorers #1565C0
+  rectangle "**ScoreCache**\nDashMap get/insert is lock-free;\na Mutex<VecDeque> is taken **only** to evict" as scache #00838F
+  rectangle "**Embedding cache**\nArc<DashMap<String, Array1<f32>>>" as ecache #00838F
+}
+
+rectangle "**AsyncShardSync**  (TLA+ · TLAPS)\nAtMostOneSyncer · CleanMeansZeroDirty" as spec #C62828
+
+producer --> rayon : bounded channel\n(backpressure)
+rayon --> entry : fetch_add(Relaxed)
+rayon -[#EF6C00]-> entry : node **split** only\n(structural, rare)
+
+workers --> overlay : increment_cas\n(lock-free, &self)
+cron --> ckpt : every checkpoint_interval_ms
+ckpt --> overlay : snapshot + evict\n(concurrent with writers)
+workers -[#EF6C00,dashed]-> ckpt : **defer-and-continue**\nif the target shard is Syncing
+
+scorers --> scache : probe hash of (w, h)
+scache -[#EF6C00]-> scache : LRU evict\n(**the one lock**)
+scorers --> ecache
+scorers --> entry : load(Relaxed)
+
+spec -[#C62828,dashed]-> ckpt : machine-checks
+
+note bottom of overlay
+  **Why writers never block on a checkpoint.** The overlay
+  snapshot is an immutable RCU point-in-time, so checkpoint()
+  takes only &self and runs under a **shared** read() guard.
+  A worker whose shard is mid-sync does not wait — it defers
+  the job and picks up the next one.
+end note
+
+@enduml

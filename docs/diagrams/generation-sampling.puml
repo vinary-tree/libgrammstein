@@ -1,0 +1,51 @@
+@startuml generation-sampling
+' sample_token's pipeline: score ⇒ temperature ⇒ softmax ⇒ sort ⇒ top-k ⇒ nucleus ⇒ renormalize ⇒ draw.
+' Render: plantuml -tsvg docs/diagrams/generation-sampling.puml
+' Source of truth for Figure 2 in docs/components/generation/text-generation.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title sample_token — temperature · top-k · nucleus decoding
+
+legend top right
+  |= Color |= Concept |
+  |<#1565C0>     | statistical LM core (n-gram scores) |
+  |<#2E7D32>     | decoding transform |
+  |<#546E7A>     | sampled token (I/O) |
+endlegend
+
+rectangle "**Score V**\nℓ_w = log ℙ(w | h),  w ∈ V\nkeep finite ℓ_w" as score #1565C0
+rectangle "**Temperature**\nℓ_w ← ℓ_w / τ   (if τ ≠ 1)" as temp #2E7D32
+rectangle "**Stabilized exp**\np_w = exp(ℓ_w − max ℓ)\nkeep p_w > min_prob" as expc #2E7D32
+rectangle "**Normalize**\np_w ← p_w / Σ p" as norm1 #2E7D32
+rectangle "**Sort ↓**\nby p_w descending" as sort #2E7D32
+rectangle "**Top-k**\ntruncate to k   (if Some(k))" as topk #2E7D32
+rectangle "**Nucleus (top-p)**\nsmallest prefix with Σ p ≥ p\n(if top_p < 1)" as nucleus #2E7D32
+rectangle "**Renormalize**\nweights = p / Σ p" as norm2 #2E7D32
+rectangle "**WeightedIndex.sample(rng)**\nStdRng(seed) or thread_rng" as draw #2E7D32
+rectangle "**Next token**\nSome(w)  ·  None if V empty" as out #546E7A
+
+score --> temp
+temp --> expc
+expc --> norm1
+norm1 --> sort
+sort --> topk
+topk --> nucleus
+nucleus --> norm2
+norm2 --> draw
+draw --> out
+
+note bottom of out
+  Greedy decoding (τ ≤ 0) bypasses this pipeline and
+  takes argmax_w ℓ_w directly (best_token).
+end note
+
+@enduml

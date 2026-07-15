@@ -1,0 +1,101 @@
+@startuml arch-importer-pipeline
+' The Google Books importer end-to-end: one prefix file's journey from a remote .gz
+' to a durable, MKN-annotated shard. Swimlanes separate the three concurrent actors
+' (worker pool, storage layer, cron thread) so the ASYNCHRONY is visible, not implied.
+' Colour legend (semantic, shared across all repo diagrams — see architecture.puml):
+'   #1565C0 blue = statistical LM core   #00838F teal = storage / persistence
+'   #006064 dark teal = the eviction tail  #546E7A grey = external / corpora
+' Render: plantuml -tsvg docs/diagrams/arch-importer-pipeline.puml
+' Source of truth for Figure 2 in docs/architecture/google-books-importer.md §3
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam NoteBackgroundColor #FFF3E0
+skinparam NoteBorderColor #EF6C00
+skinparam activity {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  DiamondBackgroundColor #ECEFF1
+  DiamondFontColor #263238
+  DiamondBorderColor #455A64
+}
+title Importer pipeline — one prefix file, three concurrent actors
+
+|#F3F5F7|Worker  (×W · tokio)|
+start
+#546E7A:**Claim job** (order, prefix)
+from the async job queue;
+#546E7A:**Fetch** the .gz prefix file
+HTTP stream — or, with --cache-files, download it
+to local disk first and then stream from there;
+#546E7A:**Gunzip** into lines;
+#1565C0:**Parse** — zero-allocation
+byte-scan for tabs, yielding a borrowed record whose
+n-gram text points back into the line buffer;
+#1565C0:**Aggregate years**
+<latex>c(g) = \sum_{y \in Y} \text{match\_count}(g, y)</latex>
+only one n-gram is buffered at a time, because the
+files arrive sorted by n-gram;
+
+|#EDF3F8|Storage  (NgramStorage)|
+#00838F:**Encode the key**
+each token becomes a vocabulary index, then a LEB128
+varint. The key is the concatenated varints, so no
+delimiter character is ever needed;
+#00838F:**Route to a shard**
+by the hash of the first token (default),
+or by that token's character prefix;
+
+if (which write path?) then (prefix-based granularity)
+  #00838F:**Chunked transaction**, SET semantics
+  buffer each insert into a document transaction;
+  if (buffered ≥ --tx-chunk-size?) then (yes)
+    #00838F:**commit_and_renew_prefix_tx**
+    flush this chunk to the WAL, then open a fresh
+    transaction for the same prefix and shard;
+  else (no)
+  endif
+  #00838F:**commit_prefix_tx**
+  commit the final chunk **and** mark the prefix complete;
+else (hash-based granularity — the default)
+  #00838F:**Per-record increment_cas**
+  a lock-free CAS straight into the shard's overlay,
+  bounded by the flush threshold and the overlay
+  budget rather than by a transaction;
+endif
+
+|#EBF3F3|Cron thread  (×1)|
+#546E7A:**Wake** every checkpoint_interval_ms;
+#00838F:**Rotate the vocabulary WAL first**
+so that word indices are durable //before// any prefix
+can be claimed complete;
+#00838F:**Sync and checkpoint the shards** (rayon, ≤8 at once)
+publishing each overlay snapshot into its durable image;
+#006064:**Eviction tail**
+evict the coldest resident overlay nodes down to
+<latex>\max(G / n_{\text{resident}},\ 64\,\text{MiB})</latex> — **losslessly**;
+#00838F:**Save the checkpoint metadata** — last, never first;
+
+|#EDF3F8|Storage  (NgramStorage)|
+#00838F:**Final vocabulary compaction**
+one full image, written exactly once;
+#1565C0:**MKN aggregation** (rayon over the shards)
+<latex>n_1 \ldots n_4 \Rightarrow Y, D_1, D_2, D_{3+}</latex>
+together with <latex>N_{1+}(\bullet, w)</latex> and <latex>N_{1+}(w, \bullet)</latex>;
+#00838F:**Merge the shards** into the output trie
+by <latex>O(\log N)</latex> parallel reduction;
+stop
+
+note right
+  **A crash anywhere above just means re-running the prefix.**
+  SET semantics make the re-insert idempotent, and any
+  uncommitted chunk was never durable in the first place.
+  Machine-checked by CheckpointStateMachine (DisjointSets,
+  CrashRecoverySound) and by PersistentStorageBridge
+  (ClaimRequiresDurableEvidence).
+end note
+
+@enduml

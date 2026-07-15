@@ -1,0 +1,67 @@
+@startuml lling-architecture
+' How libgrammstein plugs into lling-llang. lling-llang hosts a LayerPipeline that
+' carries an input lattice through spelling correction, an optional CFG filter, and
+' language-model rescoring, emitting a reweighted output lattice. The
+' LanguageModelLayer is defined against lling-llang's LanguageModel trait
+' (score_sequence / score_continuation); libgrammstein's HybridLanguageModel —
+' a Modified Kneser-Ney n-gram fused with FastText-style subword embeddings —
+' is what implements that trait. Colour follows the correction-* family:
+' liblevenshtein/statistical blue, lling-llang purple, libgrammstein green,
+' trait seam + lattice artifacts slate.
+' Render: plantuml -tsvg docs/diagrams/lling-architecture.puml
+' Source of truth for Figure 1 in docs/integration/lling-llang/overview.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Architecture — libgrammstein is the language model behind an lling-llang LayerPipeline
+
+rectangle "<color:#263238>**lling-llang**  (WFST framework)</color>" as llang #EDE7F6 {
+  rectangle "<color:#263238>**LayerPipeline**</color>" as pipe #F3E5F5 {
+    rectangle "Input Lattice" as lin #455A64
+    rectangle "**SpellingCorrectionLayer**\nfuzzy-matching candidates" as spell #1565C0
+    rectangle "**CfgFilterLayer**\ngrammar validation" as cfg #6A1B9A
+    rectangle "**LanguageModelLayer**\nrescoring with the LM" as lmlayer #2E7D32 {
+      rectangle "**LanguageModel**  (trait)\nscore_sequence()\nscore_continuation()" as lmtrait #37474F
+    }
+    rectangle "Output Lattice\n(reweighted)" as lout #455A64
+  }
+}
+
+rectangle "<color:#263238>**libgrammstein**  (language-model library)</color>" as gram #E8F5E9 {
+  rectangle "<color:#263238>**HybridLanguageModel**\n<color:#263238>n-gram ⊕ embedding</color>" as hybrid #F1F8E9 {
+    rectangle "**NgramModel**\nModified Kneser-Ney" as ngram #1565C0
+    rectangle "**SubwordEmbedding**\nFastText-style" as emb #2E7D32
+  }
+}
+
+rectangle "**liblevenshtein**\nedit-distance automaton" as lev #546E7A
+
+' the lattice's journey through the pipeline
+lin --> spell
+spell --> cfg
+cfg --> lmlayer
+lmlayer --> lout
+
+' the two integration seams
+lev --> spell : fuzzy candidates
+hybrid ..> lmtrait : **implements**\nLanguageModel trait
+
+legend top right
+  | Colour | Concept |
+  |<#1565C0> | statistical LM core / edit distance |
+  |<#6A1B9A> | lling-llang WFST host |
+  |<#2E7D32> | libgrammstein LM & embeddings |
+  |<#37474F> | trait seam — the integration contract |
+  |<#455A64> | lattice artifacts |
+  |<#546E7A> | external crate |
+endlegend
+@enduml

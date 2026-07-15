@@ -1,299 +1,293 @@
-# Skip-gram Training
+# Skip-gram Training with Negative Sampling
 
-This document describes the skip-gram with negative sampling algorithm used for training word embeddings in libgrammstein.
+libgrammstein learns its word and subword matrices with the **skip-gram** objective and
+**negative sampling** — the word2vec training recipe [[1]](#references), extended FastText-style
+[[2]](#references) so that each update also nudges the center word's character-n-gram buckets.
+This document derives the objective, states the sampling and scheduling formulae exactly as the
+code computes them, and gives literate pseudocode that mirrors the real updater — including the
+ways the shipped trainer simplifies the textbook two-matrix model.
 
-## Overview
+> **Scope.** Source of truth: [`src/embedding/trainer.rs`](../../../src/embedding/trainer.rs). The
+> matrices being trained live in [`src/embedding/model.rs`](../../../src/embedding/model.rs) (see
+> [Subword Embeddings](overview.md)); the subword helpers are in
+> [`src/embedding/bpe.rs`](../../../src/embedding/bpe.rs) (see [BPE & Subword Extraction](bpe.md)).
 
-Skip-gram learns word representations by predicting context words from center words:
+## Notation
+
+| Symbol | Meaning |
+|---|---|
+| $`w`$ | the **center** (target) word of a training window |
+| $`c`$ | a true **context** word within the window of $`w`$ |
+| $`n_i`$ | the $`i`$-th sampled **negative** (noise) word |
+| $`k`$ | number of negative samples per positive (`neg_samples`; default $`5`$) |
+| $`v_w`$ | the center word's **input vector** — word row averaged with its subword mean |
+| $`v_c, v_{n_i}`$ | raw rows of the shared `word_embeddings` matrix for $`c`$ and $`n_i`$ |
+| $`\sigma(x)`$ | the logistic sigmoid $`1/(1+e^{-x})`$ |
+| $`f(w)`$ | corpus count of $`w`$; $`z(w) = f(w)/\text{total}`$ its relative frequency |
+| $`P_n(w)`$ | the negative-sampling (noise) distribution |
+| $`\eta_e`$ | the learning rate used during epoch $`e`$ of $`E`$ total epochs |
+| $`t`$ | the frequent-word subsampling threshold (`subsample_threshold`; default $`10^{-4}`$) |
+
+**Acronyms.** *SGD* — Stochastic Gradient Descent; *NS* — Negative Sampling; *OOV* —
+Out-Of-Vocabulary.
+
+## What & why
+
+Skip-gram turns raw text into a supervised task: **given a center word, predict the words around
+it.** For the window *"the quick [brown] fox jumps"* with center *brown*, the positive examples are
+$`(\text{brown}, \text{the})`$, $`(\text{brown}, \text{quick})`$, $`(\text{brown}, \text{fox})`$,
+$`(\text{brown}, \text{jumps})`$. Optimizing this forces words that share contexts to acquire
+similar vectors — exactly the geometry [Similarity](similarity.md) later exploits.
+
+The exact skip-gram likelihood uses a softmax over the *entire* vocabulary:
+
+```math
+\mathbb{P}(c \mid w) = \frac{\exp(v_c^{\top} v_w)}{\sum_{w' \in V} \exp(v_{w'}^{\top} v_w)} \tag{S1}
+```
+
+The denominator of $`(\mathrm{S1})`$ costs $`O(\lvert V \rvert)`$ per example — hopeless for a
+million-word vocabulary. **Negative sampling** replaces it with a handful of cheap binary decisions.
+
+## Theory
+
+### The negative-sampling objective
+
+Instead of normalizing over all words, NS trains a logistic classifier to separate the *true*
+context word from $`k`$ random *noise* words. Per $`(w, c)`$ pair, the objective maximized is:
+
+```math
+J(w, c) = \log \sigma\!\bigl(v_c^{\top} v_w\bigr)
+\;+\; \sum_{i=1}^{k} \mathbb{E}_{\,n_i \sim P_n}\!\left[\log \sigma\!\bigl(-\,v_{n_i}^{\top} v_w\bigr)\right] \tag{S2}
+```
+
+The first term pushes $`v_c`$ toward $`v_w`$; each noise term pushes $`v_{n_i}`$ away. Because
+$`\sigma(-x) = 1 - \sigma(x)`$, $`(\mathrm{S2})`$ is the log-likelihood of a binary label
+(1 for the real pair, 0 for noise), and its gradient with respect to any scored vector $`v`$ has
+the tidy form $`(\,\text{label} - \sigma(v^{\top} v_w)\,)\,v_w`$.
+
+### The noise distribution
+
+Negatives are drawn not from the raw unigram distribution but from it raised to the $`3/4`$ power —
+the empirically superior choice from word2vec, which lifts rare words without over-representing
+them:
+
+```math
+P_n(w) = \frac{f(w)^{3/4}}{\sum_{w'} f(w')^{3/4}} \tag{S3}
+```
+
+The sampler that draws the negatives excludes the current positive context word.
+
+### Subsampling of frequent words
+
+Before a center word is used, it is randomly **kept** with a probability that shrinks for very
+frequent words (so *the*, *of*, *and* do not dominate training):
+
+```math
+P_{\mathrm{keep}}(w) = \left(\sqrt{\frac{z(w)}{t}} + 1\right)\frac{t}{z(w)},
+\qquad z(w) = \frac{f(w)}{\text{total tokens}} \tag{S4}
+```
+
+For a rare word $`P_{\mathrm{keep}}`$ exceeds $`1`$ (always kept); for a very common word it falls
+well below $`1`$.
+
+### Learning-rate schedule
+
+The rate decays **linearly per epoch** from the initial $`\eta_0`$ (`learning_rate`, default
+$`0.05`$) — there is no separate minimum floor:
+
+```math
+\eta_e = \eta_0 \left(1 - \frac{e}{E}\right), \qquad e = 0, 1, \dots, E-1 \tag{S5}
+```
+
+so $`\eta_0`$ at the first epoch down to $`\eta_0/E`$ at the last. The **window size** is itself
+randomized each center word — $`\texttt{window} \sim \mathrm{Uniform}\{1, \dots, \texttt{window\_size}\}`$ —
+which effectively weights nearer context words more heavily.
+
+### One shared matrix, not two
+
+Canonical word2vec keeps **two** matrices: an input matrix for center words and a separate output
+matrix for context/negative words. libgrammstein uses a **single** `word_embeddings` matrix for
+both roles, plus the `subword_embeddings` table for the center word's n-grams. Concretely, the
+center's **input vector** is the FastText-style average
+
+```math
+v_w = \tfrac{1}{2}\bigl(E_{\mathrm{word}}[w] + v_{\mathrm{sub}}(w)\bigr) \tag{S6}
+```
+
+while the scored context/negative vectors $`v_c, v_{n_i}`$ are **raw rows** of that same
+`word_embeddings` matrix. Gradients then flow to (i) the context/negative rows, (ii) the center's
+own row, and (iii) the center's subword buckets. This is a deliberate simplification — cheaper and
+adequate for the crate's OOV-coverage goal — and it is why the center row and the rows it is scored
+against come from one matrix.
+
+![Skip-gram update with negative sampling](../../diagrams/embedding-skipgram.svg)
+
+## The algorithm, literately
+
+The following mirrors [`EmbeddingTrainer::train_epoch_on_sentences`](../../../src/embedding/trainer.rs)
+and `skipgram_update`. All operators inside the fence are ASCII; `lr` is $`\eta_e`$ for the epoch.
 
 ```
-Sentence: "the quick brown fox jumps"
-          Window = 2
+function train_epoch(sentences, model, lr):            ▸ sequential; holds &mut model
+    for sentence in sentences:
+        idx <- [ vocab_index(word) for word in sentence ]   ▸ None if OOV / below min_count
+        for pos, center in enumerate(idx):
+            if center is None: continue
+            if random() > keep_prob(center): continue  ▸ subsampling, eq (S4)
+            window <- random_int(1 .. window_size)     ▸ dynamic window
+            lo <- max(pos - window, 0); hi <- min(pos + window + 1, len)
+            for cpos in lo .. hi:
+                if cpos == pos: continue
+                ctx <- idx[cpos]
+                if ctx is None: continue
+                skipgram_update(model, center, ctx, word_at(pos), lr)
 
-Center: "brown"
-Context: ["the", "quick", "fox", "jumps"]
+function skipgram_update(model, center, ctx, center_word, lr):
+    v_w     <- input_vector(model, center, center_word) ▸ (E_word[center] + subword_mean)/2, eq (S6)
+    negs    <- sampler.sample(k, exclude = ctx)         ▸ P_n proportional to f^0.75, eq (S3)
+    grad_in <- zeros(d)
 
-Objective: Maximize P(context | center)
+    ⟨score and update the positive context⟩            ▸ label 1
+    for n in negs: ⟨score and update a negative⟩         ▸ label 0
+
+    word_embeddings[center] += grad_in                  ▸ update the center's own row
+    ⟨distribute grad_in across subword buckets⟩
+
+⟨score and update the positive context⟩ ≡
+    v_c <- word_embeddings[ctx]
+    s   <- sigmoid( dot(v_w, v_c) )
+    g   <- (1 - s) * lr                                 ▸ (label - s) * lr with label = 1
+    word_embeddings[ctx] += g * v_w
+    grad_in <- grad_in + g * v_c
+
+⟨score and update a negative⟩ ≡
+    v_n <- word_embeddings[n]
+    s   <- sigmoid( dot(v_w, v_n) )
+    g   <- (0 - s) * lr                                 ▸ = -s * lr,  label = 0
+    word_embeddings[n] += g * v_w
+    grad_in <- grad_in + g * v_n
+
+⟨distribute grad_in across subword buckets⟩ ≡
+    G <- extract_subwords(center_word, min_subword_len, max_subword_len)
+    if G is not empty:
+        share <- grad_in / |G|
+        for g in G:
+            subword_embeddings[ hash_subword(g, B) ] += share
 ```
 
-## Algorithm
+The update sign is **ascent** on $`(\mathrm{S2})`$: the learning rate and sign are folded into `g`,
+and `update_word_embedding` adds `g * v_w` to a row. Subword buckets receive an equal share of the
+center's incoming gradient, which is what ties morphologically related words together.
 
-### Training Objective
+## Engineering
 
-Maximize log probability of observing context words:
-
-```
-L = Σ Σ log P(w_c | w_t)
-    t c∈C(t)
-```
-
-Where:
-- `w_t` = center word at position t
-- `C(t)` = context words within window of t
-- `P(w_c | w_t)` = softmax probability
-
-### Negative Sampling
-
-Full softmax is expensive. Negative sampling approximates:
-
-```
-log P(w_c | w_t) ≈ log σ(v_c · v_t) + Σ E[log σ(-v_n · v_t)]
-                                      n∈N
-```
-
-Where:
-- `σ` = sigmoid function
-- `v_c` = context word vector
-- `v_t` = target word vector
-- `N` = set of negative samples
-
-### Implementation
+### `EmbeddingConfig`
 
 ```rust
-fn train_skip_gram(
-    &mut self,
-    center: usize,
-    context: usize,
-    negatives: &[usize],
-    learning_rate: f32,
-) {
-    let center_vec = self.word_embeddings.row(center).to_owned();
-
-    // Positive sample
-    let context_vec = self.context_embeddings.row(context);
-    let dot = center_vec.dot(&context_vec);
-    let grad = (sigmoid(dot) - 1.0) * learning_rate;
-
-    // Update context embedding
-    self.context_embeddings.row_mut(context)
-        .scaled_add(-grad, &center_vec);
-
-    // Update center embedding
-    let mut center_grad = context_vec.to_owned() * grad;
-
-    // Negative samples
-    for &neg in negatives {
-        let neg_vec = self.context_embeddings.row(neg);
-        let dot = center_vec.dot(&neg_vec);
-        let grad = sigmoid(dot) * learning_rate;
-
-        // Update negative embedding
-        self.context_embeddings.row_mut(neg)
-            .scaled_add(-grad, &center_vec);
-
-        // Accumulate center gradient
-        center_grad.scaled_add(grad, &neg_vec);
-    }
-
-    // Apply center update
-    self.word_embeddings.row_mut(center) -= &center_grad;
+pub struct EmbeddingConfig {
+    pub dim: usize,                 // 100   — d
+    pub window_size: usize,         // 5     — max context radius (window is sampled 1..=this)
+    pub min_count: u64,             // 5     — vocabulary frequency floor
+    pub neg_samples: usize,         // 5     — k
+    pub epochs: usize,              // 5     — E
+    pub learning_rate: f32,         // 0.05  — eta_0
+    pub bucket_count: usize,        // 2_000_000 — B
+    pub min_subword_len: usize,     // 3
+    pub max_subword_len: usize,     // 6
+    pub subsample_threshold: f32,   // 1e-4  — t
+    pub batch_size: usize,          // 10_000 — prefetch batch
 }
 ```
 
-## Configuration
+### The negative sampler
 
-### Training Parameters
+`NegativeSampler` precomputes an **alias-free lookup table** of $`10^{7}`$ slots filled
+proportionally to $`f(w)^{3/4}`$; sampling is then a single $`O(1)`$ indexed read. `sample_negatives`
+rejects any draw equal to the excluded positive context word.
+
+### Weight initialization
+
+`initialize_embeddings` seeds a deterministic RNG (`StdRng::seed_from_u64(42)`) and fills **both**
+matrices with $`\mathrm{Uniform}(-0.5, 0.5) \cdot \tfrac{1}{d}`$, so initial vectors are small and
+reproducible.
+
+### Training entry points
+
+| Method | Corpus handling | Use when |
+|---|---|---|
+| `train(reader)` | buffers all sentences in memory, then multi-epoch | corpus fits in RAM |
+| `train_streaming(\|\| reader)` | re-streams the corpus once **per epoch** | large corpora (>500 MB) |
+| `train_with_progress(reader, tx)` | like `train`, emits `EmbeddingProgress` on a channel | UIs / progress bars |
+| `train_continued(model, start_epoch, reader)` | resumes an existing model's remaining epochs | checkpoint resume |
+
+`train_streaming` runs Pass 1 to build the vocabulary (streaming word counts) and then one streamed
+pass per epoch; `train_continued` recovers the ephemeral corpus statistics (the noise table and
+subsampling counts) with a single pass **aligned to the loaded model's vocabulary order**, so
+embedding-row indices stay consistent, and resumes the schedule $`(\mathrm{S5})`$ at `start_epoch`.
+
+### Honest performance notes
+
+- **The updater is currently single-threaded.** `skipgram_update` takes `&mut SubwordEmbedding`, so
+  a training epoch runs sequentially; the source imports Rayon behind
+  `#[allow(unused_imports)]` and notes that thread-safe model updates are needed before the loop can
+  be parallelized. Parallelism today is in the *vocabulary* and *BPE* passes, not the SGD loop.
+- **Loss is not computed.** `EmbeddingProgress::loss` is an `Option<f32>` that the trainer leaves
+  `None`; monitor progress via `words_processed` / `epoch`, not a loss curve.
+
+### Complexity
+
+Per epoch the cost is $`O(C \cdot \bar{w} \cdot (k+1) \cdot d)`$ where $`C`$ is the number of kept
+center tokens, $`\bar{w}`$ the mean sampled window, $`k`$ the negatives, and $`d`$ the dimension;
+each `skipgram_update` additionally touches $`\lvert G(\cdot) \rvert`$ subword buckets.
+
+## Usage
 
 ```rust
-let model = EmbeddingTrainerBuilder::new()
-    .dim(100)           // Embedding dimension
-    .window_size(5)     // Context window
-    .negative_samples(5) // Negatives per positive
-    .learning_rate(0.025)
-    .min_learning_rate(0.0001)
+use libgrammstein::embedding::{EmbeddingTrainerBuilder, SubwordEmbedding};
+use libgrammstein::corpus::PlaintextReader;
+
+// The fluent builder mirrors EmbeddingConfig; unset fields keep their defaults.
+let model: SubwordEmbedding = EmbeddingTrainerBuilder::new()
+    .dim(100)
+    .window_size(5)
+    .min_count(5)
+    .neg_samples(5)
     .epochs(5)
-    .train(&corpus)?;
+    .learning_rate(0.05)
+    .train(PlaintextReader::from_file("corpus.txt")?)?;
+
+assert!(model.vocab_size() > 0);
+# Ok::<(), libgrammstein::Error>(())
 ```
 
-### Parameter Reference
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `dim` | 100 | Vector dimensionality |
-| `window_size` | 5 | Context window (each side) |
-| `negative_samples` | 5 | Negative samples per word |
-| `learning_rate` | 0.025 | Initial learning rate |
-| `min_learning_rate` | 0.0001 | Final learning rate |
-| `epochs` | 5 | Training epochs |
-
-## Negative Sampling Distribution
-
-Words are sampled proportionally to frequency^0.75:
+For a large corpus, resume-safe streaming avoids buffering the whole thing:
 
 ```rust
-fn build_noise_distribution(word_counts: &[u64]) -> Vec<f64> {
-    let total: f64 = word_counts.iter()
-        .map(|&c| (c as f64).powf(0.75))
-        .sum();
+use libgrammstein::embedding::EmbeddingTrainerBuilder;
+use libgrammstein::corpus::PlaintextReader;
+use std::path::Path;
 
-    word_counts.iter()
-        .map(|&c| (c as f64).powf(0.75) / total)
-        .collect()
-}
+let path = Path::new("big-corpus.txt");
+let model = EmbeddingTrainerBuilder::new()
+    .dim(200)
+    .epochs(5)
+    .train_streaming(|| PlaintextReader::from_file(path))?;  // one streamed pass per epoch
+# Ok::<(), libgrammstein::Error>(())
 ```
 
-This gives rare words slightly higher sampling probability than their frequency would suggest.
+## References
 
-## Window Size
+1. T. Mikolov, I. Sutskever, K. Chen, G. Corrado & J. Dean (2013). *Distributed representations of
+   words and phrases and their compositionality* (skip-gram with negative sampling). NeurIPS 26.
+   [arXiv:1310.4546](https://arxiv.org/abs/1310.4546)
+2. P. Bojanowski, E. Grave, A. Joulin & T. Mikolov (2017). *Enriching word vectors with subword
+   information* (FastText). TACL 5, 135–146.
+   [doi:10.1162/tacl_a_00051](https://doi.org/10.1162/tacl_a_00051)
 
-Context window determines which words are considered related:
+## See also
 
-```
-Window = 2:
-"the [quick] [brown] FOX [jumps] [over]"
-       ←──────────────→
-
-Window = 5:
-"[the] [quick] [brown] FOX [jumps] [over] [the] [lazy] [dog]"
- ←────────────────────────────────────────────────────────→
-```
-
-### Dynamic Window
-
-Training uses random window size for diversity:
-
-```rust
-fn sample_window(max_window: usize, rng: &mut impl Rng) -> usize {
-    rng.gen_range(1..=max_window)
-}
-```
-
-## Subword Integration
-
-Skip-gram is augmented with subword embeddings:
-
-```rust
-fn train_with_subwords(
-    &mut self,
-    center_word: &str,
-    context: usize,
-    negatives: &[usize],
-    lr: f32,
-) {
-    // Get center vector (word + subwords)
-    let subwords = extract_subwords(center_word);
-    let center_vec = self.compute_word_vector(center_word);
-
-    // Train as usual
-    let grad = self.compute_gradient(&center_vec, context, negatives);
-
-    // Distribute gradient to word and subwords
-    if let Some(word_idx) = self.word_to_idx.get(center_word) {
-        self.word_embeddings.row_mut(*word_idx) -= &(grad.clone() * lr);
-    }
-
-    for subword in &subwords {
-        let bucket = hash_subword(subword);
-        self.subword_embeddings.row_mut(bucket) -= &(grad.clone() * lr);
-    }
-}
-```
-
-## Learning Rate Schedule
-
-Learning rate decays linearly during training:
-
-```rust
-fn current_learning_rate(
-    initial_lr: f32,
-    min_lr: f32,
-    progress: f64,
-) -> f32 {
-    let lr = initial_lr * (1.0 - progress) + min_lr * progress;
-    lr.max(min_lr)
-}
-```
-
-Progress is computed as `words_processed / total_words`.
-
-## Training Pipeline
-
-```rust
-pub fn train(&mut self, corpus: &impl CorpusReader) -> Result<()> {
-    // 1. Build vocabulary
-    self.build_vocabulary(corpus)?;
-
-    // 2. Build noise distribution
-    self.build_noise_table();
-
-    // 3. Initialize embeddings
-    self.initialize_embeddings();
-
-    // 4. Train
-    for epoch in 0..self.epochs {
-        for sentence in corpus.sentences() {
-            let tokens = self.tokenize(&sentence);
-
-            for i in 0..tokens.len() {
-                let window = sample_window(self.window_size);
-
-                for j in i.saturating_sub(window)..=(i + window).min(tokens.len() - 1) {
-                    if i != j {
-                        let negatives = self.sample_negatives();
-                        self.train_skip_gram(tokens[i], tokens[j], &negatives);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-```
-
-## Optimization Tips
-
-### Memory Efficiency
-
-```rust
-// Use half precision for large models
-.precision(Precision::Half)
-
-// Reduce negative samples
-.negative_samples(3)  // Instead of 5
-```
-
-### Training Speed
-
-```rust
-// Increase batch size (internal)
-.batch_size(256)
-
-// Use more threads
-.num_threads(8)
-```
-
-### Quality
-
-```rust
-// More epochs for small corpora
-.epochs(10)
-
-// Larger window for semantic similarity
-.window_size(10)
-
-// Smaller window for syntactic similarity
-.window_size(2)
-```
-
-## Convergence
-
-Monitor training loss:
-
-```rust
-trainer.on_epoch(|epoch, loss| {
-    println!("Epoch {}: loss = {:.4}", epoch, loss);
-});
-
-// Expected: Decreasing loss per epoch
-// Epoch 1: loss = 3.4567
-// Epoch 2: loss = 2.8901
-// Epoch 3: loss = 2.5678
-// ...
-```
-
-## See Also
-
-- [BPE Tokenization](bpe.md) - Subword tokenization
-- [Similarity Search](similarity.md) - Using trained embeddings
-- [Hyperparameters](../../training/hyperparameters.md) - Tuning guide
+- [Subword Embeddings](overview.md) — the matrices this trainer optimizes
+- [BPE & Subword Extraction](bpe.md) — `extract_subwords` / `hash_subword` used in the update
+- [Similarity](similarity.md) — evaluating the learned geometry
+- [Embedding Training guide](../../training/embedding.md) — end-to-end training workflow
+- [Hyperparameters](../../training/hyperparameters.md) — tuning $`\eta_0`$, $`k`$, window, epochs

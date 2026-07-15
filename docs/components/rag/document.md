@@ -1,370 +1,322 @@
-# RAG Documents
+# The Document Model
 
-The RAG module provides structures for representing documents with rich metadata.
+A document passes through **three shapes** on its way into the index: it is *staged* as a
+`DocumentBuilder` (prose, no vector), *realized* as a `Document` (prose **and** vector), and
+finally *projected* into a `DocumentMeta` (prose, no vector) — which is the only shape the index
+keeps. This document explains each shape, the value objects they carry, and the two questions the
+model exists to answer: **who is this document** (identity) and **where did its summary come from**
+(provenance).
 
-## Document Types
+> **Scope.** Source of truth: [`src/rag/document.rs`](../../../src/rag/document.rs); `Synopsis`
+> and `SynopsisSource` are re-exported from [`src/neural/summarizer.rs`](../../../src/neural/summarizer.rs).
+> For how documents are produced see [Builder](builder.md); for how they are stored see
+> [Index](index.md).
 
+## Notation
+
+| Symbol | Meaning |
+|---|---|
+| $`d`$ | embedding dimension — $`768`$ for ModernBERT-base |
+| $`v_D \in \mathbb{R}^{d}`$ | the embedding of document $`D`$ |
+| $`\pi`$ | the projection `Document` $`\to`$ `DocumentMeta` (drops the embedding) |
+| $`S`$ | the set of sentences already selected for a generated synopsis |
+| $`R`$ | the set of candidate sentences of a document |
+| $`c`$ | the centroid of a document's sentence embeddings |
+| $`\lambda`$ | the MMR relevance/diversity trade-off, $`\lambda \in [0,1]`$ |
+| $`\cos(u,v)`$ | cosine similarity (see [Overview](overview.md#theory-why-cosine-similarity)) |
+
+**Acronyms.** *MMR* — Maximal Marginal Relevance; *URI* — Uniform Resource Identifier;
+*BCP 47* — the IETF best-current-practice for language tags.
+
+## The three shapes
+
+![The document model: stage, embed, project](../../diagrams/rag-document.svg)
+
+| Shape | Type | Has a vector? | Lives where |
+|---|---|---|---|
+| **Staged** | `DocumentBuilder` | no — carries raw `content` | the caller's hands, before indexing |
+| **Indexable** | `Document` | **yes** — `embedding: Vec<f32>` | transient; consumed by `add_document` |
+| **Stored** | `DocumentMeta` | no — the backend has it | `RagIndex::documents`, and `metadata.json` |
+
+The `Document` is deliberately short-lived. `RagIndex::add_document` splits it in two: the
+embedding goes to the backend, and everything else is projected into a `DocumentMeta`. Formally, a
+document is the tuple
+
+```math
+D \;=\; \bigl(\, \mathrm{id},\ \mathrm{uri},\ \mathrm{title},\ \mathrm{synopsis},\ \mathrm{language},\ v_D,\ \mathrm{metadata},\ \mathrm{topics} \,\bigr) \tag{D1}
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         Document Hierarchy                               │
-│                                                                          │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │                    Document (full)                                │  │
-│  │                                                                   │  │
-│  │  uri: String                                                      │  │
-│  │  title: Option<String>                                            │  │
-│  │  synopsis: Synopsis                                               │  │
-│  │  language: LanguageTag                                            │  │
-│  │  embedding: Vec<f32>  ◄─── 768-dim ModernBERT embedding          │  │
-│  │  metadata: DocumentMetadata                                       │  │
-│  │  topic_ids: Vec<TopicId>                                         │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-│                                 │                                        │
-│                    (drop embedding)                                      │
-│                                 ▼                                        │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │                    DocumentMeta (lightweight)                     │  │
-│  │                                                                   │  │
-│  │  uri: String                                                      │  │
-│  │  title: Option<String>                                            │  │
-│  │  synopsis: String                                                 │  │
-│  │  synopsis_source: SynopsisSource                                  │  │
-│  │  language: LanguageTag                                            │  │
-│  │  metadata: DocumentMetadata                                       │  │
-│  │  topic_ids: Vec<TopicId>                                         │  │
-│  │                                                                   │  │
-│  │  (No embedding - stored separately in backend)                   │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
+
+and the stored projection simply deletes the vector coordinate:
+
+```math
+\pi(D) \;=\; D \setminus \{\, v_D \,\} \tag{D2}
 ```
 
-## DocumentId
+$`(\mathrm{D2})`$ is the whole reason `metadata.json` stays small and human-readable while the
+geometry goes to a packed binary blob. It is implemented by `DocumentMeta::from_document`, and it
+is *lossy on purpose*: nothing in the index can reconstruct $`v_D`$ from a `DocumentMeta`.
 
-Documents are identified by a 32-bit integer:
+## Identity: `DocumentId`
+
+```rust
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DocumentId(pub u32);
+```
+
+A `u32` newtype — `Copy`, `Hash`, and cheap to pass around — bounding an index at
+$`2^{32} - 1 = 4\,294\,967\,295`$ documents. It is the *join key* between the backend (which maps
+ids to vectors) and the index (which maps ids to metadata), so it must be stable for the life of
+the index.
+
+Two conversions are provided. `From<u32>` is exact. **`From<usize>` performs an unchecked `as u32`
+cast**, so on a 64-bit target an id above $`2^{32} - 1`$ wraps silently rather than failing:
 
 ```rust
 use libgrammstein::rag::DocumentId;
 
-let id = DocumentId::new(42);
-println!("ID: {}", id.0);  // 42
+assert_eq!(DocumentId::from(7_u32).as_u32(), 7);
+assert_eq!(DocumentId::from(7_usize).as_u32(), 7);
+// Caveat: DocumentId::from(usize::MAX) truncates to 4_294_967_295 without error.
 ```
 
-IDs are assigned sequentially when documents are added to an index.
+Ids are normally allocated by the index rather than chosen by hand — `RagIndex::allocate_id`
+hands out $`0, 1, 2, \dots`$ monotonically. Doing so keeps the id space *dense*, which several
+components quietly rely on; see [Index](index.md#dense-ids-are-a-load-bearing-assumption).
 
-## Document
+## Synopsis provenance
 
-The full document representation including embedding:
+A `Synopsis` is a summary plus a record of **where it came from**:
 
 ```rust
-use libgrammstein::rag::Document;
+pub enum SynopsisSource { Explicit, Generated }
 
-pub struct Document {
-    /// Unique identifier
-    pub id: DocumentId,
-
-    /// Document URI (file path, URL, etc.)
-    pub uri: String,
-
-    /// Optional human-readable title
-    pub title: Option<String>,
-
-    /// Document synopsis (explicit or generated)
-    pub synopsis: Synopsis,
-
-    /// Document language
-    pub language: LanguageTag,
-
-    /// 768-dimensional embedding vector
-    pub embedding: Vec<f32>,
-
-    /// Rich metadata
-    pub metadata: DocumentMetadata,
-
-    /// Associated topic IDs (from topic extraction)
-    pub topic_ids: Vec<TopicId>,
+pub struct Synopsis {
+    pub text: String,
+    pub source: SynopsisSource,
 }
 ```
 
-## DocumentMeta
+| Source | Constructed by | Meaning |
+|---|---|---|
+| `Explicit` | `Synopsis::explicit(text)` | the author supplied it; used **verbatim**, never regenerated |
+| `Generated` | `Synopsis::generated(text)` | libgrammstein wrote it by extractive summarization |
 
-Lightweight metadata for storage and display (without embedding):
+The distinction is not cosmetic. `Summarizer::create_synopsis(explicit, content)` short-circuits
+whenever an explicit summary exists — an author-written abstract always beats a machine-selected
+one — and `RetrievalConfig` lets a caller *demand* one kind or the other
+(`include_explicit_synopsis`, `include_generated_synopsis`; see
+[Retriever](retriever.md#stage-3-filtering)). Provenance is therefore a first-class, queryable property,
+not a comment.
 
-```rust
-use libgrammstein::rag::DocumentMeta;
+### How a generated synopsis is chosen
 
-pub struct DocumentMeta {
-    pub uri: String,
-    pub title: Option<String>,
-    pub synopsis: String,
-    pub synopsis_source: SynopsisSource,
-    pub language: LanguageTag,
-    pub metadata: DocumentMetadata,
-    pub topic_ids: Vec<TopicId>,
-}
+When no explicit summary exists, the summarizer selects sentences that are **representative** of
+the document yet **not redundant** with each other. Representativeness is measured against the
+centroid of the document's sentence embeddings,
+
+```math
+c \;=\; \frac{1}{\lvert R \rvert} \sum_{s \in R} v_s
+\qquad\text{(the mean sentence vector)} \tag{D3}
 ```
 
-This is what's stored in the index and returned from queries.
+and the selection greedily maximizes the **Maximal Marginal Relevance** objective of Carbonell &
+Goldstein [[1]](#references), which subtracts a penalty for similarity to what has already been
+chosen:
 
-## DocumentBuilder
-
-Fluent API for constructing documents:
-
-```rust
-use libgrammstein::rag::{DocumentBuilder, LanguageTag};
-
-let builder = DocumentBuilder::new("file:///docs/intro.md")
-    .title("Introduction to Machine Learning")
-    .content("Machine learning is a subset of artificial intelligence...")
-    .synopsis("Overview of ML concepts and applications")  // Explicit synopsis
-    .language(LanguageTag::english_us())
-    .metadata_author("John Doe")
-    .metadata_source("textbook")
-    .metadata_extra("chapter", "1");
+```math
+\mathrm{MMR}(s) \;=\; \lambda \cdot \underbrace{\cos(v_s,\, c)}_{\text{relevance}}
+\;-\; (1 - \lambda) \cdot \underbrace{\max_{s' \in S} \cos(v_s,\, v_{s'})}_{\text{redundancy}} \tag{D4}
 ```
 
-### Builder Methods
+The first sentence chosen is simply the most central one ($`S = \varnothing`$, so the penalty is
+vacuous); each subsequent sentence maximizes $`(\mathrm{D4})`$ over the candidates not yet taken.
+libgrammstein derives $`\lambda`$ from the summarizer's `diversity_threshold` (default $`0.3`$):
 
-| Method | Description |
-|--------|-------------|
-| `new(uri)` | Create builder with URI |
-| `title(str)` | Set document title |
-| `content(str)` | Set document content |
-| `synopsis(str)` | Set explicit synopsis |
-| `language(tag)` | Set language tag |
-| `metadata_author(str)` | Add author |
-| `metadata_source(str)` | Set source corpus |
-| `metadata_content_type(str)` | Set MIME type |
-| `metadata_date(str)` | Set publication date |
-| `metadata_extra(key, val)` | Add custom metadata |
-
-## LanguageTag
-
-ISO 639-1 language codes with optional dialect:
-
-```rust
-use libgrammstein::rag::LanguageTag;
-
-// Using helpers
-let en_us = LanguageTag::english_us();     // "en-US"
-let en_uk = LanguageTag::english_uk();     // "en-GB"
-let de = LanguageTag::german();            // "de"
-let es = LanguageTag::spanish();           // "es"
-let fr = LanguageTag::french();            // "fr"
-
-// Custom language
-let custom = LanguageTag::new("ja", Some("JP"));  // "ja-JP"
-
-// Parse from string
-let parsed = LanguageTag::parse("en-US")?;
-
-// Format to string
-let formatted = en_us.to_string();  // "en-US"
+```math
+\lambda \;=\; 1 - \texttt{diversity\_threshold} \;=\; 0.7 \tag{D5}
 ```
 
-### LanguageTag Structure
+so the default weighting is $`70\%`$ relevance against $`30\%`$ diversity. Raising
+`diversity_threshold` buys broader coverage of the document at the cost of centrality. With
+`preserve_order` (default `true`) the selected sentences are finally re-sorted into their original
+document order, so the synopsis reads as prose rather than as a ranked list. The full algorithm —
+sentence splitting, length filters, and batch embedding — is documented in
+[Summarizer](../neural/summarizer.md).
+
+## Language tags
 
 ```rust
 pub struct LanguageTag {
-    /// ISO 639-1 language code (e.g., "en")
-    pub language: String,
-
-    /// Optional dialect/region (e.g., "US")
-    pub dialect: Option<String>,
+    pub language: String,          // ISO 639-1, e.g. "en", "de", "es"
+    pub dialect: Option<String>,   // region/script, e.g. "US", "GB", "AU"
 }
 ```
 
-## DocumentMetadata
+`LanguageTag` renders as `"en-US"` via `to_tag_string` and parses back via `from_tag_string`.
+Constructors are provided for the common cases (`english_us`, `english_uk`, `german`, `spanish`,
+`french`), and `Display` delegates to `to_tag_string`.
 
-Rich metadata with builder pattern:
+> **Honest limitation.** `from_tag_string` is a *simplified* parser, not a BCP 47 implementation
+> [[2]](#references). It splits on `-` and keeps the first two components, so `"en-US"` parses as
+> expected, but `"zh-Hans-CN"` yields `language = "zh"`, `dialect = "Hans"` — capturing the
+> **script** subtag while dropping the region. Tags with more than two subtags therefore do not
+> round-trip: `from_tag_string("zh-Hans-CN").to_tag_string() == "zh-Hans"`. Use two-subtag tags
+> unless you are prepared for that.
+
+## Metadata
+
+`DocumentMetadata` is an open bag of provenance, built fluently:
 
 ```rust
 use libgrammstein::rag::DocumentMetadata;
 
-let metadata = DocumentMetadata::default()
+let metadata = DocumentMetadata::new()
     .with_content_type("text/markdown")
-    .with_source("wikipedia")
-    .with_date("2024-01-15")
-    .with_author("Jane Smith")
-    .with_author("John Doe")  // Multiple authors
-    .with_extra("category", "science")
-    .with_extra("version", "1.0");
+    .with_source("internal-wiki")
+    .with_date("2026-07-13")
+    .with_author("Ada Lovelace")
+    .with_extra("license", "CC-BY-4.0");
 ```
 
-### Metadata Fields
+The fixed fields (`content_type`, `source`, `date`, `authors`) cover the common cases; anything
+else goes into `extra: HashMap<String, String>`. Metadata is carried verbatim through $`\pi`$ into
+`DocumentMeta`, so it survives `save`/`load` and is available on every retrieval hit.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `content_type` | `Option<String>` | MIME type (e.g., "text/plain") |
-| `source` | `Option<String>` | Source corpus identifier |
-| `date` | `Option<String>` | Publication date |
-| `authors` | `Vec<String>` | List of authors |
-| `extras` | `HashMap<String, String>` | Custom key-value pairs |
+## The staging builder, literately
 
-### Accessing Metadata
+`DocumentBuilder` accumulates everything a document needs *except* the two things only the
+pipeline can supply — the id and the vector. The following mirrors
+[`DocumentBuilder::build`](../../../src/rag/document.rs) and its caller
+[`IndexBuilder::process_builder`](../../../src/rag/builder.rs); `⟨…⟩` names a refinement expanded
+below.
+
+```
+function stage_and_realize(builder, id):                 ▸ builder: DocumentBuilder
+    content <- builder.content                           ▸ REQUIRED — the only mandatory field
+    if content is absent:
+        return Err(IndexError "Document builder missing content")
+    embedding <- embed_document(builder.title, content)  ▸ ModernBERT ⇒ v ∈ ℝ⁷⁶⁸
+    synopsis  <- ⟨Choose a synopsis⟩
+    return builder.build(id, synopsis, embedding)        ▸ consumes the builder
+
+⟨Choose a synopsis⟩ ≡
+    if generate_summaries:                               ▸ IndexBuilderConfig flag
+        return create_synopsis(builder.explicit_synopsis, content)   ▸ Explicit if given, else MMR
+    else:
+        return Explicit(builder.explicit_synopsis)  if it exists
+               Generated("")                        otherwise        ▸ deliberately empty
+```
+
+Two consequences follow directly from the pseudocode:
+
+1. **`content` is mandatory.** A builder without it cannot be embedded, and the pipeline rejects
+   it with `RagError::IndexError` rather than indexing an all-zero vector.
+2. **`generate_summaries = false` can yield an empty synopsis.** If the caller supplies neither an
+   explicit synopsis nor permission to generate one, the document is indexed with
+   `Synopsis::generated("")` — searchable by vector, but with nothing to display. This is a
+   legitimate choice when the caller intends to render titles only.
+
+`build` also resets `topic_ids` to the empty vector. Topics are *not* a property the author
+supplies; they are assigned later, by the index, when a topic model is fitted over the whole
+corpus (see [Index](index.md#topic-integration)).
+
+## Engineering
+
+### The embedding is not serialized
 
 ```rust
-let meta = DocumentMetadata::default()
-    .with_source("arxiv")
-    .with_extra("doi", "10.1234/example");
-
-// Access fields
-if let Some(source) = &meta.source {
-    println!("Source: {}", source);
+pub struct Document {
+    // …
+    #[serde(skip)]
+    pub embedding: Vec<f32>,
+    // …
 }
-
-// Access extras
-if let Some(doi) = meta.extras.get("doi") {
-    println!("DOI: {}", doi);
-}
 ```
 
-## Synopsis and SynopsisSource
+`Document` derives `Serialize`/`Deserialize`, but the vector is skipped. This is a deliberate
+division of labour, and it has two visible consequences.
 
-Track whether synopsis is author-provided or generated:
+**Storage.** A $`768`$-dimensional `f32` vector is $`4 \times 768 = 3072`$ bytes packed. Rendered
+as JSON — a comma-separated list of decimal literals — the same vector costs roughly $`8`$–$`12`$
+KB, a $`3`$–$`4\times`$ inflation, and it must be re-parsed from text on every load. The backend
+instead writes all $`n`$ vectors as one contiguous `f32` blob (`backend/embeddings.bin`), which is
+both compact and fast to `mmap`-or-read.
+
+**Round-tripping.** A `Document` that is serialized and deserialized comes back with
+`embedding: Vec::new()`. This is *not* a lossy accident inside the index — the index never
+serializes `Document`, only `DocumentMeta` (which has no embedding field at all, by $`(\mathrm{D2})`$)
+— but a caller who persists bare `Document` values themselves must re-embed on load.
+
+### `Document::new` starts with an empty generated synopsis
+
+`Document::new(id, uri)` initializes `synopsis` to `Synopsis::generated(String::new())` — that is,
+`source = Generated`, `text = ""`. A document built this way and never given a synopsis will be
+*classified as generated* by `RetrievalResult::synopsis_is_explicit`, and so can be filtered out by
+a retriever configured with `include_generated_synopsis: false`. Call `.with_synopsis(...)`
+explicitly whenever the provenance matters.
+
+### `display_title` never panics
+
+Both `Document` and `DocumentMeta` expose `display_title() -> &str`, returning the title if
+present and falling back to the URI otherwise. Since a URI is mandatory, the fallback always
+exists — so rendering a hit list needs no `Option` handling.
+
+## Usage
+
+Staging a document with an author-written synopsis:
 
 ```rust
-use libgrammstein::neural::{Synopsis, SynopsisSource};
+use libgrammstein::rag::{DocumentBuilder, DocumentMetadata, LanguageTag};
 
-// Explicit synopsis (from metadata)
-let explicit = Synopsis::explicit("This document covers ML basics.");
+let builder = DocumentBuilder::new("file:///corpus/smoothing.md")
+    .title("Modified Kneser-Ney")
+    .content("Absolute discounting subtracts a fixed mass from every non-zero count …")
+    .explicit_synopsis("How MKN discounts counts and redistributes mass by continuation counts.")
+    .language(LanguageTag::english_us())
+    .metadata(DocumentMetadata::new().with_source("libgrammstein-docs"));
 
-// Generated synopsis (from summarizer)
-let generated = Synopsis::generated("Machine learning is a branch of AI...");
-
-// Check source
-match synopsis.source {
-    SynopsisSource::Explicit => println!("Author provided"),
-    SynopsisSource::Generated => println!("Auto-generated"),
-}
-
-// Boolean check
-if synopsis.is_explicit() {
-    println!("Using author's synopsis");
-}
+assert_eq!(builder.get_uri(), "file:///corpus/smoothing.md");
+assert_eq!(builder.get_explicit_synopsis(), Some("How MKN discounts counts and redistributes mass by continuation counts."));
 ```
 
-## Creating Documents from Files
-
-### Single File
+Realizing a `Document` directly, when the embedding is already known:
 
 ```rust
-use libgrammstein::rag::DocumentBuilder;
+use libgrammstein::neural::Synopsis;
+use libgrammstein::rag::{Document, DocumentId, DocumentMeta, LanguageTag};
 
-let content = std::fs::read_to_string("./doc.txt")?;
-let path = std::path::Path::new("./doc.txt");
+let doc = Document::new(DocumentId::new(1), "file:///corpus/smoothing.md")
+    .with_title("Modified Kneser-Ney")
+    .with_synopsis(Synopsis::explicit("Discounting and backoff."))
+    .with_language(LanguageTag::english_us())
+    .with_embedding(vec![0.0; 768]);
 
-let builder = DocumentBuilder::new(format!("file://{}", path.display()))
-    .title(path.file_stem().map(|s| s.to_string_lossy().to_string()))
-    .content(content);
+assert!(doc.has_explicit_synopsis());
+assert_eq!(doc.display_title(), "Modified Kneser-Ney");
+
+// The projection the index actually stores — note the embedding does not survive it.
+let meta = DocumentMeta::from_document(&doc);
+assert_eq!(meta.synopsis, "Discounting and backoff.");
+assert_eq!(meta.language.to_tag_string(), "en-US");
 ```
 
-### Directory Scan
+## References
 
-The `IndexBuilder` handles this automatically:
+1. J. Carbonell & J. Goldstein (1998). *The use of MMR, diversity-based reranking for reordering
+   documents and producing summaries.* SIGIR '98, 335–336.
+   [doi:10.1145/290941.291025](https://doi.org/10.1145/290941.291025)
+2. A. Phillips & M. Davis (2009). *Tags for identifying languages.* IETF BCP 47 / RFC 5646.
+   [rfc-editor.org/rfc/rfc5646](https://www.rfc-editor.org/rfc/rfc5646)
+3. B. Warner, A. Chaffin, B. Clavié, O. Weller, O. Hallström, S. Taghadouini, A. Gallagher,
+   R. Biswas, F. Ladhak, T. Aarsen, N. Cooper, G. Adams, J. Howard & I. Poli (2024). *Smarter,
+   better, faster, longer: a modern bidirectional encoder* (ModernBERT). arXiv:2412.13663.
+   [doi:10.48550/arXiv.2412.13663](https://doi.org/10.48550/arXiv.2412.13663)
 
-```rust
-use libgrammstein::rag::{IndexBuilder, IndexBuilderConfig};
+## See also
 
-let builder = IndexBuilder::new(IndexBuilderConfig::default())?;
-let index = builder.build_from_directory("./docs", None)?;
-```
-
-Supported file types: `.txt`, `.md`, `.html`
-
-## Document Conversion
-
-### Document to DocumentMeta
-
-```rust
-let doc: Document = /* ... */;
-
-// Create metadata (drops embedding)
-let meta = DocumentMeta {
-    uri: doc.uri.clone(),
-    title: doc.title.clone(),
-    synopsis: doc.synopsis.text.clone(),
-    synopsis_source: doc.synopsis.source,
-    language: doc.language.clone(),
-    metadata: doc.metadata.clone(),
-    topic_ids: doc.topic_ids.clone(),
-};
-```
-
-## Serialization
-
-`DocumentMeta` and `DocumentMetadata` are serializable:
-
-```rust
-use serde_json;
-
-let meta = DocumentMeta { /* ... */ };
-
-// Serialize
-let json = serde_json::to_string(&meta)?;
-
-// Deserialize
-let loaded: DocumentMeta = serde_json::from_str(&json)?;
-```
-
-## Display Helpers
-
-```rust
-let meta = DocumentMeta {
-    uri: "file:///docs/intro.md".to_string(),
-    title: Some("Introduction".to_string()),
-    // ...
-};
-
-// Display title (falls back to URI if no title)
-let display = meta.title.as_deref().unwrap_or(&meta.uri);
-println!("{}", display);  // "Introduction"
-```
-
-## Best Practices
-
-### 1. Use Meaningful URIs
-
-```rust
-// Good: informative URIs
-let doc = DocumentBuilder::new("https://example.com/articles/ml-intro")
-    .build()?;
-
-// Avoid: opaque URIs
-let doc = DocumentBuilder::new("doc-12345")
-    .build()?;
-```
-
-### 2. Provide Explicit Synopses When Available
-
-```rust
-// Check for existing metadata
-if let Some(abstract_text) = metadata.get("abstract") {
-    builder = builder.synopsis(abstract_text);
-}
-// Otherwise, summarizer will generate one
-```
-
-### 3. Include Language Information
-
-```rust
-// Enables language-specific processing
-let doc = DocumentBuilder::new(uri)
-    .language(LanguageTag::german())
-    .build()?;
-```
-
-### 4. Use Extras for Custom Metadata
-
-```rust
-let doc = DocumentBuilder::new(uri)
-    .metadata_extra("department", "engineering")
-    .metadata_extra("classification", "internal")
-    .build()?;
-```
-
-## See Also
-
-- [Overview](overview.md) - RAG module introduction
-- [Builder](builder.md) - Index construction with documents
-- [Index](index.md) - Document storage and retrieval
-- [Summarizer](../neural/summarizer.md) - Synopsis generation
+- [RAG Overview](overview.md) — why documents become vectors at all
+- [Index](index.md) — where `DocumentMeta` is stored and joined against the backend
+- [Builder](builder.md) — the pipeline that turns a `DocumentBuilder` into a `Document`
+- [Retriever](retriever.md) — how synopsis provenance is used to filter results
+- [Summarizer](../neural/summarizer.md) — the extractive summarizer behind `Synopsis::generated`
+- [Neural Embedder](../neural/embedder.md) — the encoder that produces $`v_D`$

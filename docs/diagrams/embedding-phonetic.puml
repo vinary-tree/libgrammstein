@@ -1,0 +1,41 @@
+@startuml embedding-phonetic
+' Phonetic-enhanced similarity: orthographic cosine is blended with the cosine of
+' Zompist-normalized forms; normalization runs a formally-verified transducer.
+' Render: plantuml -tsvg docs/diagrams/embedding-phonetic.puml
+' Source of truth for Figure 1 in docs/components/embedding/phonetic.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title Combined similarity  sim = (1−λ)·ortho + λ·phonetic
+
+legend top right
+  |= Color |= Concept |
+  |<#2E7D32>     | Embedding similarity |
+  |<#C62828>     | Coq/Rocq-verified rules |
+  |<#546E7A>     | Word / result |
+endlegend
+
+rectangle "w₁ , w₂" as w #546E7A
+rectangle "ortho_sim\nSubwordEmbedding.similarity(w₁,w₂)\n= cos(vec w₁, vec w₂)" as ortho #2E7D32
+rectangle "OnlinePhoneticTransducerChar\nZompist rewrite rules (62)\ntermination · idempotence · bounded" as norm #C62828
+rectangle "normalized  n₁ = N(w₁)\n            n₂ = N(w₂)" as nn #C62828
+rectangle "phonetic_sim\n1.0            if n₁ = n₂\ncos(vec n₁, vec n₂)  otherwise" as phon #2E7D32
+rectangle "**combined**\n(1−λ)·ortho + λ·phonetic\nλ = phonetic_weight (0.3)" as comb #2E7D32
+rectangle "most_similar: rerank\northo top-2k → by combined" as rerank #546E7A
+
+w --> ortho
+w --> norm
+norm --> nn
+nn --> phon
+ortho --> comb
+phon --> comb
+comb --> rerank
+@enduml

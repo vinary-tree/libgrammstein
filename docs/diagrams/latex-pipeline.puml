@@ -1,0 +1,66 @@
+@startuml latex-pipeline
+' End-to-end LaTeX scoring: tokenize -> detect modes -> per-mode n-gram + heuristic
+' scorer, with optional neural rescoring and equation retrieval.
+' Render: plantuml -tsvg docs/diagrams/latex-pipeline.puml
+' Source of truth for Figure 1 in docs/components/latex/overview.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+legend top right
+|= Concept |= Color |
+| LaTeX (tokenize / mode / scorer) | <back:#EF6C00>        </back> |
+| statistical n-gram core | <back:#1565C0>        </back> |
+| embeddings / neural | <back:#2E7D32>        </back> |
+| equation retrieval | <back:#6A1B9A>        </back> |
+| corpus / I-O | <back:#546E7A>        </back> |
+endlegend
+
+rectangle "LaTeX source\nx^2 + y^2 = z^2 in an equation env" as src #546E7A
+rectangle "**LaTeXTokenizer**\nchar lexer + math_stack\n→ Vec⟨LaTeXToken⟩ · kind · in_math" as tok #EF6C00
+rectangle "**ModeDetector**\ntoken_mode · sequence_mode\ndetect_transitions" as mode #EF6C00
+
+rectangle "**LaTeXNgramModel**\nroute region → per-mode NgramModel" as ngm #1565C0
+rectangle "command\nmodel" as cmd #1565C0
+rectangle "math\nmodel" as nm #1565C0
+rectangle "text\nmodel" as nt #1565C0
+rectangle "combined\nmodel" as comb #1565C0
+rectangle "mode-weighted Σ\nlog-prob" as ngout #1565C0
+
+rectangle "**LaTeXScorer**\nstructural ⊕ local-fluency ⊕\nsemantic-coherence → [0,1]" as scr #EF6C00
+
+rectangle "**LaTeXEmbedder**\ncommand + equation vectors" as embd #2E7D32
+rectangle "**LaTeXRescorer**\nModernBERT ppl → score\n(heuristic fallback)\nfeature latex-neural" as resc #2E7D32
+
+rectangle "**EquationRagIndex**\ncosine top-k over corpus\nfeature latex-rag" as rag #6A1B9A
+
+rectangle "Scored / ranked\ncorrection candidates" as out #455A64
+
+src --> tok : &str
+tok --> mode : tokens
+mode --> ngm : regions
+ngm --> cmd
+ngm --> nm
+ngm --> nt
+ngm --> comb
+cmd --> ngout
+nm --> ngout
+nt --> ngout
+comb --> ngout
+mode --> scr : tokens
+embd --> resc : Arc⟨LaTeXEmbedder⟩
+embd --> rag : query vector
+ngout --> out
+scr --> out
+resc --> out
+rag -[#6A1B9A,dashed]-> out : reference equations
+@enduml

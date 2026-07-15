@@ -1,0 +1,77 @@
+@startuml levenshtein-pathmap-pipeline
+' The two distinct ways PathMap enters libgrammstein — they are routinely
+' conflated. (A) PathMapDictionary is an IN-MEMORY libdictenstein backend that
+' satisfies MutableMappedDictionary, so the trainer and the Levenshtein automaton
+' use it like any other trie. (B) pathmap::PathMap is used DIRECTLY by
+' PathMapTranslator to turn a trained ARTrie into a compact, memory-mappable
+' production artifact. Only (B) touches the `pathmap` crate's own API.
+' Labels use Unicode glyphs, not <latex>: house style, see docs/diagrams/README.md.
+' Render: plantuml -tsvg docs/diagrams/levenshtein-pathmap-pipeline.puml
+' Source of truth for Figure 1 in docs/integration/liblevenshtein/pathmap-synergy.md §3.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam NoteBackgroundColor #ECEFF1
+skinparam NoteBorderColor #90A4AE
+skinparam NoteFontColor #263238
+title PathMap in libgrammstein — one crate, two entry points
+
+legend top right
+  |= Color |= Concept |
+  |<#1565C0>     | Statistical LM core (libgrammstein) |
+  |<#00838F>     | Storage / persistence |
+  |<#546E7A>     | External crate (pathmap · libdictenstein) |
+endlegend
+
+package "(A) In-memory backend — reached through libdictenstein" {
+  rectangle "**TrainerBuilder**\n""TrainerBuilder::new(dict).order(5)""" as trainer #1565C0
+  rectangle "**PathMapDictionary<NgramEntry>**\n""libdictenstein::pathmap""\nimpl MutableMappedDictionary\n+ IterableDictionary" as pmd #546E7A
+  rectangle "**PathMapNgramModel**\nNgramModel<PathMapDictionary<NgramEntry>>\nshared subtries ⟹ cheap snapshots\n(no serde: PathMap-native persistence)" as pmm #1565C0
+}
+
+package "(B) Production artifact — the pathmap crate directly" {
+  rectangle "**PersistentARTrieChar<u64>**\ntrained on disk: WAL + checkpoints\n(the corpus-scale training format)" as artrie #00838F
+  rectangle "**PathMapTranslator**\n""src/sources/google_books/translator.rs""\nskips \\x00-prefixed MKN metadata" as tr #1565C0
+  rectangle "**PathMap<u64>**\n""pathmap::PathMap""\nradix-256 trie **DAG**\nprefix compression · structural sharing" as pm #546E7A
+  rectangle "**paths file**\n""serialize_paths_with_auxdata""\nACT-compressed · merkleized · mmap-able" as paths #00838F
+}
+
+trainer --> pmd : writes through\nupdate_or_insert(&self, …)
+pmd --> pmm : backs
+pmm --> pmd : Transducer queries it\nlike any other trie
+
+artrie --> tr : ""iter_with_values()""
+tr --> pm : ""insert(key.as_bytes(), value)""
+pm --> paths : serialize
+paths --> tr : verify() re-reads via\nfor_each_deserialized_path
+
+note bottom of pmd
+  PathMapDictionary is a **trie**, not a hash map: lookup is
+  𝒪(m) in the term length m and prefix walks are supported —
+  so the Levenshtein **Transducer** can drive it exactly as it
+  drives a DAWG. Any doc claiming "𝒪(1) hash, no prefix
+  search, no fuzzy matching" is describing something else.
+end note
+
+note bottom of paths
+  Deployment reads are memory-mapped, so the resident set is the
+  **working set**, not the whole model. TranslationStats reports
+  entries_translated, the two sizes, and their ratio
+  (ARTrie bytes ÷ PathMap bytes).
+end note
+
+note right of tr
+  CLI:  ""libgrammstein convert to-pathmap""
+  ""--input <model> --output <model>.paths""
+end note
+
+@enduml

@@ -6,69 +6,42 @@ This document explains how libgrammstein integrates with [lling-llang](https://g
 
 libgrammstein and lling-llang are designed to work together:
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              lling-llang                                     │
-│                        (WFST Framework)                                     │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                      LayerPipeline                                   │   │
-│  │                                                                     │   │
-│  │   Input Lattice                                                     │   │
-│  │        │                                                            │   │
-│  │        ▼                                                            │   │
-│  │   ┌─────────────────────────────────┐                               │   │
-│  │   │   SpellingCorrectionLayer       │◄── liblevenshtein             │   │
-│  │   │   (fuzzy matching candidates)   │                               │   │
-│  │   └─────────────┬───────────────────┘                               │   │
-│  │                 ▼                                                    │   │
-│  │   ┌─────────────────────────────────┐                               │   │
-│  │   │   CfgFilterLayer                │                               │   │
-│  │   │   (grammar validation)          │                               │   │
-│  │   └─────────────┬───────────────────┘                               │   │
-│  │                 ▼                                                    │   │
-│  │   ┌─────────────────────────────────┐                               │   │
-│  │   │   LanguageModelLayer            │◄── lling-llang wrapper        │   │
-│  │   │   (rescoring with LM)           │                               │   │
-│  │   │                                 │                               │   │
-│  │   │   ┌─────────────────────────┐   │                               │   │
-│  │   │   │   LanguageModel trait   │◄──┼── libgrammstein implements    │   │
-│  │   │   │   - score_sequence()    │   │                               │   │
-│  │   │   │   - score_continuation()│   │                               │   │
-│  │   │   └─────────────────────────┘   │                               │   │
-│  │   └─────────────┬───────────────────┘                               │   │
-│  │                 ▼                                                    │   │
-│  │   Output Lattice (reweighted)                                       │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-                              │
-                              │ implements
-                              │ LanguageModel trait
-                              ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                            libgrammstein                                     │
-│                     (Language Model Library)                                │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                    HybridLanguageModel                               │   │
-│  │                                                                     │   │
-│  │   ┌─────────────────────┐    ┌─────────────────────┐               │   │
-│  │   │     NgramModel      │    │  SubwordEmbedding   │               │   │
-│  │   │  Modified Kneser-Ney│    │   FastText-style    │               │   │
-│  │   └─────────────────────┘    └─────────────────────┘               │   │
-│  │                                                                     │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+![Architecture of the integration: lling-llang hosts a LayerPipeline that carries an input lattice through the SpellingCorrectionLayer (fed by liblevenshtein's edit-distance automaton), an optional CfgFilterLayer for grammar validation, and the LanguageModelLayer, emitting a reweighted output lattice. The LanguageModelLayer is defined against lling-llang's LanguageModel trait (score_sequence, score_continuation), which libgrammstein's HybridLanguageModel implements by fusing a Modified Kneser-Ney NgramModel with a FastText-style SubwordEmbedding.](../../diagrams/lling-architecture.svg)
+
+**Figure 1.** libgrammstein as the language model behind an lling-llang
+`LayerPipeline`; the `LanguageModel` trait is the seam between the two crates.
+*(Rendered from `docs/diagrams/lling-architecture.puml`.)*
+
+## Two correction paths
+
+libgrammstein exposes **two** correctors on top of this integration, both gated by
+the `lling-llang-integration` feature:
+
+- the **lattice** `HierarchicalCorrector`, which drives the `LayerPipeline` shown
+  above — spelling correction, an optional grammar filter, then language-model
+  rescoring, decoded by `viterbi` / `nbest`; and
+- the **cascade** `GrammarCorrector`, which composes two liblevenshtein automata over
+  a shared *term-id* alphabet and decodes word-level insertions, deletions, and
+  substitutions with a beam, scored by stupid backoff over the raw n-gram counts. It
+  drives liblevenshtein directly and uses neither the `LayerPipeline` nor the
+  `LanguageModel` trait described below. The cascade itself ships in **two store
+  backends** that share one decoder — the in-memory single-store `GrammarCorrector` and
+  the `ShardedGrammarCorrector` over the Google-Books shard corpus, which adds an opt-in
+  all-shards `grammar_neighbors_fanout` and additionally requires the `google-books`
+  feature (see the [multi-shard grammar corrector](../multi-shard-grammar-corrector.md)
+  design record and [hierarchical-correction.md](hierarchical-correction.md) §6.9).
+
+See [hierarchical-correction.md](hierarchical-correction.md) §5 (lattice) and §6
+(cascade) for the theory, and [pipeline-assembly.md](pipeline-assembly.md) for both
+APIs. The rest of this page documents the `LanguageModel` trait that the *lattice*
+path is built on.
 
 ## The LanguageModel Trait
 
 lling-llang defines a `LanguageModel` trait for pluggable language models:
 
 ```rust
-// Defined in lling-llang/src/layers/lm_rerank.rs
+// Defined in lling-llang/src/layers/rescoring/lm_rerank.rs
 
 /// Language model trait for pluggable LM integration.
 ///
@@ -184,7 +157,7 @@ let scored_paths: Vec<_> = paths
 lling-llang's `LanguageModelLayer` wraps any `LanguageModel`:
 
 ```rust
-// In lling-llang/src/layers/lm_rerank.rs
+// In lling-llang/src/layers/rescoring/lm_rerank.rs
 
 pub struct LanguageModelLayer {
     lm: Box<dyn LanguageModel>,
@@ -450,11 +423,15 @@ model.prewarm_contexts(&[
 
 ## Next Steps
 
-- [Hierarchical Correction](hierarchical-correction.md): the end-to-end design — noisy channel, dimensions, WFST composition
-- [Dimensions](dimensions.md): each approximate-matching dimension, its weight, and the hybrid fusion
+- [Hierarchical Correction](hierarchical-correction.md): the end-to-end design — noisy channel, dimensions, WFST composition (§5 lattice corrector), and the `T_lex ∘ T_gram` term-id cascade (§6 `GrammarCorrector`)
+- [Dimensions](dimensions.md): each approximate-matching dimension, its weight, the hybrid fusion, and the term-id cascade's word-level edit axis
 - [Dictionary Backend](dictionary-backend.md): why the Levenshtein automaton runs directly over the persistent vocabulary trie (no DoubleArrayTrie export)
-- [Pipeline Assembly](pipeline-assembly.md): the concrete `HierarchicalCorrector` API
+- [Pipeline Assembly](pipeline-assembly.md): the concrete `HierarchicalCorrector` and `GrammarCorrector` APIs
 - [Pipeline Usage](pipeline-usage.md): Complete pipeline examples
-- [PathMap Synergy](pathmap-synergy.md): Shared infrastructure
+- [Multi-shard grammar corrector](../multi-shard-grammar-corrector.md): running the
+  cascade over the sharded Google-Books corpus — the view-source seam, co-location,
+  read-only query mode, and anchored-vs-fanout neighbors (see also
+  [hierarchical-correction.md](hierarchical-correction.md) §6.9)
+- [PathMap Synergy](../liblevenshtein/pathmap-synergy.md): Shared infrastructure
 - [Hybrid Model](../../components/hybrid/overview.md): Model details
 - [Architecture](../../architecture/overview.md): System design

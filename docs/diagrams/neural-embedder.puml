@@ -1,0 +1,78 @@
+@startuml neural-embedder
+' ModernBertEmbedder::embed and ::embed_batch. Both are &self (no interior mutability
+' beyond the lock-free cache), so a single embedder serves many threads. The batch path
+' partitions on the cache first, then only the misses reach the encoder.
+' Render: plantuml -tsvg docs/diagrams/neural-embedder.puml
+' Source of truth for Figure 1 in docs/components/neural/embedder.md §3.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam activity {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  BackgroundColor #2E7D32
+  DiamondBackgroundColor #ECEFF1
+  DiamondFontColor #263238
+  DiamondBorderColor #90A4AE
+}
+title ModernBertEmbedder — the cached embedding path  (&self · thread-safe)
+
+start
+partition "embed(text)" {
+  if (cache enabled  ∧  hit?) then (hit)
+    :**return Arc<[f32]>.to_vec()**
+    no encoder call;
+    stop
+  else (miss)
+  endif
+
+  switch (pooling)
+  case (Cls — default)
+    :model.embed(text)
+    hidden state at position 0;
+  case (MeanPooling)
+    :model.embed_mean_pooled(text)
+    (1/T) Σₜ hₜ  over //all// T tokens;
+  case (MaxPooling)
+    :**falls through to mean pooling**
+    max-pooling is not implemented;
+  endswitch
+
+  if (normalize?) then (true — default)
+    :ê ← e / ‖e‖₂
+    makes dot product ≡ cosine;
+  else (false)
+  endif
+
+  :cache.insert(text, ê);
+  :**return Vec<f32>**  (768-dim);
+}
+stop
+
+partition "embed_batch(texts)" {
+  start
+  :probe the cache for every text;
+  fork
+    :**hits** → results[i] ← cached vector;
+  fork again
+    :**misses** → uncached_texts, uncached_indices;
+    :chunk by batch_size (default 32);
+    if (pooling = Cls?) then (yes)
+      :model.embed_batch(chunk)
+      **one padded tensor, one forward pass**
+      (batch, max_len) + attention mask;
+    else (Mean / Max)
+      :loop model.embed_mean_pooled(t)
+      **one forward pass per text** — no batching;
+    endif
+    :normalize + cache.insert each;
+  end fork
+  :reassemble in the caller's order;
+  stop
+}
+
+@enduml

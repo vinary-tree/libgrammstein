@@ -1,0 +1,75 @@
+@startuml arch-memory-budget
+' The heap decomposition of a full Google Books import and the bound that governs
+' each term. The point of the picture: exactly ONE term was unbounded (the resident
+' overlay), and exactly one mechanism (the eviction tail) bounds it.
+' Colour legend (semantic, shared across all repo diagrams — see architecture.puml):
+'   #1565C0 blue = statistical LM core   #00838F teal = storage / persistence
+'   #006064 dark teal = the eviction tail
+'   #546E7A grey = external crates / corpora   #C62828 red = formal verification
+' Render: plantuml -tsvg docs/diagrams/arch-memory-budget.puml
+' Source of truth for Figure 1 in docs/architecture/memory-optimization.md §3
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam NoteBackgroundColor #FFF3E0
+skinparam NoteBorderColor #EF6C00
+title Peak-heap decomposition — every term, and the mechanism that bounds it
+
+rectangle "**Peak heap**\n<latex>H_{\text{peak}} \le H_{\text{overlay}} + H_{\text{tx}} + H_{\text{vocab}} + H_{\text{parse}} + H_{\text{alloc}}</latex>" as peak #455A64
+
+package "The already-bounded terms" {
+  rectangle "<latex>H_{\text{tx}}</latex>  —  **per-transaction buffer**\n<latex>H_{\text{tx}} \le W \cdot \text{tx\_chunk\_size} \cdot s_{\text{entry}}</latex>\nbounded by --tx-chunk-size (default 500 000)\nand by --lockfree-flush-threshold" as tx #00838F
+  rectangle "<latex>H_{\text{vocab}}</latex>  —  **the vocabulary**\n<latex>\Theta(|V|)</latex>, pre-sized from a language +\nmin_count estimate ⟹ **no resize doubling**" as vocab #00838F
+  rectangle "<latex>H_{\text{parse}}</latex>  —  **per-record parse**\n<latex>O(1)</latex> amortized: borrowed slices, plus a\nSmallVec token split that stays on the stack" as parse #1565C0
+  rectangle "<latex>H_{\text{alloc}}</latex>  —  **allocator overhead**\nmimalloc's thread-local segment heaps\nserve from a standing reservation" as alloc #546E7A
+}
+
+package "The dominant term — the one that was unbounded" {
+  rectangle "<latex>H_{\text{overlay}}</latex>  —  **resident overlay nodes**\ngrows with every //distinct// n-gram written, and\npersists for the lifetime of an open shard" as overlay #00838F
+  rectangle "**Eviction tail**   (--overlay-budget-gib, default 10)\nafter each shard checkpoint, evict the coldest resident\nnodes down to that shard's slice of the global budget\n<latex>\text{budget} = \max\!\left(G / n_{\text{resident}},\ 64\,\text{MiB}\right)</latex>\n**lossless**:   evicted ⟺ durable" as evict #006064
+}
+
+rectangle "**The durable image on disk**\nCX path-compressed ARTrie + WAL\n//(unbounded by design — it is the corpus)//" as disk #00838F
+rectangle "**LockFreeDurableCheckpointEviction**  (libdictenstein, TLA+)\nan evicted node's value faults back from the published\nimage, or from the retained WAL" as spec #C62828
+
+tx -[hidden]down- vocab
+vocab -[hidden]down- parse
+parse -[hidden]down- alloc
+
+tx --> peak
+vocab --> peak
+parse --> peak
+alloc --> peak
+overlay --> peak
+
+evict -[#006064]-> overlay : reclaim resident RAM\n(≤200 000 nodes per pass)
+overlay --> disk : publish snapshot
+disk -[#00838F,dashed]-> overlay : fault back on read
+evict -[#C62828,dashed]-> spec : losslessness is delegated here,\nnot re-proved in libgrammstein
+
+note right of alloc
+  glibc malloc serves large blocks with mmap and frees
+  them with munmap; each transition issues an mprotect
+  syscall to re-permission the pages. Under a 12-worker
+  import that alone consumed **≈49 % of CPU**. mimalloc's
+  pre-reserved segments remove the syscall from the
+  steady state entirely.
+end note
+
+note bottom of evict
+  **This is the load-bearing bound.** Without it, <latex>H_{\text{overlay}}</latex> grows
+  monotonically for the whole import — the checkpoint //published//
+  the overlay but never //reclaimed// it — and a naïve build peaks
+  at **≈33.79 GB**. With it, the same build holds **under 16 GB**,
+  losslessly.
+end note
+
+@enduml

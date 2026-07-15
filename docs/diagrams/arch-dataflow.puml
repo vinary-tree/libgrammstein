@@ -1,0 +1,88 @@
+@startuml arch-dataflow
+' End-to-end data flow: corpus bytes -> tokens -> counts -> a smoothed model, and
+' the mirror-image query path back out. Colour encodes the STAGE KIND, not the
+' crate: ingest (grey), transform (blue), persist (teal), score (green).
+' Colour legend (semantic, shared across all repo diagrams — see architecture.puml):
+'   #1565C0 blue = statistical LM core   #2E7D32 green = embeddings / neural
+'   #00838F teal = storage / persistence #546E7A grey = external crates / corpora
+' Render: plantuml -tsvg docs/diagrams/arch-dataflow.puml
+' Source of truth for Figure 1 in docs/architecture/data-flow.md §2
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam NoteBackgroundColor #FFF3E0
+skinparam NoteBorderColor #EF6C00
+title Data flow — training (down) and query (up)
+
+legend top right
+  |= Colour |= Stage kind |
+  |<#546E7A>     | Ingest (external bytes) |
+  |<#1565C0>     | Transform (pure, CPU-bound) |
+  |<#00838F>     | Persist (storage layer) |
+  |<#2E7D32>     | Score (query-time) |
+endlegend
+
+package "TRAINING — one streaming pass over the corpus" {
+  rectangle "**CorpusReader**\nPlaintext · Wikipedia XML · Gutenberg · HTTP\n**lazy** — yields one sentence at a time" as reader #546E7A
+  rectangle "**Quality filter + dedup**\nlength · symbol ratio · language · SimHash\n(opt-in)" as filter #546E7A
+  rectangle "**PrefetchingReader**\nproducer thread reads ahead;\nbatches of <latex>B</latex> sentences over a bounded channel" as prefetch #546E7A
+  rectangle "**Tokenizer**\nsentence → tokens (language-aware)" as tok #1565C0
+  rectangle "**N-gram extraction**\nevery window of every order <latex>1 \le k \le n</latex>;\n<latex>|s| - k + 1</latex> k-grams per sentence <latex>s</latex>" as extract #1565C0
+  rectangle "**Vocabulary encode**\nword → index → LEB128 varint;\nkey = concatenated varints (lock-free CAS assignment)" as encode #00838F
+  rectangle "**Trie insert / increment**\nNgramEntry atomics <latex>c(\cdot)</latex>, <latex>N_{1+}(\bullet, w)</latex>, <latex>N_{1+}(w, \bullet)</latex>\n**no lock** — one fetch_add per counter" as insert #00838F
+  rectangle "**Smoothing fit**\ncount-of-counts <latex>n_1 \ldots n_4</latex> ⟹ <latex>Y</latex>, <latex>D_1</latex>, <latex>D_2</latex>, <latex>D_{3+}</latex>" as smooth #1565C0
+}
+
+rectangle "**Trained model**\ntrie + discounts + <latex>|V|</latex> + total count" as model #00838F
+
+package "QUERY — per token, allocation-free" {
+  rectangle "**Score-cache probe**\nDashMap keyed by hash of <latex>(w, h)</latex>\nhit ⟹ return" as cache #2E7D32
+  rectangle "**MKN backoff recursion**\n<latex>\mathbb{P}(w \mid h) = \frac{[c(hw) - D]^{+}}{c(h)} + \lambda(h)\,\mathbb{P}(w \mid h')</latex>\nat most <latex>n</latex> trie look-ups" as mkn #1565C0
+  rectangle "**Embedding probability**\n<latex>\log \mathbb{P}_e(w \mid h) \approx \cos(v_w, v_h)/\tau - 1</latex>" as emb #2E7D32
+  rectangle "**Interpolate**\nLinear · LogLinear · Fallback · Dynamic" as interp #2E7D32
+}
+
+rectangle "**Output** — <latex>\log \mathbb{P}(w \mid h)</latex>\nperplexity · generation · WFST lattice rescoring" as out #455A64
+
+reader --> filter
+filter --> prefetch
+prefetch --> tok : batch
+tok --> extract
+extract --> encode
+encode --> insert
+insert --> smooth : once, after the pass
+smooth --> model
+
+model --> cache : load / mmap
+cache --> mkn : miss
+cache --> emb : miss
+mkn --> interp
+emb --> interp
+interp --> out
+interp -[#2E7D32,dashed]-> cache : memoize
+
+note right of prefetch
+  The **I/O–CPU decoupling seam**. The producer
+  thread blocks on the disk; the rayon pool below
+  it never does. Buffer depth auto-tunes to a
+  fraction of free RAM.
+end note
+
+note right of insert
+  The **only shared mutable state** in training.
+  It is shared //without a lock// because every field
+  of NgramEntry is an atomic counter and addition is
+  commutative — so worker interleaving cannot change
+  the result.
+end note
+
+@enduml

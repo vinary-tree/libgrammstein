@@ -1,0 +1,56 @@
+@startuml paradigm-indicators
+' The indicator taxonomy: 4 primary paradigms, 19 IndicatorCategory variants,
+' 170 PatternDefs, and the three weight tiers every pattern is drawn from.
+' Colour encodes concept: paradigm roots and their categories in the purple
+' (topic/analysis) family; the weight-tier legend in orange (code evidence).
+' Render: plantuml -tsvg docs/diagrams/paradigm-indicators.puml
+' Source of truth for Figure 1 in docs/components/paradigm/indicators.md §2
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title The indicator taxonomy — Paradigm ← IndicatorCategory ← PatternDef  (170 patterns)
+
+rectangle "**Paradigm**  (enum)\nObjectOriented · Functional · Reactive · Procedural · **Mixed**\nMixed is //derived//, never matched — no pattern maps to it" as root #4A148C
+
+rectangle "**ObjectOriented** — 29 patterns\n11 strong · 13 medium · 5 weak" as oop #6A1B9A
+rectangle "**Functional** — 53 patterns\n31 strong · 20 medium · 2 weak" as fp #7B1FA2
+rectangle "**Reactive** — 52 patterns\n29 strong · 23 medium · 0 weak" as rx #8E24AA
+rectangle "**Procedural** — 36 patterns\n8 strong · 16 medium · 12 weak" as proc #AB47BC
+
+rectangle "**OopClass** ‹class · struct · impl›\n**OopInheritance** ‹extends · implements · super›\n**OopEncapsulation** ‹private · protected · get · set›\n**OopPolymorphism** ‹interface · trait · virtual · abstract›\n**OopInstantiation** ‹new · this · self · constructor›" as oopc #7E57C2
+rectangle "**FpHigherOrder** ‹map · filter · fold · lambda›\n**FpImmutability** ‹const · val · immutable · readonly›\n**FpPurity** ‹compose · pipe · and_then›\n**FpPatternMatch** ‹match · case · when · (if let)›\n**FpAlgebraic** ‹option · result · monad · >>=›\n**FpRecursion** ‹rec · tailrec›" as fpc #7E57C2
+rectangle "**ReactiveObservable** ‹observable · stream · subscribe · signal›\n**ReactiveEvent** ‹emit · on · useeffect · dispatch›\n**ReactiveBackpressure** ‹backpressure · buffer · window›\n**ReactiveAsync** ‹async · await · promise · scheduler›" as rxc #7E57C2
+rectangle "**ProceduralControlFlow** ‹if · for · while · goto›\n**ProceduralMutable** ‹var · mut · malloc · static›\n**ProceduralSideEffect** ‹print · console · write · read›\n**ProceduralSequential** ‹; · return›" as procc #7E57C2
+
+rectangle "**Weight tiers** — every PatternDef is built from exactly one\n\n**strong**  w = 0.9  — the token alone is near-decisive  ‹class · subscribe · >>=›\n**medium**  w = 0.6  — suggestive, but shared across paradigms  ‹struct · this · for›\n**weak**  w = 0.3  — ambient syntax, weak evidence  ‹public · let · if · ;›\n\nis_strong ⇔ w ≥ 0.7 — so exactly the strong tier earns the confidence bonus" as tiers #EF6C00
+
+root --> oop
+root --> fp
+root --> rx
+root --> proc
+
+oop --> oopc : 5 categories
+fp --> fpc : 6 categories
+rx --> rxc : 4 categories
+proc --> procc : 4 categories
+
+tiers -[hidden]-> root
+
+note bottom of procc
+  A token may fire patterns in **several**
+  paradigms at once — ""for"" is Reactive
+  (a Rholang receive) //and// Procedural (a loop);
+  ""*"" is Reactive (dereference) //and//
+  Procedural (pointer). Both fire, and the
+  evidence is added to **both** scores.
+end note
+@enduml

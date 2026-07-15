@@ -1,0 +1,47 @@
+@startuml generation-autoregressive-loop
+' TextGenerator's autoregressive loop: window the context, score the vocabulary, decode, stop-test, append.
+' Render: plantuml -tsvg docs/diagrams/generation-autoregressive-loop.puml
+' Source of truth for Figure 1 in docs/components/generation/text-generation.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam ArrowColor #37474F
+skinparam activity {
+  BackgroundColor #2E7D32
+  BorderColor #263238
+  FontColor white
+  FontStyle bold
+  DiamondBackgroundColor #546E7A
+  DiamondFontColor white
+  DiamondBorderColor #263238
+  StartColor #263238
+  EndColor #263238
+}
+title TextGenerator — autoregressive decoding loop
+
+start
+:prompt → context: Vec<String>;
+#1565C0:context_width ← order.saturating_sub(1);
+repeat
+  #1565C0:ctx ← last context_width tokens;
+  #1565C0:score vocabulary V\nℓ_w = log ℙ(w | ctx)  for w ∈ V;
+  if (temperature ≤ 0 ?) then (greedy)
+    :next ← argmax_w ℓ_w  (best_token);
+  else (sample)
+    :next ← sample_token(ctx, rng)\ntemperature · top-k · nucleus;
+  endif
+  if (next is Some ?) then (yes)
+    if (next ∈ stop_tokens ?) then (yes)
+      :push(next);
+      stop
+    else (no)
+      :append next to context and output;
+    endif
+  else (no — no finite candidate)
+    stop
+  endif
+repeat while (generated < max_tokens ?) is (yes) not (no)
+:return generated tokens;
+stop
+
+@enduml

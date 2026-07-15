@@ -1,0 +1,55 @@
+@startuml code-overview
+' End-to-end code-correction module: source -> tree-sitter -> analysis lanes -> ensemble -> ranked corrections.
+' Render: plantuml -tsvg docs/diagrams/code-overview.puml
+' Source of truth for Figure 1 in docs/components/code/overview.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title Code Correction Module — Parse ▷ Analyze ▷ Correct ▷ Rank
+
+legend top right
+  |= Color |= Concept |
+  |<#546E7A>     | External crate / source / I-O |
+  |<#EF6C00>     | Code analysis (AST · CPG · PCFG) |
+  |<#1565C0>     | Lexical (liblevenshtein) |
+  |<#2E7D32>     | Neural / semantic |
+endlegend
+
+rectangle "**Source Code**\nPython · Rust · JS · Rholang · MeTTa" as src #546E7A
+
+rectangle "**CodeParser · tree-sitter**\nincremental parse · error recovery\nParsedCode { tree, error_ranges }" as parse #546E7A
+
+package "Representations" {
+  rectangle "**CodeTokenizer**\ntyped CodeToken stream\n+ TokenContext" as tok #EF6C00
+  rectangle "**Code Property Graph**\nAST ∪ CFG ∪ DFG" as cpg #EF6C00
+}
+
+package "Ensemble correctors" {
+  rectangle "**Lexical**\nfuzzy match · edit distance" as lex #1565C0
+  rectangle "**Grammar**\nPCFG + Earley" as gram #EF6C00
+  rectangle "**Semantic**\nGNN over CPG" as sem #2E7D32
+}
+
+rectangle "**EnsembleCorrector**\nweighted merge · agreement boost\nStreamingCorrectionCollector (bounded heap)" as ens #455A64
+rectangle "**Ranked Corrections**\nCorrectionCandidates + Diagnostics" as out #455A64
+
+src --> parse
+parse --> tok
+parse --> cpg
+tok --> lex
+tok --> gram
+cpg --> sem
+lex --> ens
+gram --> ens
+sem --> ens
+ens --> out
+
+@enduml

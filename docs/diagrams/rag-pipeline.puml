@@ -1,0 +1,86 @@
+@startuml rag-pipeline
+' The end-to-end RAG data path: index-time ingestion (documents → embeddings →
+' index) meeting query-time retrieval (query → embedding → top-k → results) at
+' the shared RagIndex. Colour encodes role, per the repo-wide legend in
+' architecture.puml:
+'   #2E7D32 green  = embeddings / neural     #6A1B9A purple = retrieval
+'   #00838F teal   = storage / persistence   #455A64 grey   = I/O boundary
+' Render: plantuml -tsvg docs/diagrams/rag-pipeline.puml
+' Source of truth for Figure 1 in docs/components/rag/overview.md §3.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title RAG — index-time ingestion ⇄ query-time retrieval
+
+legend top right
+  |= Colour |= Role |
+  |<#2E7D32>     | Embeddings / neural (ModernBERT) |
+  |<#6A1B9A>     | Retrieval (backend, scoring, ranking) |
+  |<#00838F>     | Storage / persistence |
+  |<#455A64>     | I/O boundary |
+endlegend
+
+' ─────────────────────────── index time ───────────────────────────
+rectangle "**Corpus**\n.txt · .md · .html\nor DocumentBuilder values" as corpus #455A64
+
+rectangle "**IndexBuilder** / **ParallelIndexBuilder**\nscan → process_builder → add_document" as builder #6A1B9A
+
+rectangle "**ModernBertEmbedder**\nembed_document(title, content)\ntext ↦ v ∈ ℝ⁷⁶⁸" as embedder #2E7D32
+rectangle "**Summarizer**\ncreate_synopsis(explicit, content)\nexplicit ⊳ MMR-extractive fallback" as summarizer #2E7D32
+
+rectangle "**Document**\nid · uri · title · synopsis\nlanguage · embedding · metadata" as doc #6A1B9A
+
+' ─────────────────────────── the index ───────────────────────────
+rectangle "**RagIndex<B>**\nbackend: B ⊕ documents: HashMap<DocumentId, DocumentMeta>\ntopic_model: Option<TopicModel>" as index #00838F
+
+rectangle "**RetrievalBackend** (B)\nunit-normalised embeddings\nExactCosineBackend │ HnswBackend" as backend #6A1B9A
+
+rectangle "**On disk**\nbackend/ · metadata.json\nconfig.json · state.json · topic_model.json" as disk #00838F
+
+' ─────────────────────────── query time ───────────────────────────
+rectangle "**Query**\n“what is dense retrieval?”" as query #455A64
+rectangle "**Retriever<B>**\nembed → search → filter → rank" as retriever #6A1B9A
+rectangle "**ModernBertEmbedder**\nembed_query(q)\nq ↦ v_q ∈ ℝ⁷⁶⁸" as qembed #2E7D32
+rectangle "**Top-k by cosine**\nargmax₍k₎ ⟨v̂_q , v̂_d⟩" as topk #6A1B9A
+rectangle "**Filter + rank**\nscore ≥ min_similarity\nsynopsis-kind gates" as filter #6A1B9A
+rectangle "**Vec<RetrievalResult>**\nuri · title · synopsis · score · rank" as results #455A64
+
+' ─────────────────────────── edges ───────────────────────────
+corpus --> builder : scan_directory
+builder --> embedder : content
+builder --> summarizer : content
+embedder --> doc : v ∈ ℝ⁷⁶⁸
+summarizer --> doc : Synopsis
+doc --> index : add_document
+index --> backend : add(id, v)\n(normalise to ‖v̂‖₂ = 1)
+index <--> disk : save / load
+
+query --> retriever
+retriever --> qembed
+qembed --> topk : v_q
+backend --> topk : v̂_d  ∀d
+topk --> filter : Vec<(DocumentMeta, score)>
+filter --> results
+
+note bottom of backend
+  Embeddings are stored **pre-normalised**,
+  so cosine similarity degenerates to a
+  plain dot product — one BLAS ""sgemv""
+  for the whole corpus.
+end note
+
+note bottom of index
+  The index owns the //metadata//; the backend
+  owns the //geometry//. A result is emitted only
+  when **both** agree the document exists.
+end note
+@enduml

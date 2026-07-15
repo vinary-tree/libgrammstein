@@ -1,0 +1,105 @@
+@startuml cli-commands
+' The complete grammstein command surface, exactly as declared by the clap
+' definitions in src/cli/args.rs: seven top-level command groups, their
+' subcommands, and each subcommand's positional arguments. Leaves are coloured
+' by the subsystem they drive (statistical core, embeddings, hybrid, storage);
+' the shell itself and the corpus/model housekeeping groups are grey tooling.
+' Feature-gated leaves (google-books) are attached with a dashed edge.
+' Flags are written in PlantUML monospace ("" quoting) so creole does not eat
+' the leading double hyphen.
+' Render: plantuml -tsvg docs/diagrams/cli-commands.puml
+' Source of truth for Figure 1 in docs/cli/README.md §3.
+left to right direction
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title grammstein — Command Surface (clap)
+
+legend top right
+  |= Colour |= Drives |
+  |<#546E7A>     | CLI / tooling |
+  |<#1565C0>     | N-gram statistical core |
+  |<#2E7D32>     | Embeddings |
+  |<#1B6CA8>     | Hybrid (n-gram ⊕ embedding) |
+  |<#00838F>     | Storage / persistence |
+  |= Edge |= Availability |
+  | solid | always |
+  | dashed | requires ""--features google-books"" |
+endlegend
+
+rectangle "**grammstein**\n""-v/--verbose"" · ""-q/--quiet""\n""-h/--help"" · ""-V/--version""" as root #455A64
+
+rectangle "**train**" as train #546E7A
+rectangle "**eval**" as eval #546E7A
+rectangle "**query**" as query #546E7A
+rectangle "**models**" as models #546E7A
+rectangle "**corpus**" as corpus #546E7A
+rectangle "**convert**" as convert #546E7A
+rectangle "**repl**\n⟨MODEL⟩ optional" as repl #546E7A
+
+root --> train
+root --> eval
+root --> query
+root --> models
+root --> corpus
+root --> convert
+root --> repl
+
+rectangle "**ngram**\n⟨CORPUS⟩ ⟨OUTPUT⟩" as t_ngram #1565C0
+rectangle "**embedding**\n⟨CORPUS⟩ ⟨OUTPUT⟩" as t_embed #2E7D32
+rectangle "**hybrid**\n⟨NGRAM_MODEL⟩ ⟨EMBEDDING_MODEL⟩ ⟨OUTPUT⟩" as t_hybrid #1B6CA8
+rectangle "**import-google-books**\n⟨OUTPUT⟩" as t_gb #1565C0
+
+train --> t_ngram
+train --> t_embed
+train --> t_hybrid
+train ..> t_gb
+
+rectangle "**perplexity**\n⟨MODEL⟩ ⟨TEST_CORPUS⟩" as e_ppl #1B6CA8
+rectangle "**compare**\n⟨TEST_CORPUS⟩ ⟨MODEL⟩ ⟨MODEL⟩ …" as e_cmp #1B6CA8
+eval --> e_ppl
+eval --> e_cmp
+
+rectangle "**score**\n⟨MODEL⟩ ⟨TOKENS…⟩ | stdin" as q_score #1B6CA8
+rectangle "**similar**\n⟨MODEL⟩ ⟨WORD⟩" as q_sim #2E7D32
+rectangle "**completions**\n⟨MODEL⟩ ⟨CONTEXT…⟩" as q_comp #1B6CA8
+query --> q_score
+query --> q_sim
+query --> q_comp
+
+rectangle "**list**\ninstalled models" as m_list #546E7A
+rectangle "**info**\n⟨MODEL⟩" as m_info #546E7A
+models --> m_list
+models --> m_info
+
+rectangle "**stats**\n⟨CORPUS⟩" as c_stats #546E7A
+rectangle "**sample**\n⟨CORPUS⟩" as c_sample #546E7A
+rectangle "**download**\n⟨LANGUAGE⟩" as c_dl #546E7A
+rectangle "**detect**\n⟨CORPUS⟩" as c_detect #546E7A
+rectangle "**list**\ncached corpora" as c_list #546E7A
+rectangle "**clean**\ncached corpora" as c_clean #546E7A
+corpus --> c_stats
+corpus --> c_sample
+corpus --> c_dl
+corpus --> c_detect
+corpus --> c_list
+corpus --> c_clean
+
+rectangle "**to-static**\n⟨INPUT⟩ ⟨OUTPUT⟩" as v_static #00838F
+rectangle "**to-pathmap**\n⟨INPUT⟩ ⟨OUTPUT⟩" as v_pathmap #00838F
+rectangle "**extract-dict**\n⟨MODEL⟩ ⟨OUTPUT⟩" as v_dict #00838F
+rectangle "**info**\n⟨MODEL⟩" as v_info #00838F
+convert --> v_static
+convert ..> v_pathmap
+convert ..> v_dict
+convert --> v_info
+
+@enduml

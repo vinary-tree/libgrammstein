@@ -1,555 +1,413 @@
 # API Pattern Mining
 
-libgrammstein includes an API pattern mining system that discovers common sequences of API calls using the PrefixSpan algorithm.
+`ApiPatternMiner` discovers the **call orders** that recur across a body of code — *open then
+close*, *connect, query, commit* — by running **PrefixSpan** [[1]](#references) over a database of
+API-call sequences. This document defines what a pattern and its support *are*, derives the property
+that makes the search tractable, and specifies exactly what this implementation computes.
 
-## What is API Pattern Mining?
+> **Scope.** Source of truth: [`src/topic/paradigm/api_patterns.rs`](../../../src/topic/paradigm/api_patterns.rs).
+> The miner is one of the three engines introduced in the [Overview](overview.md); it shares no
+> state with the others.
 
-API pattern mining identifies frequently occurring sequences of function or method calls in codebases. These patterns reveal:
+## 1. The problem
 
-- Common usage patterns for libraries and frameworks
-- Idiomatic code sequences
-- Potential API design issues
-- Opportunities for abstraction
+A library's *documentation* tells you which calls exist. A library's *usage* tells you which calls
+go together, and in what order — and that is what a corpus can be made to confess. Recovering those
+orders supports API-misuse detection (a `fopen` with no matching `fclose`), idiom extraction,
+documentation-by-example, and refactoring toward the abstraction the pattern is begging for
+[[5]](#references)[[6]](#references).
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    API Pattern Mining Pipeline                           │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│   Source Code                                                            │
-│       │                                                                  │
-│       ▼                                                                  │
-│   ┌─────────────────────────────────────────────────────────────────┐   │
-│   │  1. Sequence Extraction                                          │   │
-│   │     • Parse function bodies                                      │   │
-│   │     • Extract API call sequences                                 │   │
-│   │     • Build sequence database                                    │   │
-│   └───────────────────────────────┬─────────────────────────────────┘   │
-│                                   │                                      │
-│                                   ▼                                      │
-│   ┌─────────────────────────────────────────────────────────────────┐   │
-│   │  Sequence Database                                               │   │
-│   │  ["db.connect", "db.query", "db.close"]                         │   │
-│   │  ["db.connect", "db.beginTransaction", "db.query", "db.commit"] │   │
-│   │  ["fs.open", "fs.read", "fs.close"]                             │   │
-│   │  ...                                                             │   │
-│   └───────────────────────────────┬─────────────────────────────────┘   │
-│                                   │                                      │
-│                                   ▼                                      │
-│   ┌─────────────────────────────────────────────────────────────────┐   │
-│   │  2. PrefixSpan Mining                                            │   │
-│   │     • Find frequent subsequences                                 │   │
-│   │     • Apply minimum support threshold                            │   │
-│   │     • Grow patterns prefix by prefix                             │   │
-│   └───────────────────────────────┬─────────────────────────────────┘   │
-│                                   │                                      │
-│                                   ▼                                      │
-│   ┌─────────────────────────────────────────────────────────────────┐   │
-│   │  Frequent Patterns                                               │   │
-│   │  ["db.connect", "db.query"] (support: 0.85)                     │   │
-│   │  ["db.beginTransaction", "db.commit"] (support: 0.72)           │   │
-│   │  ["db.connect", ..., "db.close"] (support: 0.68)                │   │
-│   └─────────────────────────────────────────────────────────────────┘   │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
+The miner is deliberately **language-agnostic**: it consumes sequences of *strings* and never looks
+at code. What counts as an "API call" — a method name, a receiver-qualified name like `db.query`, a
+system call in a trace — is the caller's decision. Extract the sequences (from an AST, a
+[code-property graph](../code/cpg.md), or a runtime trace), then hand them over.
+
+## 2. Notation
+
+| Symbol | Meaning |
+|---|---|
+| $`\Sigma`$ | the alphabet of API-call names |
+| $`s_j = \langle a_{j,0}, \dots, a_{j,\lvert s_j \rvert - 1} \rangle`$ | the $`j`$-th **sequence**, a word over $`\Sigma`$ |
+| $`\mathcal{D} = \langle s_0, \dots, s_{N-1} \rangle`$ | the **sequence database**; $`N = \lvert \mathcal{D} \rvert`$ |
+| $`\alpha = \langle \alpha_0, \dots, \alpha_{k-1} \rangle`$ | a **pattern** — itself a word over $`\Sigma`$, of length $`k`$ |
+| $`g`$ | `max_gap` — the largest number of items that may be *skipped* between consecutive pattern items |
+| $`\mathrm{sup}(\alpha)`$ | the **support** of $`\alpha`$ — a count of *sequences*, not of occurrences |
+| $`\rho`$ | `min_support` — a *relative* support threshold in $`[0,1]`$ |
+| $`c_{\min}`$ | `min_support_count` — an *absolute* floor |
+| $`\xi`$ | the effective absolute support threshold, from $`(\mathrm{A3})`$ |
+| $`\mathcal{D}\vert_\alpha`$ | the **projected database** — where to resume scanning, per sequence |
+
+## 3. Containment, support, and the threshold
+
+Pattern $`\alpha`$ is **contained** in sequence $`s`$ under gap bound $`g`$ — written
+$`\alpha \sqsubseteq_g s`$ — when its items occur in order, each within $`g+1`$ positions of the
+last:
+
+```math
+\alpha \sqsubseteq_g s \iff \exists\, p_0 < p_1 < \dots < p_{k-1} \ \text{ with } \ s_{p_m} = \alpha_m \ \text{ and } \ 1 \le p_{m+1} - p_m \le g + 1 \tag{A1}
 ```
 
-## Core Types
+Setting $`g = 0`$ (`allow_gaps = false`, i.e. `ApiPatternConfig::strict`) forces
+$`p_{m+1} = p_m + 1`$ — the items must be **consecutive**. Larger $`g`$ tolerates that many
+intervening calls.
 
-### ApiPatternMiner
+**Support counts sequences, never occurrences.** A pattern occurring five times inside one sequence
+still has support $`1`$:
 
-The main mining interface:
-
-```rust
-pub struct ApiPatternMiner {
-    config: ApiPatternConfig,
-}
-
-impl ApiPatternMiner {
-    /// Create a new miner with configuration
-    pub fn new(config: ApiPatternConfig) -> Self;
-
-    /// Mine patterns from a sequence database
-    pub fn mine(&self, sequences: &[Vec<String>]) -> Vec<ApiPattern>;
-}
+```math
+\mathrm{sup}(\alpha) = \bigl\lvert \{\, j \ :\ \alpha \sqsubseteq_g s_j \,\} \bigr\rvert,
+\qquad
+\mathrm{sup}_{\mathrm{rel}}(\alpha) = \frac{\mathrm{sup}(\alpha)}{\max(N,\ 1)} \tag{A2}
 ```
 
-### ApiPatternConfig
+$`\mathrm{sup}_{\mathrm{rel}}`$ is the `support_ratio` field. The threshold a pattern must clear
+combines the relative and the absolute setting, taking whichever is **stricter**:
 
-Configuration for the mining process:
-
-```rust
-pub struct ApiPatternConfig {
-    /// Minimum support threshold (0.0 to 1.0)
-    /// Patterns must appear in at least this fraction of sequences
-    pub min_support: f64,
-
-    /// Maximum pattern length
-    pub max_length: usize,
-
-    /// Minimum pattern length
-    pub min_length: usize,
-
-    /// Whether to allow gaps in patterns
-    pub allow_gaps: bool,
-
-    /// Maximum gap size (if gaps allowed)
-    pub max_gap: usize,
-}
-
-impl Default for ApiPatternConfig {
-    fn default() -> Self {
-        Self {
-            min_support: 0.1,    // 10% of sequences
-            max_length: 10,
-            min_length: 2,
-            allow_gaps: true,
-            max_gap: 3,
-        }
-    }
-}
+```math
+\xi = \max\Bigl(\bigl\lceil \rho \cdot N \bigr\rceil,\ c_{\min}\Bigr) \tag{A3}
 ```
 
-### ApiPattern
+so $`\rho`$ scales with the corpus while $`c_{\min}`$ refuses to call two coincidences a pattern in
+a tiny one. A pattern is **frequent** iff $`\mathrm{sup}(\alpha) \geq \xi`$.
 
-A discovered frequent pattern:
+### The property that makes this tractable
+
+The number of candidate patterns over $`\Sigma`$ is exponential, so no miner may enumerate them.
+It does not have to, because support is **anti-monotone** (the *Apriori property*
+[[2]](#references)) — extending a pattern can never increase its support:
+
+```math
+\alpha \sqsubseteq \beta \ \implies\ \mathrm{sup}(\alpha) \ \geq\ \mathrm{sup}(\beta) \tag{A4}
+```
+
+*Proof.* Every sequence containing $`\beta`$ contains $`\alpha`$, since a witness chain for
+$`\beta`$ restricted to the positions of $`\alpha`$'s items is a witness chain for $`\alpha`$. Hence
+the witness set of $`\beta`$ is a subset of that of $`\alpha`$, and its cardinality cannot be
+larger. $`\blacksquare`$
+
+The contrapositive is the pruning rule: **if $`\alpha`$ is infrequent, every extension of $`\alpha`$
+is infrequent**, so the entire subtree below $`\alpha`$ may be cut with no risk of losing a frequent
+pattern. This single fact is the whole reason the search terminates in useful time.
+
+## 4. PrefixSpan: growth by projection
+
+![PrefixSpan by prefix projection](../../diagrams/paradigm-prefixspan.svg)
+
+Apriori-style miners *generate* candidates and then test them, which is expensive precisely because
+most candidates fail. PrefixSpan [[1]](#references) never generates a candidate. It grows a prefix
+$`\alpha`$ and carries with it a **projected database** — for each sequence still in play, a cursor
+saying *where to resume reading*:
+
+```math
+\mathcal{D}\vert_\alpha = \bigl\{\, (j,\ p) \ :\ \text{sequence } j \text{ witnesses } \alpha,\ \text{ending at position } p - 1 \,\bigr\} \tag{A5}
+```
+
+Only frequent single items can start a pattern (by $`(\mathrm{A4})`$), so the recursion seeds itself
+with those, then repeatedly: read the window of at most $`g+1`$ items past each cursor; count how
+many *distinct sequences* each item appears in; keep the items clearing $`\xi`$; and recurse on each,
+one item longer. The suffix is never copied — only the cursor moves — which is what makes a
+projection cost $`O(\lvert \mathcal{D}\vert_\alpha \rvert)`$ rather than
+$`O(\text{total suffix length})`$.
+
+## 5. The algorithm, literately
+
+This mirrors [`ApiPatternMiner::mine`](../../../src/topic/paradigm/api_patterns.rs) and its
+recursive helper; `⟨…⟩` names a refinement expanded below.
+
+```
+function mine(D):                                        ▸ D = [s_0 … s_{N-1}]
+    if D is empty: return []
+    ξ <- max( ceil(min_support * N), min_support_count )  ▸ (A3)
+    D <- intern(D)                                        ▸ every name becomes an Arc<str>
+    F <- { item : #{ j : item ∈ s_j } ≥ ξ }               ▸ frequent 1-items; per-sequence count
+    if F is empty: return []
+    patterns <- []
+    for item in F:
+        cursors <- ⟨seed the projection⟩                  ▸ one cursor per witnessing sequence
+        if |cursors| ≥ ξ:
+            prefix_span(cursors, prefix = [item])
+    sort patterns by (support ↓, length ↓)
+    truncate patterns to max_patterns
+    if closed_only: patterns <- ⟨keep only closed patterns⟩
+    return patterns
+
+function prefix_span(cursors, prefix):
+    if |prefix| ≥ min_pattern_length:                     ▸ emit before extending …
+        emit ApiPattern(prefix, support = #distinct sequences in cursors)
+    if |prefix| ≥ max_pattern_length: return              ▸ … then respect the depth bound
+
+    extensions <- empty map: item -> [cursor]
+    for (j, p) in cursors:                                ▸ scan the gap window past each cursor
+        last <- min(p + max_gap + 1, |s_j|)  if allow_gaps  else  min(p + 1, |s_j|)
+        for i in p .. last-1:
+            item <- s_j[i]
+            if item not already taken from this cursor:   ▸ dedupe within one window
+                extensions[item].push( (j, i+1) )
+
+    for (item, cursors') in extensions:
+        if #distinct sequences in cursors' ≥ ξ:           ▸ the (A4) prune
+            prefix_span(cursors', prefix ++ [item])
+
+⟨seed the projection⟩ ≡                                   ▸ NOTE: the FIRST occurrence only
+    for each sequence s_j:
+        p <- the smallest index with s_j[p] = item        ▸ earliest anchor; see §8
+        if p exists: cursors.push( (j, p+1) )
+
+⟨keep only closed patterns⟩ ≡                             ▸ (A6)
+    drop α whenever some kept β ⊐ α has sup(β) = sup(α)
+```
+
+Note the emit-then-descend order: a pattern is recorded as soon as it is long enough, so the output
+contains **every** frequent pattern of admissible length, not only the maximal ones. Filtering to
+the interesting ones is what `closed_only` is for (§9).
+
+## 6. The `ApiPattern` record
 
 ```rust
 pub struct ApiPattern {
-    /// The sequence of API calls
-    pub sequence: Vec<String>,
-
-    /// Support: fraction of sequences containing this pattern
-    pub support: f64,
-
-    /// Absolute count of occurrences
-    pub count: usize,
-
-    /// Positions where pattern occurs (sequence index, start position)
-    pub occurrences: Vec<(usize, usize)>,
+    pub sequence: Vec<Arc<str>>,   // the pattern α, in order
+    pub support: usize,            // sup(α) — (A2)
+    pub support_ratio: f64,        // sup_rel(α) — (A2)
+    pub is_closed: bool,
+    pub avg_position: f64,
+    pub confidence: Option<f64>,
 }
 ```
 
-## Quick Start
+`ApiPattern::new` sets `support_ratio` from $`(\mathrm{A2})`$ and gives the last three fields fixed
+constructor defaults — `is_closed = false`, `avg_position = 0.5`, `confidence = None`. **`mine` does
+not compute them**, and they keep those defaults in everything it returns. Two consequences are
+worth internalising, because the field names invite the opposite assumption:
 
-### Basic Pattern Mining
+- Do **not** filter on `is_closed`. Even under `closed_only`, closedness is applied by *removing*
+  non-closed patterns from the returned vector, not by flagging the survivors — so the flag reads
+  `false` on a pattern that is, in fact, closed. The correct test is "did it survive `closed_only`
+  mining", not "is `is_closed` set".
+- `avg_position` ($`0.5`$) and `confidence` (`None`) are reserved fields, carried for consumers that
+  wish to compute a positional bias or an association-rule confidence themselves. They convey no
+  information as returned.
+
+Useful methods: `len()`, `is_empty()`, and `to_string_pattern()`, which renders the sequence as
+`"open -> read -> close"`.
+
+`MiningStats` — `sequences_processed`, `items_processed`, `patterns_found`, `time_us` — is exported
+alongside, for callers that wish to record a run; `mine` returns `Vec<ApiPattern>` and does not
+produce one.
+
+## 7. Configuration
 
 ```rust
-use libgrammstein::topic::paradigm::{ApiPatternMiner, ApiPatternConfig};
-
-// Create miner with default configuration
-let miner = ApiPatternMiner::new(ApiPatternConfig::default());
-
-// Build sequence database from code analysis
-let sequences = vec![
-    vec!["db.connect", "db.query", "db.close"].into_iter().map(String::from).collect(),
-    vec!["db.connect", "db.beginTransaction", "db.query", "db.commit", "db.close"].into_iter().map(String::from).collect(),
-    vec!["db.connect", "db.query", "db.query", "db.close"].into_iter().map(String::from).collect(),
-    vec!["fs.open", "fs.read", "fs.close"].into_iter().map(String::from).collect(),
-];
-
-// Mine frequent patterns
-let patterns = miner.mine(&sequences);
-
-for pattern in patterns {
-    println!("Pattern: {:?}", pattern.sequence);
-    println!("  Support: {:.1}%", pattern.support * 100.0);
-    println!("  Count: {}", pattern.count);
+pub struct ApiPatternConfig {
+    pub min_support: f64,        // ρ    default 0.1
+    pub min_support_count: usize,// c_min default 2
+    pub max_pattern_length: usize,// L   default 10
+    pub min_pattern_length: usize,//     default 2
+    pub closed_only: bool,       //      default false
+    pub max_patterns: usize,     //      default 1000
+    pub allow_gaps: bool,        //      default true
+    pub max_gap: usize,          // g    default 3
 }
 ```
 
-Output:
-```
-Pattern: ["db.connect", "db.close"]
-  Support: 75.0%
-  Count: 3
+Every field is consumed by `mine`. Three presets and a builder are provided:
 
-Pattern: ["db.connect", "db.query"]
-  Support: 75.0%
-  Count: 3
-
-Pattern: ["db.connect", "db.query", "db.close"]
-  Support: 75.0%
-  Count: 3
-```
-
-### Extracting Sequences from Code
+| Constructor | `allow_gaps` | $`g`$ | $`\rho`$ | Use when |
+|---|---|---|---|---|
+| `default()` / `new()` | `true` | 3 | 0.10 | general purpose |
+| `strict()` | `false` | 0 | 0.10 | the calls must be **consecutive** — e.g. mining lock/unlock adjacency |
+| `lenient()` | `true` | 10 | 0.05 | long function bodies with much intervening logic |
 
 ```rust
-use libcpg::{CodePropertyGraph, TreeSitterCpgBuilder, Language};
-
-fn extract_api_sequences(cpg: &CodePropertyGraph) -> Vec<Vec<String>> {
-    let mut sequences = Vec::new();
-
-    for func in cpg.functions() {
-        let mut calls = Vec::new();
-
-        // Get all call nodes in function
-        for node_id in cpg.ast_descendants(func.id()) {
-            if let Some(node) = cpg.node(node_id) {
-                if matches!(node.kind(), CpgNodeKind::Call) {
-                    if let Some(name) = node.name() {
-                        calls.push(name.to_string());
-                    }
-                }
-            }
-        }
-
-        if calls.len() >= 2 {
-            sequences.push(calls);
-        }
-    }
-
-    sequences
-}
-
-// Usage
-let builder = TreeSitterCpgBuilder::new();
-let cpg = builder.build(source_code, Language::Rust)?;
-let sequences = extract_api_sequences(&cpg);
-let patterns = miner.mine(&sequences);
+let config = ApiPatternConfig::new()
+    .with_min_support(0.25)        // ρ — a quarter of all sequences
+    .with_min_support_count(3)     // …but never fewer than 3 sequences
+    .with_min_pattern_length(2)
+    .with_max_pattern_length(6)
+    .with_max_gap(2);              // sets allow_gaps = (2 > 0) = true
 ```
 
-## The PrefixSpan Algorithm
+`with_max_gap` also *derives* `allow_gaps`: passing `0` sets it to `false`, so
+`with_max_gap(0)` and `strict()` agree.
 
-PrefixSpan (Prefix-projected Sequential pattern mining) efficiently finds frequent subsequences by:
+## 8. What support means here, exactly
 
-1. **Finding frequent items**: Scan database for items meeting min_support
-2. **Prefix projection**: For each frequent item, project the database
-3. **Recursive mining**: Mine projected databases for extensions
-4. **Pattern growth**: Grow patterns prefix by prefix
+Two implementation choices refine $`(\mathrm{A2})`$, and both are observable. State them, or you
+will misread a support count.
 
-### Algorithm Walkthrough
+**Support is by distinct sequence, at every depth.** A projected database may hold several cursors
+for the same sequence (a later item can be reachable from several earlier witnesses), so the miner
+counts *distinct sequence indices*, never cursors. Repetition inside one sequence cannot inflate a
+support.
+
+**The seed is anchored at the earliest occurrence.** For the first item of a pattern, only the
+*first* occurrence in each sequence is projected. In classical, unconstrained PrefixSpan this is
+exactly right: anything reachable from a later occurrence is also reachable from the earliest one.
+Under a **finite `max_gap`** that implication fails, and the resulting support is a *lower bound* on
+the number of sequences containing the pattern:
 
 ```
-Initial Database:
-  S1: [a, b, c, d]
-  S2: [a, c, d]
-  S3: [a, b, d]
-  S4: [b, c, d]
+D  = ⟨ a x x x a b ⟩ , ⟨ a b ⟩ , ⟨ a b ⟩          with max_gap g = 1
 
-Step 1: Find frequent 1-sequences (min_support = 0.5)
-  a: 3/4 = 0.75 ✓
-  b: 3/4 = 0.75 ✓
-  c: 3/4 = 0.75 ✓
-  d: 4/4 = 1.00 ✓
+⟨a,b⟩ is present in all three sequences under (A1) — in the first, via the SECOND `a`,
+which is immediately followed by `b`. But the projection seeds on the FIRST `a`, whose
+gap window reaches only ⟨x, x⟩, so `b` is never seen in that sequence.
 
-Step 2: Project database by prefix 'a'
-  S1|a: [b, c, d]  (suffix after first 'a')
-  S2|a: [c, d]
-  S3|a: [b, d]
-
-Step 3: Mine projected database for prefix 'a'
-  Find frequent items in S|a: b(2/3), c(2/3), d(3/3)
-  Pattern [a, d] has support 3/4 = 0.75
-
-Step 4: Continue recursively...
-  [a, b, d]: support 2/4 = 0.50 ✓
-  [a, c, d]: support 2/4 = 0.50 ✓
+    reported support = 2          true gap-constrained support = 3
 ```
 
-### Implementation Details
+Widening $`g`$ until the window can reach from the earliest occurrence to the continuation restores
+the exact count (at $`g = 10`$ the example reports $`3`$). If you need exact gap-constrained support
+on sequences whose *seed calls repeat*, either widen `max_gap` or split each sequence at repeated
+seeds before mining. For the common shape of API traces — a resource opened once, used, and closed —
+the anchoring is harmless and the count is exact.
+
+## 9. Closed patterns
+
+A frequent pattern set is highly redundant: if `⟨connect, query, fetch, close⟩` holds in 40
+sequences, so do all $`2^4 - 1`$ of its non-empty sub-patterns, most with the *same* support and no
+extra information. A pattern is **closed** when no proper super-pattern has the same support
+[[3]](#references):
+
+```math
+\mathrm{Closed}(\mathcal{F}) = \bigl\{\, \alpha \in \mathcal{F} \ :\ \nexists\, \beta \in \mathcal{F} \ \text{ with } \ \alpha \sqsubset \beta \ \wedge \ \mathrm{sup}(\beta) = \mathrm{sup}(\alpha) \,\bigr\} \tag{A6}
+```
+
+Closed patterns are a **lossless** condensation: they preserve the support of every frequent pattern
+(any $`\alpha`$ inherits the support of its smallest closed super-pattern), while discarding the
+sub-patterns that add nothing. Setting `closed_only = true` applies $`(\mathrm{A6})`$ as a
+post-filter over the mined, sorted, truncated list — pairwise, by subsequence test.
 
 ```rust
-impl ApiPatternMiner {
-    pub fn mine(&self, sequences: &[Vec<String>]) -> Vec<ApiPattern> {
-        let n = sequences.len();
-        if n == 0 {
-            return Vec::new();
-        }
-
-        let min_count = (n as f64 * self.config.min_support).ceil() as usize;
-        let mut patterns = Vec::new();
-
-        // Find frequent 1-sequences
-        let freq_items = self.find_frequent_items(sequences, min_count);
-
-        // Mine patterns starting from each frequent item
-        for item in freq_items {
-            let prefix = vec![item.clone()];
-            let projected = self.project_database(sequences, &prefix);
-
-            if projected.len() >= min_count {
-                patterns.push(ApiPattern {
-                    sequence: prefix.clone(),
-                    support: projected.len() as f64 / n as f64,
-                    count: projected.len(),
-                    occurrences: projected,
-                });
-
-                // Recursively extend prefix
-                self.extend_pattern(
-                    sequences,
-                    &prefix,
-                    &projected,
-                    min_count,
-                    &mut patterns,
-                );
-            }
-        }
-
-        patterns
-    }
-
-    fn extend_pattern(
-        &self,
-        sequences: &[Vec<String>],
-        prefix: &[String],
-        projected: &[(usize, usize)],
-        min_count: usize,
-        patterns: &mut Vec<ApiPattern>,
-    ) {
-        if prefix.len() >= self.config.max_length {
-            return;
-        }
-
-        // Find frequent extensions
-        let extensions = self.find_extensions(sequences, projected);
-
-        for (item, new_projected) in extensions {
-            if new_projected.len() >= min_count {
-                let mut new_prefix = prefix.to_vec();
-                new_prefix.push(item);
-
-                patterns.push(ApiPattern {
-                    sequence: new_prefix.clone(),
-                    support: new_projected.len() as f64 / sequences.len() as f64,
-                    count: new_projected.len(),
-                    occurrences: new_projected.clone(),
-                });
-
-                // Continue extending
-                self.extend_pattern(
-                    sequences,
-                    &new_prefix,
-                    &new_projected,
-                    min_count,
-                    patterns,
-                );
-            }
-        }
-    }
-}
-```
-
-## Configuration Options
-
-### Support Threshold
-
-The minimum fraction of sequences that must contain a pattern:
-
-```rust
-// High support: common patterns only
-let config = ApiPatternConfig {
-    min_support: 0.5,  // Pattern must appear in 50% of sequences
-    ..Default::default()
-};
-
-// Low support: rare patterns too
-let config = ApiPatternConfig {
-    min_support: 0.05, // Pattern in 5% of sequences
-    ..Default::default()
-};
-```
-
-### Pattern Length
-
-Control the size of discovered patterns:
-
-```rust
-let config = ApiPatternConfig {
-    min_length: 3,  // At least 3 calls
-    max_length: 8,  // At most 8 calls
-    ..Default::default()
-};
-```
-
-### Gap Handling
-
-Allow non-contiguous patterns:
-
-```rust
-// Contiguous only: [a, b, c] matches "a, b, c" but not "a, x, b, c"
-let config = ApiPatternConfig {
-    allow_gaps: false,
-    ..Default::default()
-};
-
-// Allow gaps: [a, b, c] matches "a, x, b, y, z, c"
-let config = ApiPatternConfig {
-    allow_gaps: true,
-    max_gap: 2,  // At most 2 items between pattern elements
-    ..Default::default()
-};
-```
-
-## Use Cases
-
-### Library Usage Analysis
-
-Discover how developers use a library:
-
-```rust
-fn analyze_library_usage(codebase: &[SourceFile], library: &str) -> Vec<ApiPattern> {
-    let miner = ApiPatternMiner::new(ApiPatternConfig {
-        min_support: 0.1,
-        min_length: 2,
-        max_length: 6,
-        ..Default::default()
-    });
-
-    let sequences: Vec<Vec<String>> = codebase.iter()
-        .flat_map(|file| extract_api_sequences(&file.cpg))
-        .filter(|seq| seq.iter().any(|call| call.starts_with(library)))
-        .collect();
-
-    miner.mine(&sequences)
-}
-
-// Usage
-let patterns = analyze_library_usage(&codebase, "React.");
-for pattern in patterns {
-    println!("{:?} (used in {:.0}% of components)",
-             pattern.sequence, pattern.support * 100.0);
-}
-```
-
-### Anti-Pattern Detection
-
-Find common but problematic patterns:
-
-```rust
-// Known anti-patterns
-let anti_patterns = vec![
-    vec!["db.query", "db.query"],  // Multiple queries without transaction
-    vec!["file.open", "file.read"],  // No close after open
-];
-
-fn detect_anti_patterns(
-    mined: &[ApiPattern],
-    anti_patterns: &[Vec<&str>],
-) -> Vec<(&ApiPattern, &[&str])> {
-    mined.iter()
-        .filter_map(|pattern| {
-            for anti in anti_patterns {
-                if is_subsequence(anti, &pattern.sequence) {
-                    return Some((pattern, anti.as_slice()));
-                }
-            }
-            None
-        })
-        .collect()
-}
-```
-
-### Framework Idiom Discovery
-
-Learn idiomatic patterns from well-written code:
-
-```rust
-fn discover_idioms(exemplar_code: &[SourceFile]) -> Vec<ApiPattern> {
-    let miner = ApiPatternMiner::new(ApiPatternConfig {
-        min_support: 0.3,  // Common in exemplar code
-        min_length: 3,
-        ..Default::default()
-    });
-
-    let sequences = exemplar_code.iter()
-        .flat_map(|f| extract_api_sequences(&f.cpg))
-        .collect::<Vec<_>>();
-
-    miner.mine(&sequences)
-}
-
-// Document discovered idioms
-for pattern in discover_idioms(&exemplar_code) {
-    println!("Idiom: {}", pattern.sequence.join(" -> "));
-    println!("Usage: {:.0}% of exemplar code", pattern.support * 100.0);
-}
-```
-
-### API Evolution Tracking
-
-Track how API usage changes across versions:
-
-```rust
-fn compare_api_usage(
-    old_code: &[SourceFile],
-    new_code: &[SourceFile],
-) -> ApiEvolution {
-    let miner = ApiPatternMiner::new(ApiPatternConfig::default());
-
-    let old_patterns = miner.mine(&extract_all_sequences(old_code));
-    let new_patterns = miner.mine(&extract_all_sequences(new_code));
-
-    let old_set: HashSet<_> = old_patterns.iter()
-        .map(|p| &p.sequence)
-        .collect();
-    let new_set: HashSet<_> = new_patterns.iter()
-        .map(|p| &p.sequence)
-        .collect();
-
-    ApiEvolution {
-        deprecated: old_set.difference(&new_set).cloned().collect(),
-        new_patterns: new_set.difference(&old_set).cloned().collect(),
-        stable: old_set.intersection(&new_set).cloned().collect(),
-    }
-}
-```
-
-## Performance Considerations
-
-### Sequence Database Size
-
-Mining time increases with database size:
-
-```rust
-// For large codebases, sample or partition
-fn sample_sequences(sequences: &[Vec<String>], sample_rate: f64) -> Vec<Vec<String>> {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-
-    sequences.iter()
-        .filter(|_| rng.gen::<f64>() < sample_rate)
-        .cloned()
-        .collect()
-}
-```
-
-### Pattern Explosion
-
-Low support thresholds can produce many patterns:
-
-```rust
-// Start with high support, lower if needed
-let mut config = ApiPatternConfig {
+// Three identical sequences ⟨a, b, c⟩. Un-closed mining reports ⟨a,b⟩, ⟨b,c⟩, ⟨a,c⟩ and
+// ⟨a,b,c⟩ — all with support 3. Only ⟨a,b,c⟩ is closed, and it implies the rest.
+let mut miner = ApiPatternMiner::new(ApiPatternConfig {
     min_support: 0.5,
+    min_support_count: 2,
+    closed_only: true,
     ..Default::default()
-};
+});
+let patterns = miner.mine(&[vec!["a", "b", "c"], vec!["a", "b", "c"], vec!["a", "b", "c"]]);
+assert!(patterns.iter().any(|p| p.sequence.len() == 3));   // ⟨a,b,c⟩ survives
+assert!(!patterns.iter().any(|p| p.to_string_pattern() == "a -> b"));  // ⟨a,b⟩ is absorbed
+```
+
+Because the filter runs *after* the `max_patterns` truncation, a super-pattern evicted by the cap
+cannot absorb its sub-patterns. Raise `max_patterns` if you mine with `closed_only` and a tight cap.
+
+## 10. Engineering
+
+**String interning.** Every call name is interned into an `Arc<str>` through a
+`HashMap<String, Arc<str>>` held by the miner, so the many copies of a name across projections share
+one allocation and comparisons are cheap. This is why **`mine` takes `&mut self`** — the intern
+cache is the only mutable state, and it persists across calls, so repeated mining over the same
+vocabulary gets cheaper.
+
+**Signature.** `mine` is generic over anything sequence-shaped, so `Vec<Vec<&str>>`,
+`&[Vec<String>]` and `&[&[String]]` all work without conversion:
+
+```rust
+pub fn mine<S, T>(&mut self, sequences: &[S]) -> Vec<ApiPattern>
+where
+    S: AsRef<[T]>,
+    T: AsRef<str>;
+```
+
+**Output ordering.** Patterns are sorted by support descending, ties broken by length descending —
+so the most-supported, and among equals the most-specific, come first. `patterns[0]` is the strongest
+finding.
+
+## 11. Cost
+
+Let $`N`$ be the sequence count, $`\bar{\ell}`$ the mean sequence length, $`L`$ =
+`max_pattern_length`, and $`F`$ the number of frequent patterns actually emitted.
+
+| Stage | Cost |
+|---|---|
+| interning | $`O(N \bar{\ell})`$ |
+| frequent 1-items | $`O(N \bar{\ell})`$ |
+| one projection step | $`O(\lvert \mathcal{D}\vert_\alpha \rvert \cdot (g+1))`$ — the window is bounded by the gap |
+| whole recursion | $`O\bigl(F \cdot N \cdot (g+1)\bigr)`$, depth-bounded by $`L`$ |
+| `closed_only` filter | $`O(F^2 \cdot L)`$ — pairwise subsequence tests |
+
+The mining is **output-sensitive**: it costs what it finds. The two levers that bound it are $`\xi`$
+(raise `min_support` and the frequent set collapses) and $`L`$. The closed filter is the one
+quadratic term — with a large `max_patterns` and `closed_only`, it dominates.
+
+## 12. Worked example
+
+```rust
+use libgrammstein::topic::paradigm::{ApiPatternConfig, ApiPatternMiner};
+
+// Five file-I/O traces. Every one opens and closes; what else is universal?
+let sequences = vec![
+    vec!["fopen", "fread", "fclose"],
+    vec!["fopen", "fwrite", "fflush", "fclose"],
+    vec!["fopen", "fread", "fseek", "fread", "fclose"],
+    vec!["fopen", "fgets", "fclose"],
+    vec!["fopen", "fprintf", "fclose"],
+];
+
+let mut miner = ApiPatternMiner::new(ApiPatternConfig {
+    min_support: 0.3,       // ρ ⇒ ⌈0.3 × 5⌉ = 2
+    min_support_count: 2,   // c_min = 2 ⇒ ξ = max(2, 2) = 2
+    min_pattern_length: 2,
+    ..Default::default()    // g = 3, closed_only = false
+});
 
 let patterns = miner.mine(&sequences);
 
-if patterns.len() < 10 {
-    config.min_support = 0.2;
-    let patterns = miner.mine(&sequences);
+// The invariant of the whole corpus: every open is matched by a close.
+let open_close = patterns
+    .iter()
+    .find(|p| p.to_string_pattern() == "fopen -> fclose")
+    .expect("fopen → fclose is present in all five sequences");
+
+assert_eq!(open_close.support, 5);
+assert_eq!(open_close.support_ratio, 1.0);
+
+for p in patterns.iter().take(3) {
+    println!("{:<28} support {}/{}  ({:.0}%)",
+             p.to_string_pattern(), p.support, sequences.len(),
+             p.support_ratio * 100.0);
 }
+// fopen -> fclose              support 5/5  (100%)
+// fopen -> fread               support 2/5  (40%)
+// fopen -> fread -> fclose     support 2/5  (40%)
 ```
 
-### Memory Usage
+A pattern with support $`1.0`$ and an obvious pairing — *every* `fopen` is answered by an `fclose` —
+is exactly the shape of an API contract. Its *violations* are what a misuse detector reports.
 
-Projected databases can be large:
+## References
 
-```rust
-// Use indices instead of copying sequences
-struct ProjectedDb {
-    original: Arc<Vec<Vec<String>>>,
-    indices: Vec<(usize, usize)>,  // (sequence_idx, position)
-}
-```
+1. J. Pei, J. Han, B. Mortazavi-Asl, J. Wang, H. Pinto, Q. Chen, U. Dayal & M.-C. Hsu (2004).
+   *Mining sequential patterns by pattern-growth: the PrefixSpan approach.* IEEE Transactions on
+   Knowledge and Data Engineering 16(11), 1424–1440.
+   [doi:10.1109/TKDE.2004.77](https://doi.org/10.1109/TKDE.2004.77) — the algorithm implemented here.
+2. R. Agrawal & R. Srikant (1995). *Mining sequential patterns.* Proceedings of the 11th
+   International Conference on Data Engineering (ICDE), 3–14.
+   [doi:10.1109/ICDE.1995.380415](https://doi.org/10.1109/ICDE.1995.380415) — the problem statement
+   and the anti-monotonicity property $`(\mathrm{A4})`$.
+3. X. Yan, J. Han & R. Afshar (2003). *CloSpan: mining closed sequential patterns in large datasets.*
+   Proceedings of the 2003 SIAM International Conference on Data Mining, 166–177.
+   [doi:10.1137/1.9781611972733.15](https://doi.org/10.1137/1.9781611972733.15) — closed sequential
+   patterns $`(\mathrm{A6})`$ and why they are a lossless condensation.
+4. J. Wang & J. Han (2004). *BIDE: efficient mining of frequent closed sequences.* Proceedings of the
+   20th International Conference on Data Engineering (ICDE), 79–90.
+   [doi:10.1109/ICDE.2004.1319986](https://doi.org/10.1109/ICDE.2004.1319986) — mining closed
+   patterns *directly*, the natural upgrade from this implementation's post-filter.
+5. H. Zhong, T. Xie, L. Zhang, J. Pei & H. Mei (2009). *MAPO: mining and recommending API usage
+   patterns.* ECOOP 2009, LNCS 5653, 318–343.
+   [doi:10.1007/978-3-642-03013-0_15](https://doi.org/10.1007/978-3-642-03013-0_15) — the canonical
+   application of sequence mining to API usage.
+6. M. Acharya, T. Xie, J. Pei & J. Xu (2007). *Mining API patterns as partial orders from source
+   code: from usage scenarios to specifications.* ESEC/FSE 2007, 25–34.
+   [doi:10.1145/1287624.1287630](https://doi.org/10.1145/1287624.1287630) — mining API *specifications*
+   rather than sequences; the direction to go when total order is too strong an assumption.
 
-## See Also
+## See also
 
-- [Overview](overview.md) - Paradigm detection introduction
-- [Detection](detection.md) - Paradigm detector usage
-- [Indicators](indicators.md) - Indicator types and categories
-- [Domain Patterns](domain-patterns.md) - Rholang and MeTTa patterns
+- [Overview](overview.md) — the three engines and where the miner sits among them
+- [Subtree Mining](../code/subtree-mining.md) — the same idea over *trees* (TreeMiner) rather than sequences
+- [Code Property Graph](../code/cpg.md) — one good source of the call sequences this miner consumes
+- [Domain Patterns](domain-patterns.md) — hand-written catalogs, where mining is not the right tool

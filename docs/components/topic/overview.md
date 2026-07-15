@@ -1,345 +1,288 @@
 # Topic Extraction Overview
 
-The topic module provides BERTopic-style topic modeling for document clustering and keyword extraction.
+The **topic module** discovers the latent themes of a document collection and labels each
+document with the theme(s) it belongs to. It follows the **BERTopic** recipe
+[[1]](#references): *embed* every document into a dense vector, *cluster* those vectors with
+hierarchical agglomerative clustering, and *describe* each cluster with a class-based TF-IDF
+(**c-TF-IDF**) keyword list. This document explains what the module produces, the shape of the
+pipeline, the concrete types the reader will touch, and how the three stages fit together.
 
-## What is Topic Modeling?
+> **Scope.** Source of truth:
+> [`src/topic/mod.rs`](../../../src/topic/mod.rs),
+> [`src/topic/extractor.rs`](../../../src/topic/extractor.rs),
+> [`src/topic/model.rs`](../../../src/topic/model.rs),
+> [`src/topic/topic.rs`](../../../src/topic/topic.rs), and
+> [`src/topic/config.rs`](../../../src/topic/config.rs). The three stages are documented in
+> [Clustering](clustering.md), [c-TF-IDF](ctfidf.md), and [Dendrogram](dendrogram.md). For the
+> embeddings that feed the pipeline see [RAG Overview](../rag/overview.md); for topic storage in
+> a retrieval index see [RAG Index](../rag/index.md).
 
-Topic modeling discovers latent themes in a document collection:
+## What topic modeling produces
 
-```
-Documents                          Topics
-┌───────────────┐                 ┌─────────────────────────────────────┐
-│ Doc 1: ML     │                 │ Topic 0: machine, learning, model   │
-│ Doc 2: NLP    │    ───────►     │ Topic 1: natural, language, text    │
-│ Doc 3: CV     │                 │ Topic 2: image, vision, recognition │
-│ Doc 4: RL     │                 │ Topic 3: agent, reward, policy      │
-│ ...           │                 └─────────────────────────────────────┘
-└───────────────┘
-        │
-        ▼
-Document → Topic assignments:
-  Doc 1 → Topic 0 (ML)
-  Doc 2 → Topic 1 (NLP)
-  Doc 3 → Topic 2 (CV)
-  ...
-```
+Topic modeling turns an unlabeled corpus into (a) a set of **topics**, each summarized by a
+ranked keyword list, and (b) a **document → topic** assignment map. Concretely, given documents
+$`d_1, \dots, d_n`$ with embeddings $`v_1, \dots, v_n`$, the module returns a
+[`TopicModel`](../../../src/topic/model.rs) whose topics partition the corpus and whose
+`document_topics` records, for each document index, the topic(s) it was assigned.
 
-## BERTopic-Style Algorithm
+**Why the BERTopic recipe.** Classical topic models (LDA and friends) model a document as a bag
+of words drawn from latent multinomials. BERTopic instead separates *grouping* from *labeling*:
+it clusters contextual embeddings — which already encode semantics that a bag of words cannot —
+and only then extracts human-readable keywords. The separation makes each stage independently
+swappable and inspectable, and it lets the same clustering produce topics at many granularities
+by cutting a hierarchy rather than re-fitting a model.
 
-The topic module implements a BERTopic-inspired pipeline:
+## Notation
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Step 1: Document Embeddings (from RAG module)                           │
-│                                                                          │
-│   Documents → ModernBERT → 768-dim embeddings                           │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Step 2: Hierarchical Agglomerative Clustering                           │
-│                                                                          │
-│   Embeddings → Distance Matrix → HAC → Dendrogram → Cluster Labels     │
-│                                                                          │
-│   Linkage methods: Ward, Complete, Average, Single                      │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Step 3: c-TF-IDF Keyword Extraction                                     │
-│                                                                          │
-│   Clusters + Documents → c-TF-IDF scores → Top keywords per topic      │
-│                                                                          │
-│   c-TF-IDF = tf × log(1 + avg_words / freq_t)                          │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Step 4: Topic Model                                                     │
-│                                                                          │
-│   TopicId → Topic { keywords, description, document_count }            │
-│   DocumentId → Vec<TopicId>                                            │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+Every symbol is defined before it is used in a formula.
 
-## Architecture
+| Symbol | Meaning |
+|---|---|
+| $`n`$ | number of documents in the corpus |
+| $`v_i`$ | the embedding vector of document $`i`$ (768-dim by default) |
+| $`T`$ | number of topics (clusters) produced by the cut |
+| $`c`$ | a topic (cluster) index, $`0 \le c < T`$ |
+| $`d(v_i, v_j)`$ | cosine distance between embeddings $`v_i`$ and $`v_j`$ |
+| $`f(t, c)`$ | raw count of term $`t`$ across the documents of topic $`c`$ |
+| $`W_c`$ | total token count of topic $`c`$, $`W_c = \sum_t f(t, c)`$ |
+| $`A`$ | average token count per topic, $`A = \frac{1}{T}\sum_{c} W_c`$ |
+| $`\mathrm{df}(t)`$ | document frequency — number of documents containing term $`t`$ |
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         Topic Module                                     │
-│                                                                          │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │                    TopicExtractor                                 │  │
-│  │                                                                   │  │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐   │  │
-│  │  │ Hierarchical    │  │     CtfIdf      │  │  Description    │   │  │
-│  │  │ Clustering      │  │ (keywords)      │  │  Generator      │   │  │
-│  │  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘   │  │
-│  │           │                    │                    │            │  │
-│  │           └────────────────────┼────────────────────┘            │  │
-│  │                                │                                  │  │
-│  │                                ▼                                  │  │
-│  │  ┌─────────────────────────────────────────────────────────────┐ │  │
-│  │  │                    TopicModel                               │ │  │
-│  │  │                                                             │ │  │
-│  │  │  Topics: HashMap<TopicId, Topic>                           │ │  │
-│  │  │  Assignments: HashMap<DocumentId, Vec<TopicId>>            │ │  │
-│  │  │  Dendrogram: Linkage matrix                                │ │  │
-│  │  └─────────────────────────────────────────────────────────────┘ │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-│                                                                          │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │                    Topic                                          │  │
-│  │                                                                   │  │
-│  │  id: TopicId                                                      │  │
-│  │  keywords: Vec<(String, f32)>  // word, c-TF-IDF score           │  │
-│  │  description: String           // generated or keyword-based     │  │
-│  │  document_count: usize                                           │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+**Acronyms.** *HAC* — Hierarchical Agglomerative Clustering; *c-TF-IDF* — class-based Term
+Frequency–Inverse Document Frequency; *UPGMA* — Unweighted Pair Group Method with Arithmetic
+mean; *OOV* — Out-Of-Vocabulary.
 
-## Quick Start
+## The pipeline
 
-### Extract Topics from RAG Index
+[`TopicExtractor::extract`](../../../src/topic/extractor.rs) runs four phases in order. The first
+three are the BERTopic stages; the fourth assembles the result.
 
-```rust
-use libgrammstein::topic::TopicConfig;
+![BERTopic-style topic extraction pipeline](../../diagrams/topic-pipeline.svg)
 
-// Load RAG index
-let mut index = RagIndex::load("./index")?;
+1. **Distance matrix.** Every pair of document embeddings is scored with **cosine distance**
+   $`d(v_i, v_j) = 1 - \cos(v_i, v_j)`$. The upper triangle is computed in parallel and stored in
+   lock-free atomic cells (see [Clustering](clustering.md)).
+2. **Clustering.** [`HierarchicalClustering`](../../../src/topic/clustering.rs) performs
+   agglomerative clustering with a **Lance-Williams** linkage update (single, complete, average,
+   or Ward), producing a *linkage matrix* and a [`Dendrogram`](dendrogram.md).
+3. **c-TF-IDF.** [`CtfIdf`](../../../src/topic/ctfidf.rs) tokenizes the documents, aggregates
+   term counts per topic, and scores each term to yield the top-$`k`$ keywords per topic.
+4. **Assembly.** [`TopicExtractor`](../../../src/topic/extractor.rs) builds one
+   [`Topic`](../../../src/topic/topic.rs) per cluster — keywords, a generated description, the
+   cluster centroid, and a document count — and records the per-document assignments.
 
-// Get embeddings and document texts
-let embeddings = index.get_all_embeddings();
-let texts: Vec<_> = index.iter()
-    .map(|(_, meta)| meta.synopsis.clone())
-    .collect();
+## The core types
 
-// Extract topics
-let config = TopicConfig::default();
-index.extract_topics(&config, &embeddings, &texts)?;
+The types below are the public surface a caller works with; each field named here exists in the
+source.
 
-// Access topics
-if let Some(model) = index.topic_model() {
-    for topic in model.topics() {
-        println!("Topic {}: {}", topic.id.0, topic.keyword_summary(5));
-    }
-}
-```
+### `TopicId`
 
-### Standalone Topic Extraction
-
-```rust
-use libgrammstein::topic::{TopicExtractor, TopicConfig};
-
-let config = TopicConfig {
-    num_topics: Some(10),  // Target 10 topics
-    min_topic_size: 5,     // Minimum 5 documents per topic
-    top_keywords: 10,      // Extract 10 keywords per topic
-    ..Default::default()
-};
-
-let extractor = TopicExtractor::new(config);
-let model = extractor.fit(&embeddings, &texts)?;
-
-for topic in model.topics() {
-    println!("Topic {}: {}", topic.id.0, topic.description);
-    for (word, score) in &topic.keywords[..5] {
-        println!("  {}: {:.4}", word, score);
-    }
-}
-```
-
-## Configuration
-
-```rust
-use libgrammstein::topic::TopicConfig;
-
-let config = TopicConfig {
-    // Target number of topics (None = auto-determined from dendrogram)
-    num_topics: Some(20),
-
-    // Minimum documents per topic
-    min_topic_size: 3,
-
-    // Number of keywords to extract per topic
-    top_keywords: 10,
-
-    // Clustering linkage method
-    linkage: LinkageMethod::Ward,
-
-    // c-TF-IDF configuration
-    min_df: 2,       // Minimum document frequency
-    max_df: 0.95,    // Maximum document frequency (proportion)
-};
-```
-
-## Key Concepts
-
-### TopicId
-
-32-bit topic identifier:
+A 32-bit topic identifier ([`src/topic/topic.rs`](../../../src/topic/topic.rs)):
 
 ```rust
 use libgrammstein::topic::TopicId;
 
 let id = TopicId::new(0);
-println!("Topic {}", id.0);
+assert_eq!(id.as_u32(), 0);
+println!("{id}");            // Display: "Topic(0)"
 ```
 
-### Topic
+### `Topic`
 
-Individual topic with keywords and metadata:
+Each topic carries its keywords, a description, hierarchy links, and its cluster centroid:
 
 ```rust
 pub struct Topic {
     pub id: TopicId,
-    pub keywords: Vec<(String, f32)>,  // (word, c-TF-IDF score)
-    pub description: String,
+    pub parent_id: Option<TopicId>,     // hierarchy parent (None for a root topic)
+    pub children: Vec<TopicId>,         // hierarchy children (empty for a leaf topic)
+    pub level: usize,                   // 0 = root, increasing = deeper
+    pub keywords: Vec<(String, f32)>,   // (term, c-TF-IDF score), score-sorted
+    pub description: String,            // generated from the keywords
+    pub centroid: Option<Arc<[f32]>>,   // mean embedding of the cluster
     pub document_count: usize,
+    pub coherence: Option<f32>,
 }
-
-// Get keyword summary
-let summary = topic.keyword_summary(5);  // "word1, word2, word3, word4, word5"
 ```
 
-### TopicModel
+`keyword_summary(n)` joins the top $`n`$ keywords into a comma-separated string; `is_leaf` and
+`is_root` test the hierarchy links.
 
-Container for extracted topics:
+### `TopicModel`
+
+The container returned by extraction. It is immutable after construction and
+`serde`-serializable to JSON or bincode:
 
 ```rust
-// Iterate topics
+// Iterate the extracted topics.
 for topic in model.topics() {
-    println!("{}: {}", topic.id.0, topic.description);
+    println!("{}: {}", topic.id.as_u32(), topic.keyword_summary(5));
 }
 
-// Get specific topic
+// Look a topic up by id, or fetch a document's topics.
 if let Some(topic) = model.get(TopicId::new(0)) {
-    println!("Found: {}", topic.description);
+    println!("{}", topic.description);
 }
+let doc_topics: &[TopicId] = model.document_topic_ids(0);
 
-// Get document topics
-if let Some(topic_ids) = model.document_topics(doc_id) {
-    println!("Document belongs to {} topics", topic_ids.len());
-}
-
-// Get dendrogram
+// Navigate the hierarchy.
 let dendrogram = model.dendrogram();
 ```
 
-## Components
+## Configuration
 
-### Hierarchical Clustering
-
-Groups documents using agglomerative clustering:
+`TopicConfig` composes one config per stage plus a few global knobs. The fields below are exactly
+those in [`src/topic/config.rs`](../../../src/topic/config.rs) — note that the clustering,
+c-TF-IDF, and summarization settings are **nested**, not flat.
 
 ```rust
-use libgrammstein::topic::{HierarchicalClustering, LinkageMethod};
+use libgrammstein::topic::{
+    TopicConfig, ClusteringConfig, CtfidfConfig, SummarizationConfig, LinkageMethod,
+};
 
-let clustering = HierarchicalClustering::new(LinkageMethod::Ward);
-let (labels, dendrogram) = clustering.fit(&embeddings, num_clusters)?;
+let config = TopicConfig {
+    clustering: ClusteringConfig {
+        num_clusters: Some(20),          // target topic count; None => cut by threshold
+        distance_threshold: None,        // alternative cut: merge until distance > this
+        linkage: LinkageMethod::Ward,    // default linkage
+        min_cluster_size: 5,
+        parallel: true,
+        checkpoint_interval: 100,
+        verbose: false,
+    },
+    ctfidf: CtfidfConfig {
+        num_keywords: 10,                // keywords per topic
+        min_df: 2,                       // drop terms below this document frequency
+        max_df_ratio: 0.95,             // drop terms above this share (see c-TF-IDF doc)
+        ngram_range: (1, 1),
+        sublinear_tf: true,              // use 1 + ln(tf) instead of raw tf
+        min_term_length: 2,
+        max_term_length: 50,
+    },
+    summarization: SummarizationConfig::default(),
+    hierarchy_levels: 3,
+    min_topic_size: 5,
+    compute_coherence: true,
+    verbose: false,
+};
 ```
 
-See [Clustering](clustering.md) for details.
+Convenience constructors cover common regimes:
+[`TopicConfig::with_num_clusters(k)`](../../../src/topic/config.rs),
+[`TopicConfig::for_small_corpus()`](../../../src/topic/config.rs) (fewer, looser clusters), and
+[`TopicConfig::for_large_corpus()`](../../../src/topic/config.rs) (more clusters, larger
+checkpoint interval, stricter `min_df`).
 
-### c-TF-IDF
+## Standalone extraction
 
-Extracts representative keywords per topic:
-
-```rust
-use libgrammstein::topic::CtfIdf;
-
-let ctfidf = CtfIdf::new(min_df, max_df);
-let keywords = ctfidf.extract_keywords(&texts, &labels, top_k)?;
-```
-
-See [c-TF-IDF](ctfidf.md) for details.
-
-### Dendrogram
-
-Represents clustering hierarchy:
+`TopicExtractor::extract` takes `&mut self` because it threads a resumable checkpoint through the
+run; it returns an [`ExtractionResult`](../../../src/topic/extractor.rs) which
+`TopicModel::from_extraction` wraps into the persistent model.
 
 ```rust
-// Cut dendrogram at k clusters
-let labels = dendrogram.cut_tree(k);
+use libgrammstein::topic::{TopicExtractor, TopicConfig, TopicModel};
 
-// Cut at distance threshold
-let labels = dendrogram.cut_by_distance(threshold);
+// `embeddings: Vec<Vec<f32>>` and `texts: Vec<String>` are aligned by index.
+let config = TopicConfig::with_num_clusters(10);
+let mut extractor = TopicExtractor::new(config.clone());
+let result = extractor.extract(&embeddings, &texts)?;
+let model = TopicModel::from_extraction(result, config);
 
-// Get number of merges
-let n_merges = dendrogram.len();
-```
-
-See [Dendrogram](dendrogram.md) for details.
-
-## Integration with RAG
-
-### Store Topics in Index
-
-```rust
-// Extract and store topics
-index.extract_topics(&config, &embeddings, &texts)?;
-
-// Topics are automatically saved with index
-index.save("./index")?;
-
-// Load index with topics
-let index = RagIndex::load("./index")?;
-assert!(index.topic_model().is_some());
-```
-
-### Display Topics in Query Results
-
-```rust
-for (meta, score) in index.query(&embedding, 10) {
-    println!("{}: {}", meta.title.unwrap_or_default(), meta.synopsis);
-
-    // Show document topics
-    if !meta.topic_ids.is_empty() {
-        if let Some(model) = index.topic_model() {
-            let topic_names: Vec<_> = meta.topic_ids.iter()
-                .filter_map(|id| model.get(*id))
-                .map(|t| t.keyword_summary(3))
-                .collect();
-            println!("  Topics: {}", topic_names.join(", "));
-        }
+for topic in model.topics() {
+    println!("Topic {}: {}", topic.id.as_u32(), topic.description);
+    for (word, score) in topic.keywords.iter().take(5) {
+        println!("  {word}: {score:.4}");
     }
 }
+# Ok::<(), libgrammstein::topic::TopicError>(())
 ```
 
-## Thread Safety
+At least two documents are required; fewer returns
+[`TopicError::InsufficientDocuments`](../../../src/topic/mod.rs), and a ragged
+`embeddings`/`texts` length mismatch returns
+[`TopicError::ClusteringError`](../../../src/topic/mod.rs).
 
-The topic extractor uses parallel algorithms:
+## Integration with a retrieval index
 
-- Distance matrix computation with rayon
-- Lock-free cluster assignments with atomics
-- Parallel c-TF-IDF computation
+A `RagIndex` built on the exact-cosine backend can extract topics directly from the embeddings it
+already holds; the extracted [`TopicModel`](../../../src/topic/model.rs) is stored on the index
+and its topic ids are copied onto each document's metadata.
 
 ```rust
-// Safe to use in parallel contexts
+// `index: RagIndex<ExactCosineBackend>` already populated with documents.
+let texts: Vec<String> = index.iter().map(|(_, meta)| meta.synopsis.clone()).collect();
+
+let model = index.extract_topics(TopicConfig::default(), &texts)?;
+println!("{} topics over {} documents", model.num_topics(), model.num_documents());
+
+// Topics are serialized alongside the index.
+index.save(std::path::Path::new("./index"))?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`RagIndex::extract_topics` reads the embeddings via `get_all_embeddings`, so the caller supplies
+only the aligned document *texts*; the returned model is also reachable later through
+`index.topic_model()`.
+
+## Engineering
+
+### Thread safety
+
+The pipeline parallelizes the two data-parallel phases and keeps the rest sequential and
+immutable:
+
+- **Distance matrix** — the $`O(n^2)`$ pairwise cosine distances are computed with `rayon` and
+  written into a `Vec<AtomicU64>` (each cell an `f64`'s bit pattern), so worker threads never
+  contend for a lock ([Clustering](clustering.md)).
+- **Vocabulary + term counts** — c-TF-IDF builds its vocabulary through a `DashMap` and atomic
+  per-topic counters, so documents are tokenized and counted in parallel ([c-TF-IDF](ctfidf.md)).
+- **Agglomeration** — the merge loop itself is sequential (it repeatedly selects the global
+  minimum), and the resulting `TopicModel` is immutable, hence trivially `Send + Sync`.
+
+Because the model is immutable after extraction, many extractions can run concurrently:
+
+```rust
 use rayon::prelude::*;
 
-let models: Vec<_> = datasets.par_iter()
-    .map(|(embs, texts)| {
-        let extractor = TopicExtractor::new(config.clone());
-        extractor.fit(embs, texts)
+let models: Vec<_> = datasets
+    .par_iter()
+    .map(|(embeddings, texts)| {
+        let mut extractor = TopicExtractor::new(config.clone());
+        extractor.extract(embeddings, texts)
     })
     .collect();
 ```
 
-## Feature Flags
+### Persistence
 
-Enable the topic module with the `rag` feature:
+`TopicModel` serializes with `serde`. `save`/`load` use pretty JSON; `save_bincode`/`load_bincode`
+use the compact bincode format. The `centroid` field (`Option<Arc<[f32]>>`) has a custom
+serializer that round-trips through `Option<Vec<f32>>`, so both formats reload the shared-slice
+centroids without a bespoke reader.
+
+### Feature flag
+
+The module is compiled behind the `rag` feature (it shares the embedding infrastructure of the
+retrieval index):
 
 ```toml
 [dependencies]
 libgrammstein = { version = "0.1", features = ["rag"] }
 ```
 
-## See Also
+## References
 
-- [Clustering](clustering.md) - Hierarchical agglomerative clustering
-- [c-TF-IDF](ctfidf.md) - Keyword extraction algorithm
-- [Dendrogram](dendrogram.md) - Topic hierarchy navigation
-- [RAG Overview](../rag/overview.md) - RAG integration
-- [RAG Index](../rag/index.md) - Topic storage
+1. M. Grootendorst (2022). *BERTopic: Neural topic modeling with a class-based TF-IDF procedure.*
+   arXiv:2203.05794. [arxiv.org/abs/2203.05794](https://arxiv.org/abs/2203.05794)
+2. J. H. Ward Jr. (1963). *Hierarchical grouping to optimize an objective function.* Journal of
+   the American Statistical Association 58(301), 236–244.
+   [doi:10.1080/01621459.1963.10500845](https://doi.org/10.1080/01621459.1963.10500845)
+
+## See also
+
+- [Clustering](clustering.md) — hierarchical agglomerative clustering and Lance-Williams linkage
+- [c-TF-IDF](ctfidf.md) — the class-based keyword-extraction algorithm
+- [Dendrogram](dendrogram.md) — navigating and cutting the topic hierarchy
+- [RAG Overview](../rag/overview.md) — the embeddings and index that feed topic extraction
+- [RAG Index](../rag/index.md) — how topics are stored with a retrieval index

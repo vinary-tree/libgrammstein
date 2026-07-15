@@ -1,185 +1,307 @@
-# Cron Manager
+# Cron Manager: A Lock-Free Reactive Scheduler
 
-Lock-free reactive state machine scheduler for periodic tasks.
+The **cron manager** is libgrammstein's periodic-task scheduler. It exists because a multi-hour
+Google Books import must checkpoint itself without ever pausing the importer, and it is built
+so that *no thread in the system ever waits on a lock to schedule work*. Its design is a
+**reactive state machine**: a single dedicated thread repeatedly senses an event and applies a
+total transition function, and every cross-thread edge — task submission, shutdown signalling,
+statistics — is an atomic or a lock-free channel.
 
-**Source**: [`src/util/cron/mod.rs`](../../../src/util/cron/mod.rs)
+This document specifies the state machine exactly as implemented, derives its timing bounds,
+enumerates its lock-free guarantees, and records what the TLA+ model checks — including where
+the model and the code deliberately differ.
 
----
+> **Scope.** Source of truth: [`src/util/cron/mod.rs`](../../../src/util/cron/mod.rs) and its
+> tests in [`src/util/cron/tests.rs`](../../../src/util/cron/tests.rs). The formal model lives
+> in [`formal/tla/CronStateMachine.tla`](../../../formal/tla/CronStateMachine.tla). The only
+> in-tree consumer is the Google Books importer
+> ([`src/sources/google_books/importer/cron.rs`](../../../src/sources/google_books/importer/cron.rs)).
+> For the surrounding concurrency design see [Threading Model](../../architecture/threading.md).
 
-## Overview
+## When to reach for it
 
-The cron manager implements a task scheduler using a reactive state machine design with non-blocking algorithms and atomics. It is designed for periodic checkpointing during long-running imports but can be used for any scheduled task workload.
+- Periodic checkpointing during a long-running import or training run.
+- Scheduled maintenance (flush, compact, report) alongside a hot workload.
+- Any timer-driven task where the submitting threads must never block.
 
-### Key Design Goals
+The module is **not** feature-gated: `pub mod cron;` sits in
+[`src/util/mod.rs`](../../../src/util/mod.rs) unconditionally, so it is available in every
+build.
 
-1. **Explicit states with clear transitions** - States and events are enumerated types
-2. **Event-driven architecture** - No polling loops with scattered conditionals
-3. **Lock-free task submission** - MPSC channel for concurrent task submission
-4. **Thread-local min-heap** - Priority queue owned by the scheduler thread
-5. **Graceful shutdown** - Termination signal checked at every state transition
+## Notation
 
-### When to Use
+| Symbol | Meaning |
+|---|---|
+| $`t_{\text{now}}`$ | the current Unix timestamp in milliseconds (`now_ms()`) |
+| $`t_i`$ | the `scheduled_time_ms` of task $`i`$ |
+| $`\Delta`$ | a recurring task's `interval_ms` |
+| $`p`$ | the `poll_interval_ms` (default $`100`$) |
+| $`Q`$ | the scheduler's task queue — a min-heap ordered by $`t_i`$ |
+| $`t_{\text{head}}`$ | the deadline of $`Q`$'s earliest task |
+| $`e`$ | the wall-clock execution time of a task's closure |
+| $`\lambda`$ | the latency between an event occurring and the scheduler observing it |
 
-- Periodic checkpointing during long-running operations
-- Scheduled maintenance tasks
-- Any workload requiring timer-based task execution
-- Scenarios requiring lock-free concurrent task submission
-
----
+**Acronyms.** *MPSC* — Multi-Producer, Single-Consumer; *FSM* — Finite State Machine; *TLA+* —
+Temporal Logic of Actions (Lamport's specification language); *TLC* — the TLA+ model checker.
 
 ## Architecture
 
-### High-Level Architecture
+One dedicated thread (named `cron-state-machine`) owns the task queue. Any number of submitter
+threads hold cloned `CronHandle`s. Every object shared between them is lock-free.
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                              Cron Manager Architecture                        │
-│                                                                              │
-│   ┌────────────────┐    crossbeam-channel      ┌─────────────────────────┐  │
-│   │  Main Thread   │    (lock-free MPSC)       │     Cron Thread         │  │
-│   │                │ ─────────────────────────>│                         │  │
-│   │  CronHandle    │                           │  CronStateMachine       │  │
-│   │  (task submit) │    Arc<AtomicBool>        │  (owns task heap)       │  │
-│   │                │<──────────────────────────│                         │  │
-│   └────────────────┘    termination flag       └─────────────────────────┘  │
-│          │                                                │                  │
-│          │                                                │                  │
-│          ▼                                                ▼                  │
-│   ┌────────────────┐                           ┌─────────────────────────┐  │
-│   │  Arc<CronStats>│◀──────────────────────────│  AtomicU64 counters     │  │
-│   │  (read stats)  │    atomic loads           │  (tasks, failures, etc) │  │
-│   └────────────────┘                           └─────────────────────────┘  │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
+![Cron threading architecture: handles, channel, atomics, and the thread-local heap](../../diagrams/cron-architecture.svg)
 
-### State Machine Diagram
+*Figure 1 — every edge crossing a thread boundary is a `crossbeam-channel`, an `AtomicBool`, or
+an `AtomicU64`. The heap is never shared, so it needs no lock at all.*
 
-```
-                              ┌─────────────────────────────────────────┐
-                              │                                         │
-                              ▼                                         │
-    ┌─────────┐  channel has  ┌──────────────┐  task due    ┌──────────────────┐
-    │  Idle   │ ────────────▶ │ DrainChannel │ ───────────▶ │ ExecutingTask    │
-    └─────────┘   messages    └──────────────┘              └──────────────────┘
-         │                          │                              │
-         │                          │ channel empty                │ task complete
-         │                          │ & no tasks due               │ (requeue if
-         │                          ▼                              │  recurring)
-         │                    ┌──────────────┐                     │
-         │                    │   Sleeping   │◀────────────────────┘
-         │                    └──────────────┘
-         │                          │
-         │                          │ timer expired
-         │                          ▼
-         │                    ┌──────────────┐
-         └───────────────────▶│ CheckEvents  │◀──── (loop back)
-                              └──────────────┘
-                                    │
-                                    │ terminating == true
-                                    ▼
-                              ┌──────────────┐
-                              │  Terminated  │
-                              └──────────────┘
+The central design decision is visible in that figure: **the mutable task state is confined to
+one thread.** A concurrent priority queue would be the obvious data structure and the wrong one
+— it would demand locks or an elaborate lock-free heap. Instead, tasks cross the thread
+boundary as *messages* on an MPSC channel, and the heap that orders them is thread-local. This
+is the standard ownership trade: serialise access by construction rather than by mutual
+exclusion.
+
+## The state machine
+
+`CronStateMachine::run` is a two-phase loop — **sense** (`poll_event`), then **act**
+(`transition`) — until the state is `Terminated`:
+
+```rust
+pub fn run(&mut self) {
+    if let Some(tx) = self.ready_tx.take() {
+        let _ = tx.send(());          // readiness signalled from INSIDE the loop's thread
+    }
+    while self.state != CronState::Terminated {
+        let event = self.poll_event();
+        self.transition(event);
+    }
+}
 ```
 
-### State Descriptions
+![The CronStateMachine transition relation](../../diagrams/cron-state.svg)
 
-| State | Description |
-|-------|-------------|
-| `CheckEvents` | Initial state - evaluate event sources (channel, queue, termination) |
-| `DrainChannel` | Draining incoming tasks from the channel into the local queue |
-| `ExecutingTask` | Currently executing a due task |
-| `Sleeping` | Sleeping until next task is due or poll interval expires |
-| `Terminated` | Terminal state - graceful shutdown complete |
+*Figure 2 — the complete `(state, event) → state` relation. Blue edges execute a task as a side
+effect; red edges terminate; the grey state is declared but unreachable.*
 
----
-
-## Core Types
-
-### CronState
-
-Enumerated state machine states:
+### States
 
 ```rust
 pub enum CronState {
-    CheckEvents,    // Evaluate event sources
-    DrainChannel,   // Drain incoming tasks
-    ExecutingTask,  // Execute a due task
-    Sleeping,       // Wait for timer/task
-    Terminated,     // Shutdown complete
+    CheckEvents,    // initial — evaluate every event source
+    DrainChannel,   // pull tasks until the channel is empty
+    ExecutingTask,  // declared; see the note below
+    Sleeping,       // wait for the next task or the poll deadline
+    Terminated,     // terminal — run() returns
 }
 ```
 
-### CronEvent
+| State | Role |
+|---|---|
+| `CheckEvents` | The initial state and the hub. Polls, in order: a due task, the termination flag, channel disconnection, a channel message, then a due task again. |
+| `DrainChannel` | Entered on `TaskReceived`. Keeps calling `try_recv` so a burst of submissions is absorbed in one pass instead of one per loop iteration. |
+| `Sleeping` | `do_sleep()` runs **on entry** to this state; the state is left on the very next poll. |
+| `Terminated` | The loop condition fails and the thread returns. |
+| `ExecutingTask` | **Never entered** — see immediately below. |
 
-Events that drive state transitions:
+> **`ExecutingTask` is declared but unreachable.** `CronState::ExecutingTask` and
+> `CronEvent::TaskCompleted` both exist, and `transition` even carries an arm for the pair, but
+> **no code path assigns `state = ExecutingTask`, and nothing constructs a `TaskCompleted`.**
+> Task execution is a *synchronous side effect* inside the three `TaskDue` arms:
+> `execute_one_task()` is called and returns before the next poll. `poll_event` states the
+> invariant outright — its `ExecutingTask` branch is
+> `unreachable!("ExecutingTask polls internally")`. The reachable state set is therefore
+>
+> ```math
+> \mathcal{S}_{\text{reach}} = \{\, \texttt{CheckEvents},\; \texttt{DrainChannel},\; \texttt{Sleeping},\; \texttt{Terminated} \,\}
+> ```
+>
+> The two vestigial variants are retained because the TLA+ model *does* give execution its own
+> state (see [Formal verification](#formal-verification)); they mark where the code would grow
+> if execution ever became asynchronous.
+
+### Events
 
 ```rust
 pub enum CronEvent {
-    TaskReceived,                              // New task(s) in channel
-    TimerExpired,                              // Sleep timer expired
-    TaskDue,                                   // Task past deadline
-    TaskCompleted { success: bool, should_requeue: bool },
-    TerminationRequested,                      // External shutdown signal
-    ChannelDisconnected,                       // All senders dropped
-    NoEvents,                                  // Idle
+    TaskReceived,                                          // a task arrived on the channel
+    TimerExpired,                                          // the sleep finished
+    TaskDue,                                               // Q's head is past its deadline
+    TaskCompleted { success: bool, should_requeue: bool }, // never constructed
+    TerminationRequested,                                  // the AtomicBool is set
+    ChannelDisconnected,                                   // every Sender was dropped
+    NoEvents,                                              // nothing to do
 }
 ```
 
-### TaskMetadata
+### The transition relation
 
-Metadata describing task behavior:
+Complete, in priority order; this table *is* the code.
+
+| Current state | Event | Next state | Side effect / note |
+|---|---|---|---|
+| *any* | `TerminationRequested` | `Terminated` | highest-priority arm |
+| `CheckEvents` | `TaskReceived` | `DrainChannel` | the task was already pushed onto $`Q`$ |
+| `CheckEvents` | `TaskDue` | `CheckEvents` | **`execute_one_task()`**, then re-check |
+| `CheckEvents` | `NoEvents` | `Sleeping` | `do_sleep()` on entry |
+| `CheckEvents` | `ChannelDisconnected` | `Terminated` if $`Q`$ is empty, else `CheckEvents` | drain before dying |
+| `DrainChannel` | `TaskReceived` | `DrainChannel` | keep draining |
+| `DrainChannel` | `TaskDue` | `CheckEvents` | **`execute_one_task()`** |
+| `DrainChannel` | `NoEvents` | `Sleeping` | channel empty and nothing due |
+| `DrainChannel` | `ChannelDisconnected` | `CheckEvents` | continue with what is queued |
+| `Sleeping` | `TimerExpired` | `CheckEvents` | the ordinary wake-up |
+| `Sleeping` | `TaskDue` | `CheckEvents` | **`execute_one_task()`** — became due while asleep |
+| `ExecutingTask` | `TaskCompleted` | `CheckEvents` | *vestigial — unreachable* |
+| *any other pair* | — | `CheckEvents` | logged at `warn!`, then re-check |
+
+Two properties of `poll_event` deserve to be stated explicitly, because they are the source of
+the scheduler's most surprising behaviours.
+
+1. **Due tasks are polled before the termination flag.** The head of $`Q`$ is tested for
+   $`t_{\text{head}} \leq t_{\text{now}}`$ *first*; only then is `terminating` loaded. This is
+   deliberate: a checkpoint that came due while the scheduler slept still runs even though
+   shutdown was requested in the meantime — you do not lose the last checkpoint.
+2. **Consequently, a perpetually-due task starves shutdown.** If a recurring task has
+   $`\Delta = 0`$, or if its body outlasts its own interval ($`e > \Delta`$), then the
+   re-queued task is *already due* at the next poll, `TaskDue` fires forever, and the
+   termination flag is never examined. `request_shutdown()` cannot stop such a task. Keep
+   $`\Delta > e`$.
+
+## Execution semantics
 
 ```rust
-pub enum TaskMetadata {
-    /// One-shot task - executed once and discarded
-    OneShot,
-
-    /// Recurring task - re-queued after completion
-    Recurring { interval_ms: u64 },
-
-    /// Named task with optional recurrence
-    Named {
-        name: String,
-        recurring_interval_ms: Option<u64>,
-    },
+fn execute_one_task(&mut self) {
+    let Some(mut task) = self.queue.pop() else { return };   // earliest deadline first
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| (task.task)()));
+    match result {
+        Ok(true) => {
+            self.stats.record_success();
+            if let Some(interval) = task.metadata.recurrence_interval() {
+                task.scheduled_time_ms = now_ms() + interval;   // re-queue, relative to *now*
+                self.queue.push(task);
+            }
+        }
+        Ok(false) => self.stats.record_failure(),   // retire the task
+        Err(_)    => self.stats.record_panic(),     // retire the task; the scheduler survives
+    }
 }
 ```
 
-### ScheduledTask
+The contract for a task closure `F: FnMut() -> bool + Send + 'static` follows directly:
 
-A task with execution time and callback:
+| Closure outcome | Statistics | Re-queued? |
+|---|---|---|
+| returns `true` | `tasks_executed += 1` | **yes** — at $`t_{\text{now}} + \Delta`$, if it carries a recurrence interval |
+| returns `false` | `tasks_executed += 1`, `tasks_failed += 1` | no — this is how a recurring task retires itself |
+| panics | `tasks_executed += 1`, `tasks_panicked += 1` | no — the panic is caught and counted |
+
+So `tasks_executed` counts **attempts**, and the three counters satisfy
+
+```math
+\texttt{tasks\_executed} \;=\; \underbrace{\bigl(\texttt{tasks\_executed} - \texttt{tasks\_failed} - \texttt{tasks\_panicked}\bigr)}_{\text{successes}} \;+\; \texttt{tasks\_failed} \;+\; \texttt{tasks\_panicked}
+\tag{C1}
+```
+
+which `test_stats_snapshot` pins down: five tasks returning `true` and three returning `false`
+yield `tasks_executed = 8`, `tasks_failed = 3`, `tasks_panicked = 0`.
+
+**Re-queueing is relative, not absolute.** The next fire time is $`t_{\text{now}} + \Delta`$
+measured *after* the task finishes — not $`t_i + \Delta`$. Period drift is therefore $`e`$ per
+cycle: $`n`$ executions of a task costing $`e`$ occupy $`n(\Delta + e)`$ of wall clock rather
+than $`n\Delta`$. For checkpointing this is exactly right (a slow checkpoint cannot queue up a
+backlog of its own re-runs), but the scheduler is not a metronome and should not be used as
+one.
+
+## Timing
+
+`do_sleep` runs on entry to `Sleeping` and sleeps
+
+```math
+s \;=\;
+\begin{cases}
+\min\bigl(t_{\text{head}} - t_{\text{now}},\; p\bigr) & \text{if } Q \neq \varnothing \;\wedge\; t_{\text{head}} > t_{\text{now}} \\
+0 & \text{if } Q \neq \varnothing \;\wedge\; t_{\text{head}} \leq t_{\text{now}} \\
+p & \text{if } Q = \varnothing
+\end{cases}
+\tag{C2}
+```
+
+Three bounds follow directly from $`(\mathrm{C2})`$:
+
+- **Task-execution latency.** When $`Q`$ is non-empty the scheduler sleeps exactly until the
+  head's deadline (capped at $`p`$, after which it simply re-evaluates). A queued task fires at
+  $`t_i + \varepsilon`$ for OS scheduling jitter $`\varepsilon`$ — **the poll interval adds no
+  latency to an already-queued task.**
+- **Submission-detection latency.** A task submitted while the scheduler sleeps is not seen
+  until that sleep ends, so $`\lambda_{\text{submit}} \leq p`$.
+- **Shutdown latency.** `request_shutdown()` is likewise observed only at the next poll, so
+  $`\lambda_{\text{shutdown}} \leq p + e`$ — the poll interval plus any task already running.
+
+Choosing $`p`$ therefore trades idle wake-ups against shutdown responsiveness:
+
+| Use case | Suggested $`p`$ | Rationale |
+|---|---|---|
+| Responsive shutdown (interactive, tests) | $`10`$–$`50`$ ms | the Google Books importer uses $`50`$ ms |
+| Background tasks | $`100`$–$`500`$ ms | `DEFAULT_POLL_INTERVAL_MS` is $`100`$ |
+| Battery- or power-sensitive | $`\geq 1000`$ ms | fewest wake-ups; shutdown may lag by a second |
+
+## Lock-free guarantees
+
+The design contains no `Mutex` and no `RwLock`.
+
+| Component | Primitive | Progress guarantee | Memory ordering |
+|---|---|---|---|
+| Task submission | `crossbeam_channel::unbounded` (MPSC) | wait-free `send` | channel-internal |
+| Termination flag | `AtomicBool` | lock-free | `Release` on store, `Acquire` on load |
+| Statistics | `AtomicU64` × 4 | lock-free | `Relaxed` |
+| Task queue | `BinaryHeap` | not shared | thread-local — no synchronisation at all |
+| State variable | plain `enum` field | not shared | thread-local |
+
+The `Release`/`Acquire` pair on `terminating` is the one place ordering matters: it guarantees
+that everything a submitter wrote *before* calling `request_shutdown()` is visible to the cron
+thread once it observes the flag. `Relaxed` suffices for the statistics because they are
+monotone counters, read only for reporting — no other memory is published through them.
+
+`BinaryHeap` is a max-heap, so `ScheduledTask`'s `Ord` is **reversed** to obtain a min-heap
+keyed by deadline:
 
 ```rust
+impl Ord for ScheduledTask {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.scheduled_time_ms.cmp(&self.scheduled_time_ms)   // reversed ⇒ earliest pops first
+    }
+}
+```
+
+Complexity is the textbook binary-heap result: `push` and `pop` cost
+$`O(\log \lvert Q \rvert)`$, `peek` costs $`O(1)`$.
+
+## Core types
+
+```rust
+pub type UnixTimestampMs = u64;
+pub fn now_ms() -> UnixTimestampMs;      // SystemTime since UNIX_EPOCH, in milliseconds
+
 pub struct ScheduledTask {
-    pub scheduled_time_ms: UnixTimestampMs,  // When to execute
-    pub metadata: TaskMetadata,               // Task type
-    pub task: Box<dyn FnMut() -> bool + Send>, // Callback
+    pub scheduled_time_ms: UnixTimestampMs,
+    pub metadata: TaskMetadata,
+    pub task: Box<dyn FnMut() -> bool + Send>,
 }
-```
 
-The task callback returns `true` to indicate success. For recurring tasks, returning `false` prevents rescheduling.
-
-### CronStats
-
-Lock-free statistics counters:
-
-```rust
-pub struct CronStats {
-    pub tasks_executed: AtomicU64,   // Total tasks executed
-    pub tasks_failed: AtomicU64,     // Tasks that returned false
-    pub tasks_panicked: AtomicU64,   // Tasks that panicked
-    pub transitions: AtomicU64,      // State transitions performed
+pub enum TaskMetadata {
+    OneShot,                                    // name() == "one-shot"
+    Recurring { interval_ms: u64 },             // name() == "recurring"
+    Named { name: String, recurring_interval_ms: Option<u64> },
 }
-```
 
-### CronStatsSnapshot
+pub struct CronStats {                          // lock-free counters
+    pub tasks_executed: AtomicU64,
+    pub tasks_failed: AtomicU64,
+    pub tasks_panicked: AtomicU64,
+    pub transitions: AtomicU64,
+}
 
-Immutable snapshot of statistics (useful for logging):
-
-```rust
-pub struct CronStatsSnapshot {
+#[derive(Debug, Clone, Copy)]
+pub struct CronStatsSnapshot {                  // CronStats::snapshot() — plain, Copy
     pub tasks_executed: u64,
     pub tasks_failed: u64,
     pub tasks_panicked: u64,
@@ -187,340 +309,198 @@ pub struct CronStatsSnapshot {
 }
 ```
 
-### CronStateMachine
+`TaskMetadata::recurrence_interval()` is the single predicate deciding recurrence: `None` for
+`OneShot`, `Some(interval_ms)` for `Recurring`, and the inner `recurring_interval_ms` for
+`Named`. `name()` supplies the string used in every log line.
 
-The state machine itself (runs on dedicated thread):
+`CronStateMachine` holds the state, the heap, the receiver, the poll interval, the termination
+flag, a `channel_disconnected` latch, the stats, and `ready_tx: Option<Sender<()>>` — the
+one-shot readiness sender, taken and fired at the top of `run()`. `transitions` is incremented
+on *every* call to `transition`, so it counts loop iterations, not task executions.
 
-```rust
-pub struct CronStateMachine {
-    state: CronState,
-    queue: BinaryHeap<ScheduledTask>,       // Thread-local min-heap
-    task_rx: Receiver<ScheduledTask>,       // Lock-free MPSC receiver
-    poll_interval_ms: u64,
-    terminating: Arc<AtomicBool>,
-    channel_disconnected: bool,
-    stats: Arc<CronStats>,
-}
-```
+`CronHandle` is `Clone` and holds only a `Sender<ScheduledTask>` and the `Arc<AtomicBool>`,
+which is why cloning it is cheap and sharing it across threads is contention-free.
 
-### CronHandle
+## API
 
-Lock-free handle for submitting tasks (cloneable, thread-safe):
-
-```rust
-#[derive(Clone)]
-pub struct CronHandle {
-    task_tx: Sender<ScheduledTask>,     // Lock-free MPSC sender
-    terminating: Arc<AtomicBool>,
-}
-```
-
----
-
-## State Transition Table
-
-Complete mapping of (State, Event) → Next State:
-
-| Current State | Event | Next State | Notes |
-|---------------|-------|------------|-------|
-| Any | `TerminationRequested` | `Terminated` | Highest priority |
-| `CheckEvents` | `TaskReceived` | `DrainChannel` | Start draining channel |
-| `CheckEvents` | `TaskDue` | `CheckEvents` | Execute task, re-check |
-| `CheckEvents` | `NoEvents` | `Sleeping` | Nothing to do |
-| `CheckEvents` | `ChannelDisconnected` | `Terminated` or `CheckEvents` | Terminate if queue empty |
-| `DrainChannel` | `TaskReceived` | `DrainChannel` | Continue draining |
-| `DrainChannel` | `TaskDue` | `CheckEvents` | Execute task, re-check |
-| `DrainChannel` | `NoEvents` | `Sleeping` | Done draining |
-| `DrainChannel` | `ChannelDisconnected` | `CheckEvents` | Continue with existing tasks |
-| `Sleeping` | `TimerExpired` | `CheckEvents` | Wake and check |
-| `ExecutingTask` | `TaskCompleted` | `CheckEvents` | Task done, re-check |
-
----
-
-## Lock-Free Guarantees
-
-Every component uses lock-free synchronization:
-
-| Component | Synchronization Primitive | Lock-Free? | Notes |
-|-----------|--------------------------|------------|-------|
-| Task submission | `crossbeam-channel` (MPSC) | ✅ Wait-free send | Unbounded channel |
-| Termination flag | `AtomicBool` | ✅ Yes | Acquire/Release ordering |
-| Statistics | `AtomicU64` | ✅ Yes | Relaxed ordering (counters) |
-| State machine | Thread-local | ✅ N/A | No sharing needed |
-| Task queue | `BinaryHeap` (thread-local) | ✅ N/A | Owned by cron thread |
-
-### Memory Ordering
-
-- **Termination flag**: `Acquire` on load, `Release` on store - ensures proper synchronization
-- **Statistics**: `Relaxed` ordering - counters don't require ordering guarantees
-- **Channel**: Lock-free internally via crossbeam's wait-free algorithms
-
----
-
-## API Reference
-
-### spawn_cron
-
-Spawn the cron state machine with default 100ms poll interval.
+### Spawning
 
 ```rust
 pub fn spawn_cron(
     terminating: Arc<AtomicBool>,
-) -> (CronHandle, JoinHandle<()>, Arc<CronStats>, Receiver<()>)
-```
+) -> (CronHandle, JoinHandle<()>, Arc<CronStats>, Receiver<()>);
 
-**Parameters:**
-- `terminating` - Shared termination flag
-
-**Returns:**
-- `CronHandle` - For submitting tasks (clone-able, thread-safe)
-- `JoinHandle<()>` - For joining the cron thread
-- `Arc<CronStats>` - For reading statistics (lock-free)
-- `Receiver<()>` - One-shot channel that signals when the scheduler is ready (see below)
-
-### spawn_cron_with_interval
-
-Spawn with custom poll interval.
-
-```rust
 pub fn spawn_cron_with_interval(
     terminating: Arc<AtomicBool>,
     poll_interval_ms: u64,
-) -> (CronHandle, JoinHandle<()>, Arc<CronStats>, Receiver<()>)
+) -> (CronHandle, JoinHandle<()>, Arc<CronStats>, Receiver<()>);
 ```
 
-**Parameters:**
-- `terminating` - Shared termination flag
-- `poll_interval_ms` - Maximum sleep duration between event checks
+`spawn_cron` delegates to `spawn_cron_with_interval` with
+`CronStateMachine::DEFAULT_POLL_INTERVAL_MS` ($`100`$ ms). Both return the same four values: a
+cloneable handle, the thread's `JoinHandle`, the shared statistics, and a **readiness**
+receiver.
 
-**Returns:**
-- `CronHandle` - For submitting tasks (clone-able, thread-safe)
-- `JoinHandle<()>` - For joining the cron thread
-- `Arc<CronStats>` - For reading statistics (lock-free)
-- `Receiver<()>` - One-shot channel that signals when the scheduler is ready (see below)
+### The readiness signal, and the race it closes
 
-#### Ready Signal
-
-The returned `Receiver<()>` provides a one-shot signal that the scheduler is ready.
-Call `ready_rx.recv()` to block until the cron thread has entered its event loop.
-This prevents race conditions where tasks are scheduled before the scheduler is fully initialized.
+The `Receiver<()>` fires exactly once, from **inside** `run()` — after `ready_tx` is taken and
+before the first poll. That placement is the entire point: a signal sent by `spawn_cron`
+*before* the thread started would prove nothing about the event loop being live. Blocking on it
+establishes a happens-before edge, so any task scheduled after `recv()` returns is guaranteed
+to be seen by the loop.
 
 ```rust
-let terminating = Arc::new(AtomicBool::new(false));
 let (handle, thread, stats, ready_rx) = spawn_cron(Arc::clone(&terminating));
-
-// Wait for scheduler to be ready before scheduling tasks
-ready_rx.recv().expect("Cron thread failed to start");
-
-// Now safe to schedule tasks
+ready_rx.recv().expect("cron thread failed to start");   // the loop is now live
 handle.schedule_once(0, "my-task", || true);
 ```
 
-For most use cases, you can safely ignore the ready signal if you don't need deterministic startup:
+Ignoring it (`let (handle, thread, stats, _ready) = …`) is safe whenever the task has a real
+delay, because the unbounded channel buffers submissions regardless. The signal matters when a
+test needs determinism — which is precisely why `test_panic_safety` awaits it.
+
+### Scheduling
 
 ```rust
-let (handle, thread, stats, _ready) = spawn_cron(Arc::clone(&terminating));
+// Absolute deadline.
+pub fn schedule_at<F>(&self, time_ms: UnixTimestampMs, metadata: TaskMetadata, task: F) -> bool
+where F: FnMut() -> bool + Send + 'static;
+
+// Relative deadline — now_ms() + delay_ms.
+pub fn schedule_after<F>(&self, delay_ms: u64, metadata: TaskMetadata, task: F) -> bool
+where F: FnMut() -> bool + Send + 'static;
+
+// Named recurring: first fire after initial_delay_ms, then every interval_ms while it returns true.
+pub fn schedule_recurring<F>(&self, initial_delay_ms: u64, interval_ms: u64, name: &str, task: F) -> bool
+where F: FnMut() -> bool + Send + 'static;
+
+// Named one-shot.
+pub fn schedule_once<F>(&self, delay_ms: u64, name: &str, task: F) -> bool
+where F: FnMut() -> bool + Send + 'static;
 ```
 
-### CronHandle::schedule_at
+All four return `bool`: `true` when the task reached the channel, `false` when the channel is
+disconnected (the scheduler is gone). **Check the return value** — a `false` means the task will
+never run.
 
-Schedule a task at a specific Unix timestamp.
+### Shutdown and statistics
 
 ```rust
-pub fn schedule_at<F>(
-    &self,
-    time_ms: UnixTimestampMs,
-    metadata: TaskMetadata,
-    task: F,
-) -> bool
-where
-    F: FnMut() -> bool + Send + 'static
+pub fn request_shutdown(&self);                 // terminating.store(true, Release)
+pub fn is_shutting_down(&self) -> bool;         // terminating.load(Acquire)
+pub fn snapshot(&self) -> CronStatsSnapshot;    // on CronStats
 ```
 
-**Returns:** `true` if submitted, `false` if channel disconnected.
+`CronStateMachine` additionally exposes `pending_count()` and `current_state()` for tests and
+debugging.
 
-### CronHandle::schedule_after
+## Lifecycle and shutdown
 
-Schedule a task after a delay.
+There are exactly **two** ways the scheduler stops.
 
-```rust
-pub fn schedule_after<F>(
-    &self,
-    delay_ms: u64,
-    metadata: TaskMetadata,
-    task: F,
-) -> bool
-where
-    F: FnMut() -> bool + Send + 'static
-```
+1. **Explicit termination.** `request_shutdown()` — or a store to the shared `AtomicBool` by
+   anyone at all — sets the flag. The next poll that is not preempted by a due task returns
+   `TerminationRequested`, and any state transitions straight to `Terminated`.
+2. **Channel disconnection.** When every `CronHandle` clone is dropped, `try_recv` reports
+   `Disconnected`. The scheduler keeps running until $`Q`$ drains — pending tasks still fire —
+   and terminates once the queue is empty. `test_channel_disconnect_with_tasks` pins this down:
+   a task scheduled $`100`$ ms out still executes after its handle is dropped.
 
-### CronHandle::schedule_recurring
+   The corollary matters: a **recurring** task re-queues itself forever, so a disconnected
+   channel with a live recurring task never drains and the thread never exits. Use the
+   termination flag in that case.
 
-Schedule a recurring task with initial delay and interval.
+Always `join()` the returned `JoinHandle` — it is the only way to know a final checkpoint
+completed.
 
-```rust
-pub fn schedule_recurring<F>(
-    &self,
-    initial_delay_ms: u64,
-    interval_ms: u64,
-    name: &str,
-    task: F,
-) -> bool
-where
-    F: FnMut() -> bool + Send + 'static
-```
+## Usage
 
-The task continues recurring as long as it returns `true`. Returning `false` stops rescheduling.
-
-### CronHandle::schedule_once
-
-Schedule a one-shot task after a delay.
+### Recurring checkpoint — the shape the importer uses
 
 ```rust
-pub fn schedule_once<F>(
-    &self,
-    delay_ms: u64,
-    name: &str,
-    task: F,
-) -> bool
-where
-    F: FnMut() -> bool + Send + 'static
-```
-
-### CronHandle::request_shutdown
-
-Request graceful shutdown of the state machine.
-
-```rust
-pub fn request_shutdown(&self)
-```
-
-This is a lock-free atomic store. The scheduler will terminate at the next event check.
-
-### CronHandle::is_shutting_down
-
-Check if shutdown has been requested.
-
-```rust
-pub fn is_shutting_down(&self) -> bool
-```
-
-### CronStats::snapshot
-
-Get an immutable snapshot of current statistics.
-
-```rust
-pub fn snapshot(&self) -> CronStatsSnapshot
-```
-
----
-
-## Usage Examples
-
-### Basic One-Shot Task
-
-```rust
-use libgrammstein::util::cron::{spawn_cron, TaskMetadata};
+use libgrammstein::util::cron::spawn_cron_with_interval;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 let terminating = Arc::new(AtomicBool::new(false));
-let (handle, thread, stats, _ready) = spawn_cron(Arc::clone(&terminating));
+// A 50 ms poll ⇒ shutdown is observed within ~50 ms of the request.
+let (handle, thread, stats, ready_rx) =
+    spawn_cron_with_interval(Arc::clone(&terminating), 50);
+ready_rx.recv().expect("cron thread failed to start");
 
-// Schedule a task to run after 1 second
-handle.schedule_once(1000, "delayed-task", || {
-    println!("Task executed after 1 second");
-    true  // Success
+let checkpoints = Arc::new(AtomicU64::new(0));
+let counter = Arc::clone(&checkpoints);
+
+// First fire after 30 s, then every 30 s, for as long as the closure returns true.
+handle.schedule_recurring(30_000, 30_000, "periodic-checkpoint", move || {
+    counter.fetch_add(1, Ordering::Relaxed);
+    // Returning true keeps the task alive even when a checkpoint fails;
+    // returning false would retire it permanently.
+    true
 });
 
-// ... do other work ...
+// … run the import on this thread …
 
-// Graceful shutdown
 handle.request_shutdown();
-thread.join().expect("Cron thread panicked");
+thread.join().expect("cron thread panicked");
 
-println!("Executed {} tasks", stats.tasks_executed.load(std::sync::atomic::Ordering::Relaxed));
+let snap = stats.snapshot();
+println!(
+    "{} checkpoints, {} failed, {} panicked",
+    snap.tasks_executed, snap.tasks_failed, snap.tasks_panicked
+);
 ```
 
-### Recurring Task
+### A self-retiring task
+
+Returning `false` is the idiomatic way for a recurring task to stop itself — no external
+signal, no cancellation token:
 
 ```rust
 use libgrammstein::util::cron::spawn_cron;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 let terminating = Arc::new(AtomicBool::new(false));
 let (handle, thread, _stats, _ready) = spawn_cron(Arc::clone(&terminating));
 
-let counter = Arc::new(AtomicU64::new(0));
-let counter_clone = Arc::clone(&counter);
+let runs = Arc::new(AtomicU64::new(0));
+let counter = Arc::clone(&runs);
 
-// Schedule task to run every 5 seconds, starting immediately
-handle.schedule_recurring(0, 5000, "periodic-counter", move || {
-    let count = counter_clone.fetch_add(1, Ordering::Relaxed) + 1;
-    println!("Counter incremented to {}", count);
-    true  // Continue recurring
-});
-
-// Run for 20 seconds
-std::thread::sleep(std::time::Duration::from_secs(20));
-
-handle.request_shutdown();
-thread.join().expect("Cron thread panicked");
-
-println!("Final count: {}", counter.load(Ordering::Relaxed));
-// Expected: ~4-5 executions (0s, 5s, 10s, 15s, potentially 20s)
-```
-
-### Self-Terminating Recurring Task
-
-```rust
-use libgrammstein::util::cron::spawn_cron;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-let terminating = Arc::new(AtomicBool::new(false));
-let (handle, thread, _stats, _ready) = spawn_cron(Arc::clone(&terminating));
-
-let counter = Arc::new(AtomicU64::new(0));
-let counter_clone = Arc::clone(&counter);
-
-// Schedule task that stops after 5 executions
-handle.schedule_recurring(0, 100, "limited-task", move || {
-    let count = counter_clone.fetch_add(1, Ordering::Relaxed) + 1;
-    println!("Execution #{}", count);
-    count < 5  // Return false on 5th execution to stop
+handle.schedule_recurring(0, 100, "retire-after-5", move || {
+    let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+    count < 5                       // false on the 5th run ⇒ never re-queued
 });
 
 std::thread::sleep(std::time::Duration::from_secs(1));
 handle.request_shutdown();
-thread.join().expect("Cron thread panicked");
+thread.join().expect("cron thread panicked");
 
-assert_eq!(counter.load(Ordering::Relaxed), 5);
+assert_eq!(runs.load(Ordering::Relaxed), 5);
 ```
 
-### Concurrent Task Submission
+### Concurrent submission from many threads
+
+`CronHandle: Clone`, and every `send` is wait-free, so submitters never contend:
 
 ```rust
 use libgrammstein::util::cron::spawn_cron;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 let terminating = Arc::new(AtomicBool::new(false));
 let (handle, thread, stats, _ready) = spawn_cron(Arc::clone(&terminating));
-
 let counter = Arc::new(AtomicU64::new(0));
 
-// Submit tasks from 10 threads concurrently
-let handles: Vec<_> = (0..10)
+let submitters: Vec<_> = (0..10)
     .map(|_| {
-        let h = handle.clone();  // Clone is cheap (Arc + Sender)
-        let c = Arc::clone(&counter);
+        let handle = handle.clone();          // cheap: a Sender plus an Arc
+        let counter = Arc::clone(&counter);
         std::thread::spawn(move || {
             for _ in 0..100 {
-                let c = Arc::clone(&c);
-                h.schedule_once(0, "concurrent-task", move || {
-                    c.fetch_add(1, Ordering::Relaxed);
+                let counter = Arc::clone(&counter);
+                handle.schedule_once(0, "concurrent", move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
                     true
                 });
             }
@@ -528,289 +508,141 @@ let handles: Vec<_> = (0..10)
     })
     .collect();
 
-// Wait for all submitters to finish
-for h in handles {
-    h.join().expect("Submitter thread panicked");
+for submitter in submitters {
+    submitter.join().expect("submitter panicked");
 }
-
-// Wait for tasks to execute
 std::thread::sleep(std::time::Duration::from_millis(500));
 
 handle.request_shutdown();
-thread.join().expect("Cron thread panicked");
+thread.join().expect("cron thread panicked");
 
-// All 1000 tasks should have executed
-assert_eq!(counter.load(Ordering::Relaxed), 1000);
+assert_eq!(counter.load(Ordering::Relaxed), 1000);              // 10 × 100
 assert_eq!(stats.tasks_executed.load(Ordering::Relaxed), 1000);
 ```
 
-### Integration: Google Books Importer
+## Error handling
 
-Real-world usage for periodic checkpointing during a long-running import:
+| Situation | Behaviour |
+|---|---|
+| Task returns `false` | Logged at `warn!`; `tasks_failed` incremented; **not** re-queued. |
+| Task panics | Caught by `catch_unwind`; logged at `error!`; `tasks_panicked` incremented; **not** re-queued; the scheduler and every other task are unaffected. |
+| Channel disconnected | Drain $`Q`$, then terminate (see [Lifecycle](#lifecycle-and-shutdown)). |
+| `schedule_*` returns `false` | The scheduler is gone; the task was **not** accepted. |
+| System clock steps backwards | `now_ms()` calls `.expect("System time went backwards")` and panics on the *calling* thread. |
 
-```rust
-use libgrammstein::util::cron::{spawn_cron_with_interval, TaskMetadata};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-/// Shared state for periodic checkpoint tasks (lock-free reads).
-pub struct CheckpointState {
-    storage: Arc<Storage>,
-    ngrams_processed: Arc<AtomicU64>,
-    last_checkpoint_ngrams: AtomicU64,
-}
-
-impl CheckpointState {
-    /// Perform a checkpoint (called from cron thread).
-    pub fn perform_checkpoint(&self) -> Result<(), Error> {
-        let current = self.ngrams_processed.load(Ordering::Acquire);
-        let last = self.last_checkpoint_ngrams.swap(current, Ordering::AcqRel);
-
-        if current > last {
-            log::info!("Checkpointing: {} new n-grams since last checkpoint", current - last);
-            self.storage.flush_to_disk()?;
-        }
-
-        Ok(())
-    }
-}
-
-pub async fn run_import_with_periodic_checkpoints(
-    storage: Arc<Storage>,
-    checkpoint_interval_ms: u64,
-    terminating: Arc<AtomicBool>,
-) -> Result<ImportStats, Error> {
-    let ngrams_processed = Arc::new(AtomicU64::new(0));
-
-    let checkpoint_state = Arc::new(CheckpointState {
-        storage: Arc::clone(&storage),
-        ngrams_processed: Arc::clone(&ngrams_processed),
-        last_checkpoint_ngrams: AtomicU64::new(0),
-    });
-
-    // Start cron with 50ms poll interval for responsive shutdown
-    let (cron_handle, cron_thread, cron_stats, _ready) =
-        spawn_cron_with_interval(Arc::clone(&terminating), 50);
-
-    // Schedule periodic checkpoints
-    let checkpoint_state_for_cron = Arc::clone(&checkpoint_state);
-    cron_handle.schedule_recurring(
-        checkpoint_interval_ms,  // Initial delay
-        checkpoint_interval_ms,  // Interval
-        "periodic-checkpoint",
-        move || {
-            match checkpoint_state_for_cron.perform_checkpoint() {
-                Ok(()) => true,  // Continue checkpointing
-                Err(e) => {
-                    log::error!("Checkpoint failed: {}", e);
-                    true  // Keep trying
-                }
-            }
-        },
-    );
-
-    // Run the import (async)
-    let result = run_import(&storage, &ngrams_processed, &terminating).await;
-
-    // Final checkpoint before shutdown
-    if let Err(e) = checkpoint_state.perform_checkpoint() {
-        log::error!("Final checkpoint failed: {}", e);
-    }
-
-    // Signal termination to cron scheduler
-    terminating.store(true, Ordering::Release);
-
-    // Wait for cron manager to stop
-    log::info!("Stopping periodic checkpoint scheduler...");
-    if let Err(e) = cron_thread.join() {
-        log::error!("Cron thread panicked: {:?}", e);
-    }
-
-    let stats_snapshot = cron_stats.snapshot();
-    log::info!(
-        "Cron stats: {} checkpoints, {} failures",
-        stats_snapshot.tasks_executed,
-        stats_snapshot.tasks_failed
-    );
-
-    result
-}
-```
-
----
-
-## Error Handling
-
-### Task Returns False
-
-When a task returns `false`:
-- Logged as a failure (warning level)
-- Not rescheduled, even if recurring
-- `tasks_failed` counter incremented
-
-```rust
-handle.schedule_recurring(0, 1000, "conditional-task", || {
-    if some_condition() {
-        true  // Continue recurring
-    } else {
-        log::warn!("Stopping task due to condition");
-        false  // Stop recurring
-    }
-});
-```
-
-### Task Panics
-
-When a task panics:
-- Panic is caught with `std::panic::catch_unwind`
-- Logged as an error
-- `tasks_panicked` counter incremented
-- Scheduler continues running other tasks
-
-```rust
-// This won't crash the scheduler
-handle.schedule_once(0, "panicking-task", || {
-    panic!("This panic is caught");
-});
-
-// This task will still execute
-handle.schedule_once(100, "normal-task", || {
-    println!("Still running!");
-    true
-});
-```
-
-### Channel Disconnection
-
-When all `CronHandle` instances are dropped:
-- If queue is empty: scheduler terminates immediately
-- If queue has pending tasks: scheduler continues until queue is drained, then terminates
-
-```rust
-let terminating = Arc::new(AtomicBool::new(false));
-let (handle, thread, _stats, _ready) = spawn_cron(Arc::clone(&terminating));
-
-// Schedule a delayed task
-handle.schedule_once(100, "delayed", || {
-    println!("Executed even after handle dropped");
-    true
-});
-
-// Drop handle immediately
-drop(handle);
-
-// Scheduler continues running until delayed task completes
-// Then terminates because channel is disconnected and queue is empty
-thread.join().expect("Cron thread panicked");
-```
-
----
+Panic isolation is what makes the scheduler safe to hand arbitrary closures: a panicking task
+is caught, counted, and retired, and the next task runs normally (`test_panic_safety`).
 
 ## Testing
 
-The module includes 14 unit tests covering all aspects of the scheduler:
+15 unit tests in [`src/util/cron/tests.rs`](../../../src/util/cron/tests.rs) cover the state
+machine end to end.
 
-| Test | Description |
-|------|-------------|
-| `test_state_transitions` | Verifies initial state is `CheckEvents` |
-| `test_termination_from_any_state` | Termination works from any state |
-| `test_concurrent_task_submission` | 10 threads × 100 tasks = 1000 executions |
-| `test_recurring_task` | Task recurs at specified interval |
-| `test_recurring_task_stops_on_false` | Returning false stops recurrence |
-| `test_one_shot_task` | One-shot executes exactly once |
-| `test_panic_safety` | Panicking task doesn't crash scheduler |
-| `test_channel_disconnect_empty_queue` | Terminates when queue empty |
-| `test_channel_disconnect_with_tasks` | Continues with pending tasks |
-| `test_stats_snapshot` | Statistics tracking is accurate |
-| `test_task_metadata` | Metadata types work correctly |
-| `test_task_ordering` | Min-heap orders by scheduled time |
-| `test_handle_cloning` | Cloned handles submit correctly |
-| `test_shutdown_flag` | Shutdown flag propagates correctly |
+| Test | Establishes |
+|---|---|
+| `test_state_transitions` | the initial state is `CheckEvents` |
+| `test_termination_from_any_state` | a pre-set flag drives `run()` straight to `Terminated` |
+| `test_concurrent_task_submission` | 10 threads × 100 tasks ⇒ exactly 1000 executions |
+| `test_recurring_task` | a 50 ms recurring task fires 4–7 times in 275 ms |
+| `test_recurring_task_stops_on_false` | returning `false` retires the task (exactly 3 runs) |
+| `test_one_shot_task` | a one-shot runs exactly once |
+| `test_panic_safety` | a panicking task neither kills the scheduler nor blocks the next task |
+| `test_channel_disconnect_empty_queue` | dropping the handle with an empty queue terminates |
+| `test_channel_disconnect_with_tasks` | a pending task still runs after the handle is dropped |
+| `test_stats_snapshot` | 5 successes + 3 failures ⇒ `executed = 8`, `failed = 3` |
+| `test_task_metadata` | `name()` and `recurrence_interval()` for all three variants |
+| `test_task_ordering` | the reversed `Ord` yields min-heap order (100, 200, 300) |
+| `test_execute_one_task_uses_earliest_due_task` | `execute_one_task` always pops the earliest |
+| `test_handle_cloning` | cloned handles submit to the same scheduler |
+| `test_shutdown_flag` | `request_shutdown` is observable through `is_shutting_down` |
 
-Run tests with:
-
-```bash
-cargo test cron -- --nocapture
+```sh
+cargo test --lib util::cron
 ```
 
----
+## Performance
 
-## Performance Considerations
+- **Memory.** `CronStats` is $`4 \times 8 = 32`$ bytes of atomics. Each `ScheduledTask` costs a
+  boxed closure plus its metadata; $`\lvert Q \rvert`$ grows with the number of *pending* tasks,
+  which for the checkpointing workload is $`1`$.
+- **Idle cost.** With an empty queue the thread wakes every $`p`$ ms, performs one `try_recv`
+  and one atomic load, and sleeps again — $`1000/p`$ wake-ups per second, i.e. $`10`$ s⁻¹ at
+  the default poll interval.
+- **Submission cost.** One wait-free channel send; no allocation beyond the boxed closure.
+- **Scheduling cost.** $`O(\log \lvert Q \rvert)`$ per push and pop.
 
-### Poll Interval Selection
+## Formal verification
 
-| Use Case | Recommended Interval | Notes |
-|----------|---------------------|-------|
-| Responsive UI | 10-50ms | Low latency shutdown |
-| Background tasks | 100-500ms | Default, good balance |
-| Battery-sensitive | 1000ms+ | Minimal wake-ups |
+The state machine is modelled in TLA+ [[1]](#references) and checked with TLC.
 
-### Adaptive Sleep
+**Specification:** [`formal/tla/CronStateMachine.tla`](../../../formal/tla/CronStateMachine.tla)
+· **Configuration:** [`formal/tla/CronStateMachine.cfg`](../../../formal/tla/CronStateMachine.cfg)
 
-The scheduler sleeps for `min(poll_interval, time_to_next_task)`, so tasks execute promptly regardless of poll interval setting.
+The model composes two processes — the **CronThread** (states `check_events`, `drain_channel`,
+`sleeping`, `executing_task`, `terminated`) and a **TestThread** (spawn → wait-ready → schedule
+→ request-shutdown) — under the constants `MaxTasks = 3` and `MaxTime = 100`.
 
-### Memory Usage
+> **Where the model and the code differ.** The TLA+ model gives task execution its **own state**
+> (it asserts `cron_state' = ExecutingTask`), whereas the implementation collapses execution
+> into a side effect of the `TaskDue` transition and never assigns that state
+> ([above](#states)). The model is therefore a *safe over-approximation*: it admits an
+> interleaving the code does not exhibit, so the safety properties proved of the model still
+> hold of the code. It is **not** an exact bisimulation, and a reader comparing the two should
+> expect that discrepancy.
 
-- Each `ScheduledTask` contains a boxed closure
-- Queue size grows with pending tasks
-- Statistics use 4 × 8 = 32 bytes (atomic u64s)
+### Safety invariants (checked by default)
 
----
+| Invariant | Meaning |
+|---|---|
+| `TypeOK` | every variable stays within its declared domain |
+| `Safety` | the composed safety conjunction |
+| `ReadySignalSafety` | the ready signal is never received before it is sent |
+| `PanicIsolation` | the panicked and successfully-executed task sets stay disjoint |
+| `TaskIdConsistency` | task identifiers remain well formed |
+| `TestCompletionRequiresExecution` | the test completes only after the normal task has run |
+| `TestProgressRequiresExecution` | progress implies the corresponding execution happened |
+| `TerminationRequiresRequest` | the cron thread terminates **only** if termination was requested |
+| `NormalTaskWaitsForEarlierPanic` | ordering between a panicking task and a later normal one |
 
-## Formal Verification
+### Liveness properties (under fairness)
 
-The cron state machine is formally specified and verified using TLA+ (Temporal Logic of Actions).
+These are commented out in the `.cfg` by default; they require `SPECIFICATION FairSpec` and are
+far slower to check.
 
-**Specification**: [`formal/tla/CronStateMachine.tla`](../../../formal/tla/CronStateMachine.tla)
+| Property | Meaning |
+|---|---|
+| `TestEventuallyCompletes` | the test thread eventually reaches its done state |
+| `CronEventuallyTerminates` | after a shutdown request, the scheduler eventually terminates |
+| `NormalTaskExecutesAfterPanic` | a normal task still runs after an earlier task panicked |
+| `ReadySignalEventuallyReceived` | the ready signal is eventually observed |
 
-### What TLA+ Verifies
-
-The specification models the concurrent interaction between:
-1. **CronThread** - The state machine (CheckEvents/DrainChannel/Sleeping/ExecutingTask/Terminated)
-2. **TestThread** - Client behavior (spawn, wait_ready, schedule_tasks, request_shutdown)
-
-### Safety Invariants
-
-| Property | Description |
-|----------|-------------|
-| `TypeOK` | All variables have correct types |
-| `ReadySignalSafety` | Ready signal received only after sent |
-| `PanicIsolation` | Panicked and executed task sets are disjoint |
-| `TestCompletionRequiresExecution` | Test completes only after normal task executes |
-| `TerminationRequiresRequest` | Cron terminates only when termination is requested |
-
-### Liveness Properties (under fairness)
-
-| Property | Description |
-|----------|-------------|
-| `TestEventuallyCompletes` | Test eventually reaches done state |
-| `CronEventuallyTerminates` | Cron terminates after shutdown request |
-| `NormalTaskExecutesAfterPanic` | Normal task executes even after a panicking task |
-| `ReadySignalEventuallyReceived` | Ready signal is eventually received |
-
-### Running the Model Checker
-
-```bash
-# Navigate to formal specifications
+```sh
 cd formal/tla
-
-# Run TLC model checker (requires TLA+ toolbox or command-line tools)
 tlc CronStateMachine.cfg
-
-# For liveness checking (slower), uncomment SPECIFICATION and PROPERTY lines in .cfg
+# For liveness, first uncomment SPECIFICATION FairSpec and the PROPERTY lines.
 ```
 
-### Key Verified Behaviors
+`CronEventuallyTerminates` holds *in the model*, whose tasks always complete. The
+implementation's starvation caveat — a perpetually-due task preempting the termination check,
+[described above](#the-transition-relation) — lies outside the model's assumptions and is not
+contradicted by it.
 
-1. **Panic Safety**: A panicking task does not prevent subsequent tasks from executing
-2. **Ready Signal Correctness**: Tasks scheduled after receiving the ready signal are guaranteed to be processed
-3. **Graceful Termination**: The scheduler always terminates when shutdown is requested
-4. **No Deadlock**: The system cannot reach a deadlocked state
+## References
 
----
+1. L. Lamport (2002). *Specifying Systems: The TLA+ Language and Tools for Hardware and Software
+   Engineers.* Addison-Wesley. ISBN 978-0-321-14306-8.
+2. M. Herlihy & N. Shavit (2012). *The Art of Multiprocessor Programming*, revised first
+   edition. Morgan Kaufmann.
+   [doi:10.1016/C2011-0-06993-4](https://doi.org/10.1016/C2011-0-06993-4) — the
+   wait-free/lock-free progress hierarchy used in
+   [Lock-free guarantees](#lock-free-guarantees).
+3. *crossbeam-channel* — lock-free MPSC channels for Rust.
+   [github.com/crossbeam-rs/crossbeam](https://github.com/crossbeam-rs/crossbeam)
 
-## See Also
+## See also
 
-- [Threading Model](../../architecture/threading.md) - Concurrency patterns in libgrammstein
-- [Data Flow](../../architecture/data-flow.md) - How data moves through the system
-- [Google Books Importer](../../components/corpus/streaming.md) - Main user of periodic checkpoints
+- [Threading Model](../../architecture/threading.md) — the crate-wide concurrency patterns
+- [Data Flow](../../architecture/data-flow.md) — how data moves through the system
+- [Corpus Streaming](../../components/corpus/streaming.md) — the Google Books import whose
+  periodic checkpoints this scheduler drives
+- [Google Books Import (CLI)](../../cli/import-google-books.md) — the command that runs it

@@ -1,0 +1,71 @@
+@startuml codeemb-ensemble
+' EnsembleCodeEmbedder: members are queried sequentially, their vectors are fused by
+' one of four strategies, and the result is L2-normalized. Only Concatenate changes
+' the dimension; the other three require every member to agree on d.
+' Render: plantuml -tsvg docs/diagrams/codeemb-ensemble.puml
+' Source of truth for Figure 1 in docs/components/code-embeddings/ensemble.md.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Ensemble — combine_embeddings(v₁ … v_N) under four strategies
+
+rectangle "**(code c, language ℓ)**" as q #EF6C00
+
+rectangle "**CodeT5Embedder**\nv₁ ∈ ℝ²⁵⁶" as m1 #2E7D32
+rectangle "**UniXcoderEmbedder**\nv₂ ∈ ℝ⁷⁶⁸" as m2 #388E3C
+rectangle "**GraphCodeBertEmbedder**\nv₃ ∈ ℝ⁷⁶⁸" as m3 #43A047
+
+rectangle "**EnsembleStrategy**\n(one of four)" as strat #6A1B9A
+
+rectangle "**Concatenate**  (default)\nv = [v₁ │ v₂ │ … │ v_N]\nd = Σᵢ dᵢ" as cat #6A1B9A
+rectangle "**WeightedAverage**\nv = Σᵢ wᵢ · vᵢ\nweights **not** renormalized" as wavg #6A1B9A
+rectangle "**MeanPooling**\nv = (1∕N) · Σᵢ vᵢ" as mean #6A1B9A
+rectangle "**MaxPooling**\nvₖ = maxᵢ vᵢₖ  (coordinate-wise)" as max #6A1B9A
+
+rectangle "**L2 normalize**\nnormalize_final (default true)" as norm #2E7D32
+rectangle "**v̂ ∈ ℝᵈ**\nd = 1792 concat │ 768 otherwise" as out #455A64
+
+q --> m1
+q --> m2
+q --> m3
+m1 --> strat
+m2 --> strat
+m3 --> strat
+strat --> cat
+strat --> wavg
+strat --> mean
+strat --> max
+cat --> norm
+wavg --> norm
+mean --> norm
+max --> norm
+norm --> out
+
+note bottom of strat #F3E5F5
+  ""with_strategy"" **rejects** unequal dimensions for
+  every strategy except Concatenate, so CodeT5+ (256)
+  cannot be averaged with the two 768-d models.
+end note
+
+note right of cat #E8F5E9
+  With unit-norm members, concatenate-then-normalize
+  makes the ensemble cosine the **unweighted mean of the
+  member cosines** — see (E4) in ensemble.md.
+end note
+
+note left of m1 #FFF3E0
+  Members run **sequentially** on the calling
+  thread (""iter().map(...)""), so ensemble
+  latency ≈ Σᵢ latency(modelᵢ).
+end note
+
+@enduml

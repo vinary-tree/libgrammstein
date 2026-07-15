@@ -1,0 +1,62 @@
+@startuml cron-architecture
+' Threading architecture: N submitter threads share cloned CronHandles; one dedicated
+' cron thread owns the heap. Every cross-thread edge is lock-free.
+' Render: plantuml -tsvg docs/diagrams/cron-architecture.puml
+' Source of truth for Figure 1 in docs/util/cron/cron-manager.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam note {
+  BackgroundColor #ECEFF1
+  BorderColor #546E7A
+}
+left to right direction
+
+legend top right
+|= Concept |= Color |
+| cron / persistence | <back:#00838F>        </back> |
+| lock-free shared channel | <back:#1565C0>        </back> |
+| thread-local (unshared) | <back:#546E7A>        </back> |
+endlegend
+
+rectangle "**Submitter threads** (1..N)" as producers #546E7A {
+  rectangle "**CronHandle** (clone)\nschedule_at · schedule_after\nschedule_recurring · schedule_once\nrequest_shutdown · is_shutting_down" as h1 #00838F
+  rectangle "**CronHandle** (clone)" as h2 #00838F
+}
+
+rectangle "**crossbeam_channel::unbounded**\nSender<ScheduledTask> ⇉ Receiver<ScheduledTask>\nlock-free MPSC — send() never blocks" as chan #1565C0
+rectangle "**Arc<AtomicBool> terminating**\nstore(Release) · load(Acquire)" as term #1565C0
+rectangle "**Arc<CronStats>**\ntasks_executed · tasks_failed\ntasks_panicked · transitions\n(AtomicU64, Relaxed)" as stats #1565C0
+rectangle "**Receiver<()> ready**\none-shot, sent from inside run()" as ready #1565C0
+
+rectangle "**cron thread** — name: cron-state-machine" as consumer #546E7A {
+  rectangle "**CronStateMachine**\nstate · poll_interval_ms\nchannel_disconnected · ready_tx" as sm #00838F
+  rectangle "**BinaryHeap<ScheduledTask>**\nmin-heap by scheduled_time_ms\n(reversed Ord ⇒ earliest pops first)\nthread-local — never shared" as heap #546E7A
+}
+
+h1 --> chan : send (wait-free)
+h2 --> chan : send (wait-free)
+chan --> sm : try_recv (non-blocking)
+sm --> heap : push / peek / pop
+h1 --> term : request_shutdown
+term --> sm : polled every transition
+sm --> stats : fetch_add
+stats --> h1 : snapshot() ⇒ CronStatsSnapshot
+sm --> ready : send(()) once, inside run()
+ready --> h1 : recv() ⇒ safe to schedule
+
+note bottom of heap
+  The heap is the only mutable
+  task state and it lives on one
+  thread, so no lock is needed
+  anywhere in the design.
+end note
+@enduml

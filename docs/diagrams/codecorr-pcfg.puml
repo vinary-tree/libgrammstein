@@ -1,0 +1,43 @@
+@startuml codecorr-pcfg
+' PCFG training: harvest productions from named AST nodes, count, normalize
+' per left-hand side into a proper probability distribution.
+' Render: plantuml -tsvg docs/diagrams/codecorr-pcfg.puml
+' Source of truth for Figure 1 in docs/components/code/pcfg.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title PcfgTrainer — count productions, normalize per LHS
+
+rectangle "**Parsed corpus**\ntree-sitter ASTs (error-free)" as corpus #546E7A
+
+rectangle "**extract_rules**\nnamed node with named children ⇒\nA → X₁ X₂ … Xₖ  (leaf+text ⇒ terminal)" as extract #EF6C00
+
+rectangle "**rule_counts**\nHashMap⟨Production, u64⟩" as counts #EF6C00
+
+rectangle "**WeightedCFG**\nrules · rules_by_lhs · lhs_totals" as cfg #EF6C00
+
+rectangle "**normalize / probability**\nℙ(A → α) = weight(A → α) / Σ_β weight(A → β)" as norm #1565C0
+
+rectangle "**Derivation score**\nℙ(τ) = ∏_{r ∈ τ} ℙ(r)\nlog ℙ(τ) = Σ log ℙ(r)" as deriv #1565C0
+
+corpus --> extract : train_from_parsed
+extract --> counts : += 1 per occurrence
+counts --> cfg : to_weighted_cfg
+cfg --> norm
+norm --> deriv
+
+note bottom of norm #E3F2FD
+  weights are raw counts until normalize();
+  probability() divides by the per-LHS total
+  on demand, so a grammar is usable un-normalized.
+end note
+
+@enduml

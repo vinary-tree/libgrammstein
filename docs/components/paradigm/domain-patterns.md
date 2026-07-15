@@ -1,786 +1,375 @@
-# Domain-Specific Patterns
+# Domain Patterns: Rholang and MeTTa
 
-libgrammstein includes specialized pattern catalogs for domain-specific languages, particularly Rholang and MeTTa which are core to the F1R3FLY.io ecosystem.
+The general paradigm tables of [Detection](detection.md) know what a `class` or a `map` looks like
+in a hundred languages. They know nothing about a **contract**, a **join pattern**, or an
+**atomspace query**. `DomainPatternDetector` closes that gap with two hand-written catalogs of
+idioms for the F1R3FLY.io domain-specific languages:
 
-## Overview
+| Language | What it is | Catalog | Patterns | Categories used |
+|---|---|---|---|---|
+| **Rholang** | a reflective, concurrent process calculus for smart contracts [[1]](#references) | `RholangPatternCatalog` | 14 | 9 of 12 |
+| **MeTTa** | a declarative meta-language for hypergraph-based AI [[2]](#references) | `MettaPatternCatalog` | 22 | 12 of 12 |
 
-Domain patterns capture language-specific idioms and constructs that don't map directly to general programming paradigms. These patterns help with:
+> **Scope.** Source of truth: [`src/topic/paradigm/domain_patterns.rs`](../../../src/topic/paradigm/domain_patterns.rs).
+> The general four-paradigm detector is [Detection](detection.md); the two engines are independent
+> and may be run over the same token stream.
 
-- Understanding code semantics in specialized languages
-- Detecting best practices and anti-patterns
-- Enabling intelligent code completion
-- Supporting language-specific refactoring
+## 1. Why a catalog, and not mining?
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    Domain Pattern Detection                              │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    Rholang Patterns                              │    │
-│  │  • Process Composition (Par, Sequential, Choice)                │    │
-│  │  • Channel Operations (Send, Receive, Peek)                     │    │
-│  │  • Contract Patterns (Factory, Registry, Token)                 │    │
-│  │  • Concurrency Idioms (Barriers, Locks, Actors)                 │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    MeTTa Patterns                                │    │
-│  │  • Atom Definitions (Symbols, Expressions, Grounded)            │    │
-│  │  • Type Patterns (Type annotations, Inference)                  │    │
-│  │  • Reasoning Patterns (Unification, Chaining)                   │    │
-│  │  • Knowledge Representation (Ontologies, Relations)             │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+[API mining](api-patterns.md) *discovers* what recurs; a catalog *asserts* what matters. Each is
+right in a different situation, and the choice is not a matter of taste:
 
-## Rholang Pattern Catalog
+| | Mining (PrefixSpan) | Catalog (this page) |
+|---|---|---|
+| needs | a large corpus | a language expert |
+| finds | whatever is frequent | whatever is *significant* |
+| misses | rare-but-critical idioms | anything nobody wrote down |
+| names things | no — patterns are anonymous | yes — every match carries a name and a category |
 
-Rholang is a concurrent process calculus language designed for blockchain and distributed systems.
+A Rholang `contract` is worth naming even if it appears once, and a registry lookup is worth
+naming *because* it is rare and consequential. Neither would survive a support threshold. Where the
+idioms of a language are known in advance and few, a catalog beats a miner — and it can say
+*which idiom* was found, which a support count never can.
 
-### RholangPatternCatalog
+## 2. The engine
 
-The catalog of Rholang-specific patterns:
+![The two DSL catalogs and their shared matcher](../../diagrams/paradigm-domain-catalogs.svg)
 
 ```rust
-pub struct RholangPatternCatalog {
-    patterns: HashMap<RholangPatternCategory, Vec<RholangPattern>>,
-}
+impl DomainPatternDetector {
+    pub fn new() -> Self;                                   // both catalogs, fully populated
+    pub fn rholang_catalog(&self) -> &RholangPatternCatalog;
+    pub fn metta_catalog(&self) -> &MettaPatternCatalog;
 
-pub enum RholangPatternCategory {
-    ProcessComposition,
-    ChannelOperation,
-    Contract,
-    Concurrency,
-    DataStructure,
-    NameBinding,
-    Match,
-    Bundle,
-    Unforgeable,
-    SystemCall,
-    StateManagement,
-    AccessControl,
+    pub fn detect_rholang_patterns(&self, tokens: &[&str]) -> Vec<RholangPatternMatch>;
+    pub fn detect_metta_patterns(&self, tokens: &[&str]) -> Vec<MettaPatternMatch>;
 }
 ```
 
-### Process Composition Patterns
+Note the input type: **`&[&str]`**, not the `&[String]` that
+[`ParadigmDetector::analyze_tokens`](detection.md#1-the-two-entry-points) takes. The detector has no
+tokenizer of its own — you supply the tokens, which means you control how sigils are split (and,
+for these languages, that matters: see §5).
 
-Rholang processes combine using parallel, sequential, and choice operators:
-
-#### Par Composition (`|`)
-
-Parallel composition runs processes concurrently:
-
-```rholang
-// Two processes running in parallel
-for (@x <- chan1) { process1!(x) } |
-for (@y <- chan2) { process2!(y) }
-```
-
-**Detection Pattern:**
-```rust
-RholangPattern {
-    category: ProcessComposition,
-    name: "ParComposition",
-    regex: r"\|\s*(for|new|match|Nil|@)",
-    description: "Parallel process composition",
-}
-```
-
-#### Sequential Composition
-
-Sequential execution using channel synchronization:
-
-```rholang
-// Process1 completes, then process2 runs
-new ack in {
-  process1!(ack) |
-  for (_ <- ack) { process2!() }
-}
-```
-
-**Detection Pattern:**
-```rust
-RholangPattern {
-    category: ProcessComposition,
-    name: "SequentialSync",
-    regex: r"for\s*\([^)]+<-\s*(\w+)\)\s*\{[^}]*\}\s*\|\s*[^|]+!\s*\(\1\)",
-    description: "Sequential synchronization via acknowledgment channel",
-}
-```
-
-#### Choice (Select)
-
-Non-deterministic choice between processes:
-
-```rholang
-// Select first available message
-select {
-  for (@x <- chan1) { handleChan1!(x) }
-  for (@y <- chan2) { handleChan2!(y) }
-}
-```
-
-### Channel Operation Patterns
-
-Rholang uses channels for all communication:
-
-#### Send (`!`)
-
-Send data on a channel:
-
-```rholang
-channel!(data)           // Persistent send
-channel!!(data)          // Peek-able send
-```
-
-**Detection Patterns:**
-```rust
-// Standard send
-RholangPattern {
-    category: ChannelOperation,
-    name: "Send",
-    regex: r"(\w+)\s*!\s*\(",
-    description: "Channel send operation",
-}
-
-// Persistent send (peek)
-RholangPattern {
-    category: ChannelOperation,
-    name: "PersistentSend",
-    regex: r"(\w+)\s*!!\s*\(",
-    description: "Persistent/peekable send",
-}
-```
-
-#### Receive (`for ... <- ...`)
-
-Receive data from a channel:
-
-```rholang
-for (@data <- channel) { process!(data) }    // Linear receive
-for (@data <= channel) { process!(data) }    // Persistent receive (replicated)
-```
-
-**Detection Patterns:**
-```rust
-// Linear receive
-RholangPattern {
-    category: ChannelOperation,
-    name: "LinearReceive",
-    regex: r"for\s*\([^)]+<-\s*\w+\)",
-    description: "Linear (consuming) receive",
-}
-
-// Replicated receive
-RholangPattern {
-    category: ChannelOperation,
-    name: "ReplicatedReceive",
-    regex: r"for\s*\([^)]+<=\s*\w+\)",
-    description: "Replicated (persistent) receive",
-}
-```
-
-### Contract Patterns
-
-Common smart contract patterns in Rholang:
-
-#### Factory Contract
-
-Creates new contract instances:
-
-```rholang
-new factory in {
-  contract factory(@config, return) = {
-    new instance in {
-      // Initialize instance with config
-      contract instance(@method, args, ret) = {
-        // Method implementation
-      } |
-      return!(instance)
-    }
-  }
-}
-```
-
-**Detection Pattern:**
-```rust
-RholangPattern {
-    category: Contract,
-    name: "Factory",
-    regex: r"contract\s+\w+\s*\([^)]*return\s*\)\s*=\s*\{\s*new\s+\w+\s+in",
-    description: "Factory contract pattern",
-}
-```
-
-#### Registry Pattern
-
-Stores and retrieves named resources:
-
-```rholang
-new registry, lookup, register in {
-  contract register(@name, @value, ack) = {
-    registry!(name, value) |
-    ack!(true)
-  } |
-  contract lookup(@name, return) = {
-    for (@n, @v <- registry) {
-      if (n == name) { return!(v) | registry!(n, v) }
-      else { registry!(n, v) | lookup!(name, return) }
-    }
-  }
-}
-```
-
-#### Token Contract
-
-ERC20-like token implementation:
-
-```rholang
-new token in {
-  contract token(@"transfer", @from, @to, @amount, return) = {
-    // Transfer logic with balance checks
-  } |
-  contract token(@"balance", @account, return) = {
-    // Balance lookup
-  }
-}
-```
-
-### Concurrency Patterns
-
-Patterns for managing concurrent access:
-
-#### Mutex/Lock
-
-Mutual exclusion:
-
-```rholang
-new mutex in {
-  mutex!(Nil) |  // Initialize with token
-
-  // Acquire lock
-  for (_ <- mutex) {
-    // Critical section
-    mutex!(Nil)  // Release lock
-  }
-}
-```
-
-#### Barrier
-
-Synchronization point for multiple processes:
-
-```rholang
-new barrier in {
-  contract barrier(@n, ready) = {
-    new count in {
-      count!(0) |
-      for (@c <- count) {
-        if (c + 1 == n) { ready!(true) }
-        else { count!(c + 1) }
-      }
-    }
-  }
-}
-```
-
-#### Actor Pattern
-
-Message-passing concurrency:
-
-```rholang
-new actor in {
-  contract actor(@msg, reply) = {
-    match msg {
-      ("get", key) => { /* handle get */ }
-      ("set", key, value) => { /* handle set */ }
-    }
-  }
-}
-```
-
-### Using the Rholang Catalog
+Both detectors return a flat vector of matches:
 
 ```rust
-use libgrammstein::topic::paradigm::{
-    RholangPatternCatalog,
-    DomainPatternDetector,
-};
-
-let catalog = RholangPatternCatalog::default();
-let detector = DomainPatternDetector::new(catalog);
-
-let rholang_code = r#"
-new channel in {
-  contract channel(@msg, ack) = {
-    @stdout!(msg) | ack!(true)
-  } |
-  channel!("Hello", *ack) |
-  for (_ <- ack) { Nil }
-}
-"#;
-
-let matches = detector.detect(rholang_code);
-
-for m in matches {
-    println!("Found {} pattern: {}",
-             m.category, m.pattern_name);
-    println!("  At: {}..{}", m.start, m.end);
+pub struct RholangPatternMatch {   // MettaPatternMatch is identical, with a MettaPatternCategory
+    pub pattern_name: String,      // e.g. "contract_definition"
+    pub category: RholangPatternCategory,
+    pub position: usize,           // token index
+    pub length: usize,             // in tokens — see the matching contract below
+    pub weight: f64,               // the catalog entry's weight, copied through
 }
 ```
 
----
+### The matching contract
 
-## MeTTa Pattern Catalog
+Four rules govern every match. They are simple, and each has a consequence that will surprise you
+if you do not know it.
 
-MeTTa is a meta-language for hypergraph-based AI and symbolic reasoning.
+1. **Every pattern is tried at every position.** There is no index and no early exit, so matches
+   **overlap freely** — one token may be covered by several. In MeTTa, a `!` at the head of
+   `!(add-atom …)` matches both `command_prefix` and `add_atom`, and both are reported.
+2. **First variant wins — not longest.** A pattern may declare several token-sequence variants;
+   `try_match_pattern` returns the length of the **first one that matches, in declaration order**.
+   Three shipped Rholang entries declare the *short* variant first — `channel_send` (`["!"]` before
+   `["!", "("]`), `contract_definition` and `new_channel` — so for those, `length` is always the
+   short variant's. The pattern is still correctly *detected*; only the reported `length` is the
+   shorter one. Order your own variants **longest-first** if `length` matters to you.
+3. **Comparison is lower-cased on one side only.** The matcher tests
+   `tokens[pos + i].to_lowercase() == variant[i]` — the *input* token is folded, the *pattern* token
+   is used verbatim. **Catalog variants must therefore be written in lower case**: a variant
+   containing an upper-case character can never equal a lower-cased token. Two shipped entries carry
+   an upper-case character in their only variant — `symbol_definition` (`Symbol`) and
+   `registry_insert` (`insertArbitrary`) — and so do not match; write custom entries in lower case
+   to avoid the same fate.
+4. **The detector reports; it does not score.** Nothing is summed, ranked, or thresholded. `weight`
+   is copied from the catalog onto each match and left for you to aggregate. `is_antipattern`, set
+   on a catalog entry by the `antipattern()` builder, is likewise **not** carried onto the match —
+   to learn that a match names an anti-pattern, look its `pattern_name` up in the catalog.
 
-### MettaPatternCatalog
+## 3. The Rholang catalog
 
-The catalog of MeTTa-specific patterns:
+Rholang is built on the **rho-calculus** [[1]](#references), a reflective extension of the
+π-calculus in which processes and names are mutually embedded: `@P` *quotes* a process `P` into a
+name, and `*x` *dereferences* a name back into a process. Every idiom below is a shape of that
+calculus, which is why the general detector files `!`, `*`, `@` and `for` under
+[`ReactiveObservable`](indicators.md#2-the-taxonomy) — they are message passing, not object access.
 
-```rust
-pub struct MettaPatternCatalog {
-    patterns: HashMap<MettaPatternCategory, Vec<MettaPattern>>,
-}
+**`RholangPatternCategory`** has 12 variants: `ProcessComposition`, `ChannelOperation`,
+`Replication`, `Contract`, `Registry`, `JoinPattern`, `Synchronization`, `Continuation`,
+`DataMarshalling`, `AccessControl`, `StateManagement`, `NameReflection`. Each carries a
+`description()`. The last three of the first ten — `Continuation`, `DataMarshalling` and
+`AccessControl` — have **no built-in patterns**; they are categories awaiting entries you supply
+through `add_pattern` (§5).
 
-pub enum MettaPatternCategory {
-    AtomDefinition,
-    TypePattern,
-    FunctionDefinition,
-    QueryPattern,
-    Unification,
-    Import,
-    Assertion,
-    Inference,
-    GroundedAtom,
-    SpaceOperation,
-    MetaProgramming,
-    PatternMatching,
-}
+The 14 shipped patterns:
+
+| Pattern | Category | Variants (first match wins) | $`w`$ |
+|---|---|---|---|
+| `contract_definition` | `Contract` | `["contract"]`, `["contract", "("]` | 0.95 |
+| `channel_send` | `ChannelOperation` | `["!"]`, `["!", "("]` | 0.90 |
+| `channel_receive` | `ChannelOperation` | `["for", "(", "@"]`, `["for", "("]` | 0.90 |
+| `new_channel` | `ChannelOperation` | `["new"]`, `["new", "in", "{"]` | 0.85 |
+| `join_receive` | `JoinPattern` | `["for", "(", ";"]`, `["for", "(", "@", "<", "-"]` | 0.85 |
+| `persistent_receive` | `Replication` | `["contract"]` | 0.85 |
+| `parallel_composition` | `ProcessComposition` | `["\|"]` | 0.80 |
+| `registry_lookup` | `Registry` | `["rho", ":", "registry", ":", "lookup"]`, `["registry", "!", "(", "` `"]` | 0.80 |
+| `registry_insert` | `Registry` | `["rho", ":", "registry", ":", "insertArbitrary"]` | 0.80 |
+| `state_cell` | `StateManagement` | `["for", "(", "@", "state", "<", "-"]` | 0.75 |
+| `select_receive` | `ChannelOperation` | `["select", "{"]` | 0.70 |
+| `name_quote` | `NameReflection` | `["@"]` | 0.70 |
+| `name_dereference` | `NameReflection` | `["*"]` | 0.70 |
+| `ack_pattern` | `Synchronization` | `["ack", "!", "("]`, `["ret", "!", "("]` | 0.70 |
+
+The idioms these name, in the source language:
+
+```rholang
+// contract_definition (0.95) — a persistent, replicated receive. The highest weight in
+// the catalog: nothing else in Rholang looks like this, and it defines a service.
+contract foo(@arg, ret) = { ret!(arg) }
+
+// channel_send (0.90) / channel_receive (0.90) — the two halves of message passing.
+channel!(data)
+for (@data <- channel) { Nil }
+
+// new_channel (0.85) — allocate unforgeable names. NOT object construction: this is why
+// LanguageHints::rholang lists `new` as a token to ignore for the general OOP detector.
+new channel in { channel!(1) }
+
+// join_receive (0.85) — synchronise on several channels at once; the join is atomic.
+for (@x <- ch1; @y <- ch2) { Nil }
+
+// state_cell (0.75) — the idiomatic mutable cell: take the state, put a new one back.
+for (@state <- cell) { cell!(newState) }
+
+// parallel_composition (0.80) — P and Q run concurrently.
+P | Q
+
+// name_quote (0.70) / name_dereference (0.70) — the reflection that defines the rho-calculus.
+@P        // process ⇒ name
+*channel  // name ⇒ process
+
+// registry_lookup (0.80) — resolve a URI through the system registry.
+new lookup(`rho:registry:lookup`) in { Nil }
+
+// ack_pattern (0.70) — acknowledge completion on a return channel.
+ack!(Nil)
 ```
 
-### Atom Definition Patterns
+`persistent_receive` and `contract_definition` share the variant `["contract"]`, so a `contract`
+keyword yields **two** matches, in different categories (`Replication` and `Contract`). That is
+intentional: a Rholang contract *is* both a persistent receive and a service definition, and a
+consumer interested in either dimension will find it.
 
-MeTTa operates on atoms in a hypergraph:
+## 4. The MeTTa catalog
 
-#### Symbol Atoms
+MeTTa is the language of the OpenCog Hyperon framework [[2]](#references): programs are
+**atoms** — symbols, expressions, variables and grounded values — that are rewritten by pattern
+matching against an **atomspace**. It is homoiconic, so code and knowledge share one representation,
+and the idioms below are as much about *knowledge manipulation* as about computation.
 
-Simple named entities:
+**`MettaPatternCategory`** has 12 variants, and — unlike the Rholang catalog — **all 12 carry
+patterns**: `AtomDefinition`, `TypePattern`, `FunctionDefinition`, `PatternMatching`, `Unification`,
+`InferenceRule`, `KnowledgeBase`, `Query`, `Module`, `GroundedAtom`, `SpaceOperation`,
+`ReductionRule`.
+
+The 22 shipped patterns:
+
+| Pattern | Category | Variants (first match wins) | $`w`$ |
+|---|---|---|---|
+| `function_definition` | `FunctionDefinition` | `["(", "="]` | 0.90 |
+| `match_expression` | `PatternMatching` | `["(", "match"]` | 0.90 |
+| `self_reference` | `SpaceOperation` | `["&self"]` | 0.90 |
+| `type_declaration` | `TypePattern` | `["(", ":", "->", ")"]`, `["(", ":"]` | 0.85 |
+| `pattern_function` | `FunctionDefinition` | `["(", "=", "("]` | 0.85 |
+| `case_match` | `PatternMatching` | `["(", "case"]` | 0.85 |
+| `inference_rule` | `InferenceRule` | `["(", ":-"]` | 0.85 |
+| `query_space` | `Query` | `["(", "match", "&"]` | 0.85 |
+| `variable_atom` | `AtomDefinition` | `["$"]` | 0.80 |
+| `function_type` | `TypePattern` | `["(", "->"]` | 0.80 |
+| `unify_expression` | `Unification` | `["(", "unify"]` | 0.80 |
+| `add_atom` | `KnowledgeBase` | `["(", "add-atom"]`, `["!", "("]` | 0.80 |
+| `reduction_rule` | `ReductionRule` | `["(", "=", "("]` | 0.80 |
+| `remove_atom` | `KnowledgeBase` | `["(", "remove-atom"]` | 0.75 |
+| `space_bind` | `SpaceOperation` | `["(", "bind!", ")"]` | 0.75 |
+| `symbol_definition` | `AtomDefinition` | `["(", ":", "Symbol", ")"]` | 0.70 |
+| `chain_rule` | `InferenceRule` | `["(", "chain"]` | 0.70 |
+| `get_atoms` | `KnowledgeBase` | `["(", "get-atoms"]` | 0.70 |
+| `grounded_symbol` | `GroundedAtom` | `["@"]` | 0.70 |
+| `import_module` | `Module` | `["!", "(", "import!"]` | 0.70 |
+| `expression_atom` | `AtomDefinition` | `["(", "("]` | 0.60 |
+| `command_prefix` | `Query` | `["!"]` | 0.60 |
+
+The idioms, in the source language — note that the variable sigil is part of the syntax, not math:
 
 ```metta
-; Symbol definition
-(= (my-symbol) value)
-
-; Typed symbol
-(: my-symbol Type)
-```
-
-**Detection Pattern:**
-```rust
-MettaPattern {
-    category: AtomDefinition,
-    name: "SymbolDefinition",
-    regex: r"\(=\s+\(\w+\)\s+",
-    description: "Symbol atom definition",
-}
-```
-
-#### Expression Atoms
-
-Compound structures:
-
-```metta
-; Expression with multiple elements
-(my-function arg1 arg2 arg3)
-
-; Nested expressions
-(outer (inner x y) z)
-```
-
-#### Grounded Atoms
-
-Atoms with external implementation:
-
-```metta
-; Grounded function (implemented in host language)
-(: + (-> Number Number Number))
-
-; Calling grounded function
-(+ 1 2)  ; Returns 3
-```
-
-### Type Patterns
-
-MeTTa has a rich type system:
-
-#### Type Declarations
-
-```metta
-; Declare atom type
-(: my-func (-> InputType OutputType))
-
-; Polymorphic type
-(: map (-> (-> $a $b) (List $a) (List $b)))
-
-; Type alias
-(= (MyType) (List Int))
-```
-
-**Detection Patterns:**
-```rust
-// Type annotation
-MettaPattern {
-    category: TypePattern,
-    name: "TypeAnnotation",
-    regex: r"\(:\s+\w+\s+\(",
-    description: "Type annotation",
-}
-
-// Arrow type (function type)
-MettaPattern {
-    category: TypePattern,
-    name: "ArrowType",
-    regex: r"\(->\s+",
-    description: "Function type signature",
-}
-
-// Type variable
-MettaPattern {
-    category: TypePattern,
-    name: "TypeVariable",
-    regex: r"\$\w+",
-    description: "Polymorphic type variable",
-}
-```
-
-### Function Definition Patterns
-
-#### Named Functions
-
-```metta
-; Function definition with pattern matching
-(= (factorial 0) 1)
-(= (factorial $n) (* $n (factorial (- $n 1))))
-
-; Multi-argument function
+; function_definition (0.90) / reduction_rule (0.80) — in MeTTa these are the same act:
+; a definition IS a rewrite rule. Both patterns match `(= (` , in different categories.
 (= (add $x $y) (+ $x $y))
+(= (inc $x) (+ $x 1))
+
+; pattern_function (0.85) — definition by cases; the rewriter picks the matching clause.
+(= (fib 0) 1)
+(= (fib 1) 1)
+(= (fib $n) (+ (fib (- $n 1)) (fib (- $n 2))))
+
+; type_declaration (0.85) / function_type (0.80) — types are atoms too.
+(: add (-> Number Number Number))
+(-> A B)
+
+; match_expression (0.90) / query_space (0.85) — query the atomspace by unification.
+(match &self (foo $x) $x)
+
+; variable_atom (0.80) — the bare sigil; every variable in the examples above matches it.
+$x
+
+; add_atom / remove_atom / get_atoms (KnowledgeBase) — mutate the space.
+!(add-atom &self (foo bar))
+!(remove-atom &self (foo bar))
+!(get-atoms &self)
+
+; self_reference (0.90) — the current space, the most common atom in real MeTTa.
+&self
+
+; inference_rule (0.85) — a conclusion from premises.
+(:- (conclusion) (premise1) (premise2))
+
+; import_module (0.70) and command_prefix (0.60) — `!` both prefixes a command and,
+; followed by `(`, matches add_atom's second variant. Overlapping matches are normal.
+!(import! &self stdlib)
 ```
 
-**Detection Pattern:**
-```rust
-MettaPattern {
-    category: FunctionDefinition,
-    name: "FunctionDef",
-    regex: r"\(=\s+\(\w+\s+",
-    description: "Named function definition",
-}
-```
+**Tokenizing MeTTa is the caller's job, and it is consequential.** `variable_atom` matches the bare
+token `["$"]`, so a tokenizer that emits the sigil and the name as *one* token (`$x`) will not match
+it, while one that splits them (`$`, `x`) will — this is exactly the convention the crate's own
+tests use. Choose a split and stay consistent with the variants you rely on.
 
-#### Lambda Expressions
+## 5. Extending a catalog
 
-```metta
-; Anonymous function
-(lambda ($x) (+ $x 1))
-
-; Multi-parameter lambda
-(lambda ($x $y) (+ $x $y))
-```
-
-### Query and Unification Patterns
-
-#### Match Queries
-
-```metta
-; Query for matching patterns
-(match &self (parent $x $y) $x)
-
-; Query with condition
-(match &self (person $name $age) (if (> $age 18) $name))
-```
-
-**Detection Pattern:**
-```rust
-MettaPattern {
-    category: QueryPattern,
-    name: "MatchQuery",
-    regex: r"\(match\s+&\w+\s+",
-    description: "Pattern matching query",
-}
-```
-
-#### Unification
-
-```metta
-; Unify expressions
-(unify (foo $x) (foo bar) $x)
-
-; Unification in patterns
-(= (find-pair $x $y)
-   (match &self (pair $x $y) (pair $x $y)))
-```
-
-### Inference Patterns
-
-#### Forward Chaining
-
-```metta
-; Assert knowledge
-(add-atom &kb (parent alice bob))
-(add-atom &kb (parent bob charlie))
-
-; Rule for transitivity
-(= (grandparent $x $z)
-   (match &kb (parent $x $y)
-     (match &kb (parent $y $z) (grandparent $x $z))))
-```
-
-#### Backward Chaining
-
-```metta
-; Query with backward reasoning
-(: derive (-> Query Result))
-(= (derive (grandparent $x $z))
-   (let* (($y (derive (parent $x $y)))
-          ($z (derive (parent $y $z))))
-     (grandparent $x $z)))
-```
-
-### Knowledge Representation Patterns
-
-#### Ontology Structures
-
-```metta
-; Class hierarchy
-(: Animal Type)
-(: Mammal Type)
-(: Dog Type)
-
-(isa Mammal Animal)
-(isa Dog Mammal)
-
-; Instance
-(isa fido Dog)
-```
-
-#### Relations
-
-```metta
-; Binary relation
-(: owns (-> Person Thing Prop))
-(owns alice car1)
-
-; N-ary relation
-(: transaction (-> Account Account Amount Time Prop))
-(transaction acc1 acc2 100 now)
-```
-
-### Space Operations
-
-MeTTa organizes atoms into spaces:
-
-```metta
-; Create new space
-(new-space)
-
-; Add atoms to space
-(add-atom &my-space (fact 1 2 3))
-
-; Query space
-(get-atoms &my-space)
-
-; Bind space
-(bind! &kb (new-space))
-```
-
-**Detection Patterns:**
-```rust
-MettaPattern {
-    category: SpaceOperation,
-    name: "SpaceReference",
-    regex: r"&\w+",
-    description: "Space reference",
-}
-
-MettaPattern {
-    category: SpaceOperation,
-    name: "AddAtom",
-    regex: r"\(add-atom\s+&\w+",
-    description: "Add atom to space",
-}
-```
-
-### Using the MeTTa Catalog
+Both catalogs are open. `add_pattern` appends and indexes by category, so a custom entry is a
+first-class citizen of the same detector:
 
 ```rust
 use libgrammstein::topic::paradigm::{
-    MettaPatternCatalog,
-    DomainPatternDetector,
+    RholangPattern, RholangPatternCatalog, RholangPatternCategory,
 };
 
-let catalog = MettaPatternCatalog::default();
-let detector = DomainPatternDetector::new(catalog);
+let mut catalog = RholangPatternCatalog::new();     // the 14 built-ins
 
-let metta_code = r#"
-; Define a type
-(: factorial (-> Int Int))
+// Fill in one of the three empty categories.
+catalog.add_pattern(
+    RholangPattern::new(
+        "capability_attenuation",
+        RholangPatternCategory::AccessControl,
+        "Hand out a restricted forwarder rather than the raw channel",
+    )
+    .with_pattern(&["new", "forwarder", "in"])      // lower case, longest variant first
+    .with_example("new forwarder in { for (@m <- forwarder) { target!(m) } }")
+    .with_weight(0.8),
+);
 
-; Define the function
-(= (factorial 0) 1)
-(= (factorial $n)
-   (* $n (factorial (- $n 1))))
+// Anti-patterns are declared the same way, and flagged on the CATALOG entry.
+catalog.add_pattern(
+    RholangPattern::new(
+        "unbounded_replication",
+        RholangPatternCategory::Replication,
+        "A replicated receive with no termination condition",
+    )
+    .with_pattern(&["for", "(", "@", "_", "<", "-"])
+    .with_weight(0.9)
+    .antipattern(),                                  // sets is_antipattern on the entry
+);
 
-; Use it
-!(factorial 5)
-"#;
-
-let matches = detector.detect(metta_code);
-
-for m in matches {
-    println!("Found {} pattern: {}",
-             m.category, m.pattern_name);
-}
+assert_eq!(catalog.patterns().len(), 16);
+assert_eq!(catalog.by_category(RholangPatternCategory::AccessControl).len(), 1);
 ```
 
----
+Two constraints on custom entries, restated from §2 because they are the two ways to author an
+entry that silently never fires:
 
-## DomainPatternDetector
+- write every variant token in **lower case**;
+- declare variants **longest-first**, since the first match wins.
 
-The unified interface for domain pattern detection:
+`DomainPatternDetector::new()` always builds the *built-in* catalogs; to run the detector over a
+catalog you have extended, read the matches from your own catalog directly, or keep the extended
+catalog alongside and consult it when interpreting a match's `pattern_name`.
+
+## 6. Cost
+
+`detect_rholang_patterns` and `detect_metta_patterns` try every pattern at every position:
+
+```math
+\Theta\Bigl(n \cdot \sum_{p \in \mathrm{catalog}} \lvert \mathrm{variants}(p) \rvert \cdot \bar{\ell}\Bigr) \tag{X1}
+```
+
+with $`n`$ the token count and $`\bar{\ell}`$ the mean variant length. For the shipped catalogs the
+inner sum is small — 18 Rholang variants and 24 MeTTa variants, none longer than 6 tokens — so the
+scan is $`O(n)`$ with a constant near 100. That is one to two orders of magnitude more work per
+token than the [indexed general detector](detection.md#5-engineering), and it is affordable only
+because the catalogs are tiny. A catalog of thousands of patterns would need the same first-token
+index the general detector uses.
+
+## 7. Worked example
 
 ```rust
-pub struct DomainPatternDetector<C: PatternCatalog> {
-    catalog: C,
+use libgrammstein::topic::paradigm::{DomainPatternDetector, RholangPatternCategory};
+
+let detector = DomainPatternDetector::new();
+
+// Tokens for:  contract foo(@arg, ret) = { ret!(*arg) }
+let tokens = [
+    "contract", "foo", "(", "@", "arg", ",", "ret", ")", "=",
+    "{", "ret", "!", "(", "*", "arg", ")", "}",
+];
+
+let matches = detector.detect_rholang_patterns(&tokens);
+
+for m in &matches {
+    println!(
+        "{:<22} {:<18} @{:<3} len {}  w {:.2}",
+        m.pattern_name,
+        m.category.description(),
+        m.position,
+        m.length,
+        m.weight,
+    );
 }
+// contract_definition   Contract …          @0   len 1  w 0.95   ← both fire on `contract`
+// persistent_receive    Replication …       @0   len 1  w 0.85   ←
+// name_quote            NameReflection …    @3   len 1  w 0.70
+// channel_send          ChannelOperation …  @11  len 1  w 0.90   ← first variant ["!"] wins
+// name_dereference      NameReflection …    @13  len 1  w 0.70
 
-impl<C: PatternCatalog> DomainPatternDetector<C> {
-    pub fn new(catalog: C) -> Self {
-        Self { catalog }
-    }
-
-    pub fn detect(&self, code: &str) -> Vec<PatternMatch> {
-        let mut matches = Vec::new();
-
-        for (category, patterns) in self.catalog.patterns() {
-            for pattern in patterns {
-                for m in pattern.regex.find_iter(code) {
-                    matches.push(PatternMatch {
-                        category: category.clone(),
-                        pattern_name: pattern.name.clone(),
-                        start: m.start(),
-                        end: m.end(),
-                        matched_text: m.as_str().to_string(),
-                    });
-                }
-            }
-        }
-
-        matches
-    }
-}
+// The detector does not score. Aggregate the weights yourself if you want a total.
+let contract_weight: f64 = matches
+    .iter()
+    .filter(|m| m.category == RholangPatternCategory::Contract)
+    .map(|m| m.weight)
+    .sum();
+assert!(contract_weight > 0.0);
 ```
 
-### Pattern Match Result
+## References
 
-```rust
-pub struct PatternMatch {
-    /// Pattern category
-    pub category: String,
-    /// Specific pattern name
-    pub pattern_name: String,
-    /// Start position in source
-    pub start: usize,
-    /// End position in source
-    pub end: usize,
-    /// Matched text
-    pub matched_text: String,
-}
-```
+1. L. G. Meredith & M. Radestock (2005). *A reflective higher-order calculus.* Electronic Notes in
+   Theoretical Computer Science 141(5), 49–67.
+   [doi:10.1016/j.entcs.2005.05.016](https://doi.org/10.1016/j.entcs.2005.05.016) — the rho-calculus
+   underlying Rholang; the source of the quote/dereference reflection that `name_quote` and
+   `name_dereference` detect.
+2. B. Goertzel, V. Bogdanov, M. Duncan, D. Duong, Z. Goertzel, J. Horlings, M. Ikle, L. Jiang,
+   K. Kastan, et al. (2023). *OpenCog Hyperon: a framework for AGI at the human level and beyond.*
+   arXiv preprint. [doi:10.48550/arXiv.2310.18318](https://doi.org/10.48550/arXiv.2310.18318) — the
+   framework MeTTa serves, and the atom / atomspace / grounded-atom vocabulary the catalog follows.
+3. E. Bainomugisha, A. L. Carreton, T. Van Cutsem, S. Mostinckx & W. De Meuter (2013). *A survey on
+   reactive programming.* ACM Computing Surveys 45(4), Article 52.
+   [doi:10.1145/2501654.2501666](https://doi.org/10.1145/2501654.2501666) — why message-passing
+   idioms such as Rholang's are classified as reactive rather than procedural.
 
-## Extending with Custom Patterns
+## See also
 
-Add patterns for your own domain languages:
-
-```rust
-use libgrammstein::topic::paradigm::{
-    PatternCatalog,
-    DomainPattern,
-};
-
-pub struct MyLanguagePatternCatalog {
-    patterns: HashMap<String, Vec<DomainPattern>>,
-}
-
-impl MyLanguagePatternCatalog {
-    pub fn new() -> Self {
-        let mut patterns = HashMap::new();
-
-        patterns.insert("Control".to_string(), vec![
-            DomainPattern {
-                name: "IfThenElse".to_string(),
-                regex: Regex::new(r"\bif\s+.+\s+then\s+.+\s+else\b").unwrap(),
-                description: "Conditional expression".to_string(),
-            },
-        ]);
-
-        patterns.insert("DataDef".to_string(), vec![
-            DomainPattern {
-                name: "Record".to_string(),
-                regex: Regex::new(r"\brecord\s+\w+\s*\{").unwrap(),
-                description: "Record type definition".to_string(),
-            },
-        ]);
-
-        Self { patterns }
-    }
-}
-
-impl PatternCatalog for MyLanguagePatternCatalog {
-    fn patterns(&self) -> &HashMap<String, Vec<DomainPattern>> {
-        &self.patterns
-    }
-}
-```
-
-## Integration with Other Components
-
-### With Paradigm Detection
-
-Combine domain patterns with paradigm analysis:
-
-```rust
-let paradigm_detector = ParadigmDetector::new(ParadigmConfig::default());
-let domain_detector = DomainPatternDetector::new(RholangPatternCatalog::default());
-
-let profile = paradigm_detector.analyze(rholang_code);
-let domain_matches = domain_detector.detect(rholang_code);
-
-println!("Paradigm: {:?}", profile.dominant_paradigm());
-println!("Domain patterns found: {}", domain_matches.len());
-```
-
-### With Code Embeddings
-
-Use domain patterns to enhance embeddings:
-
-```rust
-// Weight embedding dimensions based on detected patterns
-let domain_matches = domain_detector.detect(code);
-let has_contract = domain_matches.iter()
-    .any(|m| m.category == "Contract");
-
-let embedding = if has_contract {
-    contract_aware_embedder.embed(code)
-} else {
-    general_embedder.embed(code)
-};
-```
-
-## See Also
-
-- [Overview](overview.md) - Paradigm detection introduction
-- [Detection](detection.md) - Paradigm detector usage
-- [Indicators](indicators.md) - Indicator types and categories
-- [API Patterns](api-patterns.md) - Mining API usage patterns
+- [Detection](detection.md) — the general four-paradigm detector, and `LanguageHints` for these languages
+- [Indicators](indicators.md) — where `!`, `*`, `@` and `for` land in the general taxonomy
+- [API Patterns](api-patterns.md) — the complementary tool: mine idioms instead of asserting them
+- [Code Languages](../code/languages.md) — the tree-sitter grammars for Rholang and MeTTa

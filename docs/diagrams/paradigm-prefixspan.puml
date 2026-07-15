@@ -1,0 +1,66 @@
+@startuml paradigm-prefixspan
+' PrefixSpan by prefix projection, traced on the five file-I/O sequences of
+' the api_patterns test suite (N = 5, min_support ρ = 0.3 ⇒ ξ = 2, max_gap = 3).
+' Colour encodes role: sequence database (orange), projected databases
+' (purple, darker = deeper recursion), emitted patterns (green), pruned (grey).
+' Render: plantuml -tsvg docs/diagrams/paradigm-prefixspan.puml
+' Source of truth for Figure 1 in docs/components/paradigm/api-patterns.md §4
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title PrefixSpan — grow patterns by projecting the database onto a prefix (never by generating candidates)
+
+rectangle "**Sequence database  D**   (N = 5)\ns₁ ⟨fopen · fread · fclose⟩\ns₂ ⟨fopen · fwrite · fflush · fclose⟩\ns₃ ⟨fopen · fread · fseek · fread · fclose⟩\ns₄ ⟨fopen · fgets · fclose⟩\ns₅ ⟨fopen · fprintf · fclose⟩" as db #EF6C00
+
+rectangle "**Frequent 1-items**  (sup ≥ ξ = 2)\nfopen 5 · fclose 5 · fread 2\n— counted once per //sequence//, not per occurrence" as items #F57C00
+
+rectangle "**D|⟨fopen⟩**   sup = 5\nprojection = the position just past the\n**first** fopen of every sequence\n[(1,1) (2,1) (3,1) (4,1) (5,1)]" as p1 #6A1B9A
+
+rectangle "**D|⟨fopen,fclose⟩**   sup = **5**\nfclose lies within the gap window\nof all five projected suffixes" as p2 #7B1FA2
+rectangle "**D|⟨fopen,fread⟩**   sup = 2\nonly s₁ and s₃ carry fread\nwithin g+1 = 4 of fopen" as p3 #7B1FA2
+
+rectangle "**D|⟨fopen,fread,fclose⟩**   sup = 2" as p4 #8E24AA
+
+rectangle "⟨fopen · fclose⟩\n**support 5** (ratio 1.00)" as e1 #2E7D32
+rectangle "⟨fopen · fread⟩\n**support 2** (ratio 0.40)" as e2 #2E7D32
+rectangle "⟨fopen · fread · fclose⟩\n**support 2** (ratio 0.40)" as e3 #2E7D32
+
+rectangle "⟨fopen · fseek⟩ sup 1\n⟨fopen · fgets⟩ sup 1\n⟨fopen · fwrite⟩ sup 1\n**pruned:** sup < ξ" as pruned #78909C
+
+db --> items : count containing sequences
+items --> p1 : seed each frequent item
+p1 --> p2 : extend with fclose
+p1 --> p3 : extend with fread
+p1 --> pruned : anti-monotonicity —\nno supersequence can\nrecover the support
+p3 --> p4 : extend with fclose
+
+p2 ..> e1 : emit (|α| ≥ min_pattern_length)
+p3 ..> e2 : emit
+p4 ..> e3 : emit
+
+note right of p1
+  **Prefix projection.** Each entry (j, p) says
+  "sequence j, resume scanning at index p".
+  The suffix is never copied — only the
+  cursor is stored, so a projection costs
+  O(#entries), not O(total suffix length).
+end note
+
+note right of pruned
+  **Anti-monotonicity (Apriori property).**
+  α ⊑ β  ⟹  sup(α) ≥ sup(β).
+  An infrequent prefix can therefore be cut
+  with no risk of losing a frequent extension —
+  this single fact is what makes the search
+  tractable.
+end note
+@enduml

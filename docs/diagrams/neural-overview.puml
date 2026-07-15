@@ -1,0 +1,80 @@
+@startuml neural-overview
+' Map of the `neural` module (feature: neural-rescore). One ModernBertModel is loaded
+' once and shared by Arc across three consumers: embedder, rescorer, summarizer.
+' Green = neural; blue = statistical LM core; purple = retrieval; orange = code/LaTeX;
+' grey = external crates. The KV-cache family is drawn detached and muted because it is
+' scaffolding: nothing in ModernBertModel::forward reads or writes it.
+' Render: plantuml -tsvg docs/diagrams/neural-overview.puml
+' Source of truth for Figure 1 in docs/components/neural/overview.md §2.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title The neural module — one encoder, three consumers  (feature: neural-rescore)
+
+legend top right
+  |= Color |= Role |
+  |<#2E7D32>     | Neural (this module) |
+  |<#1565C0>     | Statistical LM core |
+  |<#6A1B9A>     | Retrieval / RAG |
+  |<#EF6C00>     | Code / LaTeX |
+  |<#546E7A>     | External crates |
+  |<#90A4AE>     | Scaffolding — not wired |
+endlegend
+
+rectangle "**Hugging Face Hub**\nhf-hub · model.safetensors\nconfig.json · tokenizer.json" as hub #546E7A
+rectangle "**Candle**\ncandle-core · candle-nn\ncandle-transformers::modernbert" as candle #546E7A
+
+rectangle "**ModernBertModel**\nencoder + MLM head + tokenizer\nhidden_size · vocab_size · device" as model #2E7D32
+
+rectangle "**ModernBertEmbedder**\nembed · embed_batch\nembed_document · embed_query" as embedder #2E7D32
+rectangle "**ModernBertRescorer**\nscore_sentence · score_batch\nrescore_paths" as rescorer #2E7D32
+rectangle "**Summarizer**\nextractive · create_synopsis\n(MMR selection)" as summarizer #2E7D32
+rectangle "**EmbeddingCache**\nDashMap<u64, Arc<[f32]>>\n+ LRU VecDeque" as ecache #2E7D32
+
+rectangle "**n-gram / hybrid beam**\nScoredPath { tokens, ngram_score }" as beam #1565C0
+rectangle "**RAG**\nIndexBuilder · RagIndex\nRetriever  (feature: rag)" as rag #6A1B9A
+rectangle "**LaTeX rescorer**\n(feature: latex-neural)" as latex #EF6C00
+rectangle "**Code embeddings**\n(feature: code-neural)" as codeemb #EF6C00
+
+rectangle "**KvCache · LayerCache**\n**SlidingWindowCache**\nautoregressive KV reuse\n— unused by this encoder —" as kv #90A4AE
+
+hub --> model : download &\nmmap weights
+candle --> model : tensors, layers,\nlog_softmax
+
+model --> embedder : Arc<ModernBertModel>
+model --> rescorer : Arc<ModernBertModel>
+embedder --> summarizer : owns
+embedder --> ecache : memoize\ntext ↦ vector
+
+beam --> rescorer : top-k paths
+rescorer --> beam : re-ranked paths
+
+embedder --> rag : document &\nquery vectors
+summarizer --> rag : synopsis
+model --> latex : score_sentence
+model --> codeemb : encoder reuse
+
+note bottom of kv #ECEFF1
+  ModernBERT is a **bidirectional encoder**: every position
+  attends to every other position, so nothing is reusable
+  across steps. KV caching pays off only for autoregressive
+  decoding. These types compile, are exported and unit-tested,
+  but no call site in the crate constructs them.
+end note
+
+note right of ecache #E8F5E9
+  The only cache on a live path.
+  Keyed by a 64-bit digest of the text
+  (gxhash ≥ 16 B, else xxh3).
+end note
+
+@enduml

@@ -5,6 +5,8 @@
 ' FULL depth of the trie and runs directly over the mmap'd vocabulary — no in-RAM
 ' materialization. Green = the working, default path. Blue (dashed) = the optional
 ' materialized-trie side branch, reserved for small static dictionaries.
+' Render: plantuml -tsvg docs/diagrams/correction-dictionary-backend.puml
+' Source of truth for the dictionary-backend figure in docs/integration/lling-llang/dictionary-backend.md.
 skinparam backgroundColor #FAFAFA
 skinparam shadowing false
 skinparam defaultTextAlignment center

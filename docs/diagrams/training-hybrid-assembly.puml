@@ -1,0 +1,70 @@
+@startuml training-hybrid-assembly
+' `train hybrid` is an ASSEMBLY step, not a training step: it loads two already-
+' trained model files, maps the single CLI --alpha onto whichever strategy was
+' selected, and writes the combined model. Dynamic is the only strategy whose
+' three struct fields are DERIVED from --alpha rather than set directly, and
+' NgramWithEmbeddingFallback ignores --alpha entirely. Those derivations are the
+' point of the diagram.
+' Render: plantuml -tsvg docs/diagrams/training-hybrid-assembly.puml
+' Source of truth for Figure 2 in docs/training/hybrid.md §4.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam note {
+  BackgroundColor #ECEFF1
+  BorderColor #546E7A
+  FontColor #263238
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title train hybrid — assembling two pre-trained experts
+
+rectangle "**NGRAM_MODEL**\nNgramModel::load_portable" as ngram #1565C0
+rectangle "**EMBEDDING_MODEL**\nSubwordEmbedding::load" as embed #2E7D32
+
+rectangle "**""--strategy""**\nlinear · log-linear\nngram-fallback · dynamic" as strat #6A1B9A
+rectangle "**""--alpha""** (default 0.8)\n**""--cache-size""** (default 50 000)" as knobs #546E7A
+
+rectangle "**Linear**\nalpha = α" as s_lin #6A1B9A
+rectangle "**LogLinear**\nalpha = α" as s_log #6A1B9A
+rectangle "**NgramWithEmbeddingFallback**\nα is **ignored**" as s_fb #6A1B9A
+rectangle "**Dynamic**\nbase_alpha = 0.5·α\nalpha_per_context = 0.1\nmax_alpha = min(α, 0.95)" as s_dyn #6A1B9A
+
+rectangle "**HybridConfig**\nstrategy · cache_size\nembedding_smoothing = 10⁻⁸\ntemperature = 1.0" as cfg #1B6CA8
+rectangle "**HybridLanguageModel::new**" as build #1B6CA8
+rectangle "**hybrid.bin**\nsave_portable" as out #455A64
+
+ngram --> build : expert 1
+embed --> build : expert 2
+knobs --> strat
+strat --> s_lin
+strat --> s_log
+strat --> s_fb
+strat --> s_dyn
+s_lin --> cfg
+s_log --> cfg
+s_fb --> cfg
+s_dyn --> cfg
+cfg --> build
+build --> out
+
+note bottom of build
+  **No corpus is read.** Both experts must already exist
+  on disk; changing either one means re-running
+  ""train ngram"" / ""train embedding"" and re-assembling.
+end note
+
+note right of cfg
+  ""embedding_smoothing"" and ""temperature"" are **not**
+  CLI flags — they take their ""HybridConfig::default""
+  values. Tune them through the library API.
+end note
+
+@enduml

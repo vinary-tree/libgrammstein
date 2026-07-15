@@ -1,0 +1,69 @@
+@startuml arch-serialization
+' The two model-persistence paths and why both exist: the NATIVE path is fast but
+' welds the file to one dictionary backend; the PORTABLE path is backend-agnostic
+' and rebuilds the trie through a caller-supplied factory on load.
+' Colour legend (semantic, shared across all repo diagrams — see architecture.puml):
+'   #1565C0 blue = statistical LM core   #00838F teal = storage / persistence
+'   #546E7A grey = external crates / corpora
+' Render: plantuml -tsvg docs/diagrams/arch-serialization.puml
+' Source of truth for Figure 3 in docs/architecture/data-flow.md §6
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam NoteBackgroundColor #FFF3E0
+skinparam NoteBorderColor #EF6C00
+title Model persistence — the native path vs. the portable path
+
+rectangle "**In-memory model**\nNgramModel<D>  ·  HybridLanguageModel<D>" as model #1565C0
+
+package "NATIVE  —  save / load   (feature: serde-extras)" {
+  rectangle "**serde::Serialize on D**\nthe dictionary's own node graph, written verbatim" as native_ser #00838F
+  rectangle "**bincode**\ncompact binary framing" as native_bin #00838F
+  rectangle "**model.bin**\n**D-specific** — loadable only back into the //same// backend" as native_file #00838F
+}
+
+package "PORTABLE  —  save_portable / load_portable" {
+  rectangle "**to_portable()**\nflatten the trie to (key, NgramEntrySnapshot) pairs\n— plain fields, because atomics cannot cross a serializer" as port_flat #1565C0
+  rectangle "**PortableModel**\npairs + discounts + <latex>|V|</latex> + total count\n**no backend type appears in the schema**" as port_struct #1565C0
+  rectangle "**model.portable.bin**\nloadable into **any** MutableMappedDictionary" as port_file #00838F
+  rectangle "**dictionary_factory**\na caller-supplied closure that mints the backend\n//at load time//" as factory #546E7A
+}
+
+rectangle "**Rehydrated model**\nNgramModel<D'> — possibly a **different** backend" as rehydrated #1565C0
+
+model --> native_ser : save
+native_ser --> native_bin
+native_bin --> native_file
+native_file -[#00838F,dashed]-> model : load\n(same D only)
+
+model --> port_flat : save_portable
+port_flat --> port_struct
+port_struct --> port_file
+port_file --> factory : load_portable
+factory --> rehydrated : replay pairs\ninto a fresh trie
+
+note right of port_flat
+  **Why a snapshot type exists.** NgramEntry's fields
+  are AtomicU64 / AtomicU32, and an atomic has no
+  meaningful serialized identity. NgramEntrySnapshot is
+  the Copy plain-field twin, taken with Relaxed loads at
+  a quiescent point.
+end note
+
+note right of factory
+  **The escape hatch.** Train once over a mutable
+  DynamicDawgChar, ship the portable file, then load into
+  a read-optimized DoubleArrayTrieChar in production —
+  no retraining, no format migration.
+end note
+
+@enduml

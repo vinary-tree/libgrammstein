@@ -1,368 +1,286 @@
-# Extractive Summarizer
+# Extractive Summarization — Centroid Relevance and MMR
 
-The `Summarizer` extracts representative sentences from documents using embedding-based similarity and Maximal Marginal Relevance (MMR).
+`Summarizer` builds a synopsis by **selecting** sentences, never by generating them. It embeds
+every candidate sentence, measures each one's *centrality* against the document centroid, and
+then picks greedily under a **Maximal Marginal Relevance** objective [[1]](#references) so the
+chosen sentences do not all say the same thing.
 
-## What is Extractive Summarization?
+> **Scope.** Source of truth: [`src/neural/summarizer.rs`](../../../src/neural/summarizer.rs).
+> Feature: `neural-rescore`. It embeds through [`ModernBertEmbedder`](embedder.md) and is
+> consumed by the [RAG index builder](../rag/builder.md).
 
-Extractive summarization selects the most important sentences from a document without generating new text:
+## 1. Notation
 
-```
-Original Document (10 sentences):
-┌─────────────────────────────────────────────────────────────────────────┐
-│ S1: Machine learning is a subset of artificial intelligence.           │
-│ S2: It enables computers to learn from data.                           │
-│ S3: The field was founded in the 1950s.                               │
-│ S4: Early work focused on symbolic AI.                                 │
-│ S5: Neural networks emerged as a key approach.                         │
-│ S6: Deep learning revolutionized the field in 2012.                   │
-│ S7: Applications include image recognition and NLP.                    │
-│ S8: Models require large amounts of training data.                     │
-│ S9: GPUs accelerated neural network training.                          │
-│ S10: The technology continues to advance rapidly.                      │
-└─────────────────────────────────────────────────────────────────────────┘
+| Symbol | Meaning |
+|---|---|
+| $`D = (s_1, \dots, s_n)`$ | the document's candidate sentences, in document order |
+| $`\mathbf{v}_i \in \mathbb{R}^{H}`$ | the embedding of sentence $`s_i`$ ($`H = 768`$, $`\ell_2`$-normalized) |
+| $`\bar{\mathbf{v}}`$, $`\mathbf{c}`$ | the mean of the $`\mathbf{v}_i`$, and its normalization — the **centroid** |
+| $`S`$ | the set of already-selected sentences; $`R \setminus S`$ are the candidates left |
+| $`\lambda`$ | the MMR trade-off, $`\lambda \in [0, 1]`$ |
+| $`\delta`$ | the `diversity_threshold` config field; $`\lambda = 1 - \delta`$ |
+| $`m`$ | `num_sentences` — how many sentences the summary keeps |
 
-Extractive Summary (3 sentences):
-┌─────────────────────────────────────────────────────────────────────────┐
-│ S1: Machine learning is a subset of artificial intelligence.           │
-│ S6: Deep learning revolutionized the field in 2012.                   │
-│ S7: Applications include image recognition and NLP.                    │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+## 2. Extractive, and why
 
-## Algorithm
+*Abstractive* summarization writes new sentences and can hallucinate; *extractive*
+summarization can only quote. For a retrieval index — the summarizer's actual job here, where a
+synopsis is shown to a user as evidence for a hit — the extractive guarantee (**every word in
+the summary appears in the document**) is worth more than fluency. The classical instantiation is
+centroid-based [[2]](#references): treat the document's mean vector as its "topic", and keep the
+sentences nearest to it.
 
-The summarizer uses a three-step process:
+Centrality alone, however, is degenerate: the three sentences nearest the centroid are usually
+near *each other*, and the summary repeats itself. MMR is the fix.
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Step 1: Sentence Splitting & Filtering                                  │
-│                                                                          │
-│ Document → Split on .!? → Filter by length → Valid sentences            │
-│                                                                          │
-│ Handles abbreviations: Dr., Mr., Mrs., etc., e.g., i.e., vs.           │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Step 2: Embedding & Centroid Computation                                │
-│                                                                          │
-│ Sentences → ModernBERT Embedder → Embeddings (768-dim)                  │
-│                                                                          │
-│ Centroid = normalize(mean(embeddings))                                  │
-│                                                                          │
-│ Relevance[i] = cosine_similarity(embedding[i], centroid)                │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Step 3: MMR Selection                                                   │
-│                                                                          │
-│ For k sentences:                                                         │
-│   1. Select highest relevance sentence                                  │
-│   2. For remaining selections:                                          │
-│      MMR(s) = λ × relevance(s) - (1-λ) × max_sim(s, selected)          │
-│      Select sentence with highest MMR                                   │
-│                                                                          │
-│ λ = 1.0 - diversity_threshold                                           │
-└────────────────────────────────────────────────────────────────────────┘
-```
+## 3. The pipeline
 
-### Maximal Marginal Relevance (MMR)
+![Summarizer::extractive, end to end](../../diagrams/neural-summarizer-pipeline.svg)
 
-MMR balances relevance and diversity:
+*Figure 1 — `extractive`, including both short-circuits and the length filter. The selection
+step is expanded in Figure 2.*
 
-```
-MMR(s) = λ × Relevance(s) - (1-λ) × max(Similarity(s, s_selected))
+### Splitting
 
-where:
-  λ = relevance weight (higher = more relevant, less diverse)
-  Relevance(s) = cosine_similarity(s, document_centroid)
-  Similarity(s, s') = cosine_similarity(embedding(s), embedding(s'))
+`split_sentences` breaks on `.`, `!` and `?`, but suppresses the break when the buffer ends in a
+known abbreviation — a 30-entry list (`mr.`, `dr.`, `e.g.`, `i.e.`, `etc.`, `vs.`, `fig.`,
+`approx.`, …). On a suppressed break the buffer keeps accumulating, so *"Dr. Smith arrived."*
+stays one sentence. This is a lexical heuristic, not a sentence tokenizer: decimals (*"3.14"*),
+ellipses and unlisted abbreviations will still split.
+
+### Filtering and the short-circuits
+
+Two exits happen before any encoder call:
+
+- $`n = 0`$ → the empty string;
+- $`n \leq m`$ → the whole text, joined (nothing to select).
+
+Then sentences outside `[min_sentence_length, max_sentence_length]` — 20 to 500 **characters**
+by default — are dropped. If *nothing* survives the filter, the summarizer falls back to the
+first $`m`$ sentences unfiltered rather than returning nothing.
+
+## 4. The MMR objective
+
+![MMR: centrality minus redundancy](../../diagrams/neural-mmr.svg)
+
+*Figure 2 — the objective. Relevance pulls toward the centroid (blue); redundancy pushes away
+from what is already chosen (orange).*
+
+The centroid, and each sentence's relevance to it:
+
+```math
+\bar{\mathbf{v}} = \frac{1}{n}\sum_{i=1}^{n} \mathbf{v}_i,
+\qquad
+\mathbf{c} = \frac{\bar{\mathbf{v}}}{\lVert \bar{\mathbf{v}} \rVert_2},
+\qquad
+\operatorname{rel}(s_i) = \cos(\mathbf{v}_i, \mathbf{c}) \tag{S1}
 ```
 
-## Configuration
+Carbonell & Goldstein's MMR [[1]](#references) then selects greedily, trading relevance against
+redundancy:
+
+```math
+\operatorname{MMR}(s_i) \;=\; \lambda \cdot \operatorname{rel}(s_i)
+\;-\; (1 - \lambda) \cdot \max_{s_j \in S} \cos(\mathbf{v}_i, \mathbf{v}_j) \tag{S2}
+```
+
+```math
+s^{\ast} \;=\; \operatorname*{arg\,max}_{s_i \in R \setminus S} \operatorname{MMR}(s_i),
+\qquad S \leftarrow S \cup \{ s^{\ast} \} \quad\text{until}\quad \lvert S \rvert = m \tag{S3}
+```
+
+The original formulation scores relevance against a **query**; with no query to speak of, the
+document centroid $`\mathbf{c}`$ takes its place — the standard reduction of MMR to *generic*
+(query-free) summarization.
+
+The trade-off knob is inverted in the config: the field is a *diversity* threshold, so
+
+```math
+\lambda \;=\; 1 - \delta, \qquad \delta = \texttt{diversity\_threshold} \tag{S4}
+```
+
+| `diversity_threshold` $`\delta`$ | $`\lambda`$ | Behavior |
+|---|---|---|
+| `0.0` | 1.0 | pure centrality — the summary may repeat itself |
+| `0.3` (**default**) | 0.7 | centrality-leaning, with a real redundancy penalty |
+| `0.5` | 0.5 | relevance and novelty weighted equally |
+| `1.0` | 0.0 | pure novelty — the summary drifts to outliers |
+
+**The first pick is special.** With $`S = \varnothing`$ the maximum in $`(\mathrm{S2})`$ is over
+an empty set. The implementation sidesteps this by seeding $`S`$ with the most relevant sentence,
+$`\operatorname*{arg\,max}_i \operatorname{rel}(s_i)`$, *before* the loop begins — so every
+subsequent evaluation of $`(\mathrm{S2})`$ has a non-empty $`S`$ and is well-defined.
+
+### Ordering the output
+
+With `preserve_order: true` (the default) the picks are re-sorted by their **original document
+index**, so the summary reads in narrative order. With `false` they stay in MMR selection order —
+most central sentence first.
+
+## 5. The algorithm, literately
+
+Mirrors `Summarizer::extractive` and `Summarizer::select_diverse`.
+
+```
+function extractive(text, num):
+    m         <- num or config.num_sentences
+    sentences <- split_sentences(text)                  ▸ abbreviation-aware
+    if sentences is empty:      return ""
+    if |sentences| <= m:        return join(sentences)  ▸ nothing to select
+    valid <- [ (i, s) for (i, s) in sentences if min_len <= |s| <= max_len ]
+    if valid is empty:          return join(first m sentences)
+
+    V <- embedder.embed_batch(texts of valid)           ▸ cached, ℓ2-normalized
+    c <- normalize(mean(V))                             ▸ (S1)
+    scored <- [ (i, s, cos(V[j], c)) for j, (i, s) in valid ]      ▸ relevance
+
+    picks <- select_diverse(scored, V, m)               ▸ (S2), (S3)
+    idx   <- [ i for (i, _, _) in picks ]
+    if preserve_order: sort(idx)                        ▸ narrative order
+    return join(sentences[i] for i in idx)
+
+function select_diverse(scored, V, m):
+    sort scored by relevance, descending                ▸ ⚠ see §7 — this permutes `scored`
+    S <- [ scored[0] ]                                  ▸ seed with the most central sentence
+    while |S| < m and |S| < |scored|:
+        best <- argmax over candidates not in S of:
+                    λ · relevance  −  (1 − λ) · max cos(v_candidate, v_selected)
+        if no candidate: break
+        S <- S + [best]
+    return S
+```
+
+## 6. Usage
 
 ```rust
-use libgrammstein::neural::SummarizerConfig;
-
-let config = SummarizerConfig {
-    // Number of sentences to extract
-    num_sentences: 3,
-
-    // Minimum sentence length (characters)
-    min_sentence_length: 20,
-
-    // Maximum sentence length (characters)
-    max_sentence_length: 500,
-
-    // Preserve original document order in output
-    preserve_order: true,
-
-    // Diversity threshold (0.0 = all relevance, 1.0 = all diversity)
-    diversity_threshold: 0.3,
+use libgrammstein::neural::{
+    EmbeddingConfig, ModernBertEmbedder, Summarizer, SummarizerConfig,
 };
+
+// A Summarizer is constructed FROM an embedder; `new` is infallible and takes both.
+let embedder = ModernBertEmbedder::new(EmbeddingConfig::default())?;
+let summarizer = Summarizer::new(embedder, SummarizerConfig::default());
+
+let article = "Machine learning is a subfield of artificial intelligence. \
+               It lets programs improve from data rather than explicit rules. \
+               Deep learning, a further subfield, uses many-layered networks. \
+               GPUs made training those networks practical at scale.";
+
+// `None` means "use config.num_sentences" (3).
+let summary = summarizer.extractive(article, Some(2))?;
+println!("{summary}");
+# Ok::<(), libgrammstein::neural::NeuralError>(())
 ```
 
-### Diversity Threshold
-
-| Value | Effect |
-|-------|--------|
-| 0.0 | Pure relevance (may select redundant sentences) |
-| 0.3 | Balanced (default) |
-| 0.5 | Equal relevance and diversity |
-| 0.7 | Diversity-focused |
-| 1.0 | Maximum diversity (may miss key content) |
-
-## Creating a Summarizer
-
-### From Configuration
-
-```rust
-use libgrammstein::neural::{Summarizer, SummarizerConfig};
-
-let config = SummarizerConfig::default();
-let summarizer = Summarizer::new(config)?;
-```
-
-### From Existing Model
+Sharing an existing encoder instead of loading a second one:
 
 ```rust
 use std::sync::Arc;
-use libgrammstein::neural::{ModernBertEmbedder, Summarizer, SummarizerConfig};
+use libgrammstein::neural::{ModernBertModel, ModernBertConfig, Summarizer, SummarizerConfig};
 
-let embedder = ModernBertEmbedder::new(embedder_config)?;
-let summarizer = Summarizer::from_embedder(embedder, SummarizerConfig::default());
+let model = Arc::new(ModernBertModel::load(ModernBertConfig::default())?);
+
+// from_model builds an internal embedder with EmbeddingConfig::default().
+let summarizer = Summarizer::from_model(model, SummarizerConfig::default())?;
+# Ok::<(), libgrammstein::neural::NeuralError>(())
 ```
 
-## Extractive Summarization
+### Synopses
 
-### Basic Usage
+A `Synopsis` records **where the text came from**, which is what lets a RAG index prefer a
+human-written abstract over a machine-made one:
 
 ```rust
-let document = r#"
-Machine learning is a subset of artificial intelligence that enables
-computers to learn from data. The field was founded in the 1950s by
-pioneers like Alan Turing. Deep learning, a subfield using neural
-networks with many layers, has revolutionized applications like
-image recognition and natural language processing.
-"#;
+use libgrammstein::neural::SynopsisSource;
 
-let sentences = summarizer.extractive(document)?;
+// `summarizer` is the Summarizer built above.
+let body = "The paper proves X. The proof proceeds by induction on the term structure. \
+            A corollary follows for the untyped case.";
 
-for (i, sentence) in sentences.iter().enumerate() {
-    println!("{}. {}", i + 1, sentence.text);
-    println!("   Score: {:.4}", sentence.similarity_score);
+// create_synopsis(explicit, content) — the explicit synopsis comes FIRST.
+let from_abstract = summarizer.create_synopsis(Some("The paper proves X."), body)?;
+assert!(from_abstract.is_explicit());
+assert_eq!(from_abstract.source, SynopsisSource::Explicit);
+
+let generated = summarizer.create_synopsis(None, body)?;   // falls back to extractive
+assert_eq!(generated.source, SynopsisSource::Generated);   // the Default variant
+# Ok::<(), libgrammstein::neural::NeuralError>(())
+```
+
+`Synopsis` and `SynopsisSource` both derive `Serialize`/`Deserialize`, so a synopsis survives a
+round-trip through a serialized index.
+
+### Configuration
+
+```rust
+pub struct SummarizerConfig {
+    pub num_sentences: usize,       // default: 3
+    pub min_sentence_length: usize, // default: 20  (characters)
+    pub max_sentence_length: usize, // default: 500 (characters)
+    pub preserve_order: bool,       // default: true
+    pub diversity_threshold: f32,   // default: 0.3  → lambda = 0.7
 }
 ```
 
-### ScoredSentence Structure
+## 7. Limitations
 
-```rust
-pub struct ScoredSentence {
-    /// The sentence text
-    pub text: String,
+### The redundancy term compares the wrong vectors — a known defect
 
-    /// Original position in document (0-indexed)
-    pub original_index: usize,
+`select_diverse` sorts its `scored` slice **in place** by relevance, but the parallel
+`embeddings` slice is left in document order. The loop then indexes `embeddings[i]` with `i` =
+the candidate's position in the *sorted* slice, and resolves each already-selected sentence with
+`scored.iter().position(…)` — again a **sorted** position — before indexing `embeddings` with it.
+After the sort, position $`i`$ in `scored` and position $`i`$ in `embeddings` are no longer the
+same sentence.
 
-    /// Similarity to document centroid
-    pub similarity_score: f32,
-}
-```
+- **Where.** [`src/neural/summarizer.rs`](../../../src/neural/summarizer.rs), `select_diverse`,
+  the `embeddings[i]` at line 202 and the `position(…)` at line 212.
+- **Effect.** The relevance term of $`(\mathrm{S2})`$ is carried inside the tuple and is
+  therefore *correct*. The redundancy term is evaluated on a permuted pairing, so it is not the
+  $`\max_{s_j \in S} \cos(\mathbf{v}_i, \mathbf{v}_j)`$ of the formula. Selection still favors
+  central sentences and still returns $`m`$ **distinct** sentences (membership is tracked by the
+  original index, which is correct), so output remains plausible — which is exactly why the
+  defect is easy to miss.
+- **Also.** The `position(…)` scan inside the inner loop makes selection
+  $`O(m \cdot n^{2})`$ where an aligned implementation is $`O(m \cdot n \cdot H)`$.
+- **Status.** Reported, not worked around: fixing it means editing `src/`, which this
+  documentation pass does not do. Until it is fixed, treat `diversity_threshold` as a knob with
+  a *directionally* correct but quantitatively wrong effect.
 
-## Creating Synopses
+### Other limitations
 
-For RAG integration, create a `Synopsis` with source tracking:
+| Limitation | Detail |
+|---|---|
+| Sentence splitting is lexical | Decimals, ellipses and unlisted abbreviations split incorrectly. The abbreviation list is English-only. |
+| Length filter is in characters | `min`/`max_sentence_length` count `char`s via `str::len()` — i.e. **bytes** — so the effective threshold is stricter for multi-byte scripts. |
+| `ScoredSentence` is never constructed | The struct is exported but the implementation scores anonymous tuples; treat it as a reserved shape. |
+| No redundancy against the *query* | This is generic (query-free) summarization: $`\mathbf{c}`$ replaces MMR's query. There is no API to summarize *with respect to* a query. |
+| Cost | $`n`$ sentence embeddings, cached, plus an $`O(m \cdot n^2)`$ selection. The encoder passes dominate for a cold cache. |
 
-```rust
-use libgrammstein::neural::Synopsis;
+An alternative worth knowing: graph-centrality methods such as LexRank [[3]](#references) rank
+sentences by eigenvector centrality in a similarity graph instead of by distance to a centroid.
+They are more robust on multi-topic documents, at the cost of an $`O(n^2)`$ similarity matrix
+and a power iteration.
 
-let document = "Long document text here...";
+## References
 
-// Check for explicit synopsis in metadata
-let explicit_synopsis: Option<&str> = metadata.get("synopsis");
+1. J. Carbonell & J. Goldstein (1998). *The use of MMR, diversity-based reranking for reordering
+   documents and producing summaries.* SIGIR '98, 335–336.
+   [doi:10.1145/290941.291025](https://doi.org/10.1145/290941.291025)
+2. D. R. Radev, H. Jing, M. Styś & D. Tam (2004). *Centroid-based summarization of multiple
+   documents.* Information Processing & Management 40(6), 919–938.
+   [doi:10.1016/j.ipm.2003.10.006](https://doi.org/10.1016/j.ipm.2003.10.006)
+3. G. Erkan & D. R. Radev (2004). *LexRank: Graph-based Lexical Centrality as Salience in Text
+   Summarization.* Journal of Artificial Intelligence Research 22, 457–479.
+   [doi:10.1613/jair.1523](https://doi.org/10.1613/jair.1523)
+4. N. Reimers & I. Gurevych (2019). *Sentence-BERT: Sentence Embeddings using Siamese
+   BERT-Networks.* EMNLP-IJCNLP, 3982–3992. arXiv:1908.10084.
+   [doi:10.18653/v1/D19-1410](https://doi.org/10.18653/v1/D19-1410)
 
-let synopsis = summarizer.create_synopsis(document, explicit_synopsis)?;
+## See also
 
-match synopsis.source {
-    SynopsisSource::Explicit => {
-        println!("Using author-provided synopsis");
-    }
-    SynopsisSource::Generated => {
-        println!("Generated synopsis: {}", synopsis.text);
-    }
-}
-```
-
-### Synopsis Structure
-
-```rust
-pub struct Synopsis {
-    /// The synopsis text
-    pub text: String,
-
-    /// Whether explicit (author-provided) or generated
-    pub source: SynopsisSource,
-}
-
-pub enum SynopsisSource {
-    /// Synopsis provided explicitly (e.g., from metadata)
-    Explicit,
-
-    /// Synopsis generated by summarizer
-    Generated,
-}
-```
-
-### Creating Synopses Directly
-
-```rust
-// From explicit text
-let synopsis = Synopsis::explicit("This document covers machine learning basics.");
-
-// Mark as generated
-let synopsis = Synopsis::generated("Machine learning is a subset of AI...");
-
-// Check source
-if synopsis.is_explicit() {
-    println!("Author provided this synopsis");
-}
-```
-
-## Sentence Splitting
-
-The summarizer handles common abbreviations:
-
-```rust
-// These are NOT split:
-// "Dr. Smith went to the store."  → 1 sentence
-// "I.e., this is an example."     → 1 sentence
-// "The U.S. is large."            → 1 sentence
-
-// These ARE split:
-// "Hello. World."                 → 2 sentences
-// "What? Really!"                 → 2 sentences
-```
-
-### Supported Abbreviations
-
-- Titles: Dr., Mr., Mrs., Ms., Prof., Jr., Sr.
-- Latin: etc., e.g., i.e., vs., viz.
-- Academic: Ph.D., B.A., M.A.
-- Common: No., Fig., St.
-
-## Length Filtering
-
-Sentences outside the length bounds are excluded:
-
-```rust
-let config = SummarizerConfig {
-    min_sentence_length: 20,   // Skip very short sentences
-    max_sentence_length: 500,  // Skip very long sentences
-    ..Default::default()
-};
-```
-
-This helps exclude:
-- Fragments ("Yes.")
-- Headers ("Chapter 1")
-- Overly complex run-on sentences
-
-## Order Preservation
-
-Control whether output matches document order:
-
-```rust
-// Preserve original order (default)
-let config = SummarizerConfig {
-    preserve_order: true,
-    ..Default::default()
-};
-// Output: [S1, S5, S8]  (as they appear in document)
-
-// Sort by relevance
-let config = SummarizerConfig {
-    preserve_order: false,
-    ..Default::default()
-};
-// Output: [S5, S1, S8]  (highest relevance first)
-```
-
-## Integration with RAG
-
-The summarizer integrates with the RAG pipeline:
-
-```rust
-use libgrammstein::rag::{IndexBuilder, IndexBuilderConfig};
-
-// IndexBuilder uses Summarizer for auto-synopsis
-let builder_config = IndexBuilderConfig {
-    auto_synopsis: true,  // Generate synopses for documents without explicit ones
-    ..Default::default()
-};
-
-let builder = IndexBuilder::new(builder_config)?;
-let index = builder.build_from_directory("./docs", None)?;
-
-// Documents now have synopses for display in search results
-for (meta, score) in index.query(&query_embedding, 5) {
-    println!("{}: {}", meta.title.unwrap_or_default(), meta.synopsis);
-}
-```
-
-## Error Handling
-
-```rust
-use libgrammstein::neural::NeuralError;
-
-match summarizer.extractive(document) {
-    Ok(sentences) => {
-        for s in sentences {
-            println!("{}", s.text);
-        }
-    }
-    Err(NeuralError::Inference(msg)) => {
-        eprintln!("Embedding failed: {}", msg);
-    }
-    Err(e) => {
-        eprintln!("Error: {}", e);
-    }
-}
-```
-
-## Performance Tips
-
-### 1. Batch Similar-Length Documents
-
-The embedder is most efficient when processing similar-length texts.
-
-### 2. Adjust Sentence Count
-
-More sentences = more embedding computation:
-
-```rust
-let config = SummarizerConfig {
-    num_sentences: 2,  // Fewer for speed
-    ..Default::default()
-};
-```
-
-### 3. Pre-filter Documents
-
-Skip very short documents that don't need summarization:
-
-```rust
-if document.len() < 500 {
-    // Document is short enough to use as-is
-    Synopsis::explicit(document)
-} else {
-    summarizer.create_synopsis(document, None)?
-}
-```
-
-## See Also
-
-- [Overview](overview.md) - Neural module introduction
-- [Embedder](embedder.md) - Embedding generation
-- [RAG Builder](../rag/builder.md) - Synopsis in RAG pipeline
-- [Document](../rag/document.md) - Document metadata with synopsis
+- [Embedder](embedder.md) — the vectors the summarizer selects over
+- [Neural Overview](overview.md) — the module map and the maturity table
+- [RAG Builder](../rag/builder.md) — the consumer that turns synopses into index entries
+- [Topic Modeling](../topic/overview.md) — clustering documents rather than sentences
+- [Cache](cache.md) — why a second pass over the same document is nearly free

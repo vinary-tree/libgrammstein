@@ -1,0 +1,68 @@
+@startuml neural-pseudo-perplexity
+' MLM pseudo-perplexity of one sentence: T masked copies, T forward passes, one gathered
+' log-probability each. Shows exactly which tensor leaves which stage, and marks the cost.
+' Render: plantuml -tsvg docs/diagrams/neural-pseudo-perplexity.puml
+' Source of truth for Figure 2 in docs/components/neural/rescorer.md §4.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam sequence {
+  ArrowColor #37474F
+  LifeLineBorderColor #90A4AE
+  LifeLineBackgroundColor #ECEFF1
+  ParticipantBorderColor #263238
+  ParticipantBackgroundColor #2E7D32
+  ParticipantFontColor white
+  ParticipantFontStyle bold
+  ActorBorderColor #263238
+}
+title MLM pseudo-perplexity — mask every position once  (Salazar et al., 2020)
+
+participant "ModernBertRescorer\n::pseudo_perplexity" as R
+participant "Tokenizer" as T
+participant "ModernBertModel\n::get_mlm_logits" as M
+participant "candle_nn::ops\n::log_softmax" as S
+
+R -> T : encode(sentence, add_special = true)
+T --> R : W = (w₁ … w_T),  T tokens\n(including [CLS] and [SEP])
+
+R -> T : token_to_id("[MASK]")
+T --> R : mask_id = 50 284\n(NeuralError::Tokenization if absent)
+
+loop for each position t = 1 … T
+  R -> R : W∖t ← clone(W);  W∖t[t] ← [MASK]
+  R -> M : input_ids = W∖t   (shape 1 × T)
+  note right of M #E8F5E9
+    encoder → MLM head → tied decoder
+    logits Z ∈ ℝ^(1 × T × 50 368)
+  end note
+  M --> R : Z
+  R -> R : z_t ← Z[0, t, ·]   (one row: ℝ^50368)
+  R -> S : log_softmax(z_t, dim = −1)
+  S --> R : log ℙ(· | W∖t)
+  R -> R : **accumulate log ℙ(w_t | W∖t)**\n(the //original// token, not the argmax)
+end
+
+R -> R : PLL(W) = Σₜ log ℙ(w_t | W∖t)
+R -> R : **PPPL(W) = exp( −PLL(W) / T )**
+
+note over R, S #FFF8E1
+  **Cost.** T forward passes for a T-token sentence — the masked copies are
+  //not// batched into one tensor. With B = batch_size this is still T sequential
+  encoder calls per sentence; batch_size only chunks the //loop over paths// in
+  rescore_paths. Scoring an n-token beam of width k costs Θ(k · T) encoder passes.
+end note
+
+note over R #FFF8E1
+  **Divergence from the reference.** Salazar et al. score only the //content//
+  tokens; this implementation masks [CLS] and [SEP] too, so T counts them and
+  their near-deterministic (high) log-probabilities enter the mean, pulling PPPL
+  toward 1. They are 2 terms out of T, so the pull is //stronger for shorter
+  sentences//: PPPL here is not comparable to published numbers, and comparing
+  candidates of **different lengths** carries a length-dependent bias. Beams whose
+  candidates are all the same length are unaffected in //rank//.
+end note
+
+@enduml

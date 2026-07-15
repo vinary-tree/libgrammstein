@@ -1,0 +1,93 @@
+@startuml dict-backends
+' SpellingDictionary vs VocabularyDictionary: what backs each, what each costs,
+' and what each can answer. Two surfaces, deliberately not a shared trait.
+' Render: plantuml -tsvg docs/diagrams/dict-backends.puml
+' Source of truth for Figure 2 in docs/components/dictionary/overview.md, section "Choosing between them".
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam class {
+  BorderColor #263238
+  FontColor white
+  AttributeFontColor #263238
+  StemColor #37474F
+}
+skinparam note {
+  BackgroundColor #ECEFF1
+  BorderColor #90A4AE
+}
+title The two dictionary surfaces — same questions, different backing store
+
+class SpellingDictionary #00838F {
+  .. backing store ..
+  entries : Vec<WordEntry>  (sorted by frequency)
+  word_index : HashMap<String, usize>
+  metadata : DictionaryMetadata
+  .. queries ..
+  + contains(word) : bool
+  + get(word) : Option<&WordEntry>
+  + frequency(word) : Option<u64>
+  + log_prob(word) : Option<f64>
+  + rank(word) : Option<usize>
+  + top_n(n) : &[WordEntry]
+  + words_in_frequency_range(min, max)
+  + words() / entries() / len() / is_empty()
+  + total_tokens() / metadata()
+  .. lifecycle ..
+  + merge(&other)
+  + save(path) † / load(path) †
+  + export_text(path) / import_text(path, lang)
+}
+
+class WordEntry #1565C0 {
+  + word : String
+  + frequency : u64
+  + log_prob : Option<f64>
+}
+
+class DictionaryMetadata #1565C0 {
+  + version : u32   (must be 1)
+  + language : String  (BCP 47)
+  + word_count : usize
+  + total_tokens : u64
+  + min_frequency : u64
+  + created_at : u64  (Unix seconds)
+  + source : Option<String>
+}
+
+class "VocabularyDictionary<'a>" as VD #00838F {
+  .. backing store (borrowed, not copied) ..
+  vocabulary : SharedConcurrentVocab
+  storage : &'a NgramStorage
+  .. queries ..
+  + contains(word) : bool
+  + frequency(word) : Option<u64>
+  + len() : u64
+  + is_empty() : bool
+  + vocabulary() / storage()
+}
+
+SpellingDictionary *-- "n" WordEntry
+SpellingDictionary *-- "1" DictionaryMetadata
+
+note right of SpellingDictionary
+  **Owns its data.** Built once, then read-only.
+  contains / frequency / rank are O(1) expected
+  (one HashMap probe). Ranking by frequency is free:
+  the index **is** the rank, because entries are sorted.
+  † save / load need the **serde-extras** feature.
+  Costs one String per word plus the index — roughly
+  2 copies of the vocabulary text.
+end note
+
+note right of VD
+  **Borrows the model's data.** Needs the **google-books**
+  feature. contains is O(k) in the word length (a trie
+  walk); frequency additionally encodes the word to a
+  varint unigram key and probes the n-gram store.
+  Always consistent with the model, and costs no extra
+  memory — but offers no rank, no log_prob, no top_n.
+end note
+@enduml

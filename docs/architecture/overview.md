@@ -1,405 +1,345 @@
 # Architecture Overview
 
-This document provides a high-level view of libgrammstein's architecture, explaining how components fit together and the design principles behind them.
+libgrammstein is a **layered language-modeling toolkit**: a persistent-storage foundation, a
+statistical + embedding core, a hybrid scorer, and a fan of higher-level capabilities (neural
+rescoring, retrieval, topic modeling, code and LaTeX correction) that a developer enables à la
+carte with Cargo features. This document explains *what* the layers are, *why* the boundaries
+fall where they do, and *which contracts* hold the stack together.
 
-## Design Goals
+> **Scope.** This is the map, not the territory. Each layer has its own deep doc — see
+> [See also](#see-also). The three companion architecture documents are
+> [Data Flow](data-flow.md) (how bytes become probabilities), [Threading Model](threading.md)
+> (how the work is parallelized), and [Memory Optimization](memory-optimization.md) (how the
+> heap is bounded). Source of truth for the layer wiring is
+> [`src/lib.rs`](../../src/lib.rs) and [`Cargo.toml`](../../Cargo.toml).
 
-libgrammstein is designed with four primary goals:
+## Notation
 
-1. **Hybrid Scoring**: Combine the strengths of N-gram models (precise local context) with embeddings (semantic similarity, OOV handling)
+Every symbol below is defined before it is used in a formula.
 
-2. **WFST Integration**: Seamlessly integrate with lling-llang's lattice-based text correction pipeline
+| Symbol | Meaning |
+|---|---|
+| $`w`$ | the word (token) whose probability is being estimated |
+| $`h`$ | the *history* (context) — the words preceding $`w`$ |
+| $`n`$ | the maximum n-gram **order** of the model (libgrammstein supports $`1 \leq n \leq 5`$) |
+| $`c(h\,w)`$ | raw training count of the n-gram formed by appending $`w`$ to $`h`$ |
+| $`\lvert V \rvert`$ | vocabulary size — the number of distinct words |
+| $`N_{\text{doc}}`$ | number of documents in a retrieval index |
+| $`d`$ | embedding dimensionality |
+| $`\mathbb{P}_n(w \mid h)`$ | the n-gram (Modified Kneser-Ney) probability |
+| $`\mathbb{P}_e(w \mid h)`$ | the embedding-derived probability |
+| $`\alpha \in [0,1]`$ | the interpolation weight mixing $`\mathbb{P}_n`$ with $`\mathbb{P}_e`$ |
+| $`k`$ | key length in bytes (the cost parameter of a trie traversal) |
+| $`C`$ | corpus size in tokens |
+| $`m`$ | sentence length in tokens |
 
-3. **Efficiency**: Handle large corpora (10GB+) and serve millions of queries per second
+**Acronyms.** *MKN* — Modified Kneser-Ney; *OOV* — Out-Of-Vocabulary; *ARTrie* — Adaptive Radix
+Trie (persistent); *WAL* — Write-Ahead Log; *WFST* — Weighted Finite-State Transducer; *CPG* —
+Code Property Graph; *HNSW* — Hierarchical Navigable Small-World graph; *RAG* —
+Retrieval-Augmented Generation; *LEB128* — Little-Endian Base-128 (a variable-length integer
+encoding); *CAS* — Compare-And-Swap; *DAG* — Directed Acyclic Graph.
 
-4. **Modularity**: Each component is independently usable and testable
+## 1 · The forces
 
-## System Architecture
+An architecture is the residue of the constraints that shaped it. Four forces shaped this one.
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           libgrammstein                                      │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                        Hybrid Layer                                  │   │
-│  │  ┌─────────────────────────────────────────────────────────────────┐│   │
-│  │  │               HybridLanguageModel                               ││   │
-│  │  │   - Interpolates N-gram and embedding scores                    ││   │
-│  │  │   - Implements LanguageModel trait                              ││   │
-│  │  │   - LRU cache for hot queries                                   ││   │
-│  │  └─────────────────────────────────────────────────────────────────┘│   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│           │                                     │                           │
-│           ▼                                     ▼                           │
-│  ┌─────────────────────────┐     ┌─────────────────────────────────────┐   │
-│  │     N-gram Layer        │     │       Embedding Layer               │   │
-│  │                         │     │                                     │   │
-│  │  ┌───────────────────┐  │     │  ┌─────────────────────────────┐   │   │
-│  │  │    NgramModel     │  │     │  │    SubwordEmbedding         │   │   │
-│  │  │ - Modified KN     │  │     │  │ - Word embeddings           │   │   │
-│  │  │ - Order 3-5       │  │     │  │ - Subword (char n-gram)     │   │   │
-│  │  │ - Backoff chain   │  │     │  │ - BPE tokenizer             │   │   │
-│  │  └────────┬──────────┘  │     │  └────────────┬────────────────┘   │   │
-│  │           │             │     │               │                     │   │
-│  │  ┌────────▼──────────┐  │     │  ┌────────────▼────────────────┐   │   │
-│  │  │ KneserNeySmooth   │  │     │  │   Skip-gram Trainer         │   │   │
-│  │  │ - D1, D2, D3+     │  │     │  │ - Negative sampling         │   │   │
-│  │  │ - Continuation    │  │     │  │ - Window size               │   │   │
-│  │  └───────────────────┘  │     │  └─────────────────────────────┘   │   │
-│  └─────────────────────────┘     └─────────────────────────────────────┘   │
-│           │                                                                 │
-│           ▼                                                                 │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                      Storage Layer                                   │   │
-│  │  ┌───────────────────┐  ┌───────────────────┐  ┌─────────────────┐  │   │
-│  │  │  DynamicDawgChar  │  │ PathMapDictionary │  │ DoubleArrayTrie │  │   │
-│  │  │  (mutable, serde) │  │ (distributed)     │  │ (static, fast)  │  │   │
-│  │  └───────────────────┘  └───────────────────┘  └─────────────────┘  │   │
-│  │                           liblevenshtein-rust                        │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-           │
-           │ implements LanguageModel trait
-           ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              lling-llang                                     │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │                      LanguageModelLayer                               │   │
-│  │    Wraps LanguageModel trait for use in CorrectionLayer pipelines    │   │
-│  └──────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+| Force | Consequence in the design |
+|---|---|
+| **Statistical accuracy is non-negotiable.** MKN is the strongest count-based smoother known [[1]](#references)[[2]](#references); anything weaker would undercut every layer above it. | MKN is *always on* and never feature-gated. The statistical core is the one thing you cannot compile out. |
+| **The corpus is larger than RAM.** The Google Books n-gram corpus runs to billions of n-grams; a single 2-gram prefix file holds 50–100 M entries. | Storage is a *memory-mapped, crash-safe* trie with a bounded resident overlay — never a hash map that must fit in memory. See [Memory Optimization](memory-optimization.md). |
+| **Correction is inherently parallel.** A WFST lattice rescorer issues thousands of independent $`\mathbb{P}(w \mid h)`$ queries per sentence. | Every model is `Send + Sync`; the query path is lock-free; the training path is a work-stealing pool. See [Threading Model](threading.md). |
+| **Most users want a slice, not the whole cake.** A spell-checker needs the n-gram core; it does not need ONNX, tree-sitter, and a graph neural network. | Everything above the core sits behind a Cargo feature. The default build compiles the statistical + embedding + hybrid core and nothing else. |
 
-### Neural, RAG, and Topic Layers
+## 2 · The layer stack
 
-The following layers provide advanced neural capabilities, document retrieval, and topic modeling:
+![Layered architecture](../diagrams/architecture.svg)
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Neural Layer                                       │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
-│  │ ModernBertModel │──│ ModernBert      │──│   ModernBertRescorer        │  │
-│  │ (149M params)   │  │ Embedder        │  │   (beam search rescoring)   │  │
-│  │ - 8K context    │  │ - 768-dim       │  │   - pseudo-perplexity       │  │
-│  │ - MLM head      │  │ - CLS/Mean pool │  │   - embedding coherence     │  │
-│  └────────┬────────┘  └────────┬────────┘  └─────────────────────────────┘  │
-│           │                    │                                             │
-│           │           ┌────────┴────────┐                                   │
-│           │           │   Summarizer    │                                   │
-│           │           │ - MMR selection │                                   │
-│           │           │ - Extractive    │                                   │
-│           │           └─────────────────┘                                   │
-└───────────┼─────────────────────┼───────────────────────────────────────────┘
-            │                     │
-            ▼                     ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              RAG Layer                                       │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
-│  │  IndexBuilder   │──│   RagIndex<B>   │──│       Retriever<B>          │  │
-│  │ - auto-embed    │  │ - storage+query │  │ - text→embedding→results   │  │
-│  │ - auto-synopsis │  │ - topic model   │  │ - batch retrieval          │  │
-│  └─────────────────┘  └────────┬────────┘  └─────────────────────────────┘  │
-│                                │                                             │
-│  ┌─────────────────────────────┼────────────────────────────────────────┐   │
-│  │            RetrievalBackend │                                         │   │
-│  │  ┌──────────────────────┐  └────┐  ┌─────────────────────────────┐   │   │
-│  │  │ ExactCosineBackend   │       │  │       HnswBackend           │   │   │
-│  │  │ - BLAS-accelerated   │       │  │ - approx NN, O(log n)       │   │   │
-│  │  │ - O(n) query, <1M    │       │  │ - scalable, >1M docs        │   │   │
-│  │  └──────────────────────┘       │  └─────────────────────────────┘   │   │
-│  └─────────────────────────────────┴────────────────────────────────────┘   │
-└─────────────────────────────────────┬───────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                             Topic Layer                                      │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
-│  │ TopicExtractor  │──│   TopicModel    │──│         Topic               │  │
-│  │ - HAC cluster   │  │ - topics map    │  │ - id, keywords, desc        │  │
-│  │ - c-TF-IDF      │  │ - assignments   │  │ - document_count            │  │
-│  └────────┬────────┘  └─────────────────┘  └─────────────────────────────┘  │
-│           │                                                                  │
-│  ┌────────┴────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
-│  │ Hierarchical    │  │     CtfIdf      │  │       Dendrogram            │  │
-│  │ Clustering      │  │ - keywords/topic│  │ - scipy-compatible          │  │
-│  │ - Ward/Complete │  │ - min_df/max_df │  │ - cut_tree/cut_by_distance  │  │
-│  └─────────────────┘  └─────────────────┘  └─────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────┘
+**Figure 1** — the layers, coloured by concern. The palette is used consistently in every
+diagram in this repository; the legend inside
+[`architecture.puml`](../diagrams/architecture.puml) is its canonical definition.
+
+Reading from the bottom:
+
+1. **Storage** *(teal)* — persistent, crash-safe tries supplied by **libdictenstein**, plus the
+   fuzzy-matching dictionaries of **liblevenshtein**. This layer owns durability: the
+   write-ahead log, the memory-mapped image, the lock-free overlay, and overlay-heap eviction.
+2. **Statistical core** *(blue)* — the n-gram model with Modified Kneser-Ney smoothing over
+   orders 1–5, and the vocabulary that turns words into compact varint keys.
+3. **Embeddings** *(green)* — FastText-style subword vectors [[4]](#references), plus BPE,
+   phonetic, and acoustic variants.
+4. **Hybrid scorer** — interpolates the two experts. This is the layer most consumers hold.
+5. **Capabilities** *(green / purple / orange)* — neural rescoring, retrieval, topic modeling,
+   code correction, LaTeX modeling. Each is optional, and each depends *downward only*.
+6. **Integrations** *(grey)* — the `LanguageModel` implementation that lets **lling-llang** use
+   any libgrammstein model as a WFST lattice rescorer.
+
+The dependency graph is a **DAG with no upward edges**: a lower layer never names a type from a
+higher one. That property is what makes the feature gating sound — deleting the `code` feature
+cannot break the n-gram model, because the n-gram model has never heard of it.
+
+## 3 · Why hybrid?
+
+The two core experts fail in **complementary** ways, and that complementarity is the entire
+argument for the hybrid layer.
+
+| Model | Strong when | Weak when |
+|---|---|---|
+| N-gram (MKN) | the exact local context was seen in training | the word or context is unseen (OOV); long contexts are sparse |
+| Subword embedding | the word is semantically near known words; subwords cover OOV | precise word order matters |
+
+Because the two error distributions are largely independent, a weighted combination is more
+robust than either alone [[3]](#references). The default is a convex combination of the
+probabilities:
+
+```math
+\mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n(w \mid h) + (1 - \alpha)\,\mathbb{P}_e(w \mid h),
+\qquad \alpha = 0.8 \tag{A1}
 ```
 
-### Code Correction Layer
+Three further strategies — log-linear (a product of experts), a hard OOV fallback, and a
+context-length-dependent $`\alpha`$ — are available. See
+[Hybrid Interpolation](../components/hybrid/interpolation.md) for the mathematics of each and
+the guidance on choosing between them.
 
-The Code Correction layer provides multi-language code error detection and correction:
+## 4 · The two contracts that hold the stack together
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Code Correction Layer                              │
-│                                                                             │
-│  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │                        CorrectionPipeline<L>                            │ │
-│  │    Parse → Tokenize → Analyze → Correct → Rank → AnalysisResult        │ │
-│  └───────────────────────────────────┬────────────────────────────────────┘ │
-│                                      │                                       │
-│  ┌───────────────────────────────────┴───────────────────────────────────┐  │
-│  │                        EnsembleCorrector<L>                            │  │
-│  │                                                                        │  │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                 │  │
-│  │  │   Lexical    │  │   Grammar    │  │   Semantic   │                 │  │
-│  │  │  Corrector   │  │  Corrector   │  │  Corrector   │                 │  │
-│  │  │              │  │              │  │              │                 │  │
-│  │  │ Levenshtein  │  │ PCFG/Earley  │  │  GNN + CPG   │                 │  │
-│  │  └──────────────┘  └──────────────┘  └──────────────┘                 │  │
-│  └────────────────────────────────────────────────────────────────────────┘  │
-│                                      │                                       │
-│  ┌───────────────────────────────────┴───────────────────────────────────┐  │
-│  │                       Code Analysis Layer                              │  │
-│  │                                                                        │  │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────────┐   │  │
-│  │  │   CodeParser    │  │  CodeTokenizer  │  │ CodePropertyGraph    │   │  │
-│  │  │   (tree-sitter) │  │  (token types)  │  │ (AST + CFG + DFG)    │   │  │
-│  │  └─────────────────┘  └─────────────────┘  └──────────────────────┘   │  │
-│  │                                                                        │  │
-│  │  ┌─────────────────────────────────────────────────────────────────┐  │  │
-│  │  │                    CodeLanguage Trait                            │  │  │
-│  │  │  Python │ Rust │ JavaScript │ Rholang │ MeTTa │ Custom...       │  │  │
-│  │  └─────────────────────────────────────────────────────────────────┘  │  │
-│  └────────────────────────────────────────────────────────────────────────┘  │
-│                                      │                                       │
-│  ┌───────────────────────────────────┴───────────────────────────────────┐  │
-│  │                      Advanced Components                               │  │
-│  │                                                                        │  │
-│  │  ┌───────────────┐  ┌───────────────┐  ┌────────────────────────┐     │  │
-│  │  │   WeightedCFG │  │ GnnSemantic   │  │     CodeEmbedder       │     │  │
-│  │  │   + Trainer   │  │    Scorer     │  │ (UniXcoder/GraphCode)  │     │  │
-│  │  └───────────────┘  └───────────────┘  └────────────────────────┘     │  │
-│  │                                                                        │  │
-│  │  ┌───────────────┐  ┌───────────────────────────────────────────┐     │  │
-│  │  │ GrammarConstr │  │              WFST Export                   │     │  │
-│  │  │ (Earley)      │  │  (lling-llang integration)                │     │  │
-│  │  └───────────────┘  └───────────────────────────────────────────┘     │  │
-│  └────────────────────────────────────────────────────────────────────────┘  │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+Layers are cheap to draw and expensive to enforce. libgrammstein enforces its layering with
+exactly **two load-bearing traits**, one at each end of the core.
 
-## Component Relationships
+![Layer contracts](../diagrams/arch-layer-contracts.svg)
 
-### Training Pipeline
+**Figure 2** — the trait seams. Everything else in the stack is an implementation detail hidden
+behind one of these two interfaces.
 
-```
-Corpus Files                                 Trained Models
-    │                                              ▲
-    ▼                                              │
-┌─────────────────┐                       ┌────────┴────────┐
-│  CorpusReader   │                       │   save()/load() │
-│  - Wikipedia    │                       │                 │
-│  - Gutenberg    │                       │  ┌───────────┐  │
-│  - Plaintext    │                       │  │ NgramModel│  │
-└────────┬────────┘                       │  └───────────┘  │
-         │                                │                 │
-         │ sentences()                    │  ┌───────────┐  │
-         ▼                                │  │ Embedding │  │
-┌─────────────────┐                       │  └───────────┘  │
-│   Tokenizer     │                       │                 │
-│  - Sentence     │                       │  ┌───────────┐  │
-│  - Word         │                       │  │  Hybrid   │  │
-└────────┬────────┘                       │  └───────────┘  │
-         │                                └─────────────────┘
-         │ tokens                                 ▲
-         ▼                                        │
-┌─────────────────────────────────────────────────┤
-│                                                 │
-│  ┌─────────────────┐     ┌─────────────────┐   │
-│  │  NgramTrainer   │     │ EmbeddingTrainer│   │
-│  │                 │     │                 │   │
-│  │  - Count ngrams │     │  - Skip-gram    │   │
-│  │  - Compute MKN  │     │  - Neg sampling │   │
-│  │  - Store in trie│     │  - Subwords     │   │
-│  └────────┬────────┘     └────────┬────────┘   │
-│           │                       │            │
-│           └───────────┬───────────┘            │
-│                       │                        │
-│              ┌────────▼────────┐               │
-│              │ HybridLanguage  │               │
-│              │     Model       │───────────────┘
-│              └─────────────────┘
-│
-│                    Training
-└─────────────────────────────────────────────────
-```
+### 4.1 · Below the core: `MutableMappedDictionary<Value = NgramEntry>`
 
-### Inference Pipeline
-
-```
-Input: ["the", "quick", "brown", "fox"]
-           │
-           ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     HybridLanguageModel.score_sequence()                 │
-│                                                                         │
-│  ┌─────────────────────────┐     ┌─────────────────────────────────┐   │
-│  │  Check LRU Cache        │────►│  Cache Hit: Return cached score │   │
-│  └───────────┬─────────────┘     └─────────────────────────────────┘   │
-│              │                                                          │
-│              │ Cache Miss                                               │
-│              ▼                                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  For each token in sequence:                                     │   │
-│  │                                                                  │   │
-│  │  ┌───────────────────────────────────────────────────────────┐  │   │
-│  │  │  log P(token | context) =                                  │  │   │
-│  │  │    λ₁ * ngram.log_prob(token, context) +                   │  │   │
-│  │  │    λ₂ * embedding.similarity_score(token, context)         │  │   │
-│  │  └───────────────────────────────────────────────────────────┘  │   │
-│  │                                                                  │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│              │                                                          │
-│              ▼                                                          │
-│  ┌─────────────────────────┐                                           │
-│  │  Sum log probabilities  │                                           │
-│  │  Cache result           │                                           │
-│  │  Return total           │                                           │
-│  └─────────────────────────┘                                           │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-           │
-           ▼
-Output: log P(sequence) = -23.5
-```
-
-## Key Abstractions
-
-### MutableMappedDictionary (from liblevenshtein)
-
-libgrammstein stores N-grams in trie dictionaries provided by liblevenshtein:
+The statistical core is **generic over its storage backend**. `NgramModel<D>` names only the
+trait, never a concrete trie:
 
 ```rust
-pub trait MutableMappedDictionary<Value>: Dictionary {
-    /// Insert a key-value pair
-    fn insert_with_value(&mut self, key: &str, value: Value);
+use libdictenstein::MutableMappedDictionary;
+use libgrammstein::ngram::{smoothing::KneserNeySmoothing, NgramEntry};
 
-    /// Update existing or insert new
-    fn update_or_insert<F>(&mut self, key: &str, default: Value, f: F)
-    where F: FnOnce(&mut Value);
-
-    /// Get value by key
-    fn get_value(&self, key: &str) -> Option<&Value>;
+pub struct NgramModel<D>
+where
+    D: MutableMappedDictionary<Value = NgramEntry>,
+{
+    dictionary: D,                    // DAWG · double-array · persistent ARTrie · PathMap
+    smoothing: KneserNeySmoothing,    // D1, D2, D3+
+    vocab_size: usize,                // |V|
+    total_count: u64,                 // sum of all unigram counts
 }
 ```
 
-N-grams are stored as pipe-separated strings: `"the|quick|brown"` → `NgramEntry { count: 42, ... }`
+This inversion of control [[8]](#references) buys three things:
 
-### LanguageModel Trait (from lling-llang)
+- **Testability.** A unit test trains over an in-memory `DynamicDawgChar` in milliseconds.
+- **Deployment flexibility.** The *same* model type runs over a read-optimized
+  `DoubleArrayTrieChar` in production and over a memory-mapped `PersistentARTrie` during a
+  billions-of-n-grams Google Books import.
+- **A clean durability boundary.** Crash safety lives *entirely* in the backend. The n-gram
+  model itself contains no I/O and no `unsafe`.
 
-libgrammstein implements lling-llang's `LanguageModel` trait for integration:
+The trait's value type is fixed to [`NgramEntry`](../../src/ngram/entry.rs), which is three
+atomic counters — the raw count $`c(\cdot)`$, the continuation count $`N_{1+}(\bullet, w)`$ (how
+many distinct contexts $`w`$ completes), and the follower count $`N_{1+}(w, \bullet)`$ (how many
+distinct words follow $`w`$). Because those fields are atomics and their updates are commutative
+additions, **parallel corpus workers need no lock at all**; the argument is made precise in
+[Threading Model §4](threading.md#4--why-the-counters-need-no-lock).
+
+### 4.2 · Above the core: `LanguageModel` (defined by lling-llang)
+
+The consumer-facing contract is deliberately austere:
 
 ```rust
 pub trait LanguageModel: Send + Sync {
-    /// Score a complete sequence: log P(w₁, w₂, ..., wₙ)
+    /// log P(w_1, …, w_m) — the joint log-probability of a whole token sequence.
     fn score_sequence(&self, tokens: &[&str]) -> f64;
 
-    /// Score a continuation: log P(next | prefix)
+    /// log P(next | prefix) — the conditional log-probability of one continuation.
     fn score_continuation(&self, prefix: &[&str], next: &str) -> f64;
 }
 ```
 
-This trait uses `&[&str]` (strings), not vocabulary IDs, ensuring libgrammstein doesn't need to know about lling-llang's lattice internals.
+It speaks in **`&str`, never in vocabulary IDs**. That is the anti-corruption layer between the
+two crates: lling-llang never learns libgrammstein's LEB128 varint key encoding, and
+libgrammstein never learns lling-llang's lattice vocabulary. The cost is one hash lookup per
+token to re-derive the index; the benefit is that either side can change its internal
+representation without a coordinated release. `Send + Sync` is a hard requirement, because the
+lattice rescorer fans its queries out across a thread pool.
 
-## Design Decisions
+## 5 · Compile-time composition
 
-### Why Hybrid Models?
+libgrammstein is a **single crate with a feature lattice**, not a workspace of micro-crates. The
+default build is the always-on core; everything else is opt-in.
 
-| Model Type | Strengths | Weaknesses |
-|------------|-----------|------------|
-| N-gram | Precise local context, fast lookup, well-understood | OOV problem, sparse data for long contexts |
-| Embeddings | Semantic similarity, handles OOV via subwords | Ignores word order, slower |
-| **Hybrid** | Best of both: local precision + semantic coverage | Slightly more complex |
+| Feature | Unlocks | Notable transitive cost |
+|---|---|---|
+| *(default)* | n-gram (MKN), subword embeddings, hybrid model, perplexity, corpus streaming | — |
+| `google-books` | the sharded, checkpointed Google Books importer | `mimalloc`, `tokio`, `reqwest` |
+| `neural-rescore` | ModernBERT embeddings, masked-LM rescoring, MMR summarization | `candle` |
+| `rag` / `rag-hnsw` | retrieval index — exact cosine / HNSW [[7]](#references); topic modeling | `ndarray` / `hnsw_rs` |
+| `code` · `code-{python,rust,javascript,rholang,metta}` | code correction over Code Property Graphs | `tree-sitter` grammars |
+| `latex` / `latex-neural` / `latex-rag` | mode-aware LaTeX modeling | — |
+| `acoustic` / `candle-model` / `gpu` | MFCC features [[6]](#references) / neural acoustic models / GPU kernels | `candle`, CUDA |
+| `lling-llang-integration` | the `LanguageModel` implementation + WFST export | `lling-llang` |
+| `cli` | the `grammstein` binary + the terminal UI | `clap`, `ratatui` |
 
-### Why liblevenshtein for Storage?
+The rule that keeps this tractable: **a feature may add a module, never mutate one.** No feature
+changes the meaning of an existing API; it only makes new APIs exist. That is why the feature
+powerset does not explode into a combinatorial test matrix — the features are orthogonal by
+construction, not by luck.
 
-1. **Trie Structure**: Natural fit for N-gram prefix matching
-2. **Multiple Backends**: DynamicDawg (mutable), PathMap (distributed), DoubleArray (fast)
-3. **DictZipper**: Efficient traversal for backoff computation
-4. **Existing Integration**: Already used by lling-llang for spelling correction
+## 6 · Concurrency posture, in one paragraph
 
-### Why Rayon for Parallelism?
+Every model is `Send + Sync`. **Training** is a rayon work-stealing pool over batches supplied by
+a prefetching producer thread. **Import** is a tokio worker pool writing into per-shard lock-free
+overlays by compare-and-swap, with a cron thread driving periodic durable checkpoints. **Query**
+is lock-free: a `DashMap`-backed score cache in front of a read-only trie traversal. The only
+mutex on any hot path is the LRU eviction queue behind the score cache, and it is taken only when
+the cache is over capacity. The full inventory — every thread, every shared edge, and the
+primitive guarding it — is in [Threading Model](threading.md).
 
-Language model training is CPU-bound and embarrassingly parallel:
-- Sentence processing is independent
-- Skip-gram windows are independent
-- Batch inference is independent
+## 7 · Memory posture, in one paragraph
 
-Rayon's work-stealing scheduler optimally utilizes all cores without the overhead of async runtimes.
+The governing constraint is a **hard heap bound under an unbounded corpus**. Peak heap decomposes
+into five terms; four of them (per-transaction buffers, the vocabulary, the per-record parse, and
+allocator overhead) are bounded by construction. The fifth — the resident overlay in front of
+each shard — is bounded by an **eviction tail** that runs after every checkpoint and reclaims the
+coldest resident nodes down to a configured budget. Eviction is **lossless**: an evicted node
+faults back from the durable on-disk image on the next read. A naïve build peaks at ≈33.79 GB and
+burns ≈49 % of CPU in `__mprotect`; the bounded build holds under 16 GB with that syscall
+overhead removed. The full derivation is in [Memory Optimization](memory-optimization.md).
 
-### Why `&[&str]` in the Trait Interface?
+## 8 · Complexity
 
-The `LanguageModel` trait uses strings rather than vocabulary IDs because:
-1. **Decoupling**: LM doesn't need to know about lattice vocabulary
-2. **Simplicity**: No ID translation layer needed
-3. **Flexibility**: Works with any tokenization scheme
-4. **Testing**: Easier to test with literal strings
+| Operation | Cost | Notes |
+|---|---|---|
+| N-gram probability $`\mathbb{P}_n(w \mid h)`$ | $`O(n \cdot k)`$ | at most $`n`$ trie look-ups (one per backoff level), each $`O(k)`$ in key length; ≈100 ns for a 5-gram model |
+| Embedding lookup | $`O(d + s)`$ | $`s`$ = number of character n-grams (subwords) hashed |
+| Hybrid score | $`O(n \cdot k + d + s)`$ | collapses to a single hash probe on a cache hit |
+| Sentence score, $`m`$ tokens | $`O(m \cdot (n \cdot k + d + s))`$ | embarrassingly parallel across sentences |
+| N-gram training | $`O(C \cdot n)`$ | each of the $`C`$ tokens starts at most $`n`$ n-grams |
+| Embedding training | $`O(C \cdot \omega \cdot d \cdot E)`$ | $`\omega`$ = window size, $`E`$ = epochs |
+| Exact-cosine retrieval | $`O(N_{\text{doc}} \cdot d)`$ | exhaustive; exact |
+| HNSW retrieval [[7]](#references) | $`O(\log N_{\text{doc}})`$ | approximate; recall tunable via the beam width |
 
-## Thread Safety
+## 9 · Formal verification
 
-libgrammstein is designed for concurrent access:
+The importer's correctness-sensitive machinery — concurrency, crash recovery, checkpoint
+durability, and query semantics — is **machine-checked, not merely tested**.
 
-| Component | Thread Safety Mechanism |
-|-----------|------------------------|
-| `NgramModel<D>` | `Arc<D>` where `D: Send + Sync` |
-| `SubwordEmbedding` | Immutable + `Arc<DashMap>` cache |
-| `HybridLanguageModel` | `Mutex<LruCache>` for hot cache |
-| `HybridConfig` | Plain data (Copy) |
+![Formal verification map](../diagrams/formal-verification.svg)
 
-All models implement `Send + Sync`, satisfying lling-llang's requirements.
+**Figure 3** — the coverage map. Seven live TLA+ [[5]](#references) specifications are checked by
+**TLC** (bounded model checking), proved with **TLAPS**, and typechecked by **Apalache**; three
+**Rocq** modules bound the MKN arithmetic; **loom** exhaustively explores memory-ordering
+interleavings in the Rust itself.
 
-## Performance Characteristics
+| Concern | Specification(s) | Verifies (examples) |
+|---|---|---|
+| Concurrency | `AsyncShardSync` | at most one syncer per shard; clean ⇒ zero dirty |
+| Lifecycle | `ImporterLifecycle`, `WorkerShutdown`, `CronStateMachine` | phase ordering; no job lost; termination |
+| Durability | `CheckpointStateMachine`, `PersistentStorageBridge`, `QuerySemanticsBridge` | no-loss publish; recovery soundness; no metadata leak |
+| Arithmetic | Rocq: `MknStatistics`, `MknFloatBounds`, `FrequencyCountsMerge` | discount bounds; `binary64` evaluation; merge associativity and commutativity |
 
-| Operation | Time Complexity | Notes |
-|-----------|-----------------|-------|
-| N-gram lookup | O(n) | n = N-gram order |
-| Embedding lookup | O(d + s) | d = dimension, s = subwords |
-| Hybrid score | O(n + d + s) | Cache amortizes repeated queries |
-| Training (N-gram) | O(C × n) | C = corpus tokens |
-| Training (Embedding) | O(C × w × d × e) | w = window, e = epochs |
+Reproduce the whole gate with `make -C formal complete-with-dependencies`. The specifications,
+their model-checking configurations, and the contracts imported from libdictenstein and
+liblevenshtein are documented in [`formal/README.md`](../../formal/README.md).
 
-## Memory Layout
+## 10 · Design decisions, and the alternatives rejected
 
+### Why a trait-generic storage backend rather than one blessed trie?
+
+The workloads are genuinely different. A unit test wants a structure it can build in
+microseconds. A production spell-checker wants the fastest possible read path and never mutates
+after load. A Google Books import wants a crash-safe, memory-mapped structure with a bounded
+resident set. No single data structure is best at all three, and blessing one would have forced
+the other two workloads to pay for capabilities they never use. The trait costs one layer of
+static dispatch — monomorphized away at compile time — and buys all three.
+
+### Why rayon for training rather than an async runtime?
+
+N-gram training is **CPU-bound and embarrassingly parallel**: sentences are independent and the
+counter updates commute. An async runtime is the wrong tool — it optimizes for many *blocked*
+tasks, and once the I/O is decoupled into a producer thread there is nothing left to block on.
+Rayon's work-stealing scheduler saturates the cores with no per-task allocation and no executor
+overhead. The importer, by contrast, genuinely *is* I/O-bound (it downloads hundreds of gigabytes
+over HTTP), so it *does* use tokio — with a rayon pool nested inside it for the CPU-bound
+checkpoint work.
+
+### Why `&[&str]` in the `LanguageModel` trait rather than pre-resolved IDs?
+
+Passing vocabulary IDs would be marginally faster and would couple the two crates' internals
+permanently. The boundary is crossed once per candidate token in a lattice — a hash lookup, not a
+hot loop — so the cost is negligible against the $`O(n \cdot k)`$ trie traversal that immediately
+follows it. Decoupling wins.
+
+### Why is MKN not feature-gated?
+
+Because every layer above it assumes a *calibrated* probability. The embedding side is
+deliberately **unnormalized** (see
+[Hybrid Interpolation](../components/hybrid/interpolation.md)): it supplies OOV coverage and
+semantic tie-breaking, and it borrows its calibration from the n-gram side. Removing MKN would
+leave the stack with no calibrated expert at all.
+
+## 11 · Module map
+
+```text
+src/
+├── ngram/        # Modified Kneser-Ney model, varint vocabulary, trie storage   [always on]
+├── embedding/    # FastText subword · BPE · phonetic · acoustic · GPU           [always on]
+├── hybrid/       # n-gram ⊕ embedding interpolation + OOV handling              [always on]
+├── scoring/      # perplexity, sentence scoring                                 [always on]
+├── generation/   # autoregressive sampling (greedy · temperature · top-k · nucleus)
+├── corpus/       # streaming readers, prefetch, dedup, quality filters
+├── dictionary/   # word extraction, spelling dictionaries
+├── language/     # language detection + language-aware tokenization             [cli]
+├── sources/      # Google Books importer + PDF→LaTeX extraction     [google-books, pdf-extraction]
+├── aggregated/   # aggregated n-gram store used by the importer                 [google-books]
+├── neural/       # ModernBERT embedder · rescorer · summarizer                  [neural-rescore]
+├── rag/          # retrieval index: exact cosine · HNSW                         [rag]
+├── topic/        # HAC clustering · c-TF-IDF · dendrogram                       [rag]
+├── code/         # tree-sitter · CPG · PCFG · GNN · constrained decoding        [code]
+├── latex/        # mode-aware tokenizer · n-gram · embeddings · equation RAG    [latex]
+├── integration/  # lling-llang LanguageModel trait + WFST export   [lling-llang-integration]
+├── util/         # lock-free cron scheduler, hashing
+└── cli/          # the `grammstein` binary + terminal UI                        [cli]
+formal/           # TLA+ / TLAPS / Apalache specs + Rocq proofs + loom tests
+benches/          # criterion microbenchmarks
+docs/             # this documentation tree
 ```
-NgramModel
-├── dictionary: Arc<D>          # Trie with NgramEntry values
-│   ├── "the" → NgramEntry { count: 1M, ... }
-│   ├── "the|quick" → NgramEntry { count: 50K, ... }
-│   └── "the|quick|brown" → NgramEntry { count: 5K, ... }
-├── smoothing: KneserNeySmoothing
-│   ├── d1: f64                 # Discount for count=1
-│   ├── d2: f64                 # Discount for count=2
-│   └── d3_plus: f64            # Discount for count>=3
-└── vocab_size: usize
 
-SubwordEmbedding
-├── word_embeddings: Array2<f32>      # [vocab_size × dim]
-├── subword_embeddings: Array2<f32>   # [bucket_count × dim]
-├── word_to_idx: HashMap<String, usize>
-├── idx_to_word: Vec<String>
-└── cache: Arc<DashMap<String, Array1<f32>>>
+## References
 
-HybridLanguageModel
-├── ngram: NgramModel<D>
-├── embedding: SubwordEmbedding
-├── config: HybridConfig
-│   ├── ngram_weight: f64       # λ₁
-│   └── embedding_weight: f64   # λ₂
-└── cache: Mutex<LruCache<CacheKey, f64>>
-```
+1. R. Kneser & H. Ney (1995). *Improved backing-off for M-gram language modeling.* ICASSP '95,
+   181–184. [doi:10.1109/ICASSP.1995.479394](https://doi.org/10.1109/ICASSP.1995.479394)
+2. S. F. Chen & J. Goodman (1999). *An empirical study of smoothing techniques for language
+   modeling.* Computer Speech & Language 13(4), 359–393.
+   [doi:10.1006/csla.1999.0128](https://doi.org/10.1006/csla.1999.0128)
+3. F. Jelinek & R. L. Mercer (1980). *Interpolated estimation of Markov source parameters from
+   sparse data.* In *Pattern Recognition in Practice*, 381–397. North-Holland.
+4. P. Bojanowski, E. Grave, A. Joulin & T. Mikolov (2017). *Enriching word vectors with subword
+   information* (FastText). TACL 5, 135–146.
+   [doi:10.1162/tacl_a_00051](https://doi.org/10.1162/tacl_a_00051)
+5. L. Lamport (2002). *Specifying Systems: The TLA+ Language and Tools for Hardware and Software
+   Engineers.* Addison-Wesley. ISBN 978-0-321-14306-8.
+6. S. Davis & P. Mermelstein (1980). *Comparison of parametric representations for monosyllabic
+   word recognition in continuously spoken sentences.* IEEE Trans. ASSP 28(4), 357–366.
+   [doi:10.1109/TASSP.1980.1163420](https://doi.org/10.1109/TASSP.1980.1163420)
+7. Y. A. Malkov & D. A. Yashunin (2020). *Efficient and robust approximate nearest neighbor
+   search using Hierarchical Navigable Small World graphs.* IEEE TPAMI 42(4), 824–836.
+   [doi:10.1109/TPAMI.2018.2889473](https://doi.org/10.1109/TPAMI.2018.2889473)
+8. R. C. Martin (2017). *Clean Architecture: A Craftsman's Guide to Software Structure and
+   Design.* Prentice Hall. ISBN 978-0-13-449416-6. *(The dependency-inversion argument of §4.)*
 
-## Next Steps
+## See also
 
-- [Data Flow](data-flow.md): Detailed data flow through the system
-- [Threading Model](threading-model.md): Concurrency patterns
-- [N-gram Overview](../components/ngram/overview.md): N-gram model details
-- [Neural Overview](../components/neural/overview.md): ModernBERT-based neural components
-- [RAG Overview](../components/rag/overview.md): Document indexing and retrieval
-- [Topic Overview](../components/topic/overview.md): BERTopic-style topic modeling
-- [lling-llang Integration](../integration/lling-llang/overview.md): Integration architecture
+- [Data Flow](data-flow.md) — how corpus bytes become probabilities, and back again
+- [Threading Model](threading.md) — every thread, every shared edge, every primitive
+- [Memory Optimization](memory-optimization.md) — how the heap is bounded
+- [Google Books Importer](google-books-importer.md) — the largest subsystem, in full
+- [Modified Kneser-Ney](../components/ngram/modified-kneser-ney.md) — the statistical core
+- [Hybrid Interpolation](../components/hybrid/interpolation.md) — the four fusion strategies
+- [lling-llang Integration](../integration/lling-llang/overview.md) — WFST lattice rescoring
+- [`formal/README.md`](../../formal/README.md) — the machine-checked specifications

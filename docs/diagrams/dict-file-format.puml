@@ -1,0 +1,72 @@
+@startuml dict-file-format
+' The two on-disk representations of a SpellingDictionary: the versioned binary
+' container (feature-gated) and the always-available tab-separated text form.
+' Render: plantuml -tsvg docs/diagrams/dict-file-format.puml
+' Source of truth for Figure 2 in docs/components/dictionary/building.md, section "Persistence".
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam note {
+  BackgroundColor #E3F2FD
+  BorderColor #1565C0
+}
+title Persistence — one lossless binary container, one lossy portable text form
+
+rectangle "**SpellingDictionary** (in memory)\nmetadata + entries + word_index" as mem #00838F
+
+rectangle "**words.dict** — save() / load(), feature: **serde-extras**" as bin #546E7A {
+  rectangle "bytes 0..4\n**magic** = b“DICT”\nload() rejects anything else\n⇒ InvalidFormat" as b1 #1565C0
+  rectangle "bytes 4..8\n**version** : u32, little-endian\nmust equal 1 ⇒ else InvalidFormat" as b2 #1565C0
+  rectangle "bytes 8..EOF\n**bincode**(SpellingDictionary)\n= metadata + entries\nword_index is #[serde(skip)]" as b3 #1565C0
+}
+
+rectangle "**words.txt** — export_text() / import_text(), **always available**" as txt #546E7A {
+  rectangle "the\\t1234567\nof\\t987654\nand\\t876543\n… one line per entry, in descending frequency order" as t1 #1565C0
+}
+
+rectangle "**load()** rebuilds word_index\nfrom the deserialised entries — O(V)" as reidx #455A64
+rectangle "**import_text()** re-derives everything\nvia DictionaryBuilder::build_from_counts:\nN = Σ frequencies, log_prob recomputed,\nmin_frequency reset to the builder default (1)" as reimp #455A64
+
+b1 -[hidden]right-> b2
+b2 -[hidden]right-> b3
+
+mem --> bin : save()
+mem --> txt : export_text()
+bin --> reidx : load()
+txt --> reimp : import_text(path, language)
+reidx --> mem
+reimp --> mem
+
+note right of b3
+  **Round-trips exactly**: metadata (language, source,
+  created_at, min_frequency, total_tokens) and every
+  WordEntry, log_prob included.
+end note
+
+note right of t1
+  **Lossy on purpose.** Only word and frequency survive; language,
+  source, created_at and the original N are gone. Re-importing
+  therefore yields a dictionary whose total_tokens is the sum of the
+  **surviving** frequencies — so its log_probs are re-normalised
+  and no longer agree with the exporter's.
+  Lines with fewer than two tab-separated fields, or an unparsable
+  count, are skipped silently.
+end note
+
+legend right
+  |= Colour |= Role |
+  |<#00838F> | in-memory dictionary |
+  |<#546E7A> | file on disk |
+  |<#1565C0> | byte / line layout |
+  |<#455A64> | reconstruction on read |
+endlegend
+@enduml

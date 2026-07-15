@@ -1,0 +1,55 @@
+@startuml lang-tokenizer
+' create_tokenizer dispatch: the primary language subtag selects a Tokenizer impl.
+' Note WhitespaceTokenizer is never selected by the dispatcher (opt-in only), and
+' UnicodeWordTokenizer is not re-exported from the language module.
+' Render: plantuml -tsvg docs/diagrams/lang-tokenizer.puml
+' Source of truth for Figure 2 in docs/components/language/overview.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+legend top right
+|= Concept |= Color |
+| language core (libgrammstein) | <back:#1565C0>        </back> |
+| external crate (unicode-segmentation) | <back:#546E7A>        </back> |
+| reachable only by direct construction | <back:#455A64>        </back> |
+endlegend
+
+rectangle "**LanguageTag**\nlang.language() — the primary subtag" as tag #1565C0
+rectangle "**create_tokenizer(&LanguageTag)**\n⇒ Box<dyn Tokenizer>" as dispatch #1565C0
+
+rectangle "**CharacterTokenizer**\ngraphemes(true) · drop whitespace\ndrop ASCII punctuation unless\ninclude_punctuation(true)" as chartok #1565C0
+rectangle "**UnicodeWordTokenizer**\nunicode_words() — UAX #29\nword boundaries" as unitok #1565C0
+rectangle "**WhitespaceTokenizer**\nsplit_whitespace()\n(never returned by the dispatcher)" as wstok #455A64
+
+rectangle "**UnicodeSegmentation**\ngraphemes() · unicode_words()" as useg #546E7A
+
+rectangle "**trait Tokenizer: Send + Sync**\ntokenize(&self, &'a str) → Vec<&'a str>\ntokenize_iter(&'a self, &'a str) → Box<dyn Iterator>" as trait #1565C0
+
+tag --> dispatch
+dispatch --> chartok : zh · ja · ko\n(CJK — no word spacing)
+dispatch --> chartok : th · km · lo · my\n(SE-Asian — no word spacing)
+dispatch --> unitok : _ (every other subtag)
+chartok ..> useg : graphemes(true)
+unitok ..> useg : unicode_words()
+chartok --> trait
+unitok --> trait
+wstok --> trait
+
+note bottom of wstok
+  Constructed explicitly by the caller.
+  with_locale(&str) ignores its argument;
+  lowercase(bool) sets a field that
+  tokenize() never reads — tokens are
+  borrowed &str slices of the input.
+end note
+@enduml

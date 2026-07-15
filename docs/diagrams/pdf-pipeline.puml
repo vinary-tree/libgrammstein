@@ -1,0 +1,70 @@
+@startuml pdf-pipeline
+' PdfExtractor::extract — route, shell out to a Python backend, post-process.
+' Dashed edges mark configuration that is accepted but never reaches the backend.
+' Render: plantuml -tsvg docs/diagrams/pdf-pipeline.puml
+' Source of truth for Figure 1 in docs/components/sources/pdf.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+legend top right
+|= Concept |= Color |
+| PDF → LaTeX module | <back:#EF6C00>        </back> |
+| external Python tool | <back:#546E7A>        </back> |
+| neural model | <back:#2E7D32>        </back> |
+| accepted but not wired | <back:#455A64>        </back> |
+endlegend
+
+rectangle "**paper.pdf**" as pdf #546E7A
+rectangle "**PdfConfig**\nrouter · postprocess\npython_path · device · timeouts\nbatch_workers · temp_dir" as cfg #EF6C00
+rectangle "**PdfExtractor::new**\nkeeps router + postprocess only" as new #EF6C00
+rectangle "**unused config**\npython_path · marker_path · nougat_path\ntemp_dir · page_timeout · document_timeout\nbatch_workers · keep_temp_files\nmax_memory_per_worker · device" as dead #455A64
+
+rectangle "**PdfRouter::route(path)**\nanalyze ⇒ RouterDecision\n{ backend, reason, analysis, fallback }" as route #EF6C00
+
+rectangle "**MarkerBackend**\npython3 -c '…'\nTORCH_DEVICE=cpu (hard-coded)" as marker #546E7A
+rectangle "**NougatBackend**\nnougat --out - --model 0.1.0-base\n--no-skipping" as nougat #546E7A
+rectangle "**LayoutLMv3 + OCR**\nlayout-aware parse" as m_model #2E7D32
+rectangle "**Swin encoder + mBART decoder**\nneural OCR, math-first" as n_model #2E7D32
+
+rectangle "**markdown_to_latex**\nheaders · code · bold · italic" as m2l #EF6C00
+rectangle "**mathpix_markdown_to_latex**\nMMD already carries \\[ … \\] and $ … $" as mmd2l #EF6C00
+
+rectangle "**ExtractedDocument**\npages: Vec<ExtractedPage> (always len 1)\nlatex · metadata · stats" as doc #EF6C00
+rectangle "**PostProcessor::process**\nsix passes, then informational validation" as post #EF6C00
+rectangle "**LaTeX**\nready for the latex / ngram modules" as out #EF6C00
+
+pdf --> route
+cfg --> new
+new --> route : RouterConfig
+new --> post : PostProcessorConfig
+cfg -[#455A64,dashed]-> dead : dropped by PdfExtractor::new
+
+route --> marker : Backend::Marker
+route --> nougat : Backend::Nougat
+marker --> m_model : subprocess
+nougat --> n_model : subprocess
+m_model --> m2l : rendered.markdown
+n_model --> mmd2l : Mathpix Markdown
+m2l --> doc
+mmd2l --> doc
+doc --> post
+post --> out
+
+note bottom of route
+  Backend::Auto must be resolved here.
+  If it reaches the extractor, extract()
+  returns PdfError::Configuration.
+  RouterDecision.fallback is computed
+  but never acted upon.
+end note
+@enduml

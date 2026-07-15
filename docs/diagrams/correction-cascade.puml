@@ -1,0 +1,65 @@
+@startuml correction-cascade
+' The T_lex ∘ T_gram noisy-channel cascade over a shared term-id alphabet, and the
+' left-to-right, history-indexed beam (stack) decoder that realizes its argmin.
+' Distinct from the lattice corrector (correction-pipeline): here two liblevenshtein
+' Levenshtein automata are composed on TERM-IDS, and the source model is stupid
+' backoff over the RAW n-gram counts (not Kneser-Ney).
+' Colour: blue = liblevenshtein edit machines (T_lex char-level, T_gram word-level);
+'   green = source model (stupid backoff); teal = the count-store view; purple =
+'   cascade / MAP objective; grey = the beam decode; slate = observed / output anchors.
+' Render: plantuml -tsvg docs/diagrams/correction-cascade.puml
+' Source of truth for Figure 5 in docs/integration/lling-llang/hierarchical-correction.md §6.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title T_lex ∘ T_gram cascade — two Levenshtein automata over a term-id alphabet, decoded by a history-indexed beam
+
+rectangle "**observed x**\n\"teh quick fox\"   (tokens x₁ … xₙ)" as x #455A64
+
+rectangle "**T_lex**  ·  channel, character level\nfuzzy lexicon:  characters ⟶ vocabulary **term-ids**\nquery_with_distance  /  articulatory PhoneticTransducerChar\n(term, id, cost),   cost = edit + phonetic   (phonetic ≤ 0 = sound-alike discount)" as tlex #1565C0
+
+rectangle "**T_gram**  ·  channel, word level\nu64 Levenshtein over the n-gram **count store**\nquery_units_values ⟶ grammar_neighbors\n(ids, distance, frequency)" as tgram #1E88E5
+
+rectangle "**U64NgramView**\nUnit = u64 view · collapses one LEB128 varint\nper step over a byte carrier (u8 trie / char DAWG)" as view #00838F
+
+rectangle "**source model** · stupid backoff (Brants et al. 2007)\nS(w│h) = f(h·w)/f(h)   else   α·S(w│h′)   (drop oldest history word)\nbase S(w) = f(w)/N,  floor 1/(N+1),  α = 0.4\n**RAW counts — not Kneser-Ney**" as sb #2E7D32
+
+rectangle "**cascade**   T = T_lex ∘ T_gram\nMAP decode in the log semiring:\nŵ = argmin_w   c_lex(x│w) + c_gram(x│w) + λ·(−log S(w))" as casc #6A1B9A
+
+rectangle "**history-indexed beam**  (stack decoder)\nleft→right; per token xᵢ, from each hypothesis (emitted words, history h, cost g):\n • **substitute / keep** — every T_lex candidate w  :  + c_lex + λ·(−log S(w│h))\n • **delete** — drop xᵢ (removes an extraneous word)  :  + deletion_penalty\n • **insert** — bridged continuation v of h, with h·v·c stored (adds a missing word)  :  + insertion_penalty + λ·(−log S(v│h))\n⟨s⟩ seeds the history · ⟨/s⟩ scored at the end · prune to beam_width · return k_best" as beam #37474F
+
+rectangle "**ŵ**  ·  \"the quick brown fox\"\nup to k_best hypotheses, lowest cost first" as out #455A64
+
+x --> tlex : characters
+tlex --> casc : ∘  (term-ids)\nc_lex
+view --> tgram : edges = term-ids
+tgram --> casc : c_gram
+view --> sb : f(·) counts
+sb --> casc : λ·(−log S)
+casc --> beam : argmin (search)
+beam --> out
+
+note right of beam
+  The two word-level operations the lattice
+  corrector cannot express:  **delete** removes an
+  extraneous word, **insert** supplies a missing one —
+  and only where the store has evidence, so the
+  expansion stays **data-driven and finite**.
+end note
+
+legend bottom
+  |= stage |= role |= engine |
+  | T_lex | channel · spelling + phonetics | liblevenshtein Transducer / PhoneticTransducerChar over the vocabulary |
+  | T_gram | channel · word insert / delete / substitute | liblevenshtein u64 Transducer over U64NgramView |
+  | source | prior · fluency | stupid backoff over the raw n-gram counts |
+endlegend
+@enduml

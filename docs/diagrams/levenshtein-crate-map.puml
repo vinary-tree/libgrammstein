@@ -1,0 +1,76 @@
+@startuml levenshtein-crate-map
+' Ownership map for the liblevenshtein integration: which crate supplies which
+' capability, and exactly what libgrammstein imports from each. The point of the
+' diagram is that the dictionary BACKENDS were extracted out of liblevenshtein
+' into libdictenstein — liblevenshtein now supplies the AUTOMATA (and phonetics)
+' and merely re-exports the backends through its prelude, while libgrammstein
+' imports them straight from libdictenstein.
+' Grey = external crate; teal = storage; blue = libgrammstein's own core.
+' Labels use Unicode glyphs, not <latex>: house style, see docs/diagrams/README.md.
+' Render: plantuml -tsvg docs/diagrams/levenshtein-crate-map.puml
+' Source of truth for Figure 1 in docs/integration/liblevenshtein/overview.md §3.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam nodesep 55
+skinparam ranksep 55
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam NoteBackgroundColor #ECEFF1
+skinparam NoteBorderColor #90A4AE
+skinparam NoteFontColor #263238
+title liblevenshtein integration — who owns what
+
+legend top right
+  |= Color |= Concept |
+  |<#1565C0>     | Statistical LM core (libgrammstein) |
+  |<#00838F>     | Storage / persistence |
+  |<#546E7A>     | External crates (path dependencies) |
+endlegend
+
+rectangle "**libgrammstein**\nn-gram · hybrid · corrector\nℙ(w ∣ h) + candidate generation" as gram #1565C0
+
+rectangle "**liblevenshtein** 0.9\n**Levenshtein automata**\n""transducer::{Transducer, Algorithm, Candidate}""\n+ Zompist phonetic transducers" as lev #546E7A
+rectangle "**libdictenstein** 0.2\n**Dictionary traits + backends**\n""Dictionary"" · ""MappedDictionary""\n· ""MutableMappedDictionary""" as dict #546E7A
+rectangle "**pathmap** 0.2\n**radix-256 trie DAG**\nprefix compression · structural sharing\nalgebraic ops · ACT (mmap) · merkleization" as pm #546E7A
+
+rectangle "**Dictionary backends**\nDynamicDawgChar · DoubleArrayTrieChar\nPathMapDictionary · PersistentARTrieChar\nPersistentVocabARTrie" as backends #00838F
+rectangle "**On-disk artifacts**\nWAL + checkpoints · portable model\nPathMap paths file (memory-mapped)" as disk #00838F
+
+gram --> lev : ""query_with_distance(w, k)""\nfuzzy candidates for OOV tokens
+gram --> dict : ""MutableMappedDictionary""\nn-gram counts + vocabulary
+gram --> pm : ""PathMap"" + ""paths_serialization""\nproduction translation
+
+lev ..> dict : depends on —\nbackends were extracted OUT
+dict ..> pm : optional · feature\n""pathmap-backend""
+dict --> backends : provides
+backends --> disk : persist / mmap
+
+note left of lev
+  liblevenshtein re-exports the backends
+  from its **prelude**, but libgrammstein
+  imports them from the owner:
+  ""use libdictenstein::dynamic_dawg""
+  ""         ::char::DynamicDawgChar;""
+  Attributing ""MutableMappedDictionary""
+  or the tries to liblevenshtein is the
+  most common error about this stack.
+end note
+
+note right of backends
+  The automaton is generic over any
+  ""D: Dictionary"", so one Levenshtein
+  query runs unchanged over an in-memory
+  DAWG **or** a disk-backed, crash-durable
+  ARTrie. Choosing a backend never changes
+  the correction semantics — only the cost.
+end note
+
+@enduml

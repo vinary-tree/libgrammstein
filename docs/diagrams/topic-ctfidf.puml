@@ -1,0 +1,42 @@
+@startuml topic-ctfidf
+' Class-based TF-IDF dataflow: tokenize -> atomic vocab + topic term counts -> score -> top-k.
+' Render: plantuml -tsvg docs/diagrams/topic-ctfidf.puml
+' Source of truth for Figure 1 in docs/components/topic/ctfidf.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+legend top right
+|= Concept |= Color |
+| topic / clustering | <back:#6A1B9A>        </back> |
+| output keywords | <back:#00838F>        </back> |
+| corpus / I-O | <back:#546E7A>        </back> |
+endlegend
+
+rectangle "Documents + assignments\n(text, topic label c)" as docs #546E7A
+rectangle "Tokenize\nlowercase · alphanumeric · length filter" as tok #6A1B9A
+rectangle "AtomicVocabulary\nterm → index (DashMap)\ndoc_freq df(t) per term" as vocab #6A1B9A
+rectangle "TopicTermFrequencies\nf(t,c) per topic · W_c word totals\nA = average words per topic" as ttf #6A1B9A
+rectangle "Document-frequency filter\nmin_df ≤ df(t) ≤ max_df_ratio · T" as filter #6A1B9A
+rectangle "Score each kept term\nctfidf = (scaled_tf / W_c) · ln(1 + A / df(t))" as score #6A1B9A
+rectangle "Top-k keywords per topic\nVec<(String, f32)>" as kw #00838F
+
+docs --> tok
+tok --> vocab : per-document terms
+tok --> ttf : per-topic terms
+vocab --> filter : df(t)
+ttf --> filter : num_topics T
+filter --> score : kept terms
+ttf --> score : f(t,c), W_c, A
+vocab --> score : df(t)
+score --> kw : sort ↓, take num_keywords
+@enduml

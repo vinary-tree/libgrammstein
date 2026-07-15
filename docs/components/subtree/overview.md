@@ -1,299 +1,237 @@
 # Subtree Mining
 
-libgrammstein provides frequent subtree mining for discovering common code patterns in AST forests using the TreeminerD algorithm.
+Source-code abstract syntax trees are full of recurring structure — `if`/`else`/`return`
+skeletons, builder chains, error-handling shapes, and outright copy-paste clones. **Frequent
+subtree mining** discovers that structure automatically: given a forest of ASTs, it returns the
+tree-shaped patterns that occur in at least a chosen fraction of the trees. libgrammstein
+implements the **TreeMinerD** algorithm of Zaki [[1]](#references), which encodes each tree as a
+depth-first string and grows patterns one node at a time. This document explains the encoding, the
+support model, and the concrete types; the level-wise mining loop itself is detailed in
+[TreeMinerD Algorithm](treeminer-d.md).
 
-## Why Subtree Mining?
+> **Scope.** Source of truth:
+> [`src/code/subtree/mod.rs`](../../../src/code/subtree/mod.rs),
+> [`src/code/subtree/pattern.rs`](../../../src/code/subtree/pattern.rs), and
+> [`src/code/subtree/treeminer.rs`](../../../src/code/subtree/treeminer.rs). The trees are built
+> from the AST types in [`src/code/ast.rs`](../../../src/code/ast.rs) (see [AST](../code/ast.md)).
 
-Source code ASTs contain recurring structural patterns:
-- Common idioms (`if-else-return`, `for-each-accumulate`)
-- Design patterns (factory methods, builder chains)
-- Language-specific constructs
-- Copy-pasted code clones
+## Why mine subtrees?
 
-Subtree mining discovers these patterns automatically by finding frequently occurring tree structures across a codebase.
+A flat token n-gram cannot express "a function whose body is an `if` with a `return`" — that is a
+*shape*, not a sequence. Mining over ASTs recovers such shapes and enables:
 
-## Key Concepts
+- **idiom discovery** — the high-support patterns are a codebase's common constructions;
+- **clone detection** — a large pattern occurring in a handful of files flags duplicated logic;
+- **design-pattern detection** — factories, builders, and visitors have recognizable subtrees;
+- **pattern-based completion** — a partial tree can be matched against mined patterns to suggest
+  what usually comes next.
 
-### Depth-First Tree Encoding
+## Depth-first tree encoding
 
-Trees are encoded as depth-first sequences for efficient pattern matching:
+TreeMinerD never manipulates pointer-linked trees during mining. Each tree is *flattened* to a
+sequence of nodes in **pre-order** (depth-first, parent before children, left to right); every
+node records its **depth**, which is enough to reconstruct the parent-child structure without
+explicit pointers.
 
-```
-Original Tree:              Depth-First Encoding:
-      A                     A(depth=0)
-     / \                    B(depth=1)
-    B   C                   D(depth=2)
-   /                        C(depth=1)
-  D
+![A small AST and its depth-first flat encoding](../../diagrams/subtree-encoding.svg)
 
-Sequence: [A:0, B:1, D:2, C:1]
-```
+For the tree above, [`FlatTree::from_ast_node`](../../../src/code/subtree/pattern.rs) emits the
+sequence $`\langle (A,0), (B,1), (D,2), (C,1) \rangle`$, writing the node's AST kind as its label
+and its nesting level as its depth. Because pre-order plus depth is a bijection with the tree,
+patterns can be compared as strings: the **canonical encoding** of a pattern is
+`depth:label` fields joined by `|`, e.g. `0:A|1:B|2:D|1:C`
+([`encode_pattern`](../../../src/code/subtree/pattern.rs)). This string is canonical (one tree,
+one string), compact ($`O(k)`$ for a $`k`$-node pattern), and comparable (string equality is tree
+equality), which is what makes candidate grouping cheap.
 
-The depth value indicates nesting level, allowing pattern matching without explicit parent pointers.
+Each [`FlatNode`](../../../src/code/subtree/pattern.rs) also carries a `scope` field. As populated
+by `from_ast_node` it is the node's **linear position** in the pre-order sequence (the index it was
+inserted at); it derives from Zaki's *scope-list* concept [[1]](#references) but is metadata only —
+the matcher keys entirely off labels and relative depths, not `scope`.
 
-### Support and Frequency
+## Support and frequency
 
-A pattern's **support** is the number of trees containing it:
+Let the input be a forest of $`m`$ trees and let $`P`$ be a candidate pattern. The **support** of
+$`P`$ is the number of *distinct trees* that contain it (multiple occurrences within one tree do
+not raise support), and the **support ratio** normalizes that by the forest size:
 
-```
-Tree 1:    Tree 2:    Tree 3:
-   A          A          X
-  / \        / \        / \
- B   C      B   D      B   Y
-
-Pattern [A, B] appears in Tree 1 and Tree 2
-  → Support = 2
-  → Support Ratio = 2/3 = 0.667 (67%)
-```
-
-**Minimum support** filters out rare patterns, focusing on truly common structures.
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        Subtree Mining Pipeline                           │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────────┐  │
-│  │ Source Code  │───▶│  Tree-sitter │───▶│     FlatTree Forest      │  │
-│  │   (files)    │    │    Parser    │    │  (depth-first encoded)   │  │
-│  └──────────────┘    └──────────────┘    └───────────┬──────────────┘  │
-│                                                       │                  │
-│                                                       ▼                  │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │                       TreeminerD Algorithm                        │  │
-│  │  ┌────────────────┐  ┌───────────────┐  ┌──────────────────────┐ │  │
-│  │  │  Build Vertical │  │ Mine 1-Trees  │  │  Extend Patterns     │ │  │
-│  │  │  Representation │─▶│ (single nodes)│─▶│  (equivalence class) │ │  │
-│  │  └────────────────┘  └───────────────┘  └──────────────────────┘ │  │
-│  │                                                   │               │  │
-│  │                                                   ▼               │  │
-│  │                              ┌─────────────────────────────────┐  │  │
-│  │                              │    Prune Infrequent Patterns    │  │  │
-│  │                              └─────────────────────────────────┘  │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                                         │                               │
-│                                         ▼                               │
-│                              ┌─────────────────────────────────┐       │
-│                              │      SubtreePattern Results     │       │
-│                              │  • Pattern nodes                │       │
-│                              │  • Support count/ratio          │       │
-│                              │  • Occurrence locations         │       │
-│                              └─────────────────────────────────┘       │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
+```math
+\mathrm{support}(P) = \bigl\lvert \{\, t : P \text{ occurs in tree } t \,\} \bigr\rvert,
+\qquad
+\mathrm{support\_ratio}(P) = \frac{\mathrm{support}(P)}{m} \tag{S1}
 ```
 
-## Quick Start
+A pattern is **frequent** when its support meets a threshold derived from the configured minimum
+support fraction $`\sigma \in [0, 1]`$:
 
-```rust
-use libgrammstein::code::subtree::{TreeminerD, FlatTree, FlatNode};
-
-// Create flat trees from AST nodes
-let tree1 = FlatTree::new(vec![
-    FlatNode::new("function_definition", 0, 0),
-    FlatNode::new("parameters", 1, 1),
-    FlatNode::new("block", 1, 2),
-    FlatNode::new("return_statement", 2, 3),
-], 1);
-
-let tree2 = FlatTree::new(vec![
-    FlatNode::new("function_definition", 0, 0),
-    FlatNode::new("parameters", 1, 1),
-    FlatNode::new("block", 1, 2),
-    FlatNode::new("if_statement", 2, 3),
-], 2);
-
-// Mine patterns with 50% minimum support
-let miner = TreeminerD::new(0.5);
-let result = miner.mine(&[tree1, tree2]);
-
-// Print discovered patterns
-for pattern in &result.patterns {
-    println!("Pattern (support={}): {:?}",
-        pattern.support,
-        pattern.nodes.iter().map(|n| n.label.as_ref()).collect::<Vec<_>>()
-    );
-}
+```math
+\mathrm{support}(P) \;\ge\; \max\!\bigl(\lceil \sigma\, m \rceil,\; 1\bigr) \tag{S2}
 ```
 
-## Use Cases
+The right-hand side is [`MiningResult::min_support_count`](../../../src/code/subtree/treeminer.rs).
+Frequency is **downward closed** (the Apriori property): every subtree of a frequent pattern is
+itself frequent, so a pattern can be frequent only if all of its one-node-smaller prefixes are —
+this is exactly what lets TreeMinerD grow patterns level by level and prune aggressively (see
+[TreeMinerD Algorithm](treeminer-d.md)).
 
-### 1. Code Clone Detection
+What "occurs in" means here is Zaki's **embedded** subtree match: the pattern's nodes must appear
+in pre-order at their recorded *relative depths* within a single rooted subtree of the host tree,
+though intervening host nodes may be skipped. Embedded matching (as opposed to strictly induced
+matching) captures patterns that share ancestry even when unrelated nodes sit between them.
 
-Find duplicated code structures across a codebase:
+## The mining pipeline
 
-```rust
-let miner = TreeminerD::with_config(TreeminerConfig {
-    min_support: 0.01,  // 1% - find even rare clones
-    min_pattern_size: 5, // At least 5 nodes to be meaningful
-    ..Default::default()
-});
+![Source code to frequent subtree patterns](../../diagrams/subtree-pipeline.svg)
 
-let result = miner.mine(&project_trees);
+Source files are parsed to ASTs, each AST is flattened to a
+[`FlatTree`](../../../src/code/subtree/pattern.rs), and the forest is handed to
+[`TreeminerD::mine`](../../../src/code/subtree/treeminer.rs), which returns a
+[`MiningResult`](../../../src/code/subtree/treeminer.rs) of frequent
+[`SubtreePattern`](../../../src/code/subtree/pattern.rs)s.
 
-// Large patterns with low support may indicate copy-paste clones
-let clones: Vec<_> = result.patterns.iter()
-    .filter(|p| p.size() >= 10 && p.support_ratio < 0.05)
-    .collect();
-```
+## Core types
 
-### 2. Idiom Discovery
-
-Discover common coding patterns:
-
-```rust
-let miner = TreeminerD::with_config(TreeminerConfig {
-    min_support: 0.2,   // 20% - common patterns
-    min_pattern_size: 3,
-    max_pattern_size: 15,
-    ..Default::default()
-});
-
-let result = miner.mine(&project_trees);
-
-// High-support patterns are likely idioms
-for pattern in result.patterns.iter().filter(|p| p.support_ratio > 0.5) {
-    println!("Common idiom:\n{}", pattern.to_string_repr());
-}
-```
-
-### 3. Pattern-Based Code Completion
-
-Use discovered patterns to suggest completions:
-
-```rust
-// Mine patterns from a large corpus
-let patterns = miner.mine(&corpus_trees).patterns;
-
-// Given partial code, find matching patterns
-fn suggest_completions(
-    partial_tree: &FlatTree,
-    patterns: &[SubtreePattern],
-) -> Vec<&SubtreePattern> {
-    patterns.iter()
-        .filter(|p| is_prefix_of(partial_tree, p))
-        .collect()
-}
-```
-
-### 4. Design Pattern Detection
-
-Find structural patterns like factories or builders:
-
-```rust
-// Mine with settings tuned for design patterns
-let miner = TreeminerD::with_config(TreeminerConfig {
-    min_support: 0.05,
-    min_pattern_size: 4,
-    max_depth: 8,
-    ..Default::default()
-});
-
-let result = miner.mine(&project_trees);
-
-// Look for patterns matching known design pattern structures
-let factory_candidates = result.patterns.iter()
-    .filter(|p| matches_factory_structure(p))
-    .collect::<Vec<_>>();
-```
-
-## Core Types
-
-### FlatTree
-
-A tree encoded as a depth-first sequence:
-
-```rust
-pub struct FlatTree {
-    /// Nodes in depth-first order
-    pub nodes: Vec<FlatNode>,
-    /// Unique identifier for this tree
-    pub tree_id: u64,
-    /// Optional metadata (file path, language, source)
-    pub metadata: Option<TreeMetadata>,
-}
-```
-
-### FlatNode
-
-A single node in the flat encoding:
+### `FlatTree` and `FlatNode`
 
 ```rust
 pub struct FlatNode {
-    /// The node label (AST kind like "function_definition")
-    pub label: Arc<str>,
-    /// Depth in the tree (root = 0)
-    pub depth: usize,
-    /// Scope identifier for pattern matching
-    pub scope: usize,
+    pub label: Arc<str>,   // AST kind, e.g. "function_definition"
+    pub depth: usize,      // nesting level, root = 0
+    pub scope: usize,      // pre-order position (metadata; see above)
+}
+
+pub struct FlatTree {
+    pub nodes: Vec<FlatNode>,          // pre-order sequence
+    pub tree_id: u64,                  // unique per tree (e.g. a file hash)
+    pub metadata: Option<TreeMetadata>, // optional file path / language / source
 }
 ```
 
-### SubtreePattern
+`FlatTree` offers [`len`](../../../src/code/subtree/pattern.rs),
+[`is_empty`](../../../src/code/subtree/pattern.rs),
+[`label_positions`](../../../src/code/subtree/pattern.rs) (label → positions, the seed of the
+vertical representation), and [`extract_subtree`](../../../src/code/subtree/pattern.rs) (the
+contiguous slice of a node and its descendants). `from_ast_node` leaves `metadata` as `None`;
+`with_metadata` attaches a `TreeMetadata` carrying the source path, language, and text.
 
-A discovered frequent pattern:
+### `PatternNode` and `SubtreePattern`
 
 ```rust
+pub struct PatternNode {
+    pub label: Arc<str>,
+    pub depth: usize,      // depth relative to the pattern root
+}
+
 pub struct SubtreePattern {
-    /// Pattern nodes in depth-first order
-    pub nodes: Vec<PatternNode>,
-    /// Number of trees containing this pattern
-    pub support: usize,
-    /// Fraction of trees (support / total)
-    pub support_ratio: f64,
-    /// Tree IDs where this pattern appears
-    pub occurrences: Vec<u64>,
-    /// Unique pattern identifier
+    pub nodes: Vec<PatternNode>, // pre-order, depths relative to the pattern root
+    pub support: usize,          // (S1): distinct trees containing the pattern
+    pub support_ratio: f64,      // support / total_trees
+    pub occurrences: Vec<u64>,   // tree_ids where the pattern occurs
     pub pattern_id: u64,
 }
 ```
 
-## Integration with Tree-sitter
+Two `SubtreePattern`s are equal (and hash equal) iff their `nodes` match, so a pattern's identity
+is its shape. Useful accessors are [`size`](../../../src/code/subtree/pattern.rs) (node count),
+[`max_depth`](../../../src/code/subtree/pattern.rs),
+[`root_label`](../../../src/code/subtree/pattern.rs),
+[`contains`](../../../src/code/subtree/pattern.rs) (subsequence containment of another pattern),
+and [`to_string_repr`](../../../src/code/subtree/pattern.rs) (an indented, human-readable tree).
 
-Convert tree-sitter ASTs to FlatTrees:
+## Quick start
+
+```rust
+use libgrammstein::code::subtree::{FlatNode, FlatTree, TreeminerD};
+
+// Two functions that share the `function_definition -> parameters -> block` skeleton.
+let tree1 = FlatTree::new(
+    vec![
+        FlatNode::new("function_definition", 0, 0),
+        FlatNode::new("parameters", 1, 1),
+        FlatNode::new("block", 1, 2),
+        FlatNode::new("return_statement", 2, 3),
+    ],
+    1,
+);
+let tree2 = FlatTree::new(
+    vec![
+        FlatNode::new("function_definition", 0, 0),
+        FlatNode::new("parameters", 1, 1),
+        FlatNode::new("block", 1, 2),
+        FlatNode::new("if_statement", 2, 3),
+    ],
+    2,
+);
+
+// Patterns present in at least 50% of trees.
+let miner = TreeminerD::new(0.5);
+let result = miner.mine(&[tree1, tree2]);
+
+for pattern in &result.patterns {
+    let labels: Vec<&str> = pattern.nodes.iter().map(|n| n.label.as_ref()).collect();
+    println!("support {}: {:?}", pattern.support, labels);
+}
+```
+
+## Building trees from the AST
+
+[`FlatTree::from_ast_node`](../../../src/code/subtree/pattern.rs) flattens an
+[`AstNode`](../../../src/code/ast.rs) recursively, using each node's `kind` as the label:
 
 ```rust
 use libgrammstein::code::ast::AstNode;
 use libgrammstein::code::subtree::FlatTree;
 
-// From tree-sitter node
-let flat_tree = FlatTree::from_ast_node(&ast_node, file_hash);
-
-// Or build manually from tree-sitter
-fn tree_sitter_to_flat(node: tree_sitter::Node, tree_id: u64) -> FlatTree {
-    let mut nodes = Vec::new();
-    flatten_ts_node(&node, 0, &mut nodes);
-    FlatTree::new(nodes, tree_id)
-}
-
-fn flatten_ts_node(node: &tree_sitter::Node, depth: usize, out: &mut Vec<FlatNode>) {
-    out.push(FlatNode::new(node.kind(), depth, out.len()));
-    for child in node.children(&mut node.walk()) {
-        flatten_ts_node(&child, depth + 1, out);
-    }
-}
+// `ast: AstNode` parsed elsewhere; `file_hash: u64` identifies the source file.
+let flat: FlatTree = FlatTree::from_ast_node(&ast, file_hash);
+assert_eq!(flat.nodes[0].label.as_ref(), ast.kind.as_str()); // root label == root AST kind
 ```
 
-## Performance Considerations
+Because a tree is just a `Vec<FlatNode>` plus an id, trees can equally be produced from any other
+tree source (a tree-sitter cursor, a serialized AST) as long as the emitted nodes are in pre-order
+with correct depths.
 
-| Metric | Typical Value |
-|--------|---------------|
-| Trees (1000) | ~100ms |
-| Trees (10000) | ~2-5s |
-| Trees (100000) | ~30-60s |
-| Memory per tree | ~1KB average |
+## Encoding utilities
 
-### Optimization Tips
+The canonical encoding used internally for candidate grouping is exposed for storing and comparing
+patterns. These functions are re-exported at the module root — there is no public `pattern`
+submodule to import from.
 
-1. **Use parallel mining** (default) for large datasets
-2. **Increase min_support** to reduce search space
-3. **Limit max_pattern_size** for faster iteration
-4. **Pre-filter AST nodes** to remove uninteresting nodes (whitespace, comments)
+```rust
+use libgrammstein::code::subtree::{decode_pattern, encode_pattern, pattern_hash};
 
-## See Also
+let encoded = encode_pattern(&pattern.nodes);   // "0:function_definition|1:parameters|..."
+let decoded = decode_pattern(&encoded);         // round-trips back to Vec<PatternNode>
+let digest  = pattern_hash(&pattern.nodes);     // u64 hash of the canonical string
+assert_eq!(decoded, pattern.nodes);
+```
 
-- [TreeminerD Algorithm](treeminer-d.md) - Detailed algorithm documentation
-- [Code Embeddings](../code-embeddings/overview.md) - Neural code representations
-- [Paradigm Detection](../paradigm/overview.md) - Programming paradigm mining
+## Performance
+
+Mining time is dominated by candidate extension and scales with the forest size $`m`$, the average
+nodes per tree, and — steeply — with how low the support threshold is set (a lower $`\sigma`$
+admits more candidates at every level). The precise cost model is given in
+[TreeMinerD Algorithm](treeminer-d.md#complexity); each run reports its measured wall time in
+[`MiningResult::mining_time_ms`](../../../src/code/subtree/treeminer.rs) alongside the counts of
+candidates generated and pruned. Practical levers:
+
+1. **Raise `min_support`** — the single most effective way to shrink the search.
+2. **Cap `max_pattern_size` / `max_depth`** — bounds the number of extension levels.
+3. **Pre-filter AST nodes** — dropping whitespace/comment kinds before flattening removes noise.
+4. **Keep the parallel path on** (the default) for multi-core machines.
+
+## References
+
+1. M. J. Zaki (2005). *Efficiently mining frequent trees in a forest: Algorithms and
+   applications.* IEEE Transactions on Knowledge and Data Engineering 17(8), 1021–1035.
+   [doi:10.1109/TKDE.2005.125](https://doi.org/10.1109/TKDE.2005.125)
+2. M. J. Zaki (2002). *Efficiently mining frequent trees in a forest.* In Proceedings of the 8th
+   ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, 71–80.
+   [doi:10.1145/775047.775058](https://doi.org/10.1145/775047.775058)
+
+## See also
+
+- [TreeMinerD Algorithm](treeminer-d.md) — the level-wise candidate generation and pruning loop
+- [AST](../code/ast.md) — the `AstNode` trees that feed subtree mining
+- [Code Embeddings](../code-embeddings/overview.md) — an alternative, neural code representation
+- [Paradigm Detection](../paradigm/overview.md) — higher-level pattern mining over the same ASTs

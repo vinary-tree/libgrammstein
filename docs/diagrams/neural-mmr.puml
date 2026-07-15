@@ -1,0 +1,49 @@
+@startuml neural-mmr
+' Maximal Marginal Relevance as the summarizer instantiates it: the "query" of the
+' original MMR formulation is replaced by the document centroid, so relevance means
+' centrality. Greedy argmax with a redundancy penalty against the already-selected set.
+' Render: plantuml -tsvg docs/diagrams/neural-mmr.puml
+' Source of truth for Figure 1 in docs/components/neural/summarizer.md §4.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Maximal Marginal Relevance — centrality **minus** redundancy  (λ = 1 − diversity_threshold)
+
+rectangle "**Candidate set R**\nsentence vectors v₁ … vₙ\n(ℓ₂-normalized, 768-dim)" as cand #2E7D32
+rectangle "**Centroid c**\nc = v̄ / ‖v̄‖,   v̄ = (1/n) Σᵢ vᵢ\n//stands in for MMR's query//" as centroid #1565C0
+rectangle "**Relevance**\nrel(sᵢ) = cos(vᵢ, c)\n“how central is this sentence?”" as rel #1565C0
+rectangle "**Redundancy**\nred(sᵢ) = max cos(vᵢ, vⱼ)\n           sⱼ ∈ S\n“how much does it repeat S?”" as red #EF6C00
+rectangle "**MMR score**\nλ·rel(sᵢ) − (1 − λ)·red(sᵢ)" as mmr #2E7D32
+rectangle "**Selected set S**\nseeded with argmax rel\nthen grown greedily" as sel #6A1B9A
+rectangle "**Summary**\nnum_sentences picks;\nre-ordered by original\nposition if preserve_order" as out #6A1B9A
+
+cand --> centroid : mean, then normalize
+centroid --> rel
+cand --> rel
+cand --> red
+sel --> red : compare against\neach chosen sentence
+rel --> mmr : weight λ
+red --> mmr : weight −(1 − λ)
+mmr --> sel : argmax over R ∖ S
+sel --> mmr : loop until |S| = num_sentences
+sel --> out
+
+note bottom of mmr #E8F5E9
+  λ = 1: pure centrality — the summary may say the same thing three times.
+  λ = 0: pure novelty — the summary drifts to outliers.
+  Default diversity_threshold = 0.3 ⟹ **λ = 0.7**.
+  The first pick has S = ∅, so it is chosen on relevance alone; the code
+  seeds S with argmax rel before the loop, which makes the max over S
+  well-defined at every later step.
+end note
+
+@enduml

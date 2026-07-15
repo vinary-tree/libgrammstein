@@ -1,0 +1,56 @@
+@startuml paradigm-dominance
+' ParadigmProfile::dominant_paradigm — the two-test decision rule that turns
+' four scores into one verdict (or None, or Mixed). The thresholds are literals
+' inside the method, NOT configuration fields.
+' Colour encodes outcome: abstain (slate), Mixed (light purple), decided (green).
+' Render: plantuml -tsvg docs/diagrams/paradigm-dominance.puml
+' Source of truth for Figure 2 in docs/components/paradigm/indicators.md §5
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam activity {
+  BackgroundColor #6A1B9A
+  BorderColor #263238
+  FontColor white
+  FontStyle bold
+  DiamondBackgroundColor #FFF3E0
+  DiamondBorderColor #EF6C00
+  DiamondFontColor #263238
+  StartColor #455A64
+  EndColor #455A64
+}
+title ParadigmProfile::dominant_paradigm() → Option<Paradigm>
+
+start
+:sort the four scores descending;
+:S₍₁₎ ← highest score
+S₍₂₎ ← runner-up;
+if (S₍₁₎ < θ = 0.20 ?) then (yes — nothing\nclears the floor)
+  :**None**
+  the sample is too thin to call; <<#455A64>>
+  stop
+else (no)
+endif
+if (S₍₁₎ − S₍₂₎ < δ = 0.10 ?) then (yes — the top\ntwo are too close)
+  :**Some(Mixed)**
+  genuinely multi-paradigm
+  (e.g. Rust: impl + iter.map); <<#AB47BC>>
+  stop
+else (no — a clear lead)
+endif
+:**Some(top paradigm)**
+one style dominates; <<#2E7D32>>
+stop
+
+note right
+  θ = 0.20 and δ = 0.10 are **literals**
+  in the method body. They are **not**
+  configurable — ParadigmConfig carries
+  no dominance field. To impose your own
+  thresholds, call present_paradigms(θ)
+  and apply your own margin test to the
+  returned, descending-sorted list.
+end note
+@enduml

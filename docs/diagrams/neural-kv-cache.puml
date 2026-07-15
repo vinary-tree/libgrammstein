@@ -1,0 +1,66 @@
+@startuml neural-kv-cache
+' The KV-cache family (LayerCache / KvCache / SlidingWindowCache): its structure, its
+' growth law, and the two traps a future integrator must know about. Drawn muted because
+' it is scaffolding — no call site in the crate constructs any of these types.
+' Render: plantuml -tsvg docs/diagrams/neural-kv-cache.puml
+' Source of truth for Figure 2 in docs/components/neural/cache.md §5.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title The KV-cache family — structure, growth, and why it is inert here
+
+rectangle "**CacheConfig**\nmax_seq_len 8192 · num_layers 12\nnum_heads 12 · head_dim 64 · F32" as cfg #90A4AE
+
+rectangle "**LayerCache**\nkey, value: Option<Tensor>\nshape (B, A, T, d_h)\nseq_len: usize" as layer #90A4AE
+
+rectangle "**KvCache**\nlayers: Vec<LayerCache>\nupdate_layer(ℓ, k, v)\npreallocate(B)" as kv #90A4AE
+
+rectangle "**SlidingWindowCache**\ninner: KvCache\nwindow_size: W\nnarrow to the last W steps" as sw #90A4AE
+
+rectangle "**ModernBertModel::forward**\nbidirectional encoder\n— never consults a KV cache —" as model #2E7D32
+
+cfg --> kv : shapes the tensors
+layer --> kv : one per layer
+kv --> sw : wrapped
+model -[#C62828,dashed]-> kv : **no edge exists in the code**
+
+note right of layer #ECEFF1
+  **update** concatenates along dim 2 (the time axis):
+  Kₜ ← cat(Kₜ₋₁, k_new),  Vₜ ← cat(Vₜ₋₁, v_new).
+  Memory after T steps, both tensors, all layers:
+  **2 · B · L · A · T · d_h · sizeof(dtype)** bytes.
+  Defaults, B = 1, T = 8192, F32 ⟹ ≈ 604 MB.
+end note
+
+note bottom of kv #FFEBEE
+  **Trap 1 — preallocate is incompatible with update.**
+  preallocate installs zero tensors of the //full// max_seq_len;
+  the next update **concatenates onto them**, yielding an
+  (8192 + t)-step cache that is mostly zeros. It would only
+  make sense against a write-in-place kernel, which does not
+  exist here.
+
+  **Trap 2 — the defaults do not describe ModernBERT-base.**
+  num_layers = 12 is BERT-shaped; ModernBERT-base has **22**
+  layers (heads = 12 and head_dim = 64 //are// right: 12 × 64 = 768).
+  Sizing a cache from CacheConfig::default() under-counts memory
+  by 45%.
+end note
+
+note bottom of sw #ECEFF1
+  **update_layer returns the pre-narrowing tensors** — the caller
+  attends over the full history for the current step, while the
+  //stored// cache (and seq_len()) is clamped to the last W steps.
+  Memory becomes Θ(min(T, W)) instead of Θ(T).
+end note
+
+@enduml

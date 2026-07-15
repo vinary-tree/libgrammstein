@@ -1,0 +1,99 @@
+@startuml cron-state
+' CronStateMachine: the complete (state, event) -> state relation as implemented in
+' CronStateMachine::transition. ExecutingTask is declared in CronState but is never
+' entered: task execution is a synchronous side effect of the TaskDue transitions.
+' Render: plantuml -tsvg docs/diagrams/cron-state.puml
+' Source of truth for Figure 2 in docs/util/cron/cron-manager.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam ArrowColor #37474F
+skinparam state {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  BackgroundColor #00838F
+  AttributeFontColor #263238
+  AttributeFontStyle plain
+}
+skinparam note {
+  BackgroundColor #ECEFF1
+  BorderColor #546E7A
+}
+
+legend top right
+|= Concept |= Color |
+| reachable state | <back:#00838F>        </back> |
+| terminal state | <back:#C62828>        </back> |
+| declared but unreachable | <back:#455A64>        </back> |
+| task execution (side effect) | <back:#1565C0>        </back> |
+endlegend
+
+[*] --> CheckEvents : CronStateMachine::new
+
+state "**CheckEvents**" as CheckEvents #00838F
+CheckEvents : initial state — evaluate every event source
+CheckEvents : try_recv() the task channel (non-blocking)
+CheckEvents : peek() the min-heap for a due task
+CheckEvents : load(Acquire) the termination flag
+
+state "**DrainChannel**" as DrainChannel #00838F
+DrainChannel : keep pulling until try_recv() reports Empty
+DrainChannel : every received task is pushed onto the heap
+
+state "**Sleeping**" as Sleeping #00838F
+Sleeping : do_sleep() runs on entry to this state
+Sleeping : sleeps min(Δt to next task, poll_interval_ms)
+
+state "**ExecutingTask**" as ExecutingTask #455A64
+ExecutingTask : declared in CronState — never entered
+
+state "**Terminated**" as Terminated #C62828
+Terminated : run() loop exits · the cron thread joins
+
+CheckEvents --> DrainChannel : **TaskReceived**
+DrainChannel --> DrainChannel : **TaskReceived**
+DrainChannel --> CheckEvents : **ChannelDisconnected**\n(drain what remains)
+
+CheckEvents -[#1565C0,bold]-> CheckEvents : **TaskDue** ⟳\nexecute_one_task()
+DrainChannel -[#1565C0,bold]-> CheckEvents : **TaskDue**\nexecute_one_task()
+Sleeping -[#1565C0,bold]-> CheckEvents : **TaskDue**\nexecute_one_task()
+
+CheckEvents --> Sleeping : **NoEvents**
+DrainChannel --> Sleeping : **NoEvents**\nchannel empty · nothing due
+Sleeping --> CheckEvents : **TimerExpired**
+
+CheckEvents -[#C62828,bold]-> Terminated : **ChannelDisconnected**\n∧ queue.is_empty()
+CheckEvents -[#C62828,bold]-> Terminated : **TerminationRequested**
+DrainChannel -[#C62828,bold]-> Terminated : **TerminationRequested**
+Sleeping -[#C62828,bold]-> Terminated : **TerminationRequested**
+
+ExecutingTask -[#455A64,dashed]-> CheckEvents : **TaskCompleted**\n{ success, should_requeue }\nvestigial arm — nothing\nconstructs this event
+
+note bottom of ExecutingTask
+  CronState::ExecutingTask and CronEvent::TaskCompleted exist,
+  and transition() carries an arm for the pair, but no code path
+  ever assigns state = ExecutingTask. execute_one_task() is called
+  **inside** the TaskDue arms and returns before the next poll, so
+  the reachable state set is
+     { CheckEvents, DrainChannel, Sleeping, Terminated }.
+  poll_event() encodes exactly this: its ExecutingTask branch is an
+  unreachable!() with the message 'ExecutingTask polls internally'.
+end note
+
+note right of Terminated
+  poll_event() tests the heap head **before** the
+  termination flag, so a task that is already due
+  still runs after request_shutdown(). A perpetually
+  due task (interval_ms = 0, or a body slower than
+  its own interval) therefore starves shutdown.
+end note
+
+note left of CheckEvents
+  execute_one_task() pops the earliest task, runs it
+  under catch_unwind, and re-queues it at
+  now_ms() + interval only when the closure returned
+  true **and** the metadata carries a recurrence
+  interval. false ⇒ retire; panic ⇒ count and retire.
+end note
+@enduml

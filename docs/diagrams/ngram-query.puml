@@ -1,0 +1,64 @@
+@startuml ngram-query
+' The read-only query surface of NgramModel: one log_prob call fans out into at most n
+' trie lookups (one per backoff level); sentence_log_prob slides an (n-1)-word window
+' across the tokens and sums; perplexity exponentiates the negated mean.
+' Render: plantuml -tsvg docs/diagrams/ngram-query.puml
+' Source of truth for Figure 1 in docs/components/ngram/query-api.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title NgramModel — the query surface
+
+legend top right
+  |= Color |= Concept |
+  |<#1565C0>     | Statistical LM core |
+  |<#00838F>     | Storage / persistence |
+  |<#455A64>     | Caller / result |
+endlegend
+
+rectangle "**sentence_log_prob(tokens)**\nΣᵢ log ℙ(wᵢ | w_{i−n+1..i−1})" as sent #455A64
+rectangle "**Perplexity**\nexp( −(1/m) Σᵢ log ℙ )" as ppl #455A64
+rectangle "**log_prob(w, h)**\npublic entry point" as lp #455A64
+rectangle "**count(tokens)**\nraw c(·), 0 if absent" as cnt #455A64
+rectangle "**in_vocabulary(w)**\nc(w) > 0" as inv #455A64
+
+rectangle "**KneserNeySmoothing**\nprob_recursive(w, h, highest?)\nD₁ · D₂ · D₃₊ · N₁₊(•,•)" as kn #1565C0
+rectangle "**backoff**\nh′ = h[1:]  (drop oldest word)\nat most n levels" as backoff #1565C0
+rectangle "**unigram base case**\nhighest: c(w)/total_count\nbacked-off: N₁₊(•,w)/N₁₊(•,•)\nOOV: 1/|V|  — always > 0" as base #1565C0
+
+rectangle "**NgramTrie<D>**\ncount(tokens) · get(tokens)\nencode key → get_value" as trie #00838F
+rectangle "**Backend D**\nO(m) walk, m = key units" as backend #00838F
+
+sent --> lp : per token
+ppl --> sent
+lp --> kn
+cnt --> trie
+inv --> trie
+kn --> trie : c(h·w), c(h), N₁₊(h,•)
+kn --> backoff : context unseen\nor interpolate
+backoff --> kn : recurse on h′
+backoff --> base : |h| = 0
+base --> trie : c(w) / N₁₊(•, w)
+trie --> backend
+
+note right of base #E3F2FD
+  Every path bottoms out here, and every branch
+  returns a strictly positive probability — so
+  log ℙ is always finite, never −∞.
+end note
+
+note bottom of trie #E3F2FD
+  The model is immutable after training:
+  all queries take &self and are Send + Sync.
+end note
+
+@enduml

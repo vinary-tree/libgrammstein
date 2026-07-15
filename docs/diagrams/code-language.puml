@@ -1,0 +1,74 @@
+@startuml code-language
+' The CodeLanguage trait and its supporting token-classification vocabulary.
+' Render: plantuml -tsvg docs/diagrams/code-language.puml
+' Source of truth for Figure 1 in docs/components/code/language.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam class {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  AttributeFontColor white
+}
+title CodeLanguage trait & token vocabulary
+
+interface CodeLanguage <<trait: Send + Sync>> #EF6C00 {
+  +name() : &str
+  +display_name() : &str
+  +tree_sitter_language() : Language
+  +keywords() : &[&str]
+  +special_tokens() : &[&str]
+  +file_extensions() : &[&str]
+  +classify_token(token, node_kind) : TokenType
+  +is_valid_identifier(s) : bool
+  +builtin_types() : &[&str]
+  +stdlib_functions() : &[&str]
+  +comment_syntax() : CommentSyntax
+  +is_whitespace_significant() : bool
+  +keyword_set() : HashSet<&str>
+}
+
+enum TokenType #1565C0 {
+  Keyword
+  Identifier
+  TypeName
+  Operator
+  Punctuation
+  StringLiteral
+  NumericLiteral
+  BooleanLiteral
+  Comment
+  Whitespace
+  Special
+  Unknown
+  --
+  +is_correctable() : bool
+  +has_fixed_vocabulary() : bool
+}
+
+class TokenContext #2E7D32 {
+  +token_type : TokenType
+  +parent_node_type : Option<String>
+  +sibling_types : Vec<String>
+  +depth : usize
+  +in_error_region : bool
+  +expected_types : Vec<TokenType>
+}
+
+class CommentSyntax #00838F {
+  +line_comment : Option<&str>
+  +block_comment : Option<(&str,&str)>
+  +doc_comment : Option<&str>
+  --
+  +c_style() · python_style()
+  +shell_style() · lisp_style()
+}
+
+CodeLanguage ..> TokenType : classify_token ▷
+CodeLanguage ..> CommentSyntax : comment_syntax ▷
+TokenContext *-- TokenType : token_type
+TokenContext ..> TokenType : expected_types
+
+@enduml

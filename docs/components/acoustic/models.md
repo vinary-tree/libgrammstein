@@ -1,483 +1,328 @@
 # Acoustic Models
 
-Neural network acoustic models using the Candle ML framework.
+An **acoustic model** maps a sequence of audio feature frames to a sequence of log posterior
+distributions over output units — senones, phonemes, or characters plus a CTC blank. Those
+posteriors are the emission probabilities a CTC or HMM decoder searches when it composes the
+acoustic evidence with a language model. libgrammstein ships three implementations behind the
+`candle-model` gate, built on the [Candle](https://github.com/huggingface/candle) tensor
+framework: a linear baseline, a Transformer encoder, and a deterministic mock for testing.
 
-## What are Acoustic Models?
+> **Scope.** Source of truth: [`src/acoustic/model.rs`](../../../src/acoustic/model.rs)
+> (feature-gated `candle-model`). For the features these models consume see
+> [Feature Extraction](features.md); for where the model sits in the recognizer see the
+> [Acoustic Overview](overview.md#from-features-to-transcription). The Transformer encoder follows
+> Vaswani et al. [[1]](#references); the CTC blank contract follows Graves et al.
+> [[2]](#references).
 
-Acoustic models map audio features to probability distributions over output units (phonemes, characters, or subword tokens). In the ASR cascade, they compute the emission probabilities that drive CTC or HMM decoding.
+## What & why
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Acoustic Model in ASR                                │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│   Audio Features              Acoustic Model                Posteriors      │
-│   [T, F]                      (Neural Network)              [T, U]          │
-│                                                                             │
-│   ┌───┬───┬───┐              ┌──────────────────┐         ┌───┬───┬───┐   │
-│   │f₀₀│f₀₁│...│──────────────│  Transformer or  │─────────│p₀₀│p₀₁│...│   │
-│   ├───┼───┼───┤              │  Linear Encoder  │         ├───┼───┼───┤   │
-│   │f₁₀│f₁₁│...│              └──────────────────┘         │p₁₀│p₁₁│...│   │
-│   ├───┼───┼───┤                                           ├───┼───┼───┤   │
-│   │...│...│...│              T = time frames              │...│...│...│   │
-│   └───┴───┴───┘              F = feature dim (40)         └───┴───┴───┘   │
-│                              U = output units (4096)                        │
-│                                                                             │
-│   Posteriors represent: log P(unit | features)                              │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+A recognizer needs $`\log \mathbb{P}(u \mid \text{frame})`$ for every output unit $`u`$ at every
+time step — the *emission* term of the search. The acoustic model is the neural network that
+produces it. Its quality dominates recognition accuracy, so the architecture matters: a purely
+frame-local model (the linear baseline) cannot use temporal context, whereas a Transformer lets
+every frame attend to every other frame, resolving coarticulation and long-range dependencies.
+All three models share one contract — the `AcousticModel` trait — so a decoder can treat them
+interchangeably.
 
-## Feature Flag
+## Notation
 
-Acoustic models require the `candle-model` feature:
+Every symbol below is defined before it is used in a formula.
 
-```toml
-[dependencies]
-libgrammstein = { version = "0.1", features = ["candle-model"] }
-```
+| Symbol | Meaning |
+|---|---|
+| $`\mathbf{x}`$ | one input feature frame (dimension $`F`$) |
+| $`F`$ | input feature dimension (`feature_dim`) |
+| $`H`$ | hidden dimension (`hidden_dim`) |
+| $`U`$ | number of output units (`num_units`) |
+| $`T`$ | number of frames in the input sequence |
+| $`\mathbf{z}`$ | pre-softmax logits (dimension $`U`$) |
+| $`W_\bullet, \mathbf{b}_\bullet`$ | a learned weight matrix and bias |
+| $`Q, K, V`$ | query, key, value projections in attention |
+| $`d_k`$ | per-head dimension (`hidden_dim / num_heads`) |
+| $`\gamma, \beta`$ | LayerNorm scale and shift |
+| $`p`$ | a time position in the positional encoding |
 
-This enables:
-- `candle-core` - Tensor operations
-- `candle-nn` - Neural network layers
-- `acoustic` - Feature extraction (automatically included)
+**Acronyms.** *CTC* — Connectionist Temporal Classification; *HMM* — Hidden Markov Model;
+*GELU* — Gaussian Error Linear Unit; *MHSA* — Multi-Head Self-Attention; *LN* — Layer
+Normalization.
 
-## AcousticModel Trait
+## The `AcousticModel` trait
 
-The core interface for acoustic models.
+The trait is a deliberate local mirror of lling-llang's acoustic-model trait, kept inside
+libgrammstein to avoid a circular crate dependency. A `forward` receives $`T`$ frames of $`F`$
+values and returns $`T`$ log-posterior vectors of $`U`$ values.
 
 ```rust
 pub trait AcousticModel: Send + Sync {
-    /// Input feature dimension (e.g., 40 for filterbank)
+    /// Input feature dimensionality F.
     fn feature_dim(&self) -> usize;
 
-    /// Number of output units (vocabulary size)
+    /// Number of output units U.
     fn num_units(&self) -> usize;
 
-    /// Compute log posteriors for input frames
-    /// Input: [batch_size, feature_dim]
-    /// Output: [batch_size, num_units]
+    /// Log posteriors for frames: [T, F] -> [T, U].
     fn forward(&self, frames: &[Vec<f32>]) -> Vec<Vec<f32>>;
 
-    /// CTC blank token ID (if using CTC)
+    /// CTC blank id, when this is a CTC model.
     fn blank_id(&self) -> Option<u32> { None }
 
-    /// Optional: Get unit name for debugging
-    fn unit_name(&self, unit: u32) -> Option<String> { None }
+    /// Human-readable name for an output unit (default: none).
+    fn unit_name(&self, _unit: u32) -> Option<String> { None }
 }
 ```
 
-## AcousticModelConfig
+The `Send + Sync` bound lets one model be shared across decoder threads. Each concrete model
+overrides `blank_id` to return `Some(blank_id)` when configured for CTC; `unit_name` uses the
+default (`None`) unless a future model supplies a symbol table.
 
-Configuration for all acoustic model types.
+## `AcousticModelConfig`
 
-### Parameters
+One configuration record parameterizes every model.
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `feature_dim` | `usize` | 40 | Input feature dimension |
-| `hidden_dim` | `usize` | 256 | Hidden layer dimension |
-| `num_units` | `usize` | 4096 | Output vocabulary size |
-| `num_layers` | `usize` | 6 | Encoder layers |
-| `dropout` | `f64` | 0.1 | Dropout probability |
-| `num_heads` | `usize` | 4 | Attention heads (transformer) |
-| `ff_dim` | `usize` | 1024 | Feed-forward dimension |
-| `is_ctc` | `bool` | false | Has CTC blank token |
-| `blank_id` | `u32` | 0 | Blank token ID |
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `feature_dim` | `usize` | $`40`$ | input feature dimension $`F`$ |
+| `hidden_dim` | `usize` | $`256`$ | encoder hidden dimension $`H`$ |
+| `num_units` | `usize` | $`4096`$ | output units $`U`$ |
+| `num_layers` | `usize` | $`6`$ | Transformer encoder layers |
+| `dropout` | `f64` | $`0.1`$ | training dropout probability |
+| `num_heads` | `usize` | $`4`$ | attention heads |
+| `ff_dim` | `usize` | $`1024`$ | feed-forward width |
+| `is_ctc` | `bool` | `true` | model has a CTC blank token |
+| `blank_id` | `u32` | $`0`$ | blank token id |
 
-### Preset Configurations
+> **`is_ctc` defaults to `true`.** With the default config every model reports
+> `blank_id() == Some(0)`. The `dropout` field configures training; the inference `forward`
+> implemented here does not apply dropout.
+
+Three presets and three builder methods are provided — and **only** these three builder methods:
 
 ```rust
 use libgrammstein::acoustic::AcousticModelConfig;
 
-// Small: Fast inference, lower accuracy
-let small = AcousticModelConfig::small();
-// hidden_dim: 128, num_layers: 2, num_heads: 2
+let small  = AcousticModelConfig::small();   // H=128, layers=2, heads=2, ff=512
+let medium = AcousticModelConfig::medium();  // = default: H=256, layers=6, heads=4, ff=1024
+let large  = AcousticModelConfig::large();   // H=512, layers=12, heads=8, ff=2048
 
-// Medium: Balanced (default)
-let medium = AcousticModelConfig::medium();
-// hidden_dim: 256, num_layers: 6, num_heads: 4
-
-// Large: High accuracy, slower
-let large = AcousticModelConfig::large();
-// hidden_dim: 512, num_layers: 12, num_heads: 8
-```
-
-### Builder Pattern
-
-```rust
+// Builder methods: with_feature_dim, with_num_units, with_ctc.
 let config = AcousticModelConfig::default()
-    .with_feature_dim(80)      // 80-dim filterbank
-    .with_num_units(4096)      // Vocabulary size
-    .with_hidden_dim(512)      // Larger hidden layer
-    .with_num_layers(12)       // More layers
-    .with_ctc(0);              // Enable CTC with blank_id=0
+    .with_feature_dim(80)   // 80-dim filterbank input
+    .with_num_units(4096)   // output vocabulary
+    .with_ctc(0);           // is_ctc = true, blank_id = 0
 ```
 
-## LinearAcousticModel
+To change `hidden_dim`, `num_layers`, `num_heads`, or `ff_dim`, start from a preset or set the
+fields directly with struct-update syntax (`..Default::default()`) — there are no
+`with_hidden_dim` / `with_num_layers` setters.
 
-A simple baseline model with a single hidden layer.
+## Theory
 
-### Architecture
+### The shared skeleton
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         LinearAcousticModel                                  │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│   Input [B, F]                                                              │
-│       │                                                                     │
-│       ▼                                                                     │
-│   ┌─────────────────────┐                                                   │
-│   │  Linear (F → H)     │                                                   │
-│   └──────────┬──────────┘                                                   │
-│              │                                                              │
-│              ▼                                                              │
-│   ┌─────────────────────┐                                                   │
-│   │       ReLU          │                                                   │
-│   └──────────┬──────────┘                                                   │
-│              │                                                              │
-│              ▼                                                              │
-│   ┌─────────────────────┐                                                   │
-│   │  Linear (H → U)     │                                                   │
-│   └──────────┬──────────┘                                                   │
-│              │                                                              │
-│              ▼                                                              │
-│   ┌─────────────────────┐                                                   │
-│   │    Log Softmax      │                                                   │
-│   └──────────┬──────────┘                                                   │
-│              │                                                              │
-│              ▼                                                              │
-│   Output [B, U]  (log posteriors)                                           │
-│                                                                             │
-│   B = batch size, F = feature_dim, H = hidden_dim, U = num_units            │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+Every model ends the same way: it produces logits $`\mathbf{z} \in \mathbb{R}^U`$ per frame and
+applies a **log-softmax** so the output is a proper log distribution over units:
+
+```math
+\log\mathrm{softmax}(\mathbf{z})_u = z_u - \log \sum_{u'=0}^{U-1} e^{z_{u'}} \tag{M1}
 ```
 
-### Usage
+so that $`\sum_u \exp\bigl(\log \mathbb{P}(u \mid \text{frame})\bigr) = 1`$.
+
+### LinearAcousticModel
+
+The baseline is a two-layer perceptron applied to each frame independently — no temporal context:
+
+```math
+\mathbf{h} = \mathrm{ReLU}\bigl(W_{\mathrm{in}}\mathbf{x} + \mathbf{b}_{\mathrm{in}}\bigr),
+\qquad
+\mathbf{z} = W_{\mathrm{out}}\mathbf{h} + \mathbf{b}_{\mathrm{out}},
+\qquad
+\log \mathbb{P}(\cdot \mid \mathbf{x}) = \log\mathrm{softmax}(\mathbf{z}) \tag{M2}
+```
+
+with $`W_{\mathrm{in}} \in \mathbb{R}^{H \times F}`$ and
+$`W_{\mathrm{out}} \in \mathbb{R}^{U \times H}`$. It is intended for wiring tests and baselines,
+not accuracy.
+
+### TransformerAcousticModel
+
+The Transformer processes all $`T`$ frames as one sequence, so each frame's representation is
+informed by the whole utterance. The input is projected to $`H`$ dimensions and a sinusoidal
+**positional encoding** is added so the otherwise order-agnostic attention knows frame order:
+
+```math
+\mathrm{PE}[p, 2i] = \sin\!\left(\frac{p}{10000^{\,2i/H}}\right),
+\qquad
+\mathrm{PE}[p, 2i+1] = \cos\!\left(\frac{p}{10000^{\,2i/H}}\right) \tag{M3}
+```
+
+Each of the `num_layers` encoder blocks is a **post-norm** pair of residual sublayers: multi-head
+self-attention then a position-wise feed-forward network. Scaled dot-product attention lets each
+frame weight every other frame [[1]](#references):
+
+```math
+\mathrm{Attn}(Q, K, V) = \mathrm{softmax}\!\left(\frac{Q K^{\top}}{\sqrt{d_k}}\right) V,
+\qquad d_k = \frac{H}{\text{num\_heads}} \tag{M4}
+```
+
+with $`Q = \mathbf{x}W_Q`$, $`K = \mathbf{x}W_K`$, $`V = \mathbf{x}W_V`$ reshaped into
+`num_heads` heads and recombined by an output projection. The feed-forward network uses a GELU
+nonlinearity:
+
+```math
+\mathrm{FFN}(\mathbf{x}) = W_2\,\mathrm{GELU}\bigl(W_1 \mathbf{x} + \mathbf{b}_1\bigr) + \mathbf{b}_2 \tag{M5}
+```
+
+and each sublayer is wrapped in a residual connection and Layer Normalization
+($`\mu, \sigma^2`$ over the hidden axis, $`\epsilon = 10^{-5}`$):
+
+```math
+\mathrm{LN}(\mathbf{x}) = \frac{\mathbf{x} - \mu}{\sqrt{\sigma^2 + \epsilon}} \odot \gamma + \beta,
+\qquad
+\begin{aligned}
+\mathbf{x}' &= \mathrm{LN}_1\bigl(\mathbf{x} + \mathrm{Attn}(\mathbf{x})\bigr) \\
+\mathbf{x}'' &= \mathrm{LN}_2\bigl(\mathbf{x}' + \mathrm{FFN}(\mathbf{x}')\bigr)
+\end{aligned} \tag{M6}
+```
+
+A final projection to $`U`$ units and $`(\mathrm{M1})`$ give the per-frame log posteriors.
+
+### MockAcousticModel
+
+The mock returns a uniform log distribution for every frame — a fixed emission for testing
+decoders and pipelines with no neural dependency:
+
+```math
+\log \mathbb{P}(u \mid \text{frame}) = -\log U \tag{M7}
+```
+
+![Neural acoustic model architecture: input projection, the Linear ReLU path and the Transformer encoder stack (positional encoding, multi-head self-attention, add and norm, feed-forward, add and norm), output projection, and log-softmax](../../diagrams/acoustic-model-architecture.svg)
+
+## The forward pass, literately
+
+The following mirrors [`TransformerAcousticModel::forward`](../../../src/acoustic/model.rs).
+
+```
+function forward(frames):                       ▸ [T, F] -> [T, U] log posteriors
+    if frames is empty: return []
+    x <- tensor(frames) as [1, T, F]             ▸ one sequence, batch = 1
+    h <- input_proj(x)                            ▸ Linear F -> H
+    h <- h + positional_encoding(T, H)            ▸ (M3)
+    for layer in layers:                          ▸ num_layers blocks
+        h <- layer_norm1(h + self_attention(h))   ▸ (M4), (M6)
+        h <- layer_norm2(h + feed_forward(h))      ▸ (M5), (M6)
+    z <- output_proj(h)                           ▸ Linear H -> U
+    return log_softmax(z, dim = U).squeeze(0)     ▸ (M1)
+    ▸ on ANY tensor error, degrade to zeros [T, U] instead of panicking
+```
+
+`LinearAcousticModel::forward` differs in two ways: it shapes the frames as $`[T, F]`$ (each frame
+independent, no positional encoding, no attention), and its body is the single $`(\mathrm{M2})`$
+expression `output_proj(relu(input_proj(x)))` before the log-softmax.
+
+## Engineering
+
+### Untrained `new` vs. loaded weights
+
+`new(config, &device)` builds the architecture with **randomly initialized** weights (a fresh
+Candle `VarMap`), so its posteriors are meaningless until the model is trained. For real
+recognition, `load(path, config, &device)` memory-maps a trained `safetensors` file. Both are
+available for `LinearAcousticModel` and `TransformerAcousticModel`.
 
 ```rust
-use libgrammstein::acoustic::{LinearAcousticModel, AcousticModelConfig, AcousticModel};
+use libgrammstein::acoustic::{AcousticModel, AcousticModelConfig, TransformerAcousticModel};
 use candle_core::Device;
 
-// Configure model
-let config = AcousticModelConfig {
-    feature_dim: 40,
-    hidden_dim: 256,
-    num_units: 4096,
-    ..Default::default()
-};
-
-// Create on GPU if available
 let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
-let model = LinearAcousticModel::new(config, &device).expect("Failed to create model");
+let config = AcousticModelConfig::default().with_num_units(4096).with_ctc(0);
 
-// Forward pass
-let features = vec![vec![0.0f32; 40]; 100];  // 100 frames
-let posteriors = model.forward(&features);    // [100, 4096]
+// Load trained weights (use ::new(config, &device) only to test wiring).
+let model = TransformerAcousticModel::load("acoustic.safetensors", config, &device)
+    .expect("load acoustic model");
 
-// Get best unit per frame
-for (i, frame_post) in posteriors.iter().enumerate() {
-    let best_unit = frame_post
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-        .map(|(idx, _)| idx)
-        .unwrap();
-    println!("Frame {}: best unit = {}", i, best_unit);
-}
-```
-
-### Loading Pretrained Weights
-
-```rust
-// Load from safetensors file
-let model = LinearAcousticModel::load(
-    "linear_acoustic.safetensors",
-    config,
-    &device,
-).expect("Failed to load model");
-```
-
-## TransformerAcousticModel
-
-State-of-the-art acoustic model using transformer encoder layers with self-attention.
-
-### Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       TransformerAcousticModel                               │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│   Input [B, T, F]                                                           │
-│       │                                                                     │
-│       ▼                                                                     │
-│   ┌─────────────────────┐                                                   │
-│   │ Linear (F → H)      │  Input projection                                 │
-│   └──────────┬──────────┘                                                   │
-│              │                                                              │
-│              ▼                                                              │
-│   ┌─────────────────────┐                                                   │
-│   │ + Positional Enc    │  Sinusoidal position encoding                     │
-│   └──────────┬──────────┘                                                   │
-│              │                                                              │
-│              ▼                                                              │
-│   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │                     Transformer Layers (×N)                          │   │
-│   │  ┌────────────────────────────────────────────────────────────────┐ │   │
-│   │  │  ┌─────────────────┐    ┌─────────────────┐                    │ │   │
-│   │  │  │  Multi-Head     │───►│   Add & Norm    │                    │ │   │
-│   │  │  │  Self-Attention │    └────────┬────────┘                    │ │   │
-│   │  │  │  (H heads)      │             │                             │ │   │
-│   │  │  └─────────────────┘             ▼                             │ │   │
-│   │  │                      ┌─────────────────┐    ┌─────────────────┐│ │   │
-│   │  │                      │  Feed-Forward   │───►│   Add & Norm    ││ │   │
-│   │  │                      │  (H → FF → H)   │    └────────┬────────┘│ │   │
-│   │  │                      │  + GELU         │             │         │ │   │
-│   │  │                      └─────────────────┘             ▼         │ │   │
-│   │  └─────────────────────────────────────────────────────────────────┘ │   │
-│   └──────────────────────────────────┬──────────────────────────────────┘   │
-│                                      │                                      │
-│                                      ▼                                      │
-│   ┌─────────────────────┐                                                   │
-│   │ Linear (H → U)      │  Output projection                                │
-│   └──────────┬──────────┘                                                   │
-│              │                                                              │
-│              ▼                                                              │
-│   ┌─────────────────────┐                                                   │
-│   │    Log Softmax      │                                                   │
-│   └──────────┬──────────┘                                                   │
-│              │                                                              │
-│              ▼                                                              │
-│   Output [B, T, U]  (log posteriors per frame)                              │
-│                                                                             │
-│   B = batch, T = time, F = features, H = hidden, U = units, N = num_layers  │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Self-Attention
-
-The self-attention mechanism allows each frame to attend to all other frames:
-
-```
-                    Query (Q)      Key (K)       Value (V)
-                       ↓             ↓              ↓
-                    ┌──────────────────────────────────┐
-                    │                                  │
-                    │    Attention = softmax(QK^T/√d)V │
-                    │                                  │
-                    └──────────────────────────────────┘
-                                    │
-                                    ▼
-                              Context-aware
-                              representation
-```
-
-### Usage
-
-```rust
-use libgrammstein::acoustic::{
-    TransformerAcousticModel, AcousticModelConfig, AcousticModel
-};
-use candle_core::Device;
-
-// Configure transformer model
-let config = AcousticModelConfig {
-    feature_dim: 40,
-    hidden_dim: 256,
-    num_units: 4096,
-    num_layers: 6,
-    num_heads: 4,
-    ff_dim: 1024,
-    dropout: 0.1,
-    is_ctc: true,
-    blank_id: 0,
-    ..Default::default()
-};
-
-// Create model
-let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
-let model = TransformerAcousticModel::new(config, &device)
-    .expect("Failed to create model");
-
-// Print model info
-println!("Feature dim: {}", model.feature_dim());   // 40
-println!("Output units: {}", model.num_units());    // 4096
-println!("Blank ID: {:?}", model.blank_id());       // Some(0)
-
-// Forward pass maintains temporal structure
-let features = vec![vec![0.0f32; 40]; 100];  // 100 frames, 40 dims each
-let posteriors = model.forward(&features);    // [100, 4096]
-
-assert_eq!(posteriors.len(), 100);
-assert_eq!(posteriors[0].len(), 4096);
-```
-
-### Loading Pretrained Model
-
-```rust
-// Load pretrained weights
-let model = TransformerAcousticModel::load(
-    "transformer_acoustic.safetensors",
-    config,
-    &device,
-).expect("Failed to load model");
-```
-
-## MockAcousticModel
-
-A testing model that returns uniform log probabilities.
-
-```rust
-use libgrammstein::acoustic::{MockAcousticModel, AcousticModelConfig, AcousticModel};
-
-let config = AcousticModelConfig::default();
-let model = MockAcousticModel::new(config);
-
-// All outputs are uniform log probabilities
-let features = vec![vec![0.0f32; 40]; 100];
-let posteriors = model.forward(&features);
-
-// Each frame has uniform distribution over units
-let first_posterior = &posteriors[0];
-let expected_log_prob = -(config.num_units as f32).ln();
-assert!((first_posterior[0] - expected_log_prob).abs() < 1e-5);
-```
-
-## CTC Integration
-
-When using CTC decoding, configure the blank token:
-
-```rust
-let config = AcousticModelConfig::default()
-    .with_ctc(0);  // blank_id = 0
-
-let model = TransformerAcousticModel::new(config, &device)?;
-
-// Blank token is first output unit
+assert_eq!(model.feature_dim(), 40);
 assert_eq!(model.blank_id(), Some(0));
-
-// Forward pass includes blank probability
-let posteriors = model.forward(&features);
-let blank_log_prob = posteriors[0][0];  // log P(blank | frame_0)
 ```
 
-## Complete ASR Example
+### Graceful degradation
+
+`forward` never panics on a tensor error. If tensor construction or a kernel fails, it returns a
+$`T \times U`$ block of zeros rather than propagating the error. A zero vector is a sentinel, not a
+valid log distribution (its probabilities do not sum to one), so a downstream decoder should treat
+an all-zero frame as "no acoustic information."
+
+### CTC blank contract
+
+When `is_ctc` is set, unit `blank_id` (default $`0`$) is the CTC blank. A greedy CTC collapse
+reads the argmax unit per frame, drops blanks, and merges immediate repeats [[2]](#references):
+
+```rust
+let posteriors = model.forward(&features);      // [T, U] log posteriors
+let blank = model.blank_id().unwrap_or(0);
+let mut prev = blank;
+let mut units = Vec::new();
+for frame in &posteriors {
+    let best = frame.iter().enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("finite posterior"))
+        .map(|(u, _)| u as u32).expect("non-empty frame");
+    if best != blank && best != prev { units.push(best); }
+    prev = best;
+}
+```
+
+### Device and cost
+
+Models run on any Candle `Device` — `Device::Cpu`, `Device::cuda_if_available(0)`, or Metal on
+Apple silicon. The Linear model is $`O(T \cdot (FH + HU))`$; the Transformer adds
+$`O(\text{num\_layers} \cdot (T^2 H + T H\,\text{ff\_dim}))`$, the $`T^2`$ term being the
+attention over all frame pairs. Preset sizes trade cost against accuracy:
+
+| Preset | `hidden_dim` | `num_layers` | `num_heads` | Use case |
+|---|---|---|---|---|
+| `small` | $`128`$ | $`2`$ | $`2`$ | fast inference, wiring tests |
+| `medium` (default) | $`256`$ | $`6`$ | $`4`$ | balanced |
+| `large` | $`512`$ | $`12`$ | $`8`$ | highest accuracy |
+
+### Feature gate
+
+The models require the `candle-model` gate (which also enables `acoustic` for feature
+extraction). See the [Acoustic Overview](overview.md#feature-gates).
+
+## Usage
 
 ```rust
 use libgrammstein::acoustic::{
-    FeatureExtractor, FeatureConfig,
-    TransformerAcousticModel, AcousticModelConfig,
-    AcousticModel,
+    AcousticModel, AcousticModelConfig, FeatureConfig, FeatureExtractor,
+    TransformerAcousticModel,
 };
 use candle_core::Device;
 
-fn transcribe(audio_path: &str) -> String {
-    // Step 1: Configure feature extraction
-    let feature_config = FeatureConfig::default();
-    let extractor = FeatureExtractor::new(feature_config);
+// 1. Extract features.
+let extractor = FeatureExtractor::new(FeatureConfig::default());
+let audio: Vec<f32> = load_audio("speech.wav");
+let features = extractor.extract_filterbank(&audio);   // [T, 40]
 
-    // Step 2: Load audio
-    let audio = load_audio_16khz(audio_path);
+// 2. Load a trained acoustic model matching the feature dimension.
+let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
+let config = AcousticModelConfig::default().with_feature_dim(40).with_ctc(0);
+let model = TransformerAcousticModel::load("acoustic.safetensors", config, &device)
+    .expect("load acoustic model");
 
-    // Step 3: Extract features
-    let features = extractor.extract_filterbank(&audio);
-    println!("Extracted {} frames", features.len());
-
-    // Step 4: Configure acoustic model
-    let model_config = AcousticModelConfig::default()
-        .with_num_units(4096)
-        .with_ctc(0);
-
-    // Step 5: Load acoustic model
-    let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
-    let model = TransformerAcousticModel::load(
-        "acoustic_model.safetensors",
-        model_config,
-        &device,
-    ).expect("Failed to load model");
-
-    // Step 6: Get posteriors
-    let posteriors = model.forward(&features);
-
-    // Step 7: Greedy CTC decode
-    let blank_id = model.blank_id().unwrap_or(0);
-    let mut prev_unit = blank_id;
-    let mut decoded = Vec::new();
-
-    for frame_posteriors in &posteriors {
-        let best_unit = frame_posteriors
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(idx, _)| idx as u32)
-            .unwrap();
-
-        // CTC rule: skip blanks and repeated units
-        if best_unit != blank_id && best_unit != prev_unit {
-            decoded.push(best_unit);
-        }
-        prev_unit = best_unit;
-    }
-
-    // Convert to text (depends on your vocabulary)
-    decode_units_to_text(&decoded)
-}
+// 3. Emit per-frame log posteriors for the decoder.
+let posteriors = model.forward(&features);             // [T, num_units]
 ```
 
-## Device Selection
+## References
 
-```rust
-use candle_core::Device;
+1. A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, Ł. Kaiser &
+   I. Polosukhin (2017). *Attention is all you need.* NeurIPS 30.
+   [arXiv:1706.03762](https://arxiv.org/abs/1706.03762)
+2. A. Graves, S. Fernández, F. Gomez & J. Schmidhuber (2006). *Connectionist temporal
+   classification: labelling unsegmented sequence data with recurrent neural networks.* ICML,
+   369–376. [doi:10.1145/1143844.1143891](https://doi.org/10.1145/1143844.1143891)
 
-// CPU (always available)
-let device = Device::Cpu;
+## See also
 
-// CUDA GPU (if available)
-let device = Device::cuda_if_available(0)?;  // GPU index 0
-
-// Metal (Apple Silicon)
-#[cfg(target_os = "macos")]
-let device = Device::new_metal(0)?;
-
-// Automatic best device
-let device = if Device::is_cuda_available() {
-    Device::new_cuda(0)?
-} else if Device::is_metal_available() {
-    Device::new_metal(0)?
-} else {
-    Device::Cpu
-};
-```
-
-## Performance Tips
-
-### Batch Processing
-
-```rust
-// Process multiple frames together for better GPU utilization
-let batch_size = 32;
-let features: Vec<Vec<f32>> = /* ... */;
-
-for batch in features.chunks(batch_size) {
-    let posteriors = model.forward(batch);
-    // Process batch...
-}
-```
-
-### Model Size Trade-offs
-
-| Model | Hidden | Layers | Params | Speed | Accuracy |
-|-------|--------|--------|--------|-------|----------|
-| Small | 128 | 2 | ~1M | Fast | Lower |
-| Medium | 256 | 6 | ~10M | Medium | Good |
-| Large | 512 | 12 | ~50M | Slow | Best |
-
-## Related Documentation
-
-- [Acoustic Overview](overview.md) - Module introduction
-- [Feature Extraction](features.md) - Audio preprocessing
-- [lling-llang AcousticModel](../../../lling-llang/docs/acoustic/overview.md) - Integration
+- [Acoustic Overview](overview.md) — module tour and the ASR cascade
+- [Feature Extraction](features.md) — the features these models consume
+- [Modified Kneser-Ney](../ngram/modified-kneser-ney.md) — the grammar composed with the emissions

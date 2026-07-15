@@ -1,0 +1,77 @@
+@startuml dict-normalize
+' WordExtractor::normalize_word — the five-step gauntlet every token runs before it
+' is counted. Under the DEFAULT config, filter_special = true silently discards every
+' word containing an interior apostrophe or hyphen ("don't", "well-known").
+' Render: plantuml -tsvg docs/diagrams/dict-normalize.puml
+' Source of truth for Figure 2 in docs/components/dictionary/extraction.md, section "What counts as a word".
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam note {
+  BackgroundColor #E3F2FD
+  BorderColor #1565C0
+}
+title normalize_word — the gauntlet between a raw token and a counted word
+
+rectangle "**raw token**\nsentence.split_whitespace()" as raw #546E7A
+
+rectangle "**1 · trim**\nword.trim_matches(|c| !c.is_alphanumeric())\nstrips leading/trailing punctuation only" as t1 #1565C0
+rectangle "**2 · non-empty**\n!word.is_empty()" as t2 #1565C0
+rectangle "**3 · length**\nmin_word_length ≤ chars().count() ≤ max_word_length\ndefault: 1 … 50 — measured in **chars**, not bytes" as t3 #1565C0
+rectangle "**4 · digits**\nfilter_digits ⇒ reject if any c.is_ascii_digit()\ndefault: **false** (digits are kept)" as t4 #1565C0
+rectangle "**5 · special**\nfilter_special ⇒ reject if any !c.is_alphanumeric()\ndefault: **true**" as t5 #1565C0
+rectangle "**6 · case**\nlowercase ⇒ word.to_lowercase()\ndefault: **true**" as t6 #1565C0
+
+rectangle "**None** — token discarded\ntotal_tokens is **not** incremented" as none #90A4AE
+rectangle "**Some(normalized)**\ntotal_tokens += 1\ncounts.entry(w).or_insert(0) += 1" as some #00838F
+
+raw --> t1
+t1 --> t2
+t2 -[#2E7D32]-> t3 : ✓
+t3 -[#2E7D32]-> t4 : ✓
+t4 -[#2E7D32]-> t5 : ✓
+t5 -[#2E7D32]-> t6 : ✓
+t6 -[#2E7D32]-> some : ✓
+
+t2 -[#C62828]-> none : ✗ punctuation-only token
+t3 -[#C62828]-> none : ✗ too short / too long
+t4 -[#C62828]-> none : ✗ contains a digit
+t5 -[#C62828]-> none : ✗ contains a non-alphanumeric char
+
+note right of t5
+  **The default that surprises people.** Trimming only touches the
+  *edges*, so an interior mark survives step 1 and is then rejected
+  by step 5:
+    "Hello,"      ⇒ "hello"        ✓ kept
+    "don't"        ⇒ ✗ dropped (apostrophe)
+    "well-known"   ⇒ ✗ dropped (hyphen)
+    "café"         ⇒ "café"        ✓ kept (is_alphanumeric is Unicode-aware)
+    "你好"          ⇒ "你好"         ✓ kept
+  Set filter_special = false to keep clitics and compounds.
+end note
+
+note bottom of some
+  Extraction does **not** use corpus::Tokenizer. It splits on whitespace
+  only, so a sentence must already be whitespace-tokenised — which is
+  exactly what CorpusReader::sentences() yields.
+end note
+
+legend right
+  |= Colour |= Role |
+  |<#546E7A> | raw input |
+  |<#1565C0> | normalisation step |
+  |<#00838F> | counted into the DashMap |
+  |<#90A4AE> | discarded |
+  |<#2E7D32> | ✓ edge: survives |
+  |<#C62828> | ✗ edge: rejected |
+endlegend
+@enduml

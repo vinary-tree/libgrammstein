@@ -1,0 +1,54 @@
+@startuml latex-rag-retrieval
+' Equation retrieval: build id/domain indices, then exact linear cosine scan with a
+' similarity floor and top-k truncation, fronted by a quantised query cache.
+' Render: plantuml -tsvg docs/diagrams/latex-rag-retrieval.puml
+' Source of truth for Figure 1 in docs/components/latex/rag.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+legend top right
+|= Concept |= Color |
+| equation retrieval | <back:#6A1B9A>        </back> |
+| embeddings | <back:#2E7D32>        </back> |
+| query cache | <back:#00838F>        </back> |
+| corpus / I-O | <back:#546E7A>        </back> |
+endlegend
+
+rectangle "EquationDocument\nid · latex · embedding · domain" as doc #546E7A
+rectangle "**EquationRagIndex**\nequations · Vec\nid_index · domain_index\ndimension guard" as idx #6A1B9A
+
+rectangle "query vector v_q\nlen == dimension" as q #2E7D32
+rectangle "**EquationRetriever**\nquantised-key cache\nint8(x·127)" as cache #00838F
+
+rectangle "candidate set\nall, or domain_index[d]" as cand #6A1B9A
+rectangle "cos(v_q, eᵢ) scan\nkeep sim ≥ min_similarity" as scan #6A1B9A
+rectangle "sort desc · truncate top_k" as topk #6A1B9A
+rectangle "Vec⟨RetrievalResult⟩\ndocument · similarity · rank" as out #455A64
+
+doc --> idx : add / add_batch
+q --> cache : probe
+cache --> cand : miss
+idx --> cand : candidates
+cand --> scan
+scan --> topk
+topk --> out
+out -[#00838F,dashed]-> cache : insert
+cache --> out : hit
+
+note right of scan
+  Exact linear scan (O(n·d)).
+  use_ann / HNSW is the crate-level
+  rag-hnsw path, not this in-memory
+  index. min_similarity prunes early.
+end note
+@enduml

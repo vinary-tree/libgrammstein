@@ -2,10 +2,16 @@
 
 [← hierarchical correction](./hierarchical-correction.md)
 
+> **Notation.** Mathematical prose uses MathJax delimited for GitHub-flavored
+> Markdown: inline math is a backtick span wrapped in dollar signs, and display
+> math is a fenced block whose info-string is `math`. Bare dollar delimiters are
+> never used. PlantUML diagram labels are the one exception: they use Unicode
+> glyphs, since SVG cannot typeset MathJax.
+
 Dimension 1 (orthographic correction) builds a **Levenshtein automaton** over the
 in-vocabulary words and intersects it with a query to enumerate every dictionary
-word within edit distance $k$. A natural question at Google-Books scale: to feed
-that automaton, must the $\sim\!13$-million-term vocabulary be exported to an
+word within edit distance $`k`$. A natural question at Google-Books scale: to feed
+that automaton, must the $`\sim\!13`$-million-term vocabulary be exported to an
 in-memory trie, or can the automaton run directly over the memory-mapped
 persistent vocabulary?
 
@@ -19,10 +25,15 @@ The code-verified answer:
    implements `libdictenstein::Dictionary`, and its node handle now descends the
    full depth of the trie, so a `Transducer<SharedVocabARTrie>` enumerates
    multi-character corrections against the memory-mapped overlay with **no
-   in-RAM materialization** — no full-vocabulary copy, no $O(N)$ rebuild,
+   in-RAM materialization** — no full-vocabulary copy, no $`O(N)`$ rebuild,
    eviction and persistence intact.
 
 ![Feeding the Levenshtein automaton directly from the persistent vocabulary trie. Dictionary::root and DictionaryNode::transition walk the lock-free overlay; each transitioned node keeps an Arc to its overlay node and re-resolves children on demand, so the automaton descends the full depth of the trie and enumerates every in-vocabulary word within edit distance k with no in-RAM materialization. The optional DoubleArrayTrie export is shown as a side branch reserved for small, static dictionaries.](../../diagrams/correction-dictionary-backend.svg)
+
+**Figure.** Feeding the Levenshtein automaton directly from the persistent
+vocabulary trie; the green path is the default in-place traversal, the dashed
+blue branch is the optional materialized trie for small static dictionaries.
+*(Rendered from `docs/diagrams/correction-dictionary-backend.puml`.)*
 
 ---
 
@@ -47,10 +58,10 @@ pub trait DictionaryNode: Clone + Send + Sync {
 }
 ```
 
-The automaton simulates $A(w, k)$ — the set of strings within edit distance $k$
-of the query $w$ — and walks it in lockstep with the dictionary graph, pruning a
+The automaton simulates $`A(w, k)`$ — the set of strings within edit distance $`k`$
+of the query $`w`$ — and walks it in lockstep with the dictionary graph, pruning a
 subtree the instant no automaton state survives. The recognition cost is thus
-$O(|w|)$-bounded, independent of the dictionary size (Schulz & Mihov 2002).
+$`O(|w|)`$-bounded, independent of the dictionary size (Schulz & Mihov 2002).
 **Crucially, this requires `transition` to descend the full depth of the trie.**
 
 ## How the persistent trie satisfies the contract

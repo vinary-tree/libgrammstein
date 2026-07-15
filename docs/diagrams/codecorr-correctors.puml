@@ -1,0 +1,55 @@
+@startuml codecorr-correctors
+' Three-layer code-correction stack: parse/tokenize once, fan out to the lexical,
+' grammar, and semantic correctors, then aggregate in the ensemble.
+' Render: plantuml -tsvg docs/diagrams/codecorr-correctors.puml
+' Source of truth for Figure 1 in docs/components/code/correctors/overview.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title Code Correction — Lexical ∪ Grammar ∪ Semantic → Ensemble
+
+legend top right
+  |= Color |= Concept |
+  |<#EF6C00>     | Code / PCFG / Earley |
+  |<#2E7D32>     | Neural / GNN |
+  |<#546E7A>     | External crate (liblevenshtein) / I-O |
+  |<#455A64>     | Aggregated output |
+endlegend
+
+rectangle "**Source code**  (with error)\ntree-sitter incremental parse → AST + tokens" as src #546E7A
+
+package "CodeCorrector implementations" {
+  rectangle "**LexicalCorrector**\ntoken-type fuzzy match\nedit distance ≤ d" as lex #EF6C00
+  rectangle "**GrammarCorrector**\nPCFG + Earley\ninsert / delete / replace" as gram #EF6C00
+  rectangle "**SemanticCorrector** 🟨\nCPG + GNN\nvariable misuse / unused" as sem #2E7D32
+}
+
+rectangle "**liblevenshtein**\nstandard_distance (Levenshtein automaton)" as lev #546E7A
+
+rectangle "**EnsembleCorrector**\ncollect → weight → merge (agreement ⊕ boost) → rank" as ens #455A64
+rectangle "**Ranked corrections**\nconfidence-sorted, deduplicated, top-k" as out #455A64
+
+src --> lex
+src --> gram
+src --> sem
+lex .[#546E7A,dashed].> lev : delegates
+lex --> ens : source = Lexical
+gram --> ens : source = Grammar
+sem --> ens : source = Neural / DataFlow
+ens --> out
+
+note bottom of sem #FFF8E1
+  🟨 the GNN/semantic path is experimental and
+  falls back to deterministic CPG graph rules
+  when learned embeddings are unavailable.
+end note
+
+@enduml

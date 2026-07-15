@@ -1,0 +1,31 @@
+@startuml subtree-treeminer
+' TreeMinerD level-wise mining loop: vertical rep -> 1-subtrees -> extend -> prune.
+' Render: plantuml -tsvg docs/diagrams/subtree-treeminer.puml
+' Source of truth for Figure 1 in docs/components/subtree/treeminer-d.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam activity {
+  BackgroundColor #EF6C00
+  BorderColor #263238
+  FontColor white
+  FontStyle bold
+  DiamondBackgroundColor #1565C0
+  DiamondFontColor white
+  DiamondBorderColor #263238
+}
+
+start
+:Build vertical representation\nlabel → [(tree_id, positions)];
+:Mine frequent 1-subtrees\nkeep labels with support ≥ ⌈σ·T⌉;
+repeat
+  :Extend each frequent k-pattern\nby one adjacent node (per occurrence);
+  :Group candidates by canonical\nDFS string  0:A | 1:B | …;
+  :Count distinct trees per candidate\nprune support < ⌈σ·T⌉;
+repeat while (frequent (k+1)-patterns\nand k ≤ max_pattern_size?) is (yes)
+->no;
+:Emit patterns with size ≥ min_pattern_size\nand max_depth ≤ max_depth;
+stop
+@enduml

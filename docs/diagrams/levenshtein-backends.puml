@@ -1,0 +1,87 @@
+@startuml levenshtein-backends
+' Backend selection decision tree. Every leaf is a libdictenstein backend that
+' libgrammstein actually instantiates — except SuffixAutomatonChar, which exists
+' but is deliberately not wired in (drawn grey to say so). The question order is
+' the order that matters in practice: durability first (it constrains everything
+' downstream), then mutability, then the read/space trade-off.
+' Rectangles (not the activity beta) so the fills are exact and stable.
+' Labels use Unicode glyphs, not <latex>: house style, see docs/diagrams/README.md.
+' Render: plantuml -tsvg docs/diagrams/levenshtein-backends.puml
+' Source of truth for Figure 1 in docs/integration/liblevenshtein/backend-selection.md §3.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam nodesep 40
+skinparam ranksep 45
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+' Decisions are light-filled, so they need dark text — the global white would vanish.
+skinparam rectangle<<decision>> {
+  BackgroundColor #ECEFF1
+  FontColor #263238
+  FontStyle plain
+  BorderColor #546E7A
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam NoteBackgroundColor #ECEFF1
+skinparam NoteBorderColor #90A4AE
+skinparam NoteFontColor #263238
+title Choosing a dictionary backend — every leaf is a libdictenstein type
+
+legend top right
+  |= Color |= Concept |
+  |<#ECEFF1>     | Decision |
+  |<#00838F>     | Storage backend (wired into libgrammstein) |
+  |<#546E7A>     | Available, deliberately not wired |
+endlegend
+
+rectangle "**Q1.** Corpus exceeds RAM,\nor must survive a crash?" as q1 <<decision>>
+rectangle "**Q2.** Still being trained\n(needs writes)?" as q2 <<decision>>
+rectangle "**Q3.** Want cheap snapshots /\nstructural sharing?" as q3 <<decision>>
+rectangle "**Q4.** Match anywhere *inside* a term\n(substring), not from the start?" as q4 <<decision>>
+
+rectangle "**PersistentARTrieChar<V>**\n""SharedCharARTrie<V> = Arc<PersistentARTrieChar<V>>""\nWAL + checkpoints · lock-free CAS overlay\nSIMD Node16 ladder · 𝒪(m) + I/O" as artrie #00838F
+rectangle "**PathMapDictionary<V>**\nradix-256 trie DAG · shared subtries\nalias ""PathMapNgramModel""\nno serde — PathMap-native persistence" as pmd #00838F
+rectangle "**DynamicDawgChar<V>**\nlock-free, wait-free exact traversal\nsuffix sharing · insert **and** remove\nalias ""SerializableNgramModel"" (serde)" as dawg #00838F
+rectangle "**DoubleArrayTrieChar<V>**\nfastest lookup, most compact (≈8 B/node)\nbulk-built, read-only: ""MappedDictionary"" only\n""from_portable_static"" / ""load_static_portable""" as dat #00838F
+rectangle "**SuffixAutomatonChar<V>**\nsubstring search (match anywhere)\nexists in libdictenstein —\nlibgrammstein does **not** use it" as sa #546E7A
+
+q1 -down-> artrie : **yes**
+q1 -down-> q2 : no — fits in memory
+q2 -down-> q3 : **yes**
+q2 -down-> q4 : no — model is frozen
+q3 -down-> pmd : **yes**
+q3 -down-> dawg : no — ordinary training
+q4 -down-> sa : **yes**
+q4 -down-> dat : no — whole-term lookup
+
+note right of artrie
+  The corpus-scale training backend (Google Books).
+  Pair it with **PersistentVocabARTrie** for the
+  term ↔ u64 vocabulary bijection — that, and not
+  the DAWG, is where a Bloom filter is armed for
+  fast out-of-vocabulary rejection.
+end note
+
+note right of dawg
+  The default. Its ""auto_minimize_threshold"" and
+  ""bloom_filter_capacity"" arguments are accepted
+  for **API compatibility only** — the lock-free core
+  ignores them and traverses exactly. They are not
+  live tuning knobs; do not document them as such.
+end note
+
+note bottom of dat
+  Every backend answers a lookup in 𝒪(m) for a term of
+  length m, independent of the number of stored terms n.
+  The choice therefore trades **build cost, mutability and space**
+  — never asymptotic query time.
+end note
+
+@enduml

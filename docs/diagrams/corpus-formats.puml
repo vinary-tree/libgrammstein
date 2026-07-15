@@ -1,0 +1,89 @@
+@startuml corpus-formats
+' How a path plus a --format flag becomes a Box<dyn CorpusReader>.
+' The dispatch is create_corpus_reader() in src/cli/commands/train/corpus_reader.rs:
+' the format is declared, never sniffed; the path shape (dir/file/URL) picks the ctor.
+' Render: plantuml -tsvg docs/diagrams/corpus-formats.puml
+' Source of truth for Figure 1 in docs/components/corpus/formats.md, section "Choosing a reader".
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam note {
+  BackgroundColor #E3F2FD
+  BorderColor #1565C0
+}
+title Choosing a reader — create_corpus_reader(path, CorpusFormat)
+
+rectangle "**CLI**\ngrammstein train ngram CORPUS --format F" as cli #455A64
+rectangle "**CorpusFormat**\nPlaintext //(default)// · Wikipedia · Gutenberg" as fmt #1565C0
+
+rectangle "**Plaintext**" as p #546E7A
+rectangle "**Wikipedia**" as w #546E7A
+rectangle "**Gutenberg**" as g #546E7A
+
+rectangle "path.is_dir()\n⇒ PlaintextReader::from_directory\nrecursive; keeps *.txt and *.text" as pd #546E7A
+rectangle "path.exists()\n⇒ PlaintextReader::from_file" as pf #546E7A
+
+rectangle "http:// or https:// †\n⇒ WikipediaReader::from_url(url, cfg)\nLoadStrategy: Stream · Download · Auto" as wu #546E7A
+rectangle "path.exists()\n⇒ WikipediaReader::new(path)\n.bz2 ⇒ BzDecoder, else raw XML" as wf #546E7A
+
+rectangle "path.is_dir()\n⇒ GutenbergReader::from_directory\nrecursive *.txt, sorted" as gd #546E7A
+rectangle "path.exists()\n⇒ GutenbergReader::from_file" as gf #546E7A
+
+rectangle "**CliError::file_not_found**" as err #90A4AE
+rectangle "**Box<dyn CorpusReader>**\nthe blanket impl forwards documents() / sentences()" as box #1565C0
+
+cli --> fmt : --format
+fmt --> p
+fmt --> w
+fmt --> g
+
+p --> pd : directory
+p --> pf : file
+p --> err : neither
+
+w --> wu : URL †
+w --> wf : file
+w --> err : neither
+
+g --> gd : directory
+g --> gf : file
+g --> err : neither
+
+pd --> box
+pf --> box
+wu --> box
+wf --> box
+gd --> box
+gf --> box
+
+note bottom of fmt
+  The format is **declared, never sniffed.** There is no
+  content-based or extension-based auto-detection:
+  passing a Wikipedia dump with --format plaintext
+  trains on raw XML markup.
+end note
+
+note right of wu
+  † The URL branch is compiled in only with the
+  **http-corpus** feature. Auto picks Download when
+  2 × Content-Length fits in 90 % of the free space of
+  std::env::temp_dir(), otherwise it streams.
+end note
+
+legend right
+  |= Colour |= Role |
+  |<#455A64> | CLI entry point |
+  |<#1565C0> | dispatch / result type |
+  |<#546E7A> | reader construction (I-O) |
+  |<#90A4AE> | error path |
+endlegend
+@enduml

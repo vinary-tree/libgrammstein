@@ -1,0 +1,94 @@
+@startuml pdf-router
+' PdfRouter::route — the full backend-selection decision procedure, in evaluation order.
+' Render: plantuml -tsvg docs/diagrams/pdf-router.puml
+' Source of truth for Figure 2 in docs/components/sources/pdf.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam ArrowColor #37474F
+skinparam activity {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  BackgroundColor #EF6C00
+  DiamondBackgroundColor #FFE0B2
+  DiamondFontColor #263238
+  DiamondFontStyle plain
+  StartColor #00838F
+  EndColor #C62828
+}
+skinparam note {
+  BackgroundColor #ECEFF1
+  BorderColor #546E7A
+}
+
+legend top right
+|= Concept |= Color |
+| routing step | <back:#EF6C00>        </back> |
+| predicate | <back:#FFE0B2>        </back> |
+endlegend
+
+start
+:**PdfRouter::new**
+require Marker or Nougat installed
+else PdfError::BackendNotAvailable;
+:**route(path)**;
+if (path.exists()?) then (no)
+  :PdfError::FileNotFound;
+  stop
+endif
+
+:**analyze_document**
+fs::metadata ⇒ file_size
+quick_pdf_analysis ⇒ (page_count, math_density, has_tables, has_figures)
+detect_academic_paper ⇒ filename contains
+arxiv|paper|manuscript|preprint|journal|conference|proceedings;
+
+note right
+  quick_pdf_analysis reads the **whole**
+  file, lossy-decodes it as UTF-8, and
+  counts literal substrings:
+    page_count  = count('/Type /Page').max(1)
+    math_count  = Σ count(26 markers: the word 'equation'
+                  plus 25 TeX macros — frac, sum, int, alpha,
+                  nabla, mathbb, mathcal, …)
+    math_density = min(math_count ÷ (100·page_count), 1)
+  Content streams in a real PDF are
+  compressed, so these markers rarely
+  survive ⇒ math_density ≈ 0 in practice.
+end note
+
+if (default_backend ≠ Auto?) then (yes)
+  :backend ← default_backend
+  reason ← 'Explicitly configured to use …';
+  :fallback ← get_fallback(backend)
+  if fallback_on_error;
+  stop
+endif
+
+if (exactly one backend installed?) then (yes)
+  :backend ← the installed one
+  fallback ← None;
+  stop
+endif
+
+if (math_density > math_density_threshold?) then (yes)
+  :**Nougat**
+  high math density;
+elseif (page_count > page_count_threshold?) then (yes)
+  :**Marker**
+  large document — prefer speed;
+elseif (is_academic ∧ math_density > 0.1?) then (yes)
+  :**Nougat**
+  academic paper with math;
+else (otherwise)
+  :**Marker**
+  general-document default;
+endif
+
+:fallback ← get_fallback(backend)
+if fallback_on_error;
+:**RouterDecision**
+{ backend, reason, analysis, fallback };
+stop
+@enduml

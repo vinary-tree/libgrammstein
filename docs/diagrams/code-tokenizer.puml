@@ -1,0 +1,42 @@
+@startuml code-tokenizer
+' Tokenization: descend to AST leaves, classify by (text, node_kind), filter, enrich TokenContext.
+' Render: plantuml -tsvg docs/diagrams/code-tokenizer.puml
+' Source of truth for Figure 1 in docs/components/code/tokenizer.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam activity {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+}
+title CodeTokenizer — Leaf Extraction, Classification, Context
+
+start
+:Tree + source
+(tokenize · or tokenize_errors);
+#EF6C00:traverse_node(node, depth, in_error)
+in_error |= node.is_error();
+if (child_count == 0? ▷ leaf) then (yes)
+  #EF6C00:text = node.utf8_text(source);
+  #1565C0:token_type = language.classify_token(text, node_kind);
+  if (Whitespace and not include_whitespace?
+or Comment and not include_comments?) then (drop)
+    #C62828:skip token;
+  else (keep)
+    #EF6C00:CodeToken { text, byte_offset, line, column,
+token_type, node_kind };
+    #2E7D32:enrich TokenContext
+depth · parent_node_type · sibling_types · in_error_region;
+    :push CodeToken;
+  endif
+else (interior)
+  #EF6C00:recurse into children (depth + 1);
+endif
+:**Vec<CodeToken>**
+is_correctable() · is_in_error();
+stop
+
+@enduml

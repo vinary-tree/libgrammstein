@@ -1,0 +1,53 @@
+@startuml latex-modeaware-tokenizer
+' Mode-aware lexer state machine: a math_stack toggles Text vs Math handling so the
+' same character lexes to different token kinds by mode.
+' Render: plantuml -tsvg docs/diagrams/latex-modeaware-tokenizer.puml
+' Source of truth for Figure 1 in docs/components/latex/tokenizer.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam state {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  BackgroundColor #EF6C00
+  AttributeFontColor #263238
+}
+
+legend top right
+|= Concept |= Color |
+| LaTeX lexer mode | <back:#EF6C00>        </back> |
+| math sub-lexing | <back:#1565C0>        </back> |
+endlegend
+
+[*] --> TextMode
+
+state "Text mode\nmath_stack empty · in_math = false" as TextMode #EF6C00 {
+  state "letters → Text(String)" as t_text
+  state "digits → Number(String)" as t_num
+  state "\\name → Command(String)" as t_cmd
+  state "{ } [ ] ( ) → Open/CloseBrace" as t_brace
+  state "% … → Comment(String)" as t_com
+}
+
+state "Math mode\nmath_stack non-empty · in_math = true" as MathMode #1565C0 {
+  state "letters → Identifier(String)" as m_id
+  state "+ - * / = < > → Operator(String)" as m_op
+  state "digits → Number(String)" as m_num
+  state "_ → Subscript · ^ → Superscript" as m_sup
+  state "\\name → Command(String)" as m_cmd
+}
+
+TextMode -[#C62828,bold]-> MathMode : **push** math_stack\n$ · $$ · \\( · \\[ ·\n\\begin{equation|align|…}
+MathMode -[#2E7D32,bold]-> TextMode : **pop** math_stack\n$ · $$ · \\) · \\] ·\n\\end{…}
+
+note bottom of MathMode
+  Nested delimiters stack:
+  \\[ … $x$ … \\] keeps in_math
+  true until the outermost close.
+  The delimiter tokens themselves
+  carry in_math = false.
+end note
+@enduml

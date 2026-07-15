@@ -1,3 +1,8 @@
+> ⚠ **Archived — historical record, not current design.**
+> A scientific ledger of finished A/B optimization experiments (each marked ACCEPTED/REJECTED with a
+> commit hash). Retained for provenance. For the current formal-verification suite see
+> [`../../../formal/README.md`](../../../formal/README.md).
+
 # Scientific Ledger: Formal Proof-Based Optimizations
 
 ## Overview

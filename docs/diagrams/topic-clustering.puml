@@ -1,0 +1,33 @@
+@startuml topic-clustering
+' The agglomerative merge loop: distance matrix -> find-min -> Lance-Williams update.
+' Render: plantuml -tsvg docs/diagrams/topic-clustering.puml
+' Source of truth for Figure 1 in docs/components/topic/clustering.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam activity {
+  BackgroundColor #6A1B9A
+  BorderColor #263238
+  FontColor white
+  FontStyle bold
+  DiamondBackgroundColor #EF6C00
+  DiamondFontColor white
+  DiamondBorderColor #263238
+}
+
+start
+:Compute cosine distance matrix\nupper triangle · atomic u64 · rayon;
+:Seed n singleton clusters\nClusterState::new(n);
+repeat
+  :Find closest active pair (i, j)\nActiveDistanceMatrix::find_minimum;
+  :Record merge in linkage\n(i, j, d, size_i + size_j);
+  :Lance–Williams update\nd(i ∪ j, k) for each active k;
+  :Deactivate i, j · activate new cluster\nClusterState::merge(i, j);
+repeat while (more than one active cluster?) is (yes)
+->no;
+:Build dendrogram\nDendrogram::from_linkage;
+:Cut → assignments\ncut_to_k_clusters(k) or cut_at_distance(τ);
+stop
+@enduml

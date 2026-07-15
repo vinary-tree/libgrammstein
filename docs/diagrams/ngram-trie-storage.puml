@@ -1,0 +1,64 @@
+@startuml ngram-trie-storage
+' N-gram key encoding: words are interned to u64 vocabulary indices, LEB128-varint
+' encoded, and each byte is carried as a Latin-1 char so any char-keyed trie can store
+' the key. Index 0 is reserved so a varint never collides with the \x00 metadata prefix.
+' Render: plantuml -tsvg docs/diagrams/ngram-trie-storage.puml
+' Source of truth for Figure 1 in docs/components/ngram/trie-storage.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title N-gram key encoding — words ⇒ varint ⇒ trie key
+
+legend top right
+  |= Color |= Concept |
+  |<#1565C0>     | Statistical LM core |
+  |<#00838F>     | Storage / persistence |
+  |<#C62828>     | Deprecated / unsafe |
+  |<#546E7A>     | Tokens / result |
+endlegend
+
+rectangle "**n-gram tokens**\n[ the · quick · brown ]" as toks #546E7A
+
+rectangle "**Legacy encoding** (deprecated)\nthe|quick|brown\n⚠ a token containing '|' corrupts the split" as legacy #C62828
+
+rectangle "**Vocabulary ARTrie**\ninsert(w) → u64  (idempotent, lock-free)\nthe → 1 · quick → 2 · brown → 3\nFIRST_VALID_INDEX = 1" as vocab #00838F
+rectangle "**LEB128 varint**\n7 payload bits/byte, high bit = continue\n1 → [0x01]   128 → [0x80,0x01]" as varint #1565C0
+rectangle "**Latin-1 carrier**\nbyte 0xNN → char U+00NN\nkey = ⟨U+0001, U+0002, U+0003⟩" as latin1 #1565C0
+
+rectangle "**VocabularyIndexedDictionary<D>**\nsplit → encode → delegate\nOOV reads never mutate the vocabulary" as vid #00838F
+rectangle "**Backend trie D**\nDynamicDawgChar · PathMapDictionary\nSharedCharARTrie · DoubleArrayTrieChar" as backend #00838F
+rectangle "**NgramEntry**\ncount · continuation_count\nunique_continuations  (all atomic)" as entry #1565C0
+
+rectangle "**\\x00 METADATA_PREFIX**\nreserved subtree — hidden by\nMetadataFilteringZipper" as meta #546E7A
+
+toks --> legacy : v0.2 (do not use)
+toks --> vocab : v0.3+
+vocab --> varint
+varint --> latin1
+latin1 --> vid
+vid --> backend : get / insert
+backend --> entry : value
+backend --> meta : sibling subtree
+
+note right of vocab #E3F2FD
+  Index 0 is never assigned: varint(0) = 0x00,
+  which would alias the metadata prefix and be
+  filtered out of every traversal.
+end note
+
+note right of varint #E3F2FD
+  Zipf's law pays here: the ~127 most frequent
+  words each cost a single byte, so a typical
+  5-gram key is ~5-8 bytes.
+end note
+
+@enduml

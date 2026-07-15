@@ -1,0 +1,49 @@
+@startuml acoustic-streaming
+' StreamingFeatureExtractor: chunks accumulate, complete frames are emitted, overlap is retained, flush pads.
+' Render: plantuml -tsvg docs/diagrams/acoustic-streaming.puml
+' Source of truth for Figure 3 in docs/components/acoustic/features.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam ArrowColor #37474F
+skinparam sequence {
+  ArrowColor #37474F
+  LifeLineBorderColor #263238
+  ParticipantFontColor white
+  ParticipantFontStyle bold
+  ParticipantBorderColor #263238
+}
+title StreamingFeatureExtractor — buffered real-time extraction
+
+actor "Caller\n(microphone loop)" as caller #546E7A
+participant "StreamingFeatureExtractor\nbuffer: Vec<f32>" as stream #2E7D32
+participant "FeatureExtractor\n(stateless kernels)" as extr #2E7D32
+
+== accumulate ==
+caller -> stream : add_samples(chunk)
+stream -> stream : buffer.extend(chunk)
+stream --> caller : available_frames()  ⌊(len − N)/S⌋ + 1
+
+== emit complete frames ==
+caller -> stream : extract_filterbank()
+stream -> extr : extract_filterbank(&buffer)
+extr --> stream : T frame vectors
+stream -> stream : drain(T·S)  ▸ keep N − S overlap
+stream --> caller : features [T, M]
+
+== end of stream ==
+caller -> stream : flush_filterbank()
+stream -> stream : zero-pad buffer up to N
+stream -> extr : extract_filterbank(&buffer)
+extr --> stream : final frame(s)
+stream -> stream : buffer.clear()
+stream --> caller : final features
+
+note over stream
+  CMVN in extract_filterbank is applied per call
+  over the current buffer. For frame-local features
+  with no per-utterance normalization, tap
+  extract_log_mel instead.
+end note
+
+@enduml

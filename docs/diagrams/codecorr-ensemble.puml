@@ -1,0 +1,47 @@
+@startuml codecorr-ensemble
+' EnsembleCorrector aggregation: gather weighted candidates from each source,
+' group by (replacement, span), boost on agreement, filter and rank.
+' Render: plantuml -tsvg docs/diagrams/codecorr-ensemble.puml
+' Source of truth for Figure 1 in docs/components/code/correctors/ensemble.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title EnsembleCorrector — weighted aggregation & agreement boost
+
+rectangle "**Lexical**\nw = 0.40" as lex #EF6C00
+rectangle "**Grammar**\nw = 0.35" as gram #EF6C00
+rectangle "**Semantic**\nw = 0.25" as sem #2E7D32
+
+package "collect_corrections → merge_corrections" {
+  rectangle "**Group** by key\n(replacement, start, end)" as group #455A64
+  rectangle "**Single source**\nconf ⊗ weight" as single #455A64
+  rectangle "**Multiple sources agree**\nconf = mean(confᵢ·wᵢ) ⊗ boost\nsource ← Combined" as multi #6A1B9A
+}
+
+rectangle "**finalize_corrections**\nretain conf ≥ min · sort ↓ · take max_candidates" as fin #455A64
+rectangle "**Ranked corrections**" as out #455A64
+
+lex --> group
+gram --> group
+sem --> group
+group --> single : |group| = 1
+group --> multi : |group| > 1
+single --> fin
+multi --> fin
+fin --> out
+
+note right of multi #F3E5F5
+  agreement_boost_factor (default 1.30)
+  rewards independent sources that
+  propose the same edit at the same span.
+end note
+
+@enduml

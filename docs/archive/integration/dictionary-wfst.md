@@ -1,3 +1,11 @@
+> ⚠ **Archived — superseded, not current design.**
+> This describes a `grammstein dictionary export-fst` / OpenFST-text workflow that does **not** exist
+> in the codebase (there is no `dictionary` subcommand and no `export_fst_text` / `trie_to_fst`
+> symbol in `src/`). The supported WFST path is the `LanguageModel` trait composed with a
+> `HierarchicalCorrector`; see
+> [`../../integration/lling-llang/overview.md`](../../integration/lling-llang/overview.md) and
+> [`../../integration/liblevenshtein/overview.md`](../../integration/liblevenshtein/overview.md).
+
 # Dictionary WFST Integration
 
 This document describes how to integrate libgrammstein dictionaries with Weighted Finite-State Transducers (WFSTs) for spell correction.
@@ -359,7 +367,7 @@ static CORRECTION_FST: Lazy<CorrectionFst> = Lazy::new(|| {
 
 ## See Also
 
-- [Dictionary Overview](../components/dictionary/overview.md) - Dictionary module
-- [Spell Correction Example](../examples/spell-correction.md) - Complete example
-- [Hybrid Model](../api/hybrid.md) - Language model API
+- [Dictionary Overview](../../components/dictionary/overview.md) - Dictionary module
+- [Spell Correction Example](../../examples/spell-correction.md) - Complete example
+- [Hybrid Model](../../api/hybrid.md) - Language model API
 - [liblevenshtein](https://github.com/f1r3fly-io/liblevenshtein-rust) - Fuzzy matching

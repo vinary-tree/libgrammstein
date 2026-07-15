@@ -1,0 +1,59 @@
+@startuml cli-workflow
+' The canonical operator workflow: inspect a corpus, train the two experts
+' independently, assemble them into a hybrid, evaluate, then serve. The key fact
+' the diagram encodes is that `train hybrid` consumes two ALREADY-TRAINED model
+' files - it never reads a corpus - so the two training arms are independent and
+' may be run in parallel or reused across several hybrids.
+' Render: plantuml -tsvg docs/diagrams/cli-workflow.puml
+' Source of truth for Figure 2 in docs/cli/README.md §4 and Figure 1 in
+' docs/training/hybrid.md §2.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title grammstein — End-to-End Operator Workflow
+
+rectangle "**Corpus**\nplaintext · wikipedia · gutenberg" as corpus #455A64
+rectangle "**corpus stats / detect / sample**\nsize · language · spot-check" as inspect #546E7A
+
+rectangle "**train ngram**\n⟨CORPUS⟩ ⟨OUTPUT⟩\n""--order 5"" · ""--min-count 2""" as tngram #1565C0
+rectangle "**train embedding**\n⟨CORPUS⟩ ⟨OUTPUT⟩\n""--dim 100"" · ""--epochs 5""" as tembed #2E7D32
+
+rectangle "**ngram.bin**\nMKN n-gram model" as mngram #1565C0
+rectangle "**embed.bin**\nsubword embedding" as membed #2E7D32
+
+rectangle "**train hybrid**\n⟨NGRAM_MODEL⟩ ⟨EMBEDDING_MODEL⟩ ⟨OUTPUT⟩\n""--strategy"" · ""--alpha 0.8""\n**reads no corpus**" as thybrid #1B6CA8
+rectangle "**hybrid.bin**" as mhybrid #1B6CA8
+
+rectangle "**eval perplexity**\n**eval compare**" as evaluate #546E7A
+rectangle "**convert to-static**\nDoubleArrayTrie — faster reads" as static #00838F
+rectangle "**query** score · similar · completions\n**repl**" as serve #546E7A
+
+corpus --> inspect
+inspect --> tngram
+inspect --> tembed
+corpus --> tngram
+corpus --> tembed
+
+tngram --> mngram
+tembed --> membed
+
+mngram --> thybrid : NGRAM_MODEL
+membed --> thybrid : EMBEDDING_MODEL
+thybrid --> mhybrid
+
+mhybrid --> evaluate
+mngram ..> evaluate : n-gram models\nevaluate too
+evaluate --> serve : keep the lowest\nheld-out perplexity
+mhybrid --> static
+static --> serve
+
+@enduml

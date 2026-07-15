@@ -1,363 +1,302 @@
 # Modified Kneser-Ney Smoothing
 
-Modified Kneser-Ney (MKN) is the state-of-the-art smoothing algorithm for N-gram language models. This document explains how it works and how libgrammstein implements it.
+**Modified Kneser-Ney (MKN)** is the smoothing algorithm at the statistical core of
+libgrammstein. It is the most accurate count-based smoother known for n-gram language models
+[[1]](#references)[[2]](#references), and it is the crate's always-on default. This document
+explains *what* problem it solves, *how* the mathematics works, and *how libgrammstein
+implements it* — including the places where the shipped code deliberately simplifies the
+textbook formula.
 
-## The Problem: Unseen N-grams
+> **Scope.** Source of truth: [`src/ngram/smoothing/kneser_ney.rs`](../../../src/ngram/smoothing/kneser_ney.rs)
+> and [`src/ngram/entry.rs`](../../../src/ngram/entry.rs). For the surrounding query surface see
+> [Query API](query-api.md); for storage see [Trie Storage](trie-storage.md).
 
-Maximum Likelihood Estimation (MLE) assigns zero probability to N-grams not seen in training:
+## Notation
 
-```
-P_MLE(w | context) = count(context w) / count(context)
-```
+Every symbol below is defined before it is used in a formula.
 
-If "the quick purple" never appeared in training, `P_MLE(purple | the quick) = 0`. This causes:
-- Zero probability for any sentence containing this N-gram
-- Log probability becomes negative infinity
+| Symbol | Meaning |
+|---|---|
+| $`w`$ | the word (token) whose probability is being estimated |
+| $`h`$ | the *history* (context) — the words preceding $`w`$ |
+| $`h'`$ | the *backed-off* history — $`h`$ with its **oldest** (leftmost) word removed |
+| $`c(h\,w)`$ | raw training count of the n-gram formed by appending $`w`$ to $`h`$ |
+| $`c(h)`$ | raw training count of the context $`h`$ |
+| $`D(c)`$ | the absolute discount applied to an n-gram of count $`c`$ |
+| $`D_1, D_2, D_{3+}`$ | the three MKN discounts, for counts $`1`$, $`2`$, and $`\geq 3`$ |
+| $`\gamma(h)`$ | the backoff weight for history $`h`$ (mass redistributed to lower orders) |
+| $`N_{1+}(\bullet, w)`$ | *continuation count* — number of **distinct** contexts in which $`w`$ appears |
+| $`N_{1+}(h, \bullet)`$ | number of **distinct** words that follow $`h`$ |
+| $`N_{1+}(\bullet, \bullet)`$ | total number of distinct bigram types, $`\sum_w N_{1+}(\bullet, w)`$ |
+| $`\lvert V \rvert`$ | vocabulary size |
+| $`[x]^{+}`$ | $`\max(x, 0)`$ |
 
-## Smoothing Intuition
+**Acronyms.** *MLE* — Maximum-Likelihood Estimate; *MKN* — Modified Kneser-Ney; *OOV* —
+Out-Of-Vocabulary.
 
-Smoothing techniques "steal" probability mass from seen events and redistribute it to unseen events. The key questions are:
+## The problem: unseen n-grams
 
-1. **How much** probability mass to steal?
-2. **How to distribute** it among unseen events?
+An n-gram model estimates $`\mathbb{P}(w \mid h)`$, the probability of the next word given a
+history. The naïve **Maximum-Likelihood Estimate** simply divides counts:
 
-## Kneser-Ney vs Modified Kneser-Ney
-
-### Original Kneser-Ney
-
-Uses a single discount value D for all N-grams:
-
-```
-P_KN(w | context) = max(count(context w) - D, 0) / count(context)
-                  + γ(context) × P_KN(w | shorter_context)
-```
-
-### Modified Kneser-Ney
-
-Uses **three different discounts** based on the count:
-
-| Count | Discount |
-|-------|----------|
-| 1 | D₁ |
-| 2 | D₂ |
-| ≥3 | D₃₊ |
-
-This is based on empirical observation that the optimal discount varies with count.
-
-## The Complete Algorithm
-
-### Step 1: Compute Discount Values
-
-From the training corpus, calculate:
-
-```
-n₁ = number of N-grams appearing exactly once
-n₂ = number of N-grams appearing exactly twice
-n₃ = number of N-grams appearing exactly three times
-n₄ = number of N-grams appearing exactly four times
-
-Y = n₁ / (n₁ + 2 × n₂)
-
-D₁ = 1 - 2Y × (n₂ / n₁)
-D₂ = 2 - 3Y × (n₃ / n₂)
-D₃₊ = 3 - 4Y × (n₄ / n₃)
+```math
+\mathbb{P}_{\mathrm{MLE}}(w \mid h) = \frac{c(h\,w)}{c(h)} \tag{M1}
 ```
 
-Typical values: D₁ ≈ 0.6, D₂ ≈ 0.8, D₃₊ ≈ 0.9
+$`(\mathrm{M1})`$ assigns **zero** probability to any n-gram never seen in training. Because a
+sentence's log-probability is a *sum* of per-token log-probabilities, a single unseen n-gram
+sends $`\log \mathbb{P} \to -\infty`$ for the whole sentence. If *"the quick purple"* never
+occurred, then $`\mathbb{P}_{\mathrm{MLE}}(\text{purple} \mid \text{the quick}) = 0`$ and the
+sentence is deemed impossible. *Smoothing* repairs this by stealing a little probability mass
+from seen events and redistributing it to unseen ones. Two questions define a smoother:
 
-### Step 2: Compute Highest-Order Probability
+1. **How much** mass to steal? — MKN answers with *absolute discounting*.
+2. **How to redistribute** it? — MKN answers with *continuation counts* and *backoff*.
 
-For the highest order N (e.g., 5-gram):
+## Theory
 
-```
-P_MKN(w | h) = [count(h w) - D(count(h w))]₊ / count(h)
-             + γ(h) × P_MKN(w | h')
+### Absolute discounting with three discounts
 
-Where:
-- h = history (context)
-- h' = history with first word removed (backoff context)
-- [x]₊ = max(x, 0)
-- D(c) = D₁ if c=1, D₂ if c=2, D₃₊ if c≥3
-```
+Kneser-Ney subtracts a fixed **absolute discount** $`D`$ from every non-zero count before
+normalizing, reserving the removed mass for a lower-order *backoff* distribution. The *Modified*
+variant of Chen & Goodman [[2]](#references) observed that the optimal discount depends on the
+count, and so uses **three** discounts — one for singletons, one for count-2 n-grams, and one
+for the rest:
 
-### Step 3: Compute Backoff Weight γ
-
-```
-γ(h) = (D₁ × N₁(h) + D₂ × N₂(h) + D₃₊ × N₃₊(h)) / count(h)
-
-Where:
-- N₁(h) = number of unique words following h with count 1
-- N₂(h) = number of unique words following h with count 2
-- N₃₊(h) = number of unique words following h with count ≥ 3
-```
-
-### Step 4: Compute Lower-Order Probabilities
-
-For orders below the highest, use **continuation counts** instead of raw counts:
-
-```
-P_MKN_lower(w | h) = [N₁₊(• h w) - D(N₁₊(• h w))]₊ / N₁₊(• h •)
-                   + γ_lower(h) × P_MKN_lower(w | h')
-
-Where:
-- N₁₊(• h w) = number of unique contexts where "h w" appears
-             = |{v : count(v h w) > 0}|
-- N₁₊(• h •) = total continuation count for history h
-             = |{(v, w) : count(v h w) > 0}|
+```math
+D(c) = \begin{cases}
+0 & c = 0 \\
+D_1 & c = 1 \\
+D_2 & c = 2 \\
+D_{3+} & c \geq 3
+\end{cases} \tag{M2a}
 ```
 
-### Step 5: Base Case (Unigram)
+The discounts are estimated from the corpus's *count-of-counts* — $`n_i`$ is the number of
+n-grams occurring exactly $`i`$ times:
 
-The unigram level backs off to a uniform distribution:
-
-```
-P_MKN(w) = [N₁₊(• w) - D(N₁₊(• w))]₊ / N₁₊(• •)
-         + γ_uniform × (1 / |V|)
-
-Where:
-- |V| = vocabulary size
+```math
+Y = \frac{n_1}{n_1 + 2\,n_2}, \qquad
+D_1 = 1 - 2Y\frac{n_2}{n_1}, \qquad
+D_2 = 2 - 3Y\frac{n_3}{n_2}, \qquad
+D_{3+} = 3 - 4Y\frac{n_4}{n_3} \tag{M2b}
 ```
 
-## Why Continuation Counts?
+libgrammstein clamps each discount to its natural range ($`D_1 \in [0,1]`$, $`D_2 \in [0,2]`$,
+$`D_{3+} \in [0,3]`$) for numerical safety, and when count statistics are unavailable it falls
+back to fixed defaults $`D_1 = 0.75,\ D_2 = 0.85,\ D_{3+} = 0.95`$
+(`KneserNeySmoothing::default_discounts`).
 
-Consider the word "Francisco". In raw frequency, it's common because of "San Francisco". But it only ever follows "San", so it's not a good predictor for unknown contexts.
+### The interpolated recursion
 
-Continuation counts measure **versatility**:
+At the highest order, MKN interpolates a discounted higher-order estimate with a recursive
+lower-order term:
 
-| Word | Raw Count | Continuation Count |
-|------|-----------|-------------------|
-| Francisco | 1000 | 1 (only follows "San") |
-| city | 500 | 50 (follows many words) |
+```math
+\mathbb{P}_{\mathrm{MKN}}(w \mid h) =
+\frac{\bigl[\,c(h\,w) - D(c(h\,w))\,\bigr]^{+}}{c(h)}
+\;+\; \gamma(h)\,\mathbb{P}_{\mathrm{MKN}}(w \mid h') \tag{M3}
+```
 
-Using continuation counts, "city" correctly gets higher lower-order probability than "Francisco".
+The backoff weight $`\gamma(h)`$ is chosen to be exactly the mass removed by discounting, which
+guarantees the estimate is a proper distribution — $`\sum_w \mathbb{P}_{\mathrm{MKN}}(w \mid h) = 1`$
+at every order. In canonical MKN it aggregates the three discounts over the counts of the
+words following $`h`$:
 
-## libgrammstein Implementation
+```math
+\gamma(h) = \frac{D_1\,N_1(h) + D_2\,N_2(h) + D_{3+}\,N_{3+}(h)}{c(h)} \tag{M4}
+```
 
-### KneserNeySmoothing Struct
+where $`N_i(h)`$ is the number of distinct words that follow $`h`$ exactly $`i`$ times.
+
+### Continuation counts: measuring versatility
+
+The lower-order terms do **not** use raw counts. They use **continuation counts** — *how many
+distinct contexts a word completes* — which measure a word's *versatility* rather than its raw
+frequency:
+
+```math
+\mathbb{P}_{\mathrm{cont}}(w) = \frac{N_{1+}(\bullet, w)}{N_{1+}(\bullet, \bullet)},
+\qquad N_{1+}(\bullet, w) = \bigl\lvert \{\, v : c(v\,w) > 0 \,\} \bigr\rvert \tag{M5}
+```
+
+This is the **"San Francisco" intuition**: the word *Francisco* is frequent, but it follows
+essentially only *San*, so its continuation count is $`\approx 1`$ and it earns almost no
+lower-order mass. *City* follows many words, so it earns a high fallback probability.
+
+| Word | Raw count | Continuation count $`N_{1+}(\bullet, w)`$ |
+|---|---|---|
+| Francisco | high | $`\approx 1`$ (only follows *San*) |
+| city | moderate | large (follows many words) |
+
+Under raw counts, *Francisco* would wrongly outrank *city* as a fallback; under continuation
+counts, *city* correctly wins.
+
+![Modified Kneser-Ney backoff recursion](../../diagrams/mkn-backoff.svg)
+
+## The algorithm, literately
+
+Scoring is a single recursion from the longest matching context down to a unigram base case.
+The following mirrors [`KneserNeySmoothing::prob_recursive`](../../../src/ngram/smoothing/kneser_ney.rs);
+`⟨…⟩` names a refinement expanded below.
+
+```
+function MKN_log_prob(w, h):                          ▸ public entry point; returns a log-probability
+    return ln( prob(w, h, is_highest_order = true) )
+
+function prob(w, h, is_highest_order):
+    if h is empty:                                    ▸ recursion bottoms out at the unigram
+        return ⟨Unigram base case⟩
+    c_hw <- count(h ++ w)                             ▸ raw count of the full n-gram
+    c_h  <- count(h)                                  ▸ raw count of the context
+    if c_h == 0:                                      ▸ context unseen at this order ...
+        return prob(w, h', is_highest_order = false)  ▸ ... so back off: drop the oldest word of h
+    ⟨Discounted higher-order term⟩
+    ⟨Backoff weight lambda(h)⟩
+    p_low <- prob(w, h', is_highest_order = false)    ▸ recursive lower-order probability
+    p <- p_high + lambda * p_low
+    return p if p > 0 else p_low                      ▸ finite-log guard (see Engineering)
+
+⟨Discounted higher-order term⟩ ≡
+    D      <- discount(c_hw)                          ▸ D1 / D2 / D3+  per (M2a)
+    p_high <- max(c_hw - D, 0) / c_h                  ▸ the discounted mass, per (M3)
+
+⟨Backoff weight lambda(h)⟩ ≡                          ▸ single-discount form; see Engineering
+    D_lam <- d1 if c_hw == 0 else discount(c_hw)      ▸ reserve mass even for an unseen target
+    Nh    <- max(unique_continuations(h), 1)          ▸ N1+(h, .) = distinct words following h
+    lambda <- D_lam * Nh / c_h
+
+⟨Unigram base case⟩ ≡
+    if is_highest_order:                              ▸ top-level unigram uses raw frequency
+        cnt <- count(w)
+        return  1 / |V|  if cnt == 0  else  cnt / total_count
+    else:                                             ▸ backed-off unigram uses continuation prob
+        cc <- continuation_count(w)                   ▸ N1+(., w) = distinct preceding contexts
+        return  1 / |V|  if cc == 0  else  cc / total_bigram_types   ▸ (M5); OOV backs off to 1/|V|
+```
+
+**Backoff drops the oldest word.** $`h' = h[1{:}]`$ — the recursion peels the *leftmost*
+(oldest) word, so a 5-gram context shrinks 5→4→3→2→1.
+
+## Engineering
+
+### `NgramEntry`: lock-free atomic statistics
+
+Each n-gram stores three statistics, held as **atomics** so parallel corpus workers can update
+them without locks (see [Threading Model](../../architecture/threading.md)). Fields are private;
+access is via methods.
 
 ```rust
-#[derive(Clone, Debug)]
-pub struct KneserNeySmoothing {
-    /// Discount for count = 1
-    pub d1: f64,
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-    /// Discount for count = 2
-    pub d2: f64,
-
-    /// Discount for count >= 3
-    pub d3_plus: f64,
-}
-
-impl KneserNeySmoothing {
-    /// Compute discounts from N-gram count statistics
-    pub fn from_counts(n1: u64, n2: u64, n3: u64, n4: u64) -> Self {
-        let y = n1 as f64 / (n1 + 2 * n2) as f64;
-
-        Self {
-            d1: 1.0 - 2.0 * y * (n2 as f64 / n1 as f64),
-            d2: 2.0 - 3.0 * y * (n3 as f64 / n2 as f64),
-            d3_plus: 3.0 - 4.0 * y * (n4 as f64 / n3 as f64),
-        }
-    }
-
-    /// Get discount for a given count
-    pub fn discount(&self, count: u64) -> f64 {
-        match count {
-            0 => 0.0,
-            1 => self.d1,
-            2 => self.d2,
-            _ => self.d3_plus,
-        }
-    }
-}
-```
-
-### NgramEntry Fields
-
-```rust
+#[derive(Debug, Default)]
 pub struct NgramEntry {
-    /// Raw count: count(history w)
-    pub count: u64,
+    count: AtomicU64,                 // raw corpus count  c(h·w)
+    continuation_count: AtomicU32,    // N1+(., ngram): distinct preceding contexts
+    unique_continuations: AtomicU32,  // N1+(ngram, .): distinct following words
+}
 
-    /// Continuation count: N₁₊(• history w)
-    /// How many unique contexts this N-gram appears in
-    pub continuation_count: u32,
-
-    /// Unique continuations: N₁₊(history •)
-    /// How many unique words follow this context
-    pub unique_continuations: u32,
+impl NgramEntry {
+    pub fn count(&self) -> u64 { self.count.load(Ordering::Relaxed) }
+    pub fn continuation_count(&self) -> u32 { self.continuation_count.load(Ordering::Relaxed) }
+    pub fn unique_continuations(&self) -> u32 { self.unique_continuations.load(Ordering::Relaxed) }
+    pub fn increment(&self) { self.count.fetch_add(1, Ordering::Relaxed); }
+    // …increment_continuation / increment_unique_continuations / set_* elsewhere
 }
 ```
 
-### Probability Computation
+A `Clone`/`Copy` [`NgramEntrySnapshot`](../../../src/ngram/entry.rs) with plain (non-atomic)
+fields is provided for crossing thread boundaries and for serialization.
+
+### The implementation's backoff weight is the single-discount form
+
+The shipped code does **not** evaluate the three-count $`\gamma(h)`$ of $`(\mathrm{M4})`$.
+Instead it uses the *single-discount* interpolation weight
+
+```math
+\lambda(h) = \frac{D \cdot N_{1+}(h, \bullet)}{c(h)} \tag{M4$'$}
+```
+
+where $`N_{1+}(h, \bullet)`$ is `unique_continuations` and $`D`$ is the per-count discount of
+the queried n-gram. This is the classic Kneser-Ney backoff weight; it is cheaper (one field,
+one multiply) and empirically robust, at the cost of the finer per-count aggregation. **Two
+guards keep the log-probability finite:**
+
+1. **Unseen-target mass.** If the queried n-gram is unseen ($`c(h\,w) = 0`$), then
+   $`D(0) = 0`$ would zero *both* the discounted term and $`\lambda`$, giving probability $`0`$
+   and $`\log \mathbb{P} = -\infty`$. The code substitutes $`D_1`$ for $`D`$ in
+   $`(\mathrm{M4}')`$ in this case, so mass is still reserved for the always-positive backoff.
+2. **Degenerate-zero fallback.** If the interpolated $`p = p_{\text{high}} + \lambda\,p_{\text{low}}`$
+   still evaluates to $`\leq 0`$, the code returns the strictly-positive backoff $`p_{\text{low}}`$.
+
+The lower-order continuation denominator $`N_{1+}(\bullet, \bullet)`$ (`total_bigram_types`) is
+computed once at training time. Models serialized before this statistic was tracked store $`0`$;
+the code then falls back to $`\lvert V \rvert`$ as the denominator, so old models still load.
+
+### Log-space, and why probabilities never underflow
+
+Sentence scoring sums per-token log-probabilities (never multiplies raw probabilities), so long
+sequences cannot underflow. Every path through the recursion terminates at the unigram base
+case, whose OOV branch returns the strictly-positive $`1 / \lvert V \rvert`$. Hence
+$`\mathbb{P}_{\mathrm{MKN}}(w \mid h) > 0`$ always, and $`\log \mathbb{P}`$ is always finite.
+
+### Complexity
+
+A single $`\mathbb{P}_{\mathrm{MKN}}(w \mid h)`$ query performs at most $`n`$ trie look-ups (one
+per backoff level) for an order-$`n`$ model — $`O(n)`$ look-ups, each linear in the key length.
+In practice this is $`\approx 100`$ ns for a 5-gram model over a varint-indexed trie.
+
+## Usage
 
 ```rust
-impl<D: MutableMappedDictionary<Value = NgramEntry>> NgramModel<D> {
-    /// Compute log P(word | context) using Modified Kneser-Ney
-    pub fn log_prob(&self, word: &str, context: &[&str]) -> f64 {
-        self.mkn_prob(word, context, self.order).ln()
-    }
+use libgrammstein::ngram::{NgramEntry, TrainerBuilder};
+use libgrammstein::corpus::PlaintextReader;
+use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
-    fn mkn_prob(&self, word: &str, context: &[&str], order: usize) -> f64 {
-        if order == 0 {
-            // Base case: uniform distribution
-            return 1.0 / self.vocab_size as f64;
-        }
+// Train a 5-gram Modified Kneser-Ney model over a serializable trie backend.
+let reader = PlaintextReader::from_file("corpus.txt")?;
+let model = TrainerBuilder::new(DynamicDawgChar::<NgramEntry>::new())
+    .order(5)
+    .train(reader)?;
 
-        // Truncate context to current order
-        let effective_context = if context.len() >= order - 1 {
-            &context[context.len() - (order - 1)..]
-        } else {
-            context
-        };
-
-        // Build key for this N-gram
-        let key = self.build_key(effective_context, word);
-
-        // Look up entry
-        let (count, context_count, unique_cont) = self.lookup_counts(&key, effective_context);
-
-        if context_count == 0 {
-            // Context never seen, back off entirely
-            return self.mkn_prob(word, context, order - 1);
-        }
-
-        // Use continuation counts for lower orders
-        let effective_count = if order == self.order {
-            count as f64
-        } else {
-            self.lookup_continuation_count(&key) as f64
-        };
-
-        // Apply discount
-        let discount = self.smoothing.discount(effective_count as u64);
-        let adjusted = (effective_count - discount).max(0.0);
-
-        // Highest-order probability
-        let p_high = adjusted / context_count as f64;
-
-        // Backoff weight
-        let gamma = self.compute_gamma(effective_context, context_count, unique_cont);
-
-        // Lower-order probability (recursive)
-        let p_low = self.mkn_prob(word, context, order - 1);
-
-        // Combine
-        p_high + gamma * p_low
-    }
-
-    fn compute_gamma(&self, context: &[&str], context_count: u64, unique_cont: u32) -> f64 {
-        // γ = (D₁×N₁ + D₂×N₂ + D₃₊×N₃₊) / count(context)
-        // Simplified: use unique_continuations as approximation
-        let d_avg = (self.smoothing.d1 + self.smoothing.d2 + self.smoothing.d3_plus) / 3.0;
-        (d_avg * unique_cont as f64) / context_count as f64
-    }
-}
+// log P(fox | quick brown) under Modified Kneser-Ney.
+let log_p = model.log_prob("fox", &["quick", "brown"]);
+println!("log P = {log_p:.3}");
+# Ok::<(), libgrammstein::Error>(())
 ```
 
-## Training: Collecting Continuation Counts
-
-### Two-Pass Algorithm
-
-**Pass 1**: Count all N-grams
+The discounts themselves can be inspected or constructed directly:
 
 ```rust
-fn pass1_count_ngrams(sentences: impl Iterator<Item = String>) {
-    for sentence in sentences {
-        let tokens = tokenize(&sentence);
-        for n in 1..=order {
-            for window in tokens.windows(n) {
-                let key = window.join("|");
-                dictionary.update_or_insert(&key, NgramEntry::default(), |entry| {
-                    entry.count += 1;
-                });
-            }
-        }
-    }
-}
+use libgrammstein::ngram::smoothing::KneserNeySmoothing;
+
+// From corpus count-of-counts (n1, n2, n3, n4):
+let kn = KneserNeySmoothing::from_counts(1_000_000, 250_000, 100_000, 50_000);
+// …or the fixed fallback discounts D1=0.75, D2=0.85, D3+=0.95:
+let default_kn = KneserNeySmoothing::default_discounts();
 ```
 
-**Pass 2**: Collect continuation counts
+## Comparison with other smoothers
 
-```rust
-fn pass2_continuation_counts() {
-    // For each N-gram, track unique preceding contexts
-    for (key, entry) in dictionary.iter() {
-        let parts: Vec<&str> = key.split('|').collect();
-        if parts.len() > 1 {
-            // The shorter suffix is the "continuation"
-            let suffix_key = parts[1..].join("|");
-            dictionary.update(&suffix_key, |suffix_entry| {
-                suffix_entry.continuation_count += 1;
-            });
-        }
-    }
+| Method | Idea | Trade-off |
+|---|---|---|
+| Add-$`k`$ (Laplace) | add a constant to every count | simple; systematically over-smooths |
+| Good-Turing | re-estimate mass from count-of-counts | theoretically motivated; fiddly to implement |
+| Witten-Bell | discount by observed novelty rate | intuitive; weaker than Kneser-Ney |
+| Kneser-Ney | absolute discount + continuation counts | strong; single discount |
+| **Modified Kneser-Ney** | three count-dependent discounts | **best empirical accuracy**; most parameters |
 
-    // For each context, count unique continuations
-    for (key, entry) in dictionary.iter() {
-        let parts: Vec<&str> = key.split('|').collect();
-        if parts.len() > 1 {
-            let context_key = parts[..parts.len()-1].join("|");
-            dictionary.update(&context_key, |ctx_entry| {
-                ctx_entry.unique_continuations += 1;
-            });
-        }
-    }
-}
-```
+## References
 
-## Numerical Stability
+1. R. Kneser & H. Ney (1995). *Improved backing-off for M-gram language modeling.* ICASSP '95,
+   181–184. [doi:10.1109/ICASSP.1995.479394](https://doi.org/10.1109/ICASSP.1995.479394)
+2. S. F. Chen & J. Goodman (1999). *An empirical study of smoothing techniques for language
+   modeling.* Computer Speech & Language 13(4), 359–393.
+   [doi:10.1006/csla.1999.0128](https://doi.org/10.1006/csla.1999.0128)
 
-### Log-Space Computation
+## See also
 
-For long sequences, probabilities become very small. libgrammstein works in log space:
-
-```rust
-pub fn sentence_log_prob(&self, tokens: &[&str]) -> f64 {
-    // Sum of log probabilities (avoids underflow)
-    tokens.windows(self.order)
-        .map(|window| self.log_prob(window.last().unwrap(), &window[..window.len()-1]))
-        .sum()
-}
-```
-
-### Handling Zero Probabilities
-
-MKN guarantees non-zero probabilities through the uniform backoff at unigram level:
-
-```
-P(w) ≥ γ_unigram × (1 / |V|) > 0
-```
-
-## Perplexity Computation
-
-Perplexity measures how "surprised" the model is by test data:
-
-```rust
-pub fn perplexity(&self, tokens: &[&str]) -> f64 {
-    let log_prob = self.sentence_log_prob(tokens);
-    let avg_log_prob = log_prob / tokens.len() as f64;
-    (-avg_log_prob).exp()
-}
-```
-
-Lower perplexity = better model. Typical values:
-- 50-100: Good model on similar domain
-- 100-300: Reasonable cross-domain
-- 1000+: Poor fit or small training data
-
-## Comparison with Other Smoothing Methods
-
-| Method | Pros | Cons |
-|--------|------|------|
-| Add-k | Simple | Suboptimal, uniform treatment |
-| Good-Turing | Theoretically motivated | Complex implementation |
-| Witten-Bell | Intuitive | Less effective than KN |
-| Kneser-Ney | State-of-the-art | Single discount |
-| **Modified KN** | **Best empirical results** | Most complex |
-
-## Next Steps
-
-- [Trie Storage](trie-storage.md): How N-grams are stored
-- [Query API](query-api.md): Complete query interface
-- [N-gram Overview](overview.md): Higher-level concepts
+- [N-gram Overview](overview.md) — higher-level concepts and the query surface
+- [Trie Storage](trie-storage.md) — how n-grams and vocabulary are stored
+- [Query API](query-api.md) — the probability-query interface
+- [Hybrid Interpolation](../hybrid/interpolation.md) — combining this model with embeddings

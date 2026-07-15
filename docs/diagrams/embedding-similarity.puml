@@ -1,0 +1,43 @@
+@startuml embedding-similarity
+' most_similar / analogy: an enriched query vector is scored by cosine against the
+' RAW word_embeddings rows (the asymmetry), then ranked by an OrderedFloat sort.
+' Render: plantuml -tsvg docs/diagrams/embedding-similarity.puml
+' Source of truth for Figure 1 in docs/components/embedding/similarity.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title Nearest-neighbour ranking — most_similar / analogy
+
+legend top right
+  |= Color |= Concept |
+  |<#2E7D32>     | Query / ranking logic |
+  |<#00838F>     | Stored weight matrix |
+  |<#546E7A>     | Query token / result |
+endlegend
+
+rectangle "query word  q\n(or analogy  b − a + c)" as q #546E7A
+rectangle "**q enriched**\nword_vector(q)\n(word ⊕ subword)" as qv #2E7D32
+rectangle "word_embeddings\n[ |V| × d ]  (RAW rows)" as M #00838F
+rectangle "cos(q, rowᵢ) for every i\n(skip excluded word)" as cos #2E7D32
+rectangle "sort ↓ by OrderedFloat\ntake top-k" as sort #2E7D32
+rectangle "Vec<(word, cosine)>\nk results" as out #546E7A
+
+q --> qv
+qv --> cos
+M --> cos : row per candidate
+cos --> sort
+sort --> out
+
+note bottom of cos
+  Asymmetry: the query is subword-enriched,
+  candidates are raw word-embedding rows.
+end note
+@enduml

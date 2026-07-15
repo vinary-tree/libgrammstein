@@ -1,0 +1,71 @@
+@startuml training-ngram-pipeline
+' N-gram training, both paths. The library path (TrainerBuilder::train) is a
+' three-phase in-memory pipeline: parallel counting over prefetched batches, a
+' second pass collecting continuation counts, and discount estimation from the
+' count-of-counts. The CLI adds a second, checkpointed path selected by
+' --checkpoint: a WAL-backed on-disk accumulator that survives interruption and
+' is converted into an inference-format model only at the end. The two paths
+' differ in whether --min-count is applied at all; that divergence is called out
+' explicitly because it is a live behavioural trap.
+' Render: plantuml -tsvg docs/diagrams/training-ngram-pipeline.puml
+' Source of truth for Figure 1 in docs/training/ngram.md §3.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam note {
+  BackgroundColor #ECEFF1
+  BorderColor #546E7A
+  FontColor #263238
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title N-gram training — library path (blue) vs. checkpointed CLI path (teal)
+
+rectangle "**CorpusReader**\nPlaintext · Wikipedia · Gutenberg" as reader #455A64
+rectangle "**PrefetchingReader**\nbatch_size · ram_fraction = 0.10\nI/O decoupled from CPU" as prefetch #546E7A
+
+rectangle "**Phase 1 — count**\nrayon par_iter over batches;\nfor n ∈ 1..=order insert every\nn-gram into the atomic trie" as count #1565C0
+rectangle "**Phase 2 — continuation counts**\nN₁₊(•,w) distinct left contexts\nN₁₊(h,•) distinct right words" as cont #1565C0
+rectangle "**Phase 3 — discounts**\ncount-of-counts (n₁…n₄) ⟹\nY, D₁, D₂, D₃₊ (Chen & Goodman);\nfixed fallbacks when too sparse" as disc #1565C0
+rectangle "**NgramModel**\ntrie ⊕ smoothing ⊕ |V| ⊕ N" as model #1565C0
+
+rectangle "**NgramAccumulator**\nWAL-backed on-disk counts" as accum #00838F
+rectangle "**Checkpoint**\nevery ""--checkpoint-interval""\nsentences (default 1 000 000)" as ckpt #00838F
+rectangle "**Finalize**\nkeep count ≥ ""--min-count"",\nload into DynamicDawgChar,\nattach Kneser-Ney smoothing" as final #00838F
+
+rectangle "**model.bin**\nsave_portable" as out #455A64
+
+reader --> prefetch
+prefetch --> count : library path\n(no ""--checkpoint"")
+count --> cont
+cont --> disc
+disc --> model
+model --> out
+
+reader --> accum : CLI path\n(""--checkpoint <DIR>"")
+accum --> ckpt : periodic
+ckpt --> accum : ""--resume""
+accum --> final : end of corpus
+final --> out
+
+note bottom of count
+  ""--min-count"" is **inert on this path**.
+  ""TrainerBuilder::min_word_freq"" is stored on
+  ""TrainingConfig"" but never read while counting,
+  so the in-memory model retains every n-gram.
+end note
+
+note bottom of final
+  ""--min-count"" **applies here**. Only n-grams whose
+  accumulated count reaches the threshold are
+  exported into the final trie.
+end note
+
+@enduml

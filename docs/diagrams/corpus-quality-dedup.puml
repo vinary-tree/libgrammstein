@@ -1,0 +1,92 @@
+@startuml corpus-quality-dedup
+' The two independent gates a sentence must clear to reach a consumer: the eight
+' ordered quality predicates (first failure wins), then the deduplication mode.
+' Green edge = kept; red edge = dropped, labelled with the RejectionReason variant.
+' Render: plantuml -tsvg docs/diagrams/corpus-quality-dedup.puml
+' Source of truth for Figure 3 in docs/components/corpus/overview.md, sections "Quality filtering" and "Deduplication".
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam note {
+  BackgroundColor #E3F2FD
+  BorderColor #1565C0
+}
+title Quality filtering ⇒ deduplication — the two gates in front of a consumer
+
+rectangle "**sentence : String**" as s #546E7A
+
+rectangle "**QualityMetrics::compute**\nword_count · max_word_repetition · has_terminal_punct\nchar_entropy · alpha_ratio · avg_word_length" as m #1565C0
+
+rectangle "**g1** word_count ∈ [min_words, max_words]" as g1 #1565C0
+rectangle "**g2** max_word_repetition ≤ θ_rep" as g2 #1565C0
+rectangle "**g3** terminal punctuation (if required)" as g3 #1565C0
+rectangle "**g4** char_entropy ≥ H_min" as g4 #1565C0
+rectangle "**g5** alpha_ratio ≥ α_min" as g5 #1565C0
+rectangle "**g6** avg_word_length ∈ [L_min, L_max]" as g6 #1565C0
+
+rectangle "**dropped**\nrejection_reason() names the first failing gate\nQualityStats counts it by variant" as rej #90A4AE
+
+rectangle "**Deduplicator::is_unique**" as dedup #1565C0
+rectangle "**Exact**\nh = safe_hash(s)\nHashSet<u64>" as de #00838F
+rectangle "**Normalized** //(default)//\nh = safe_hash(normalize(s))\nletters lowercased + digits, whitespace collapsed" as dn #00838F
+rectangle "**MinHash{k, τ, n}**\nshingles = char n-grams of normalize(s)\nsig[i] = min hash(shingle, i) — linear scan of all signatures" as dm #00838F
+
+rectangle "**duplicate**\nstats.duplicates += 1" as dup #90A4AE
+rectangle "**kept** — stats.unique += 1\n⇒ n-gram trainer · WordExtractor · eval" as keep #455A64
+
+s --> m
+m --> g1
+g1 -[#2E7D32]-> g2 : ✓
+g2 -[#2E7D32]-> g3 : ✓
+g3 -[#2E7D32]-> g4 : ✓
+g4 -[#2E7D32]-> g5 : ✓
+g5 -[#2E7D32]-> g6 : ✓
+g6 -[#2E7D32]-> dedup : ✓ passes all gates
+
+g1 -[#C62828]-> rej : ✗ TooFewWords / TooManyWords
+g2 -[#C62828]-> rej : ✗ ExcessiveRepetition
+g3 -[#C62828]-> rej : ✗ MissingTerminalPunct
+g4 -[#C62828]-> rej : ✗ LowEntropy
+g5 -[#C62828]-> rej : ✗ LowAlphaRatio
+g6 -[#C62828]-> rej : ✗ ShortWords / LongWords
+
+dedup --> de : mode = Exact
+dedup --> dn : mode = Normalized
+dedup --> dm : mode = MinHash
+
+de -[#2E7D32]-> keep : ✓ first sighting
+dn -[#2E7D32]-> keep : ✓
+dm -[#2E7D32]-> keep : ✓ max similarity < τ
+
+de -[#C62828]-> dup : ✗
+dn -[#C62828]-> dup : ✗
+dm -[#C62828]-> dup : ✗ some Jaccard ≥ τ
+
+note right of dm
+  **MinHash caveat.** A sentence whose normalised form is
+  shorter than the shingle size n yields **no** shingles and is
+  reported as *not unique* — it is **dropped**, not kept.
+  Each query is compared against every retained signature,
+  so the mode costs O(N·k) per sentence and O(N²·k) overall.
+end note
+
+legend right
+  |= Colour |= Role |
+  |<#546E7A> | corpus input |
+  |<#1565C0> | statistical gate |
+  |<#00838F> | hash / signature store |
+  |<#90A4AE> | dropped |
+  |<#455A64> | kept — on to the consumer |
+  |<#2E7D32> | ✓ edge: retained |
+  |<#C62828> | ✗ edge: discarded |
+endlegend
+@enduml

@@ -1,0 +1,63 @@
+@startuml paradigm-detection
+' The analyze_tokens dataflow: token stream → indexed pattern probe → literal
+' match → confidence → weighted accumulation → density normalisation → profile.
+' Colour encodes stage role: code/token artifacts (orange), analysis (purple),
+' scoring arithmetic (indigo), output (green), configuration inputs (slate).
+' Render: plantuml -tsvg docs/diagrams/paradigm-detection.puml
+' Source of truth for Figure 1 in docs/components/paradigm/detection.md §3
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title ParadigmDetector::analyze_tokens — probe → match → weigh → accumulate → normalise
+
+rectangle "**Input**\n\"class Foo extends Bar { this.x = 0; }\"" as in #455A64
+rectangle "**0. tokenize()**\nalphanumeric+_ runs kept whole;\nevery other non-space char\nbecomes its own token\n[class · Foo · extends · Bar · { · this · . · x · = · 0 · ; · } ]" as tok #EF6C00
+
+rectangle "**1. pattern_index probe**\nHashMap<String, Vec<(Paradigm, usize)>>\nkeyed on each pattern's FIRST token —\nO(1) per token, no scan of 170 patterns" as idx #6A1B9A
+rectangle "**2. try_match()**\nlower-case literal comparison of the\nwhole token sequence  s(π)\n(only 1 of 170 patterns is multi-token)" as mat #7B1FA2
+rectangle "**3. calculate_confidence()**\nconf = min(1, κ + 0.1·b·σ)\nκ = 1 when no context is required,\nelse the fraction of required context\ntokens present in the ±ω window" as conf #8E24AA
+
+rectangle "**4. accumulate**\nS(p) += w(π) · conf · μ(p)\nw ∈ {0.9 strong, 0.6 medium, 0.3 weak}\nμ(p) = the paradigm's multiplier" as acc #283593
+rectangle "**5. density normalise**  (normalize_scores)\nŜ(p) = min(1, S(p) · 100 / max(n,1))\n— a score *per 100 tokens*, capped at 1;\nNOT a sum-to-one normalisation" as norm #303F9F
+
+rectangle "**ParadigmProfile**\noop 0.72 · fp 0.05 · reactive 0.00 · procedural 0.31\nindicators · match_count · total_tokens" as prof #2E7D32
+rectangle "**DetectionResult**\nprofile + matches (with context)\n+ stats (tokens, checks, time_us)" as res #2E7D32
+
+rectangle "**ParadigmConfig**\ncontext_window ω\nweights.strong_indicator_bonus b\nweights.*_multiplier μ\nnormalize_scores" as cfg #546E7A
+
+in --> tok
+tok --> idx : per token tᵢ
+idx --> mat : candidate patterns
+mat --> conf : on match
+conf --> acc
+acc --> norm : after all tokens
+norm --> prof
+prof --> res
+
+cfg -[#546E7A]-> conf
+cfg -[#546E7A]-> acc
+cfg -[#546E7A]-> norm
+
+note right of idx
+  The index is the reason detection is
+  **O(n · k)**, not O(n · |Π|): only the
+  k patterns sharing the current token's
+  first token are ever tested.
+end note
+
+note right of norm
+  The cap makes Ŝ **saturating**: once a
+  paradigm exceeds 1 match-weight per
+  100 tokens its score pins at 1.0, so
+  dominance compares //saturated// scores.
+end note
+@enduml

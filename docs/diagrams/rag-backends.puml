@@ -1,0 +1,60 @@
+@startuml rag-backends
+' The RetrievalBackend contract and its two implementations, plus the
+' size-driven selection rule (BackendType::recommended_for_size). Colour:
+'   #6A1B9A purple = retrieval        #00838F teal  = storage / persistence
+'   #2E7D32 green  = embeddings       #546E7A grey  = external crates
+' Render: plantuml -tsvg docs/diagrams/rag-backends.puml
+' Source of truth for Figure 1 in docs/components/rag/backend.md §2.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title RetrievalBackend — one contract, two geometries
+
+rectangle "**trait RetrievalBackend : Send + Sync**\n\nadd(&mut self, id, &[f32]) → Result<()>\nquery(&self, &[f32], top_k) → Vec<(DocumentId, f32)>\nlen · is_empty · embedding_dim · contains\nsave · load · clear · remove (default: Err)" as trait #6A1B9A
+
+rectangle "**Normalisation invariant**\nevery embedding is stored as v̂ = v / ‖v‖₂\n⇒ cos(v̂_q , v̂_d) = ⟨v̂_q , v̂_d⟩" as invariant #2E7D32
+
+rectangle "**ExactCosineBackend**  (default)\nembeddings: Array2<f32>  (n × d)\ndoc_ids: Vec<DocumentId>\n\n**exact** · recall = 1.0" as exact #6A1B9A
+rectangle "**HnswBackend**  (feature ""rag-hnsw"")\nindex: RwLock<Option<Hnsw<f32, DistDot>>>\npending_points: RwLock<Vec<(Vec<f32>, DocumentId)>>\nneeds_rebuild: AtomicBool · num_points: AtomicUsize\n\n**approximate** · recall ≈ f(ef_search)" as hnsw #6A1B9A
+
+rectangle "**ndarray → BLAS**\nsgemv: s = E v̂_q\nthen introselect top-k\nΘ(nd) time · Θ(nd) space" as blas #546E7A
+rectangle "**hnsw_rs 0.3**  (simdeez_f)\nlayered proximity graph\nDistDot = 1 − ⟨·,·⟩\nΘ(d · ef · log n) expected" as hnswrs #546E7A
+
+rectangle "**BackendType::recommended_for_size(n)**\nn > 1_000_000  ∧  feature ""rag-hnsw""  ⟹  Hnsw\notherwise                                        ⟹  ExactCosine" as choose #00838F
+
+rectangle "**save(path) / load(path, dim)**\nexact: embeddings.bin + doc_ids.bin\nhnsw:  hnsw_config.json + doc_mapping.bin (batched, 10 000/batch)\n       + native hnsw_index.hnsw.{graph,data}" as persist #00838F
+
+trait -down-> invariant : enforced by\nnormalize_embedding
+invariant -down-> exact
+invariant -down-> hnsw
+exact -down-> blas : delegates
+hnsw -down-> hnswrs : delegates
+choose -up-> exact : n ≤ 10⁶
+choose -up-> hnsw : n > 10⁶
+exact -down-> persist
+hnsw -down-> persist
+
+note right of hnsw
+  Interior mutability: ""query(&self, …)""
+  **lazily builds** the graph on first use
+  (""ensure_built""), and ""add"" re-arms
+  ""needs_rebuild"", force-rebuilding every
+  10 000 insertions.
+end note
+
+note left of exact
+  ""remove"" is supported but **Θ(nd)** —
+  the matrix is rebuilt without the row.
+  ""HnswBackend"" inherits the trait default
+  and returns ""Err"" for ""remove"".
+end note
+@enduml

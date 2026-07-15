@@ -1,452 +1,376 @@
-# Language Implementations
+# The Five Shipped Languages
 
-This module provides built-in implementations of the `CodeLanguage` trait for various programming languages.
+libgrammstein ships five [`CodeLanguage`](language.md) implementations: three **mainstream**
+languages (Python, Rust, JavaScript) and two **DSLs** (Rholang, MeTTa). Each is a stateless unit
+struct behind its own Cargo feature, so a binary links only the tree-sitter grammars it actually
+uses. This page is the reference for what each language declares — its grammar, its vocabularies,
+its identifier syntax, and the node kinds its classifier keys on.
 
-## Overview
+> **Scope.** Source of truth: [`src/code/languages/`](../../../src/code/languages/) —
+> [`python.rs`](../../../src/code/languages/python.rs),
+> [`rust_lang.rs`](../../../src/code/languages/rust_lang.rs),
+> [`javascript.rs`](../../../src/code/languages/javascript.rs),
+> [`rholang.rs`](../../../src/code/languages/rholang.rs), and
+> [`metta.rs`](../../../src/code/languages/metta.rs). The trait they implement is
+> [Language](language.md); to add a sixth language, follow the skeleton there.
 
-libgrammstein supports both mainstream programming languages and domain-specific languages (DSLs). Each implementation provides:
+![The five CodeLanguage implementations and their feature gates](../../diagrams/code-languages.svg)
 
-- Tree-sitter grammar integration
-- Keyword and operator definitions
-- Token classification logic
-- Built-in types and standard library functions
-- Comment syntax configuration
+*Figure 1. Every implementation is a unit struct implementing the one `CodeLanguage` trait. The
+`code-mainstream` and `code-dsl` feature groups bundle the three mainstream and two
+domain-specific languages respectively; `code-full` is those two groups plus `code-neural`.*
 
-## Supported Languages
+## Feature gates
 
-| Language | Feature Flag | Category | Tree-sitter Grammar |
-|----------|--------------|----------|---------------------|
-| Python | `code-python` | Mainstream | `tree-sitter-python` |
-| Rust | `code-rust` | Mainstream | `tree-sitter-rust` |
-| JavaScript | `code-javascript` | Mainstream | `tree-sitter-javascript` |
-| Rholang | `code-rholang` | DSL (Blockchain) | `rholang-tree-sitter` |
-| MeTTa | `code-metta` | DSL (AI/Reasoning) | `tree-sitter-metta` |
+Each language is gated individually, and every language feature **transitively enables `code`** —
+so `features = ["code-python"]` is sufficient; you never need to name `code` yourself.
 
-## Feature Flags
-
-Enable language support in `Cargo.toml`:
+| Feature | Enables | Pulls in |
+|---|---|---|
+| `code-python` | `Python` | `tree-sitter-python` |
+| `code-rust` | `Rust` | `tree-sitter-rust` |
+| `code-javascript` | `JavaScript` | `tree-sitter-javascript` |
+| `code-rholang` | `Rholang` | `rholang-tree-sitter` |
+| `code-metta` | `MeTTa` | `tree-sitter-metta` |
+| `code-mainstream` | Python + Rust + JavaScript | all three mainstream grammars |
+| `code-dsl` | Rholang + MeTTa | both DSL grammars |
+| `code-full` | `code-neural` + `code-mainstream` + `code-dsl` | everything |
 
 ```toml
 [dependencies]
-libgrammstein = { version = "0.1", features = ["code", "code-python", "code-rust"] }
+libgrammstein = { version = "0.1", features = ["code-python", "code-rholang"] }
 ```
 
-Convenience feature groups:
+Each type is re-exported at the crate's `code` root under its own gate, so
+`use libgrammstein::code::Python;` works whenever `code-python` is on.
 
-| Feature | Includes |
-|---------|----------|
-| `code-mainstream` | Python, Rust, JavaScript |
-| `code-dsl` | Rholang, MeTTa |
-| `code-full` | All languages + neural features |
+## Vocabularies at a glance
+
+The numbers below are the exact lengths of the slices each implementation returns. They matter:
+`keywords()` doubles as the `Keyword` classifier's dictionary *and* the lexical corrector's
+closed candidate set, so its size bounds the cost of the linear membership scan in
+`classify_token` (see [Language](language.md#cost-of-the-vocabulary-accessors)).
+
+| Language | `keywords()` | `special_tokens()` | `builtin_types()` | `stdlib_functions()` | Extensions |
+|---|---|---|---|---|---|
+| Python | 35 | 7 | 39 | 68 | `py`, `pyw`, `pyi` |
+| Rust | 41 *(39 distinct)* | 14 | 70 | 52 | `rs` |
+| JavaScript | 41 | 5 *(4 distinct)* | 43 | 71 | `js`, `jsx`, `mjs`, `cjs` |
+| Rholang | 20 | 22 | 6 | 16 | `rho` |
+| MeTTa | 34 | 23 | 16 | 45 | `metta`, `mt` |
+
+> **Two harmless duplicates.** `Rust::keywords()` lists `"async"` and `"await"` twice (41 entries,
+> 39 distinct), and `JavaScript::special_tokens()` lists `"?."` twice (5 entries, 4 distinct).
+> Neither changes behavior — membership tests are unaffected and `keyword_set()` collects into a
+> `HashSet`, which de-duplicates — but a corrector that iterates `keywords()` to enumerate
+> candidates will visit those two Rust entries twice.
+
+Extensions carry **no leading dot** (`"py"`, not `".py"`), matching `Path::extension()`.
+
+## Cross-language contrasts
+
+The same character is classified differently depending on the language's semantics — which is
+exactly why classification is delegated to the language rather than hard-coded:
+
+| Token | Python | Rust | JavaScript | Rholang | MeTTa |
+|---|---|---|---|---|---|
+| `:` | `Punctuation` | `Punctuation` | **`Operator`** (ternary) | `Punctuation` | `Operator` (type annotation) |
+| `@` | `Punctuation` (decorator) | `Punctuation` (pattern binding) | — | **`Operator`** (quote/name) | `Operator` |
+| `*` | `Operator` | `Operator` | `Operator` | **`Operator`** (dereference a name) | `Operator` |
+| `!` | — | `Operator` | `Operator` (negation) | **`Operator`** (send) | `Operator` (reduce) |
+| `true` | `BooleanLiteral` | `BooleanLiteral` | `BooleanLiteral` | `BooleanLiteral` | — (`True`) |
+| null-ish | `None` → `Keyword` | — | `null`, `undefined` → `Keyword` | `Nil` → `Keyword` | — |
+
+Structural conventions differ just as much:
+
+| Property | Python | Rust | JavaScript | Rholang | MeTTa |
+|---|---|---|---|---|---|
+| Whitespace significant | **yes** | no | no | no | no |
+| Line comment | `#` | `//` | `//` | `//` | `;` |
+| Block comment | `"""` … `"""` | `/*` … `*/` | `/*` … `*/` | `/*` … `*/` | **none** |
+| Doc comment | `#` | `///` | `///` | `///` | `;;` |
+| Identifier extras | — | `r#` raw | `$` allowed | `'` allowed | `$` vars, `&` spaces |
 
 ---
 
 ## Python
 
-Python support with type hints and indentation awareness.
-
-### Usage
+Indentation-sensitive, with type hints. The only shipped language for which
+`is_whitespace_significant()` returns `true` — a signal to layout-aware repair that indentation
+edits change meaning.
 
 ```rust
-use libgrammstein::code::Python;
+use libgrammstein::code::{CodeLanguage, Python};
 
 let python = Python::new();
-
-// Parse Python code
-let source = r#"
-def greet(name: str) -> str:
-    return f"Hello, {name}!"
-"#;
-
-// Access language information
 assert_eq!(python.name(), "python");
+assert_eq!(python.display_name(), "Python");
 assert!(python.is_whitespace_significant());
+assert_eq!(python.file_extensions(), &["py", "pyw", "pyi"]);
 ```
 
-### Characteristics
+**Keywords** (35) — the full reserved set of modern Python:
 
-| Property | Value |
-|----------|-------|
-| File Extensions | `.py`, `.pyw`, `.pyi` |
-| Whitespace Significant | Yes |
-| Comment Syntax | `#` (line), `"""` (block) |
-| Unicode Identifiers | Yes |
-
-### Keywords
-
-```
-False   None    True    and     as      assert  async   await
-break   class   continue  def   del     elif    else    except
-finally for     from    global  if      import  in      is
-lambda  nonlocal not     or      pass    raise   return  try
-while   with    yield
+```text
+False    None     True     and      as       assert   async    await
+break    class    continue def      del      elif     else     except
+finally  for      from     global   if       import   in       is
+lambda   nonlocal not      or       pass     raise    return   try
+while    with     yield
 ```
 
-### Built-in Types
+**Special tokens** (7): `@` (decorator), `->` (return annotation), `:` (annotation/slice), `**`
+(power / kwargs), `//` (floor division), `...` (`Ellipsis`), `_` (conventional throwaway).
+
+**Built-in types** (39) span primitives (`int`, `float`, `complex`, `str`, `bytes`, `bool`, …),
+containers (`list`, `tuple`, `set`, `frozenset`, `dict`), exceptions (`Exception`, `TypeError`,
+`ValueError`, `KeyError`, …), and `typing` aliases (`Optional`, `Union`, `List`, `Dict`,
+`Callable`, `Any`, `Protocol`, …). **`stdlib_functions()`** (68) is the builtins namespace —
+`print`, `len`, `range`, `enumerate`, `zip`, `sorted`, `isinstance`, and friends.
+
+**Classification.** Booleans are recognized by node kind (`True`/`False`), but `None` is a
+`Keyword`, not a literal. Names arrive from tree-sitter as the generic kind `identifier`, so the
+classifier disambiguates by text — keyword first, then built-in type, else a plain identifier:
 
 ```rust
-// Primitive types
-["int", "float", "complex", "str", "bytes", "bytearray",
- "list", "tuple", "set", "frozenset", "dict", "bool", "object", "type"]
+use libgrammstein::code::{CodeLanguage, Python, TokenType};
 
-// Type hints (typing module)
-["Optional", "Union", "List", "Dict", "Set", "Tuple",
- "Callable", "Any", "Type", "Generic", "Protocol"]
-
-// Exception types
-["Exception", "BaseException", "TypeError", "ValueError",
- "KeyError", "IndexError", "AttributeError", "NameError"]
-```
-
-### Token Classification
-
-```rust
 let python = Python::new();
-
-// Keywords use their text as node_kind
 assert_eq!(python.classify_token("def", "def"), TokenType::Keyword);
 assert_eq!(python.classify_token("None", "None"), TokenType::Keyword);
-
-// Boolean literals
 assert_eq!(python.classify_token("True", "True"), TokenType::BooleanLiteral);
-
-// Identifiers and types
-assert_eq!(python.classify_token("foo", "identifier"), TokenType::Identifier);
 assert_eq!(python.classify_token("int", "identifier"), TokenType::TypeName);
-
-// Literals
+assert_eq!(python.classify_token("foo", "identifier"), TokenType::Identifier);
 assert_eq!(python.classify_token("42", "integer"), TokenType::NumericLiteral);
-assert_eq!(python.classify_token("3.14", "float"), TokenType::NumericLiteral);
+assert_eq!(python.classify_token("#", "comment"), TokenType::Comment);
 ```
 
-### Identifier Validation
+**Identifiers.** A letter or `_`, then letters, digits, or `_`. The check is Unicode-aware
+(`char::is_alphabetic`), so `café` is accepted, as real Python accepts it.
 
 ```rust
-let python = Python::new();
-
-// Valid Python identifiers
-assert!(python.is_valid_identifier("foo"));
+# use libgrammstein::code::{CodeLanguage, Python};
+# let python = Python::new();
 assert!(python.is_valid_identifier("_private"));
-assert!(python.is_valid_identifier("CamelCase"));
 assert!(python.is_valid_identifier("snake_case_123"));
-
-// Invalid identifiers
-assert!(!python.is_valid_identifier("123abc"));  // Starts with digit
-assert!(!python.is_valid_identifier(""));        // Empty
-assert!(!python.is_valid_identifier("my-var"));  // Contains hyphen
+assert!(!python.is_valid_identifier("123abc")); // leading digit
+assert!(!python.is_valid_identifier("my-var")); // hyphen
 ```
 
 ---
 
 ## Rust
 
-Rust support with macro awareness and raw identifier handling.
-
-### Usage
+C-style comments, macro awareness, and raw identifiers.
 
 ```rust
-use libgrammstein::code::Rust;
+use libgrammstein::code::{CodeLanguage, Rust};
 
 let rust = Rust::new();
-
-// Access language information
 assert_eq!(rust.name(), "rust");
+assert_eq!(rust.file_extensions(), &["rs"]);
 assert!(!rust.is_whitespace_significant());
 ```
 
-### Characteristics
+**Keywords** (41 entries, 39 distinct):
 
-| Property | Value |
-|----------|-------|
-| File Extensions | `.rs` |
-| Whitespace Significant | No |
-| Comment Syntax | `//` (line), `/* */` (block), `///` (doc) |
-| Raw Identifiers | `r#keyword` syntax |
-
-### Keywords
-
-```
-as      async   await   break   const   continue  crate   dyn
-else    enum    extern  false   fn      for       if      impl
-in      let     loop    match   mod     move      mut     pub
-ref     return  self    Self    static  struct    super   trait
-true    type    unsafe  use     where   while     try
+```text
+as     async  await  break  const  continue  crate  dyn
+else   enum   extern false  fn     for       if     impl
+in     let    loop   match  mod    move      mut    pub
+ref    return self   Self   static struct    super  trait
+true   type   unsafe use    where  while     try
 ```
 
-### Built-in Types
+**Special tokens** (14): `#`, `!`, `?`, `::`, `=>`, `->`, `..`, `..=`, `@`, `'` (lifetimes), `&`,
+`*`, `$` (macro metavariables), `|`.
+
+**Built-in types** (70) — the largest table of the five — cover the primitives (`bool`, `char`,
+`str`, the sized integers, `f32`/`f64`), the common `std` types (`String`, `Vec`, `Box`, `Rc`,
+`Arc`, `Option`, `Result`, `HashMap`, `Cow`, `PhantomData`, …), and the common traits (`Copy`,
+`Clone`, `Send`, `Sync`, `Iterator`, `From`, `Into`, `Fn`, `FnMut`, `FnOnce`, …). Note that
+`Option`'s and `Result`'s *variants* (`Some`, `None`, `Ok`, `Err`) are listed as types too, so they
+classify as `TypeName` rather than `Identifier`.
+
+**Classification.** Rust is the one language whose classifier trusts a dedicated type node kind:
+`type_identifier` is a `TypeName` outright, without a dictionary lookup. Macro invocations get
+`Special`.
 
 ```rust
-// Primitive types
-["bool", "char", "str",
- "i8", "i16", "i32", "i64", "i128", "isize",
- "u8", "u16", "u32", "u64", "u128", "usize",
- "f32", "f64"]
+use libgrammstein::code::{CodeLanguage, Rust, TokenType};
 
-// Standard library types
-["String", "Vec", "Box", "Rc", "Arc", "Cell", "RefCell",
- "Option", "Result", "Ok", "Err", "Some", "None",
- "HashMap", "HashSet", "BTreeMap", "BTreeSet",
- "Path", "PathBuf", "Cow", "Pin", "PhantomData"]
-
-// Common traits
-["Copy", "Clone", "Debug", "Display", "Default",
- "Send", "Sync", "Sized", "Eq", "PartialEq", "Ord", "PartialOrd",
- "Iterator", "IntoIterator", "From", "Into", "Drop", "Fn", "FnMut", "FnOnce"]
-```
-
-### Token Classification
-
-```rust
 let rust = Rust::new();
-
-// Keywords
 assert_eq!(rust.classify_token("fn", "fn"), TokenType::Keyword);
-assert_eq!(rust.classify_token("let", "let"), TokenType::Keyword);
-
-// Boolean literals
 assert_eq!(rust.classify_token("true", "true"), TokenType::BooleanLiteral);
-
-// Primitive types
 assert_eq!(rust.classify_token("i32", "primitive_type"), TokenType::TypeName);
-
-// Macro invocations are special
+assert_eq!(rust.classify_token("MyStruct", "type_identifier"), TokenType::TypeName);
 assert_eq!(rust.classify_token("println!", "macro_invocation"), TokenType::Special);
+assert_eq!(rust.classify_token("x", "identifier"), TokenType::Identifier);
 ```
 
-### Raw Identifier Support
+**Identifiers.** `is_valid_identifier` strips a leading `r#` before validating, so **raw
+identifiers are accepted** — the mechanism by which a reserved word becomes a legal name:
 
 ```rust
-let rust = Rust::new();
-
-// Raw identifiers allow keywords as names
-assert!(rust.is_valid_identifier("r#type"));   // Valid: raw identifier
-assert!(rust.is_valid_identifier("r#match"));  // Valid: raw identifier
-assert!(rust.is_valid_identifier("r#loop"));   // Valid: raw identifier
-
-// Regular identifiers
-assert!(rust.is_valid_identifier("foo_bar"));
+# use libgrammstein::code::{CodeLanguage, Rust};
+# let rust = Rust::new();
+assert!(rust.is_valid_identifier("r#type"));  // raw identifier
+assert!(rust.is_valid_identifier("r#match"));
 assert!(rust.is_valid_identifier("_hidden"));
+assert!(!rust.is_valid_identifier("123foo"));
 ```
 
 ---
 
 ## JavaScript
 
-JavaScript ES6+ support with JSX awareness.
-
-### Usage
+ES6+ with JSX awareness.
 
 ```rust
-use libgrammstein::code::JavaScript;
+use libgrammstein::code::{CodeLanguage, JavaScript};
 
 let js = JavaScript::new();
-
-// Access language information
 assert_eq!(js.name(), "javascript");
 assert_eq!(js.display_name(), "JavaScript");
+assert_eq!(js.file_extensions(), &["js", "jsx", "mjs", "cjs"]);
 ```
 
-### Characteristics
+**Keywords** (41):
 
-| Property | Value |
-|----------|-------|
-| File Extensions | `.js`, `.jsx`, `.mjs`, `.cjs` |
-| Whitespace Significant | No |
-| Comment Syntax | `//` (line), `/* */` (block), `///` (doc) |
-| Dollar Identifiers | `$variable` syntax |
-
-### Keywords
-
-```
-async     await     break     case      catch     class     const
-continue  debugger  default   delete    do        else      export
-extends   false     finally   for       function  if        import
-in        instanceof  let     new       null      return    static
-super     switch    this      throw     true      try       typeof
-undefined var       void      while     with      yield
+```text
+async     await   break   case    catch   class      const
+continue  debugger default delete  do      else       export
+extends   false   finally for     function if        import
+in        instanceof let   new     null    return     static
+super     switch  this    throw   true    try        typeof
+undefined var     void    while   with    yield
 ```
 
-### Built-in Types
+**Special tokens** (5 entries, 4 distinct): `=>`, `...`, `?.`, `??`.
+
+**Built-in types** (43): primitive wrappers (`Boolean`, `Number`, `String`, `Symbol`, `BigInt`),
+core objects (`Object`, `Array`, `Function`, `Date`, `RegExp`, `Map`, `Set`, `Promise`, `Proxy`,
+…), the full typed-array family, the error hierarchy (`TypeError`, `RangeError`, …), plus `JSON`,
+`Math`, `Intl`, and `console`. **`stdlib_functions()`** (71) mixes global functions (`parseInt`,
+`fetch`, `setTimeout`) with the common `Array`/`Object`/`String`/`Promise`/`console` methods.
+
+**Classification.** JavaScript is where the `:`/`?` contrast bites: both are **`Operator`s** (the
+conditional expression), not punctuation. `null` and `undefined` are `Keyword`s, not literals. JSX
+element boundaries are `Special`.
 
 ```rust
-// Primitive wrappers
-["Boolean", "Number", "String", "Symbol", "BigInt"]
+use libgrammstein::code::{CodeLanguage, JavaScript, TokenType};
 
-// Objects
-["Object", "Array", "Function", "Date", "RegExp", "Error",
- "Map", "Set", "WeakMap", "WeakSet", "Promise", "Proxy", "Reflect"]
-
-// TypedArrays
-["ArrayBuffer", "DataView", "Int8Array", "Uint8Array",
- "Int16Array", "Uint16Array", "Int32Array", "Uint32Array",
- "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array"]
-
-// Error types
-["TypeError", "RangeError", "ReferenceError", "SyntaxError"]
-```
-
-### Token Classification
-
-```rust
 let js = JavaScript::new();
-
-// Keywords
 assert_eq!(js.classify_token("function", "function"), TokenType::Keyword);
-assert_eq!(js.classify_token("const", "const"), TokenType::Keyword);
-
-// Null-like keywords
 assert_eq!(js.classify_token("null", "null"), TokenType::Keyword);
 assert_eq!(js.classify_token("undefined", "undefined"), TokenType::Keyword);
-
-// Boolean literals
 assert_eq!(js.classify_token("true", "true"), TokenType::BooleanLiteral);
-
-// JSX elements are special
+assert_eq!(js.classify_token("?", "?"), TokenType::Operator);
+assert_eq!(js.classify_token("42", "number"), TokenType::NumericLiteral);
 assert_eq!(js.classify_token("<div>", "jsx_opening_element"), TokenType::Special);
 ```
 
-### Identifier Validation
+**Identifiers.** A letter, `_`, or `$`, then letters, digits, `_`, or `$` — so the jQuery/Angular
+idioms validate:
 
 ```rust
-let js = JavaScript::new();
-
-// Valid JavaScript identifiers
-assert!(js.is_valid_identifier("foo"));
-assert!(js.is_valid_identifier("_private"));
-assert!(js.is_valid_identifier("$element"));    // jQuery-style
-assert!(js.is_valid_identifier("$$internal"));  // Angular-style
-
-// Invalid identifiers
-assert!(!js.is_valid_identifier("123abc"));  // Starts with digit
-assert!(!js.is_valid_identifier("my-var"));  // Contains hyphen
+# use libgrammstein::code::{CodeLanguage, JavaScript};
+# let js = JavaScript::new();
+assert!(js.is_valid_identifier("$element"));
+assert!(js.is_valid_identifier("$$internal"));
+assert!(!js.is_valid_identifier("my-var"));
 ```
 
 ---
 
 ## Rholang
 
-Rholang is a reflective, concurrent programming language based on the rho-calculus, designed for building scalable, secure blockchain applications on the RChain platform.
-
-### Core Concepts
-
-- **Channels (names)**: Communication endpoints prefixed with `@`
-- **Processes**: Concurrent computations composed with `|`
-- **Contracts**: Persistent receive operations
-- **Bundles**: Access control for channels
-
-### Usage
+Rholang is a reflective, concurrent language built on the **rho-calculus** — a process algebra for
+RChain smart contracts. Its abstractions are *names* (channels), *processes*, *contracts*
+(persistent receives), and *bundles* (channel access control). It is the language with the richest
+operator vocabulary of the five (22 special tokens against 20 keywords) — the operators, not the
+keywords, carry the semantics.
 
 ```rust
-use libgrammstein::code::Rholang;
+use libgrammstein::code::{CodeLanguage, Rholang};
 
 let rholang = Rholang::new();
-
-// Access language information
 assert_eq!(rholang.name(), "rholang");
-assert!(!rholang.is_whitespace_significant());
+assert_eq!(rholang.file_extensions(), &["rho"]);
 ```
 
-### Characteristics
+**Keywords** (20):
 
-| Property | Value |
-|----------|-------|
-| File Extensions | `.rho` |
-| Whitespace Significant | No |
-| Comment Syntax | `//` (line), `/* */` (block), `///` (doc) |
-| Paradigm | Concurrent, process algebra |
-
-### Keywords
-
-```
-new     in      if      else    let     match   select  contract  for
-or      and     matches not
-bundle  bundle- bundle+ bundle0
-true    false   Nil
+```text
+new  in     if      let     match   select  contract  for   else
+or   and    matches not
+bundle  bundle-  bundle+  bundle0
+true    false    Nil
 ```
 
-### Special Tokens (Operators)
+**Special tokens** (22), grouped by role:
 
-Rholang has a rich set of channel and process operators:
+```text
+names        @    quote (process → name)          *     eval (name → process)
+send         !    send once                       !!    send persistently
+             !?   synchronous send-then-receive   ?!    receive-then-send
+receive      <-   linear receive                  <=    persistent receive
+             <<-  peek (non-consuming)
+composition  |    parallel                        &     concurrent binding
+             ;    sequential                      =>    match arm
+collections  ++   union / concat                  --    difference
+patterns     /\   conjunction                     \/    disjunction
+             ~    negation                        %%    interpolation
+binding      =    simple                          =*    with dereference
+remainder    ...  spread / rest
+```
+
+**Built-in types** (6): `Bool`, `Int`, `String`, `Uri`, `ByteArray`, `Nil`. **`stdlib_functions()`**
+(16) is *not* a standard library in the usual sense — Rholang has none — but the method names
+available on its collections: `nth`, `length`, `slice`, `union`, `diff`, `add`, `delete`,
+`contains`, `get`, `getOrElse`, `set`, `keys`, `size`, `toByteArray`, `hexToBytes`, `toUtf8Bytes`.
+
+**Classification.** The classifier keys on the grammar's semantic node kinds — `bool_literal`,
+`long_literal`, `uri_literal`, `simple_type`, `var`, and the bind kinds (`linear_bind`,
+`repeated_bind`, `peek_bind`) — falling back to keyword and special-token text tests:
 
 ```rust
-// Channel operations
-"@"   // Quote (process -> name)
-"*"   // Eval/dereference (name -> process)
+use libgrammstein::code::{CodeLanguage, Rholang, TokenType};
 
-// Send operations
-"!"   // Send single
-"!!"  // Send persistent
-"!?"  // Synchronous send-then-receive
-
-// Receive operations
-"<-"  // Linear receive
-"<="  // Persistent receive
-"<<-" // Peek (non-consuming receive)
-"?!"  // Receive-then-send
-
-// Process algebra
-"|"   // Parallel composition
-"&"   // Concurrent binding
-";"   // Sequential composition
-"=>"  // Pattern match arm
-
-// Set operations
-"++"  // Union/concatenation
-"--"  // Difference
-"/\\" // Conjunction
-"\\/" // Disjunction
-"~"   // Negation
-```
-
-### Built-in Types
-
-```rust
-["Bool", "Int", "String", "Uri", "ByteArray", "Nil"]
-```
-
-### Token Classification
-
-```rust
 let rholang = Rholang::new();
-
-// Keywords
 assert_eq!(rholang.classify_token("new", "new"), TokenType::Keyword);
 assert_eq!(rholang.classify_token("contract", "contract"), TokenType::Keyword);
-
-// Boolean literals
 assert_eq!(rholang.classify_token("true", "bool_literal"), TokenType::BooleanLiteral);
-
-// Types
+assert_eq!(rholang.classify_token("42", "long_literal"), TokenType::NumericLiteral);
 assert_eq!(rholang.classify_token("Int", "simple_type"), TokenType::TypeName);
-
-// Variables
 assert_eq!(rholang.classify_token("myVar", "var"), TokenType::Identifier);
+assert_eq!(rholang.classify_token("_", "wildcard"), TokenType::Special);
 ```
 
-### Identifier Validation
+**Identifiers** follow the grammar's rule:
 
-Rholang identifiers can include apostrophes (for mathematical notation):
+```text
+identifier ::= [a-zA-Z] [a-zA-Z0-9_']*
+             | _ [a-zA-Z0-9_']+
+```
+
+so **apostrophes are legal** (the primed-variable convention of process calculi), and a bare `_` is
+a *wildcard*, not a name:
 
 ```rust
-let rholang = Rholang::new();
-
-// Valid Rholang identifiers
-assert!(rholang.is_valid_identifier("foo"));
-assert!(rholang.is_valid_identifier("bar123"));
+# use libgrammstein::code::{CodeLanguage, Rholang};
+# let rholang = Rholang::new();
+assert!(rholang.is_valid_identifier("x'"));      // primed
+assert!(rholang.is_valid_identifier("foo'bar"));
 assert!(rholang.is_valid_identifier("_foo"));
-assert!(rholang.is_valid_identifier("x'"));      // With apostrophe
-assert!(rholang.is_valid_identifier("foo'bar")); // Apostrophe in middle
-
-// Invalid identifiers
-assert!(!rholang.is_valid_identifier("_"));      // Wildcard only
-assert!(!rholang.is_valid_identifier("123foo")); // Starts with digit
-assert!(!rholang.is_valid_identifier("@foo"));   // Starts with @
+assert!(!rholang.is_valid_identifier("_"));      // wildcard, not an identifier
+assert!(!rholang.is_valid_identifier("@foo"));   // @ quotes a process; not part of the name
 ```
 
-### Example Rholang Code
+A representative program — a persistent contract, a parallel composition, and a linear receive:
 
-```rholang
-// A simple contract that echoes messages
+```text
 new echo, stdout(`rho:io:stdout`) in {
   contract echo(@msg, return) = {
     return!(msg) |
@@ -465,219 +389,148 @@ new echo, stdout(`rho:io:stdout`) in {
 
 ## MeTTa
 
-MeTTa (Meta Type Talk) is a functional meta-programming language designed for knowledge representation, reasoning, and AI systems. It features hypergraph-based data structures and powerful pattern matching.
-
-### Core Concepts
-
-- **Atoms**: Basic units (symbols, variables, expressions)
-- **Expressions**: S-expression lists `(expr expr ...)`
-- **Variables**: Pattern variables prefixed with `$`
-- **Spaces**: Atomspace references prefixed with `&`
-- **Types**: Gradual typing with `:` annotations
-
-### Usage
+MeTTa (*Meta Type Talk*) is a homoiconic, functional meta-programming language for knowledge
+representation and reasoning: programs are S-expressions over *atoms*, pattern variables are
+prefixed `$`, and *atomspaces* are prefixed `&`.
 
 ```rust
-use libgrammstein::code::MeTTa;
+use libgrammstein::code::{CodeLanguage, MeTTa};
 
 let metta = MeTTa::new();
-
-// Access language information
 assert_eq!(metta.name(), "metta");
 assert_eq!(metta.display_name(), "MeTTa");
+assert_eq!(metta.file_extensions(), &["metta", "mt"]);
 ```
 
-### Characteristics
+**Keywords** (34) — note that MeTTa's "keywords" include its type names and its atomspace
+primitives, because in a homoiconic language these are ordinary symbols that the classifier must
+nonetheless recognize:
 
-| Property | Value |
-|----------|-------|
-| File Extensions | `.metta`, `.mt` |
-| Whitespace Significant | No |
-| Comment Syntax | `;` (line), `;;` (doc) |
-| Paradigm | Functional, homoiconic |
-
-### Keywords
-
-```
-True    False   match   let     let*    if      case    function  return
-empty   Error   Type    Atom    Symbol  Variable  Expression  Grounded
-Unit    Number  String  Bool
+```text
+True   False
+match  let   let*  if  case  function  return  empty  Error
+Type   Atom  Symbol  Variable  Expression  Grounded  Unit  Number  String  Bool
 new-space  add-atom  remove-atom  get-atoms  import!  include  bind!  pragma!
 sequential  chain  eval  quote  unquote
 ```
 
-### Special Tokens
+**Special tokens** (23): the prefixes `!` (reduce), `?` (query), `'` (quote), `$` (variable), `&`
+(atomspace); the binders `:` (type annotation), `=` (definition), `:=` (rule); the arrows `->`,
+`<-`, `<<-`; the comparisons `==`, `!=`, `<=`, `>=`, `<`, `>`; and `|`, `,`, `@`, `...`, `.`, `_`.
+
+**Built-in types** (16): the core meta-types (`Type`, `Atom`, `Symbol`, `Variable`, `Expression`,
+`Grounded`), the primitives (`Number`, `String`, `Bool`, `Unit`), the collections (`List`,
+`Tuple`), `Function` and the arrow `->` itself, plus the special symbols `%Undefined%` and
+`%Irreducible%`. **`stdlib_functions()`** (45) covers evaluation, arithmetic, comparison, boolean,
+atomspace, list, and type operations (`cons-atom`, `car-atom`, `get-type`, `collapse`,
+`superpose`, `println!`, …).
+
+**Comments** are the one place MeTTa refuses a preset: it *is* Lisp-like, but it has **no block
+comments**, so it declines `CommentSyntax::lisp_style()` (which would supply `#|` … `|#`) and
+constructs its own with `block_comment: None`.
+
+**Classification.** Node kinds carry most of the load; the text fallback recognizes the sigils
+directly, so a `$`-prefixed token is an `Identifier` (a variable) and an `&`-prefixed token is
+`Special` (an atomspace) even when the grammar does not label them:
 
 ```rust
-// Prefix operators
-"!"   // Reduction/evaluation
-"?"   // Query
-"'"   // Quote
+use libgrammstein::code::{CodeLanguage, MeTTa, TokenType};
 
-// Variable prefix
-"$"   // Pattern variable marker
-
-// Space reference prefix
-"&"   // Atomspace reference (e.g., &self)
-
-// Type annotation
-":"   // Type annotation
-
-// Assignment/binding
-"="   // Definition/equality
-":="  // Rule definition
-
-// Arrows
-"->"  // Function type / transformation
-```
-
-### Built-in Types
-
-```rust
-// Core types
-["Type", "Atom", "Symbol", "Variable", "Expression", "Grounded"]
-
-// Primitive types
-["Number", "String", "Bool", "Unit"]
-
-// Collection types
-["List", "Tuple"]
-
-// Function types
-["Function", "->"]
-
-// Special types
-["%Undefined%", "%Irreducible%"]
-```
-
-### Token Classification
-
-```rust
 let metta = MeTTa::new();
-
-// Boolean literals
 assert_eq!(metta.classify_token("True", "boolean_literal"), TokenType::BooleanLiteral);
-
-// Numeric literals
-assert_eq!(metta.classify_token("42", "integer_literal"), TokenType::NumericLiteral);
 assert_eq!(metta.classify_token("3.14", "float_literal"), TokenType::NumericLiteral);
-
-// Variables
 assert_eq!(metta.classify_token("$x", "variable"), TokenType::Identifier);
-
-// Keywords
-assert_eq!(metta.classify_token("match", "identifier"), TokenType::Keyword);
-
-// Space references
 assert_eq!(metta.classify_token("&self", "space_reference"), TokenType::Special);
+assert_eq!(metta.classify_token("match", "identifier"), TokenType::Keyword);
+assert_eq!(metta.classify_token("foo", "identifier"), TokenType::Identifier);
 ```
 
-### Identifier Validation
-
-MeTTa has a permissive identifier syntax:
+**Identifiers** are the most permissive of the five: *anything* that does not begin with a
+delimiter or a sigil and contains no delimiter is a symbol — so `+` and `->` are legal names, as a
+Lisp-family language requires. Variables (`$…`) and atomspaces (`&…`) are handled by prefix, and
+the wildcard `_` is explicitly admitted:
 
 ```rust
-let metta = MeTTa::new();
-
-// Valid MeTTa identifiers (symbols)
-assert!(metta.is_valid_identifier("foo"));
-assert!(metta.is_valid_identifier("my-function"));  // Hyphens allowed
-assert!(metta.is_valid_identifier("+"));            // Operators as symbols
-assert!(metta.is_valid_identifier("->"));           // Arrow as symbol
-assert!(metta.is_valid_identifier("_"));            // Wildcard
-
-// Variables
-assert!(metta.is_valid_identifier("$x"));
-assert!(metta.is_valid_identifier("$var"));
-assert!(metta.is_valid_identifier("$"));            // Empty variable
-
-// Space references
-assert!(metta.is_valid_identifier("&self"));
-assert!(metta.is_valid_identifier("&kb"));
-assert!(!metta.is_valid_identifier("&"));           // Empty not allowed
-
-// Invalid identifiers
-assert!(!metta.is_valid_identifier(""));            // Empty
-assert!(!metta.is_valid_identifier("(foo"));        // Starts with delimiter
-assert!(!metta.is_valid_identifier("foo(bar"));     // Contains delimiter
+# use libgrammstein::code::{CodeLanguage, MeTTa};
+# let metta = MeTTa::new();
+assert!(metta.is_valid_identifier("+"));           // operators are symbols
+assert!(metta.is_valid_identifier("->"));
+assert!(metta.is_valid_identifier("my-function")); // hyphens are ordinary
+assert!(metta.is_valid_identifier("_"));           // wildcard is a valid symbol
+assert!(metta.is_valid_identifier("$x"));          // variable
+assert!(metta.is_valid_identifier("$"));           // bare variable marker is accepted
+assert!(metta.is_valid_identifier("&self"));       // atomspace
+assert!(!metta.is_valid_identifier("&"));          // …but a bare & is not
+assert!(!metta.is_valid_identifier("foo(bar"));    // embedded delimiter
 ```
 
-### Example MeTTa Code
+A representative program — a type declaration, a rule, and an atomspace query:
 
-```metta
-; Define a type
+```text
+; Declare a type
 (: add-numbers (-> Number Number Number))
 
-; Define a function
+; Define a rule
 (= (add-numbers $x $y)
    (+ $x $y))
 
-; Pattern matching example
-(= (factorial $n)
-   (if (== $n 0)
-       1
-       (* $n (factorial (- $n 1)))))
-
-; Using atomspaces
-!(bind! &kb
-  (new-space))
-
-!(add-atom &kb (Person "Alice"))
+; Populate and query an atomspace
+!(bind! &kb (new-space))
 !(add-atom &kb (knows (Person "Alice") (Person "Bob")))
-
-; Query the space
-!(match &kb
-  (knows (Person "Alice") $who)
-  $who)
+!(match &kb (knows (Person "Alice") $who) $who)
 ```
 
----
+> **Grammar API drift.** Python, Rust, JavaScript, and Rholang obtain their grammar through the
+> modern tree-sitter constant (`tree_sitter_python::LANGUAGE.into()`); MeTTa still uses the older
+> function form (`tree_sitter_metta::language()`). This is invisible to callers — both satisfy
+> `tree_sitter_language() -> Language` — but it is worth knowing when upgrading grammar crates.
 
-## Comparison Table
+## Concurrency
 
-| Feature | Python | Rust | JavaScript | Rholang | MeTTa |
-|---------|--------|------|------------|---------|-------|
-| Paradigm | OOP/Functional | Systems | Multi-paradigm | Concurrent | Functional |
-| Whitespace | Significant | No | No | No | No |
-| Line Comment | `#` | `//` | `//` | `//` | `;` |
-| Block Comment | `"""` | `/* */` | `/* */` | `/* */` | None |
-| Doc Comment | `#` | `///` | `///` | `///` | `;;` |
-| Variable Prefix | None | None | `$` optional | None | `$` |
-| Type Annotation | `:` | `:` | TypeScript | `:` | `:` |
-| Unicode Identifiers | Yes | Yes | Yes | Yes | Yes |
-| Raw Identifiers | No | `r#` | No | No | No |
-
-## Thread Safety
-
-All language implementations are `Send + Sync` and can be safely shared across threads:
+Every implementation is a **unit struct** with no fields, hence `Send + Sync`, trivially `Clone`,
+and free to share:
 
 ```rust
+use libgrammstein::code::{CodeLanguage, Python, Rust};
 use std::sync::Arc;
-use std::thread;
 
 let python = Arc::new(Python::new());
 let rust = Arc::new(Rust::new());
 
-let handles: Vec<_> = vec![
+let handles: Vec<_> = [
     {
         let lang = Arc::clone(&python);
-        thread::spawn(move || lang.keywords().len())
+        std::thread::spawn(move || lang.keywords().len())
     },
     {
         let lang = Arc::clone(&rust);
-        thread::spawn(move || lang.keywords().len())
+        std::thread::spawn(move || lang.keywords().len())
     },
-];
+]
+.into_iter()
+.collect();
 
-for handle in handles {
-    let count = handle.join().unwrap();
-    println!("Keywords: {}", count);
-}
+let counts: Vec<usize> = handles
+    .into_iter()
+    .map(|h| h.join().expect("language thread panicked"))
+    .collect();
+assert_eq!(counts, vec![35, 41]); // Rust's 41 entries include two duplicates
 ```
 
-## See Also
+## References
 
-- [Language Framework](language.md) - `CodeLanguage` trait and `TokenType` system
-- [AST](ast.md) - Tree-sitter integration
-- [Tokenizer](tokenizer.md) - Token extraction from source code
-- [Correction](correction.md) - How token types affect correction strategies
+1. L. G. Meredith & M. Radestock (2005). *A reflective higher-order calculus.* Electronic Notes in
+   Theoretical Computer Science 141(5), 49–67. — the rho-calculus underlying Rholang.
+   [doi:10.1016/j.entcs.2005.05.016](https://doi.org/10.1016/j.entcs.2005.05.016)
+2. T. A. Wagner & S. L. Graham (1998). *Efficient and flexible incremental parsing.* ACM
+   Transactions on Programming Languages and Systems 20(5), 980–1013. — the incremental GLR
+   parsing model tree-sitter implements.
+   [doi:10.1145/293677.293678](https://doi.org/10.1145/293677.293678)
+
+## See also
+
+- [Language](language.md) — the `CodeLanguage` trait these five implement, and how to add a sixth
+- [AST](ast.md) — the tree-sitter parse each grammar produces
+- [Tokenizer](tokenizer.md) — where `classify_token` is applied to every leaf
+- [Correction](correction.md) — how `TokenType` selects a repair strategy
+- [Overview](overview.md) — the module map

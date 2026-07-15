@@ -1,0 +1,72 @@
+@startuml arch-importer-sharding
+' Shard routing and the anatomy of ONE shard. Left: the two routing families and the
+' shard counts each yields. Right: what a single ShardHandle actually contains — the
+' three-tier stack (overlay / mmap image / WAL) that every design decision hangs off.
+' Colour legend (semantic, shared across all repo diagrams — see architecture.puml):
+'   #1565C0 blue = statistical LM core   #00838F teal = storage / persistence
+'   #546E7A grey = external crates / corpora   #C62828 red = formal verification
+' Render: plantuml -tsvg docs/diagrams/arch-importer-sharding.puml
+' Source of truth for Figure 3 in docs/architecture/google-books-importer.md §4
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam NoteBackgroundColor #FFF3E0
+skinparam NoteBorderColor #EF6C00
+title Shard routing (left) and shard anatomy (right)
+
+rectangle "**N-gram**  <latex>g = (w_1, \ldots, w_k)</latex>\ne.g.  the quick brown" as ngram #1565C0
+
+package "Routing — ShardGranularity" {
+  rectangle "**CpuProportional**  — //the default//\n<latex>\text{shard}(g) = h(w_1) \bmod n</latex>,   <latex>n = \max(2C, 8)</latex>\n<latex>C</latex> = available cores  ⟹  **16–64 shards**\n**even load**, but one file's n-grams scatter across shards" as hashed #1565C0
+  rectangle "**Adaptive**  — //mirrors Google's own partitioning//\n1-grams → first character:  **26 shards** (a–z)\n2–5-grams → first two characters:  **676 shards** (aa–zz)\n**file → shard is a function** ⟹ chunked transactions are safe" as prefixed #1565C0
+  rectangle "**FirstChar** (26)  ·  **TwoChar** (676)  ·  **Custom(<latex>p</latex>)** (<latex>26^p</latex>)\nfixed-width prefix variants" as fixed #546E7A
+}
+
+package "One ShardHandle  —  shard_k.artrie" {
+  rectangle "**Lock-free overlay**\nDashMap-backed;  increment_cas(key, c)\nwriters hold only a **shared** read() guard\n⟹ no writer serialization" as overlay #00838F
+  rectangle "**Persistent ARTrie image**\nmemory-mapped · CX path-compressed\n**the durable state** — evicted overlay nodes\nfault back from here on the next read" as image #00838F
+  rectangle "**Write-Ahead Log**\nbatched document-transaction records;\nreplayed by open_with_recovery" as wal #00838F
+  rectangle "**ShardSyncCoordinator**\nAtomicU8:  Clean → Dirty → Syncing → Clean\na CAS elects **exactly one** syncer" as sync #00838F
+}
+
+rectangle "**ShardCoordinator**\nDashMap<ShardKey, Arc<RwLock<ShardHandle>>>\nper-key creation lock (no TOCTOU) · LRU cap · one persistent rayon pool" as coord #00838F
+
+rectangle "**AsyncShardSync**  (TLA+ · TLAPS)\nAtMostOneSyncer · CleanMeansZeroDirty" as spec #C62828
+
+ngram --> hashed : hash_to_shard(<latex>w_1</latex>)
+ngram --> prefixed : compute_shard_key_from_token(<latex>w_1</latex>)
+ngram --> fixed
+
+hashed --> coord
+prefixed --> coord
+fixed --> coord
+coord --> overlay : store_in_shard
+
+overlay --> image : checkpoint()\npublish snapshot
+overlay --> wal : transaction commit
+wal -[#00838F,dashed]-> image : replay on reopen
+image -[#00838F,dashed]-> overlay : fault back\non read
+sync -[#00838F,dashed]-> overlay : gates the publish
+spec -[#C62828,dashed]-> sync : machine-checks
+
+note bottom of prefixed
+  **Why the granularity choice changes the write path.**
+  A chunked transaction binds the whole transaction to //one//
+  shard, keyed by the **file** prefix. Under hashing, the hash of
+  "th" and the hash of "the" land in different shards — so
+  begin_prefix_tx returns None for hash-based granularities and
+  the importer falls back to the per-record increment_cas path,
+  whose memory is bounded by the flush threshold and the
+  overlay budget instead.
+end note
+
+@enduml

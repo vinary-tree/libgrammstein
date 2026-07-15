@@ -1,0 +1,75 @@
+@startuml training-large-corpora-memory
+' Every place a large corpus can blow up the heap, and the mechanism that bounds
+' it. Read top to bottom as the data path: each red box is an unbounded
+' accumulation, each teal box is the bound that contains it. The three-way split
+' at the bottom is the actual decision an operator makes - in-memory training,
+' WAL-accumulator training, or the sharded Google Books importer.
+' Render: plantuml -tsvg docs/diagrams/training-large-corpora-memory.puml
+' Source of truth for Figure 1 in docs/training/large-corpora.md §2.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam note {
+  BackgroundColor #ECEFF1
+  BorderColor #546E7A
+  FontColor #263238
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Large-corpus training — the four memory pressures and their bounds
+
+legend top right
+  |= Colour |= Meaning |
+  |<#C62828>     | Unbounded accumulation (the hazard) |
+  |<#00838F>     | The mechanism that bounds it |
+  |<#1565C0>     | Resulting training mode |
+endlegend
+
+rectangle "**Corpus on disk**\ntens of GiB" as disk #455A64
+
+rectangle "**① Corpus resident in RAM**\nnaively: read it all, then train" as p1 #C62828
+rectangle "**PrefetchingReader**\nbounded batch queue,\nram_fraction = 0.10;\nreaders stream, never materialise" as b1 #00838F
+
+rectangle "**② N-gram table**\n≈ order × tokens entries\nbefore any pruning" as p2 #C62828
+rectangle "**NgramAccumulator**\nWAL-backed, on disk\n(""--checkpoint <DIR>"")" as b2 #00838F
+
+rectangle "**③ Continuation-count pass**\nHashMap⟨String, HashSet⟨String⟩⟩;\n2–5 GiB beyond ≈ 5·10⁶ n-grams" as p3 #C62828
+rectangle "**Import pre-computed statistics**\nthe Google Books path derives the MKN\ncontinuation/frequency tables during merge" as b3 #00838F
+
+rectangle "**④ Importer overlay**\nper-shard lock-free write buffer" as p4 #C62828
+rectangle "**Three nested bounds**\n""--tx-chunk-size"" — per transaction\n""--lockfree-flush-threshold"" — per shard\n""--overlay-budget-gib"" — resident heap" as b4 #00838F
+
+rectangle "**In-memory training**\n""TrainerBuilder::train""\ncorpora ≲ 1 GiB" as r1 #1565C0
+rectangle "**Checkpointed training**\n""train ngram --checkpoint""\ninterruptible · resumable" as r2 #1565C0
+rectangle "**Sharded import**\n""train import-google-books""\n10⁹ and more n-grams" as r3 #1565C0
+
+disk --> p1
+p1 --> b1 : bounded by
+b1 --> p2
+p2 --> b2 : bounded by
+b2 --> p3
+p3 --> b3 : bounded by
+b3 --> p4
+p4 --> b4 : bounded by
+
+b4 --> r1
+b4 --> r2
+b4 --> r3
+
+note right of p3
+  This is the pass that most often kills a
+  from-scratch build on a big corpus: a **second,
+  in-memory pass over every n-gram**, and it is
+  not incremental. It is the reason the Google
+  Books path computes these statistics during
+  the merge instead.
+end note
+
+@enduml

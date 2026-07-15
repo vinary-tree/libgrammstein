@@ -5,7 +5,7 @@ Modified Kneser-Ney n-gram core that scales losslessly to the *entire* Google Bo
 corpus, layered up through subword/neural embeddings, retrieval, topic discovery, and
 structured-domain (code & LaTeX) correction.
 
-![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-1565C0.svg)
+![License](https://img.shields.io/badge/license-Apache--2.0-1565C0.svg)
 ![Rust](https://img.shields.io/badge/rust-2021-EF6C00.svg)
 ![Formally verified](https://img.shields.io/badge/formally%20verified-TLA%2B%20%C2%B7%20TLAPS%20%C2%B7%20Apalache%20%C2%B7%20Rocq-C62828.svg)
 ![Tests](https://img.shields.io/badge/tests-900%2B%20passing-2E7D32.svg)
@@ -52,15 +52,15 @@ diagram.
 Every symbol below is reused across sections; component-local terms are defined where they
 first appear. (Acronyms are expanded on first prose use even if listed here.)
 
-| Symbol               | Meaning                                        | Symbol   | Meaning                                            |
-|----------------------|------------------------------------------------|----------|----------------------------------------------------|
-| `w`                  | word (token) being predicted                   | `[x]⁺`   | `max(x, 0)`                                        |
-| `h`                  | history / context (preceding words)            | `N₁₊(·)` | continuation count — number of *distinct* contexts |
-| `h′`                 | backed-off history (`h` minus its oldest word) | `α`, `λ` | interpolation weight(s), `∈ [0,1]`                 |
-| `c(·)`               | raw training count of an n-gram                | `τ`      | temperature (softmax sharpness)                    |
-| `∣V∣`                | vocabulary size                                | `ε`      | approximate-search recall tolerance                |
-| `D`, `D₁`/`D₂`/`D₃₊` | absolute discount(s)                           | `d`      | embedding dimensionality                           |
-| `γ(h)`               | backoff weight for history `h`                 | `ℙ`, `Σ` | probability, summation                             |
+| Symbol | Meaning | Symbol | Meaning |
+|---|---|---|---|
+| $`w`$ | word (token) being predicted | $`[x]^{+}`$ | $`\max(x, 0)`$ |
+| $`h`$ | history / context (preceding words) | $`N_{1+}(\cdot)`$ | continuation count — number of *distinct* contexts |
+| $`h'`$ | backed-off history ($`h`$ minus its oldest word) | $`\alpha`$, $`\lambda`$ | interpolation weight(s), $`\in [0,1]`$ |
+| $`c(\cdot)`$ | raw training count of an n-gram | $`\tau`$ | temperature (softmax sharpness) |
+| $`\lvert V \rvert`$ | vocabulary size | $`\varepsilon`$ | approximate-search recall tolerance |
+| $`D`$, $`D_1`$/$`D_2`$/$`D_{3+}`$ | absolute discount(s) | $`d`$ | embedding dimensionality |
+| $`\gamma(h)`$ | backoff weight for history $`h`$ | $`\mathbb{P}`$, $`\sum`$ | probability, summation |
 
 | Acronym      | Expansion                                | Acronym         | Expansion                                                   |
 |--------------|------------------------------------------|-----------------|-------------------------------------------------------------|
@@ -113,8 +113,9 @@ The full surface is in the [Capability Matrix](#capability-matrix).
 
 ## Quick Start
 
-**1 · Train an n-gram model and measure perplexity.** Perplexity `PP(W) = exp(−(1/N)·Σᵢ log
-ℙ(wᵢ ∣ hᵢ))` is the standard fit metric — lower is better.
+**1 · Train an n-gram model and measure perplexity.** Perplexity
+$`\mathrm{PP}(W) = \exp\!\bigl(-\tfrac{1}{N}\sum_i \log \mathbb{P}(w_i \mid h_i)\bigr)`$ is the
+standard fit metric — lower is better.
 
 ```rust
 use libgrammstein::ngram::{NgramEntry, TrainerBuilder};
@@ -128,10 +129,10 @@ let model = TrainerBuilder::new(DynamicDawgChar::<NgramEntry>::new())
     .order(5)
     .train(train)?;
 
-let log_p = model.log_prob("fox", &["quick", "brown"]);     // log ℙ(fox ∣ quick brown)
+let log_p = model.log_prob("fox", &["quick", "brown"]);     // log P(fox | quick brown)
 let dev   = PlaintextReader::from_file("dev.txt")?;
 let ppl   = Perplexity::new(&model).corpus_perplexity(&dev)?;
-println!("log ℙ = {log_p:.3} · perplexity = {:.1}", ppl.perplexity);
+println!("log P = {log_p:.3} | perplexity = {:.1}", ppl.perplexity);
 ```
 
 **2 · Combine n-gram precision with embedding coverage (the hybrid model).**
@@ -160,43 +161,54 @@ Four components earn a full treatment. The rest are mapped in the [Capability Ma
 
 ## Statistical Core: Modified Kneser-Ney
 
-**What & why.** An n-gram model estimates `ℙ(w ∣ h)` — the probability of the next word `w`
-given a history `h`. The naïve **Maximum-Likelihood Estimate (MLE)**
+**What & why.** An n-gram model estimates $`\mathbb{P}(w \mid h)`$ — the probability of the next
+word $`w`$ given a history $`h`$. The naïve **Maximum-Likelihood Estimate (MLE)**
 
-```
-ℙ_MLE(w ∣ h) = c(h·w) / c(h)          (M1)
+```math
+\mathbb{P}_{\mathrm{MLE}}(w \mid h) = \frac{c(h\,w)}{c(h)} \tag{M1}
 ```
 
-assigns **zero** probability to any n-gram never seen in training, which makes `log ℙ = −∞` for
-a whole sentence the moment one unseen n-gram appears. *Smoothing* fixes this by stealing a
-little probability mass from seen events and redistributing it to unseen ones. **Modified
-Kneser-Ney** [1, 2] is the most accurate count-based smoother known, and is libgrammstein's
-always-on core.
+assigns **zero** probability to any n-gram never seen in training, which makes
+$`\log \mathbb{P} = -\infty`$ for a whole sentence the moment one unseen n-gram appears.
+*Smoothing* fixes this by stealing a little probability mass from seen events and redistributing
+it to unseen ones. **Modified Kneser-Ney** [1, 2] is the most accurate count-based smoother
+known, and is libgrammstein's always-on core.
 
 **How.** MKN subtracts a count-dependent **absolute discount** and *backs off* to a
-shorter context, recursively. The discounts are estimated from the corpus's count-of-counts
-`nᵢ = #{n-grams occurring exactly i times}`:
+shorter context, recursively. The discounts are estimated from the corpus's count-of-counts —
+$`n_i`$ is the number of n-grams occurring exactly $`i`$ times:
 
-```
-Y  = n₁ / (n₁ + 2·n₂)
-D₁ = 1 − 2Y·(n₂/n₁) ,  D₂ = 2 − 3Y·(n₃/n₂) ,  D₃₊ = 3 − 4Y·(n₄/n₃)      (M2)
-```
-
-(typically `D₁ ≈ 0.6, D₂ ≈ 0.8, D₃₊ ≈ 0.9`). The highest-order estimate discounts then backs
-off with weight `γ(h)`:
-
-```
-ℙ_MKN(w ∣ h) = [c(h·w) − D(c(h·w))]⁺ / c(h)  +  γ(h)·ℙ_MKN(w ∣ h′)        (M3)
-   where  D(c) = D₁ if c=1,  D₂ if c=2,  D₃₊ if c≥3 ;   h′ = h without its oldest word
-γ(h) = (D₁·N₁(h) + D₂·N₂(h) + D₃₊·N₃₊(h)) / c(h)                          (M4)
+```math
+Y = \frac{n_1}{n_1 + 2 n_2}, \quad
+D_1 = 1 - 2Y\tfrac{n_2}{n_1}, \quad
+D_2 = 2 - 3Y\tfrac{n_3}{n_2}, \quad
+D_{3+} = 3 - 4Y\tfrac{n_4}{n_3} \tag{M2}
 ```
 
-Lower orders use **continuation counts** `N₁₊` — *how many distinct contexts a word completes*
-— instead of raw counts, bottoming out at a uniform base:
+(typically $`D_1 \approx 0.6`$, $`D_2 \approx 0.8`$, $`D_{3+} \approx 0.9`$; the crate's fixed
+fallback discounts, used when count statistics are unavailable, are $`0.75 / 0.85 / 0.95`$). The
+highest-order estimate discounts then backs off with weight $`\gamma(h)`$:
 
+```math
+\mathbb{P}_{\mathrm{MKN}}(w \mid h) = \frac{[\,c(h\,w) - D(c(h\,w))\,]^{+}}{c(h)} + \gamma(h)\,\mathbb{P}_{\mathrm{MKN}}(w \mid h') \tag{M3}
 ```
-N₁₊(•·h·w) = ∣{ v : c(v·h·w) > 0 }∣                                       (M5)
-ℙ_MKN(w)   = [N₁₊(•·w) − D]⁺ / N₁₊(•·•)  +  γ_unif·(1/∣V∣)
+
+where $`D(c) = D_1`$ if $`c=1`$, $`D_2`$ if $`c=2`$, $`D_{3+}`$ if $`c \geq 3`$, and $`h'`$ is
+$`h`$ without its oldest word, and the backoff weight is
+
+```math
+\gamma(h) = \frac{D_1 N_1(h) + D_2 N_2(h) + D_{3+} N_{3+}(h)}{c(h)} \tag{M4}
+```
+
+Lower orders use **continuation counts** $`N_{1+}`$ — *how many distinct contexts a word
+completes* — instead of raw counts, bottoming out at a uniform base:
+
+```math
+N_{1+}(\bullet\, h\, w) = \bigl\lvert \{\, v : c(v\,h\,w) > 0 \,\} \bigr\rvert \tag{M5}
+```
+
+```math
+\mathbb{P}_{\mathrm{MKN}}(w) = \frac{[\,N_{1+}(\bullet\, w) - D\,]^{+}}{N_{1+}(\bullet\, \bullet)} + \gamma_{\mathrm{unif}}\cdot\frac{1}{\lvert V \rvert}
 ```
 
 This is the **"San Francisco" intuition**: *Francisco* is frequent but follows only *San*, so
@@ -209,18 +221,18 @@ probability. Continuation counts measure **versatility**, not raw frequency.
 down to the uniform base:
 
 ```
-function MKN_log_prob(w, h):                       ▸ public entry point; returns log ℙ
+function MKN_log_prob(w, h):                       ▸ public entry point; returns a log-probability
     return ln( prob(w, h, highest_order = true) )
 
 function prob(w, h, highest_order):
-    if h not found in trie:                        ▸ no evidence at this order …
-        return prob(w, h′, highest_order = false)  ▸ … so back off (drop oldest word of h)
-    c   ← count(h·w)
-    D   ← discount(c)                              ▸ D₁ / D₂ / D₃₊  per (M2)
-    top ← [c − D]⁺ / count(h)                      ▸ discounted higher-order mass (M3)
-    γ   ← backoff_weight(h)                        ▸ exactly the mass removed by discounting (M4)
-    return top + γ · prob(w, h′, highest_order = false)
-    ▸ invariant: γ(h) equals the discounted mass, so Σ_w ℙ_MKN(w ∣ h) = 1 at every order.
+    if h not found in trie:                        ▸ no evidence at this order ...
+        return prob(w, h', highest_order = false)  ▸ ... so back off (drop oldest word of h)
+    c   <- count(h ++ w)
+    D   <- discount(c)                             ▸ D1 / D2 / D3+  per (M2)
+    top <- max(c - D, 0) / count(h)                ▸ discounted higher-order mass (M3)
+    g   <- backoff_weight(h)                       ▸ exactly the mass removed by discounting (M4)
+    return top + g * prob(w, h', highest_order = false)
+    ▸ invariant: g(h) equals the discounted mass, so the sum of P_MKN(w | h) over w is 1 per order.
 ```
 
 **Engineering.** Keys are **vocabulary-indexed varints**: each word maps to a `u64`, LEB128-
@@ -236,15 +248,18 @@ Their failure modes are complementary, so libgrammstein **interpolates** them. T
 side is **FastText-style subword** [3, 4]: a word's vector is the sum of its character-n-gram
 vectors, so even an OOV word like *splendiferous* has a meaningful representation.
 
-**How.** `score(w ∣ h)` blends an n-gram probability `ℙₙ = ℙ_MKN(w ∣ h)` with an embedding
-probability `ℙₑ ∝ cos(v_w, v_h)/τ` (cosine similarity of the word vector to the context vector,
-temperature-scaled). Four strategies are available:
+**How.** `score(w | h)` blends an n-gram probability
+$`\mathbb{P}_n = \mathbb{P}_{\mathrm{MKN}}(w \mid h)`$ with an embedding probability
+$`\mathbb{P}_e \propto \cos(v_w, v_h)/\tau`$ (cosine similarity of the word vector to the context
+vector, temperature-scaled). Four strategies are available:
 
-```
-Linear:      ℙ = α·ℙₙ + (1−α)·ℙₑ
-Log-Linear:  ℙ = exp( α·log ℙₙ + (1−α)·log ℙₑ )           ▸ for differing score scales
-Fallback:    ℙ = ℙₙ  if w ∈ V_ngram  else  ℙₑ              ▸ n-gram when known, embed for OOV
-Dynamic:     ℙ = α(h)·ℙₙ + (1−α(h))·ℙₑ ,  α(h) = min(α₀ + κ·∣h∣, α_max)   (M6)
+```math
+\begin{aligned}
+\textbf{Linear:}     &\quad \mathbb{P} = \alpha\,\mathbb{P}_n + (1-\alpha)\,\mathbb{P}_e \\
+\textbf{Log-Linear:} &\quad \mathbb{P} = \exp\!\bigl(\alpha \log \mathbb{P}_n + (1-\alpha) \log \mathbb{P}_e\bigr) \\
+\textbf{Fallback:}   &\quad \mathbb{P} = \mathbb{P}_n \ \text{if}\ w \in V_{\text{ngram}}\ \text{else}\ \mathbb{P}_e \\
+\textbf{Dynamic:}    &\quad \mathbb{P} = \alpha(h)\,\mathbb{P}_n + (1-\alpha(h))\,\mathbb{P}_e, \quad \alpha(h) = \min(\alpha_0 + \kappa \lvert h \rvert,\ \alpha_{\max})
+\end{aligned} \tag{M6}
 ```
 
 ![Hybrid scoring flow](docs/diagrams/hybrid-scoring.svg)
@@ -254,16 +269,17 @@ The scorer dispatches on strategy and memoizes in a lock-free cache:
 ```
 function hybrid_score(w, h):
     if (h, w) in cache: return cache[(h, w)]       ▸ DashMap probe — no lock on the hot path
-    s ← match strategy:                            ▸ branch per (M6)
-          Linear{α}    → α·Pₙ(w,h) + (1−α)·Pₑ(w,h)
-          LogLinear{α} → exp(α·ln Pₙ + (1−α)·ln Pₑ)
-          Fallback     → Pₙ if known(w) else Pₑ    ▸ exact local stats when available …
-          Dynamic{…}   → linear with α growing in ∣h∣   ▸ … trust n-gram more as context grows
+    s <- match strategy:                           ▸ branch per (M6)
+          Linear{a}    -> a*Pn(w,h) + (1-a)*Pe(w,h)
+          LogLinear{a} -> exp(a*ln Pn + (1-a)*ln Pe)
+          Fallback     -> Pn if known(w) else Pe   ▸ exact local stats when available ...
+          Dynamic{...} -> linear with a growing in |h|   ▸ ... trust n-gram more as context grows
     cache.insert((h, w), s); return s              ▸ LRU-bounded; lock taken only on eviction
 ```
 
-Log-linear is the right default when `ℙₙ` and `ℙₑ` live on different scales; `Dynamic` leans on
-the n-gram as the context lengthens (where local statistics are most reliable). → deep dive:
+Log-linear is the right default when $`\mathbb{P}_n`$ and $`\mathbb{P}_e`$ live on different
+scales; `Dynamic` leans on the n-gram as the context lengthens (where local statistics are most
+reliable). → deep dive:
 [`docs/components/hybrid/interpolation.md`](docs/components/hybrid/interpolation.md).
 
 ## Systems Flagship: The Google Books Importer
@@ -297,13 +313,13 @@ The eviction tail, literately:
 ```
 function checkpoint_tail(shard, G, resident_shards):
     publish_durable(shard.overlay)                 ▸ write the overlay snapshot to the durable image
-    budget ← max(G / resident_shards, 64 MiB)      ▸ this shard's slice of --overlay-budget-gib (M10)
+    budget <- max(G / resident_shards, 64 MiB)     ▸ this shard's slice of --overlay-budget-gib (M10)
     while resident_bytes(shard) > budget:
-        node ← coldest_resident(shard.overlay)
-        assert node ∈ durable_image(shard)         ▸ SAFETY: never evict an un-persisted node …
-        drop_resident(node)                        ▸ … so the drop is lossless (faults back on read)
-        resident_bytes(shard) −= sizeof(node)
-    ▸ invariant: evicted ⇔ durable. This is exactly what the TLA+ specs
+        node <- coldest_resident(shard.overlay)
+        assert node in durable_image(shard)        ▸ SAFETY: never evict an un-persisted node ...
+        drop_resident(node)                        ▸ ... so the drop is lossless (faults back on read)
+        resident_bytes(shard) -= sizeof(node)
+    ▸ invariant: evicted <=> durable. This is exactly what the TLA+ specs
     ▸ CheckpointStateMachine / PersistentStorageBridge machine-check (see Formal Verification).
 ```
 
@@ -318,17 +334,17 @@ Verification](#formal-verification)). → deep dive:
 to nearest-neighbor search in embedding space: rank documents by **cosine similarity** to a
 query vector. For unit-normalized vectors this is just a dot product:
 
-```
-cos(a, b) = (a·b) / (‖a‖·‖b‖) = â · b̂                                    (M7)
+```math
+\cos(a, b) = \frac{a \cdot b}{\lVert a \rVert\,\lVert b \rVert} = \hat{a} \cdot \hat{b} \tag{M7}
 ```
 
 libgrammstein offers two backends with a clean accuracy/latency trade-off *(features: `rag`,
 `rag-hnsw`)*:
 
-| Backend                         | Query cost | Build cost   | Recall          | Use when            |
-|---------------------------------|------------|--------------|-----------------|---------------------|
-| **Exact cosine** (ndarray/BLAS) | `O(n·d)`   | `O(n)`       | 100 %           | `n ≲ 10⁶` documents |
-| **HNSW** [7]                    | `O(log n)` | `O(n·log n)` | tunable via `ε` | `n ≳ 10⁶` documents |
+| Backend | Query cost | Build cost | Recall | Use when |
+|---|---|---|---|---|
+| **Exact cosine** (ndarray/BLAS) | $`O(n\,d)`$ | $`O(n)`$ | 100 % | $`n \lesssim 10^6`$ documents |
+| **HNSW** [7] | $`O(\log n)`$ | $`O(n \log n)`$ | tunable via $`\varepsilon`$ | $`n \gtrsim 10^6`$ documents |
 
 **How HNSW works.** A **Hierarchical Navigable Small-World** graph stacks proximity graphs in
 layers — sparse at the top, dense at the bottom (a skip-list for vectors). Search starts coarse
@@ -336,10 +352,10 @@ and refines downward:
 
 ```
 function hnsw_search(q, k, ef):                    ▸ ef = breadth knob (recall vs speed)
-    v ← entry_point(top_layer)
+    v <- entry_point(top_layer)
     for layer from top down to 1:                  ▸ coarse-to-fine descent
-        v ← greedy_nearest(q, from = v, in = layer)▸ hop to the closest neighbor until no improvement
-    C ← beam_search(q, from = v, in = layer_0, breadth = ef)   ▸ widen at the base layer
+        v <- greedy_nearest(q, from = v, in = layer)  ▸ hop to the closest neighbor until no improvement
+    C <- beam_search(q, from = v, in = layer_0, breadth = ef)   ▸ widen at the base layer
     return top_k(C, k)
     ▸ log-time because each upper layer halves the remaining search horizon.
 ```
@@ -353,7 +369,7 @@ backend builds lazily on first query and is thread-safe. → deep dive:
 **What & why.** Correcting source code needs *syntax*, *control flow*, **and** *data flow* at
 once. A **Code Property Graph (CPG)** [9] fuses three classic representations into one joint
 structure — the **AST** (Abstract Syntax Tree: nesting), the **CFG** (Control-Flow Graph:
-branch/loop edges), and the **DFG** (Data-Flow Graph: definition→use edges) — so a single
+branch/loop edges), and the **DFG** (Data-Flow Graph: definition-to-use edges) — so a single
 traversal sees structure and behavior together. *(features: `code`, `code-{python,rust,javascript,rholang,metta}`)*
 
 ![Code Property Graph + correction](docs/diagrams/cpg-triad.svg)
@@ -363,10 +379,10 @@ proposes ranked fixes:
 
 ```
 function correct(source):
-    cpg ← build_cpg(tree_sitter_parse(source))     ▸ AST ∪ CFG ∪ DFG in one graph
-    candidates ←  lexical(cpg)                      ▸ fuzzy match vs dictionary (liblevenshtein)
-               ∪  grammar(cpg)                      ▸ PCFG + Earley: is this a likely production?
-               ∪  semantic(cpg)                     ▸ 🟨 GNN over the CPG: variable misuse, dead code
+    cpg <- build_cpg(tree_sitter_parse(source))    ▸ AST + CFG + DFG in one graph
+    candidates <-  lexical(cpg)                     ▸ fuzzy match vs dictionary (liblevenshtein)
+                ++ grammar(cpg)                      ▸ PCFG + Earley: is this a likely production?
+                ++ semantic(cpg)                     ▸ GNN over the CPG (experimental): misuse/dead code
     return rank_by_confidence(candidates)
 ```
 
@@ -391,11 +407,12 @@ cluster → describe*. *(feature: `rag`)*
 2. **Describe** each cluster `c` with **class-based TF-IDF (c-TF-IDF)** — TF-IDF computed
    per-*cluster* rather than per-document, so the top-scoring terms are the cluster's keywords:
 
+```math
+\text{c-TF-IDF}(t, c) = \mathrm{tf}(t, c)\cdot \log\!\left(1 + \frac{A}{f(t)}\right) \tag{M8}
 ```
-c-TF-IDF(t, c) = tf(t, c) · log( 1 + A / f(t) )                          (M8)
-   tf(t, c) = frequency of term t in cluster c      A = average words per cluster
-   f(t)     = number of clusters containing term t
-```
+
+where $`\mathrm{tf}(t, c)`$ is the frequency of term $`t`$ in cluster $`c`$, $`A`$ is the average
+number of words per cluster, and $`f(t)`$ is the number of clusters containing $`t`$.
 
 A term scores high when it is frequent *in its cluster* yet rare *across* clusters — exactly
 the words that name a topic. → deep dive:
@@ -572,19 +589,24 @@ src/
 ├── ngram/        # Modified Kneser-Ney n-gram model, varint vocabulary, trie storage
 ├── embedding/    # FastText subword · BPE · phonetic · acoustic · GPU
 ├── hybrid/       # n-gram ⊕ embedding interpolation + OOV handling
-├── scoring/      # perplexity, sentence scoring        · generation/  # sampling
+├── scoring/      # perplexity, sentence scoring
+├── generation/   # autoregressive sampling (greedy · temperature · top-k · nucleus)
 ├── corpus/       # streaming readers (Wikipedia, Gutenberg, plaintext), dedup, quality
 ├── dictionary/   # word extraction, spelling dictionaries
-├── sources/      # Google Books importer: sharding · storage · checkpoint · eviction  [google-books]
-├── neural/       # ModernBERT embedder · rescorer · summarizer                        [neural-rescore]
+├── language/     # whatlang detection + language-aware tokenization                   [cli]
+├── sources/      # Google Books importer + PDF→LaTeX extraction         [google-books, pdf-extraction]
+├── aggregated/   # aggregated n-gram store used by the importer                       [google-books]
+├── neural/       # ModernBERT embedder · rescorer · summarizer · code embeddings      [neural-rescore]
 ├── rag/          # retrieval index: exact cosine · HNSW                               [rag]
-├── topic/        # HAC clustering · c-TF-IDF · dendrogram                             [rag]
+├── topic/        # HAC clustering · c-TF-IDF · dendrogram · paradigm detection        [rag]
 ├── code/         # tree-sitter · CPG · PCFG · GNN · constrained decoding              [code]
 ├── latex/        # mode-aware tokenizer · n-gram · embeddings · equation RAG          [latex]
-├── language/     # whatlang detection + language-aware tokenization
-├── integration/  # lling-llang LanguageModel trait + WFST export                      [lling-llang-integration]
-└── cli/          # the `grammstein` binary + ratatui TUI                              [cli]
+├── integration/  # lling-llang LanguageModel trait + WFST export         [lling-llang-integration]
+├── util/         # cron scheduler, hashing
+├── cli/          # the `grammstein` binary + ratatui TUI                              [cli]
+└── bin/          # grammstein · compare_artries · dump_checkpoint
 formal/           # TLA+ / TLAPS / Apalache specs + Rocq proofs + loom tests
+benches/          # criterion microbenchmarks
 docs/             # deep component documentation (see docs/README.md)
 ```
 
@@ -618,7 +640,8 @@ DOIs are linked and verified; arXiv-only works link their abstract page.
 
 ## License & Related
 
-Licensed under **MIT OR Apache-2.0**.
+Licensed under **Apache-2.0** — the license declared in [`Cargo.toml`](Cargo.toml). (A top-level
+`LICENSE` file mirroring the Apache-2.0 text should be added to the repository root.)
 
 - [liblevenshtein-rust](https://github.com/f1r3fly-io/liblevenshtein-rust) — fuzzy matching & trie dictionaries
 - libdictenstein — persistent adaptive-radix trie with lock-free overlay & eviction

@@ -1,594 +1,278 @@
 # Probabilistic Context-Free Grammars
 
-Probabilistic Context-Free Grammars (PCFGs) provide formal grammar representations with weighted production rules for syntax validation and scoring.
+A **Probabilistic Context-Free Grammar (PCFG)** attaches a probability to every production rule of a
+context-free grammar, turning the grammar into a generative model over syntax trees. Because
+programming languages *have* a known formal grammar, libgrammstein learns a PCFG from a corpus of
+parsed code and uses it to score how syntactically ordinary a construct is — the statistical backbone
+of the [grammar corrector](correctors/grammar.md) and the
+[grammar-constrained decoder](constrained-decoding.md). This document explains what a PCFG is, the
+maximum-likelihood mathematics that estimates it, and exactly how `WeightedCFG` and `PcfgTrainer`
+implement it.
 
-## Overview
+> **Scope.** Source of truth: [`src/code/pcfg.rs`](../../../src/code/pcfg.rs). The grammar is *consumed*
+> by [Constrained Decoding](constrained-decoding.md) (Earley parsing), exported to transducers by
+> [WFST Export](wfst-export.md), and applied to repairs by the
+> [Grammar Corrector](correctors/grammar.md). Rules are harvested from the tree-sitter
+> [AST](ast.md).
 
-The PCFG module provides:
+## What & why
 
-- **Production rules**: Grammar rules with left-hand and right-hand sides
-- **Weighted grammars**: Probability distributions over derivations
-- **Grammar training**: Learn rule probabilities from parsed code
-- **Grammar-constrained decoding**: Ensure syntactic validity of outputs
+A **context-free grammar (CFG)** describes syntax with rewrite rules such as
+`if_statement -> "if" "(" expression ")" block`. A CFG answers a yes/no question — *is this string in
+the language?* A PCFG answers a graded one — *how likely is this string, and which of its several
+parses is most probable?* That gradation is what a corrector needs: given a malformed fragment, it
+must rank candidate repairs, and "more probable under the grammar the corpus actually exhibits" is a
+principled ranking signal.
 
-## Architecture
+libgrammstein does not hand-write grammars. It **reads production rules directly off parsed ASTs**
+(`PcfgTrainer::extract_rules`): every named AST node with named children contributes one rule whose
+left-hand side is the node's kind and whose right-hand side is the sequence of its named children's
+kinds. Counting these across a corpus and normalizing yields the rule probabilities. The grammar is
+therefore an empirical, corpus-specific model of "what code in this language usually looks like,"
+rather than the language's full reference grammar.
+
+## Theory
+
+### Notation
+
+Every symbol is defined before it is used.
+
+| Symbol | Meaning |
+|---|---|
+| $`G = (V, \Sigma, R, S)`$ | a grammar: non-terminals, terminals, rules, start symbol |
+| $`V`$ | the set of **non-terminals** (AST node kinds, e.g. `expression`) |
+| $`\Sigma`$ | the set of **terminals** (leaf tokens, e.g. `"if"`) |
+| $`A \in V`$ | a non-terminal on the left-hand side of a rule |
+| $`\alpha \in (V \cup \Sigma)^{*}`$ | a right-hand side: a string of symbols |
+| $`A \to \alpha`$ | a **production rule** rewriting $`A`$ as $`\alpha`$ |
+| $`c(A \to \alpha)`$ | training **count** of the rule (times it was observed) |
+| $`\mathbb{P}(A \to \alpha)`$ | the rule's probability, conditioned on its LHS |
+| $`\tau`$ | a **derivation** (parse tree) |
+| $`\mathrm{yield}(\tau)`$ | the terminal string at the leaves of $`\tau`$ |
+
+**Acronyms.** *CFG* — Context-Free Grammar; *PCFG* — Probabilistic CFG; *LHS/RHS* — left/right-hand
+side; *MLE* — Maximum-Likelihood Estimate.
+
+### Rule probabilities as conditional MLE
+
+A PCFG requires that the probabilities of all rules sharing a left-hand side form a distribution
+[[1]](#references):
+
+```math
+\sum_{\alpha} \mathbb{P}(A \to \alpha) = 1 \quad \text{for every } A \in V \tag{P1}
+```
+
+The maximum-likelihood estimate of each rule probability is its **relative frequency** — its count
+divided by the total count of all rules with the same LHS:
+
+```math
+\mathbb{P}(A \to \alpha) = \frac{c(A \to \alpha)}{\sum_{\beta} c(A \to \beta)} \tag{P2}
+```
+
+This is exactly what `WeightedCFG::probability` computes: `weight(production)` is the numerator and
+`lhs_totals[lhs]` is the denominator. Storing *weights* (raw counts) rather than pre-divided
+probabilities is deliberate — it keeps the grammar usable and updatable before normalization, and
+`probability` performs the division $`(\mathrm{P2})`$ lazily on each query.
+
+### Probability of a derivation
+
+Under the context-free independence assumption, the probability of a parse tree $`\tau`$ is the
+**product** of the probabilities of the rules used to build it:
+
+```math
+\mathbb{P}(\tau) = \prod_{(A \to \alpha) \in \tau} \mathbb{P}(A \to \alpha) \tag{P3}
+```
+
+A string can have several parses; its probability marginalizes over them, and its most probable parse
+is the Viterbi derivation:
+
+```math
+\mathbb{P}(s) = \sum_{\tau \,:\, \mathrm{yield}(\tau) = s} \mathbb{P}(\tau),
+\qquad
+\hat{\tau}(s) = \arg\max_{\tau \,:\, \mathrm{yield}(\tau) = s} \mathbb{P}(\tau) \tag{P4}
+```
+
+Because a product of many small probabilities underflows, scoring is done in **log space**, where the
+product $`(\mathrm{P3})`$ becomes a sum — this is `PcfgScorer::score_parse` (see
+[WFST Export](wfst-export.md)):
+
+```math
+\log \mathbb{P}(\tau) = \sum_{(A \to \alpha) \in \tau} \log \mathbb{P}(A \to \alpha) \tag{P5}
+```
+
+`WeightedCFG::log_probability` returns $`\log \mathbb{P}(A \to \alpha)`$, and defines
+$`\log 0 = -\infty`$ (`f64::NEG_INFINITY`) for a rule that was never observed, so an impossible
+production annihilates the whole derivation's log-probability — the syntactic analogue of the
+zero-probability n-gram discussed in [Modified Kneser-Ney](../ngram/modified-kneser-ney.md).
+
+## Training, literately
+
+The trainer walks each parsed AST and emits one production per named internal node. The following
+mirrors [`PcfgTrainer::extract_rules`](../../../src/code/pcfg.rs) and `to_weighted_cfg`; `⟨…⟩` names a
+refinement expanded below.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        WeightedCFG                               │
-│                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                  Production Rules                           │ │
-│  │                                                             │ │
-│  │  stmt -> "if" "(" expr ")" stmt          [p=0.30]          │ │
-│  │  stmt -> "while" "(" expr ")" stmt       [p=0.20]          │ │
-│  │  stmt -> "return" expr ";"               [p=0.30]          │ │
-│  │  stmt -> expr ";"                        [p=0.20]          │ │
-│  │  expr -> identifier                      [p=0.50]          │ │
-│  │  expr -> literal                         [p=0.50]          │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                              │                                   │
-│                              ▼                                   │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │              Probability Calculation                        │ │
-│  │                                                             │ │
-│  │  P(production) = weight(production) / Σ weight(lhs=X)      │ │
-│  │                                                             │ │
-│  │  Normalization ensures probabilities sum to 1 per LHS      │ │
-│  └────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                       PcfgTrainer                                │
-│                                                                  │
-│  Parsed AST ──► Extract Productions ──► Count Rules ──► CFG     │
-└──────────────────────────────────────────────────────────────────┘
+function train(parsed_files):                       ▸ PcfgTrainer over a corpus
+    for parsed in parsed_files:
+        ast <- AstNode.from_ts_node(parsed.root, parsed.source)
+        extract_rules(ast)                          ▸ accumulate into rule_counts
+    return to_weighted_cfg()
+
+function extract_rules(node):
+    if node.is_error or node.is_missing: return     ▸ never learn from broken syntax
+    if node.is_named and node.children not empty:
+        ⟨Emit one production for this node⟩
+    for child in node.children:                     ▸ recurse over the whole subtree
+        extract_rules(child)
+
+⟨Emit one production for this node⟩ ≡
+    lhs <- node.kind                                ▸ the node kind is the non-terminal
+    rhs <- []
+    for c in node.children where c.is_named:        ▸ unnamed punctuation is skipped
+        if c.children empty and c.text present:
+            rhs.append(Terminal(c.kind))            ▸ a leaf with text is a terminal
+        else:
+            rhs.append(NonTerminal(c.kind))         ▸ an internal node is a non-terminal
+    if rhs not empty:
+        rule_counts[Production(lhs, rhs)] += 1
+
+function to_weighted_cfg():                          ▸ counts -> WeightedCFG
+    cfg <- WeightedCFG(start_symbol)                ▸ default start = "source_file"
+    for (production, count) in rule_counts:
+        cfg.add_rule(production, count as f64)       ▸ weight = raw count
+    return cfg
 ```
 
-## Symbol
+`add_rule` maintains three structures in lock-step so later queries are $`O(1)`$: the
+`rules: HashMap<Production, f64>` weight table, the `rules_by_lhs` index used by `rules_for`, and the
+`lhs_totals` running per-LHS denominator of $`(\mathrm{P2})`$. Calling `normalize` rewrites every
+stored weight to its probability and resets each `lhs_totals` entry to $`1.0`$, so a normalized
+grammar's `weight` and `probability` coincide.
 
-Symbols represent grammar elements (terminals and non-terminals):
+## Engineering
+
+### Data structures
 
 ```rust
 pub enum Symbol {
-    /// Non-terminal symbol (e.g., "expression", "statement")
-    NonTerminal(String),
-    /// Terminal symbol (actual token, e.g., "if", "+", identifier)
-    Terminal(String),
+    NonTerminal(String),   // Display: <expr>
+    Terminal(String),      // Display: 'if'
 }
-```
 
-### Creating Symbols
-
-```rust
-use libgrammstein::code::Symbol;
-
-// Non-terminal (grammar category)
-let expr = Symbol::non_terminal("expr");
-let stmt = Symbol::non_terminal("statement");
-
-// Terminal (actual token)
-let plus = Symbol::terminal("+");
-let keyword = Symbol::terminal("if");
-
-// Checking symbol type
-assert!(expr.is_non_terminal());
-assert!(plus.is_terminal());
-
-// Get symbol name
-assert_eq!(expr.name(), "expr");
-assert_eq!(plus.name(), "+");
-```
-
-### Display Format
-
-```rust
-// Non-terminals are displayed with angle brackets
-let nt = Symbol::non_terminal("expr");
-println!("{}", nt);  // Output: <expr>
-
-// Terminals are displayed with quotes
-let t = Symbol::terminal("+");
-println!("{}", t);   // Output: '+'
-```
-
-## Production
-
-A production rule maps a non-terminal to a sequence of symbols:
-
-```rust
 pub struct Production {
-    /// Left-hand side (non-terminal)
-    pub lhs: String,
-    /// Right-hand side (sequence of symbols)
-    pub rhs: Vec<Symbol>,
+    pub lhs: String,       // a non-terminal
+    pub rhs: Vec<Symbol>,  // may be empty (an epsilon production)
 }
-```
 
-### Creating Productions
-
-```rust
-use libgrammstein::code::{Production, Symbol};
-
-// Simple production: expr -> identifier
-let prod1 = Production::new(
-    "expr",
-    vec![Symbol::Terminal("identifier".to_string())],
-);
-
-// Compound production: expr -> expr "+" term
-let prod2 = Production::new(
-    "expr",
-    vec![
-        Symbol::NonTerminal("expr".to_string()),
-        Symbol::Terminal("+".to_string()),
-        Symbol::NonTerminal("term".to_string()),
-    ],
-);
-
-// Epsilon production (empty RHS)
-let epsilon = Production::new("optional", vec![]);
-assert!(epsilon.is_epsilon());
-
-// Production arity
-assert_eq!(prod2.arity(), 3);
-```
-
-### Display Format
-
-```rust
-let prod = Production::new(
-    "expr",
-    vec![
-        Symbol::NonTerminal("term".to_string()),
-        Symbol::Terminal("+".to_string()),
-        Symbol::NonTerminal("expr".to_string()),
-    ],
-);
-
-println!("{}", prod);
-// Output: expr -> <term> '+' <expr>
-```
-
-## WeightedCFG
-
-A weighted context-free grammar with probability distributions:
-
-```rust
 pub struct WeightedCFG {
-    /// Production rules with their weights
-    rules: HashMap<Production, f64>,
-    /// Start symbol
+    rules: HashMap<Production, f64>,                    // rule -> weight (count)
+    rules_by_lhs: HashMap<String, Vec<(Production, f64)>>, // LHS -> its rules (index)
     start_symbol: String,
-    // ... indexing structures
+    lhs_totals: HashMap<String, f64>,                  // LHS -> sum of weights, the (P2) denominator
 }
 ```
 
-### Creating a Grammar
+`Production` and `Symbol` derive `Hash + Eq`, so a production is a valid `HashMap` key and identical
+rules from different files collapse onto one incremented count. `Production::is_epsilon` reports an
+empty RHS and `Production::arity` its length.
+
+### Complexity
+
+| Operation | Cost | Note |
+|---|---|---|
+| `add_rule` | $`O(\lvert \alpha \rvert)`$ amortized | hashes the production; updates three maps |
+| `probability` / `log_probability` | $`O(1)`$ | one lookup, one division $`(\mathrm{P2})`$ |
+| `rules_for(A)` | $`O(\lvert R_A \rvert)`$ | pre-indexed by LHS |
+| `extract_rules` over one AST | $`O(n)`$ | $`n`$ = AST nodes, one visit each |
+| `normalize` | $`O(\lvert R \rvert)`$ | one pass over all rules |
+
+Memory is $`O(\lvert R \rvert)`$ — one entry per *distinct* production. A mainstream language with a
+few hundred node kinds and average arity around three typically yields a low-thousands rule set of a
+few tens of kilobytes.
+
+### Concurrency and feature-gating
+
+The whole `code` module is behind the `code` Cargo feature (which pulls in `tree-sitter` and
+`petgraph`). A built `WeightedCFG` is immutable and `Send + Sync`, so a single grammar may be shared
+across correction threads by `Arc`; `PcfgTrainer`, by contrast, accumulates counts and needs `&mut`
+during training.
+
+### A subtlety: two `PcfgWfstConfig` types
+
+`pcfg.rs` defines a `PcfgWfstConfig` describing *which rules* to export
+(`include_epsilon`, `min_probability = 1e-10`, `max_rules`). The actual WFST **builder** in
+[`wfst_export.rs`](../../../src/code/wfst_export.rs) carries its own, differently-shaped
+`PcfgWfstConfig` (`max_depth`, `include_backoff`, `max_states`) — see [WFST Export](wfst-export.md).
+They are distinct types in distinct modules; do not conflate them.
+
+![PcfgTrainer: count productions and normalize per LHS](../../diagrams/codecorr-pcfg.svg)
+
+## Usage
+
+Train a grammar from a corpus, normalize it, and score productions:
 
 ```rust
-use libgrammstein::code::{WeightedCFG, Production, Symbol};
-
-// Create grammar with start symbol
-let mut cfg = WeightedCFG::new("S");
-
-// Add production rules with weights
-cfg.add_rule(
-    Production::new("S", vec![
-        Symbol::NonTerminal("NP".to_string()),
-        Symbol::NonTerminal("VP".to_string()),
-    ]),
-    1.0,
-);
-
-cfg.add_rule(
-    Production::new("NP", vec![
-        Symbol::Terminal("the".to_string()),
-        Symbol::NonTerminal("N".to_string()),
-    ]),
-    0.6,
-);
-
-cfg.add_rule(
-    Production::new("NP", vec![
-        Symbol::NonTerminal("N".to_string()),
-    ]),
-    0.4,
-);
-```
-
-### Querying the Grammar
-
-```rust
-// Get rules for a non-terminal
-let np_rules = cfg.rules_for("NP");
-for (production, weight) in np_rules {
-    println!("{} [weight: {:.2}]", production, weight);
-}
-
-// Get probability (normalized)
-let production = Production::new("NP", vec![
-    Symbol::Terminal("the".to_string()),
-    Symbol::NonTerminal("N".to_string()),
-]);
-let prob = cfg.probability(&production);
-println!("P(NP -> 'the' <N>) = {:.2}", prob);  // 0.60
-
-// Get log probability
-let log_prob = cfg.log_probability(&production);
-println!("log P = {:.3}", log_prob);  // -0.511
-
-// Iterate over all rules
-for (production, weight) in cfg.iter_rules() {
-    let prob = cfg.probability(production);
-    println!("{} [prob: {:.2}]", production, prob);
-}
-```
-
-### Grammar Properties
-
-```rust
-// Start symbol
-let start = cfg.start_symbol();
-println!("Start: {}", start);
-
-// Number of rules
-println!("Rules: {}", cfg.rule_count());
-
-// Get all non-terminals
-for nt in cfg.non_terminals() {
-    println!("Non-terminal: {}", nt);
-}
-
-// Get all terminals
-for t in cfg.terminals() {
-    println!("Terminal: {}", t);
-}
-```
-
-### Normalizing Weights
-
-Weights can be normalized to ensure they sum to 1.0 for each LHS:
-
-```rust
-let mut cfg = WeightedCFG::new("S");
-
-// Add rules with counts (not probabilities)
-cfg.add_rule(rule_a.clone(), 75.0);  // Seen 75 times
-cfg.add_rule(rule_b.clone(), 25.0);  // Seen 25 times
-
-// Before normalization
-println!("Weight A: {}", cfg.weight(&rule_a));  // 75.0
-println!("Prob A: {}", cfg.probability(&rule_a));  // 0.75
-
-// Normalize to convert weights to probabilities
-cfg.normalize();
-
-// After normalization, weights are probabilities
-println!("Weight A: {}", cfg.weight(&rule_a));  // 0.75
-```
-
-## PcfgTrainer
-
-Train PCFGs from parsed code corpora:
-
-```rust
-pub struct PcfgTrainer<'a, L: CodeLanguage> {
-    language: &'a L,
-    rule_counts: HashMap<Production, u64>,
-    start_symbol: String,
-}
-```
-
-### Training from Code
-
-```rust
-use libgrammstein::code::{PcfgTrainer, CodeParser, Python};
+use libgrammstein::code::pcfg::{PcfgTrainer, Production, Symbol, WeightedCFG};
+use libgrammstein::code::{CodeParser, Python};
 use std::sync::Arc;
 
 let python = Arc::new(Python::new());
-let mut parser = CodeParser::new(python.clone()).unwrap();
+let mut parser = CodeParser::new(Arc::clone(&python))?;
 let mut trainer = PcfgTrainer::new(&*python);
 
-// Parse source files
-let sources = vec![
-    "def foo(x): return x + 1",
-    "def bar(a, b): return a * b",
-    "class MyClass: pass",
-];
-
-for source in &sources {
-    let parsed = parser.parse(source).unwrap();
-    trainer.train_from_parsed(&parsed);
-}
-
-// Convert to weighted CFG
-let cfg = trainer.to_weighted_cfg();
-
-println!("Unique rules: {}", trainer.unique_rule_count());
-println!("Total instances: {}", trainer.total_rule_count());
-```
-
-### Batch Training
-
-```rust
-// Train from iterator of parsed files
-let parsed_files: Vec<ParsedCode> = /* load files */;
-trainer.train_from_parsed_iter(parsed_files.iter());
-
-// Build the CFG
-let cfg = trainer.to_weighted_cfg();
-```
-
-### Custom Start Symbol
-
-```rust
-// Use custom start symbol instead of "source_file"
-let trainer = PcfgTrainer::new(&*python)
-    .with_start_symbol("function_definition");
-```
-
-### Inspecting Training Progress
-
-```rust
-// Get rule counts
-for (production, count) in trainer.rule_counts() {
-    println!("{}: {} occurrences", production, count);
-}
-
-// Clear and retrain
-trainer.clear();
-```
-
-## Rule Extraction
-
-The trainer extracts production rules from AST nodes:
-
-```
-Source: def foo(x): return x + 1
-
-AST:
-  function_definition
-    ├── "def"
-    ├── identifier: "foo"
-    ├── parameters
-    │   └── identifier: "x"
-    └── return_statement
-        └── binary_operator
-            ├── identifier: "x"
-            ├── "+"
-            └── integer: "1"
-
-Extracted Rules:
-  function_definition -> identifier parameters return_statement
-  parameters -> identifier
-  return_statement -> binary_operator
-  binary_operator -> identifier "+" integer
-```
-
-### Rule Filtering
-
-Only named AST nodes generate rules:
-
-```rust
-fn extract_rules(&mut self, node: &AstNode) {
-    // Skip error nodes
-    if node.is_error || node.is_missing {
-        return;
-    }
-
-    // Only create rules for named nodes with children
-    if node.is_named && !node.children.is_empty() {
-        let lhs = node.kind.clone();
-        let rhs: Vec<Symbol> = node.children
-            .iter()
-            .filter(|c| c.is_named)
-            .map(|c| /* ... */)
-            .collect();
-
-        if !rhs.is_empty() {
-            let production = Production::new(lhs, rhs);
-            *self.rule_counts.entry(production).or_insert(0) += 1;
-        }
-    }
-
-    // Recurse into children
-    for child in &node.children {
-        self.extract_rules(child);
+for source in ["def add(a, b): return a + b", "def sub(a, b): return a - b"] {
+    let parsed = parser.parse(source)?;
+    if !parsed.has_errors {          // only learn from clean parses
+        trainer.train_from_parsed(&parsed);
     }
 }
+
+let mut cfg = trainer.to_weighted_cfg();
+cfg.normalize();                     // weights become probabilities, (P2)
+
+// P(function_definition -> ...) for the most probable expansion.
+for (production, _weight) in cfg.rules_for("function_definition") {
+    let log_p = cfg.log_probability(production);   // (P5)
+    println!("{production}  log P = {log_p:.3}");
+}
+# Ok::<(), libgrammstein::code::AstError>(())
 ```
 
-## PcfgWfstConfig
-
-Configuration for WFST export (for integration with lling-llang):
+A grammar can also be built by hand for a small language or a test — the classic ambiguous
+expression grammar, with weights that `normalize` will turn into $`(\mathrm{P2})`$ probabilities:
 
 ```rust
-pub struct PcfgWfstConfig {
-    /// Whether to include epsilon transitions
-    pub include_epsilon: bool,
-    /// Minimum probability threshold
-    pub min_probability: f64,
-    /// Maximum number of rules to include
-    pub max_rules: Option<usize>,
-}
+use libgrammstein::code::pcfg::{Production, Symbol, WeightedCFG};
+
+let mut cfg = WeightedCFG::new("expr");
+cfg.add_rule(
+    Production::new("expr", vec![
+        Symbol::non_terminal("expr"),
+        Symbol::terminal("+"),
+        Symbol::non_terminal("term"),
+    ]),
+    3.0,   // observed 3 times
+);
+cfg.add_rule(
+    Production::new("expr", vec![Symbol::non_terminal("term")]),
+    1.0,   // observed once
+);
+// P(expr -> expr '+' term) = 3 / (3 + 1) = 0.75
 ```
 
-### Configuration Options
+## References
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `include_epsilon` | true | Include epsilon transitions for optional rules |
-| `min_probability` | 1e-10 | Filter rules below this probability |
-| `max_rules` | None | Limit total rules (None = no limit) |
+1. T. L. Booth & R. A. Thompson (1973). *Applying probability measures to abstract languages.* IEEE
+   Transactions on Computers, C-22(5), 442–450.
+   [doi:10.1109/T-C.1973.223746](https://doi.org/10.1109/T-C.1973.223746)
+2. J. Earley (1970). *An efficient context-free parsing algorithm.* Communications of the ACM 13(2),
+   94–102. [doi:10.1145/362007.362035](https://doi.org/10.1145/362007.362035)
 
-## Integration Example
+## See also
 
-Complete example training and using a PCFG:
-
-```rust
-use libgrammstein::code::{
-    PcfgTrainer, WeightedCFG, Production, Symbol,
-    CodeParser, Python
-};
-use std::sync::Arc;
-
-fn train_python_grammar(sources: &[&str]) -> WeightedCFG {
-    let python = Arc::new(Python::new());
-    let mut parser = CodeParser::new(python.clone()).unwrap();
-    let mut trainer = PcfgTrainer::new(&*python);
-
-    for source in sources {
-        if let Ok(parsed) = parser.parse(source) {
-            // Only train on error-free parses
-            if !parsed.has_errors {
-                trainer.train_from_parsed(&parsed);
-            }
-        }
-    }
-
-    let mut cfg = trainer.to_weighted_cfg();
-    cfg.normalize();
-    cfg
-}
-
-fn main() {
-    let corpus = vec![
-        "def add(a, b): return a + b",
-        "def sub(a, b): return a - b",
-        "def mul(a, b): return a * b",
-        "x = 42",
-        "y = x + 1",
-    ];
-
-    let cfg = train_python_grammar(&corpus);
-
-    println!("Trained grammar with {} rules", cfg.rule_count());
-    println!("Start symbol: {}", cfg.start_symbol());
-
-    // Find most probable rules for function definitions
-    let rules = cfg.rules_for("function_definition");
-    println!("\nFunction definition rules:");
-    for (prod, _) in rules {
-        let prob = cfg.probability(prod);
-        if prob > 0.01 {
-            println!("  {} [p={:.3}]", prod, prob);
-        }
-    }
-}
-```
-
-## Building a Grammar Manually
-
-For simple languages or testing:
-
-```rust
-use libgrammstein::code::{WeightedCFG, Production, Symbol};
-
-// Simple expression grammar
-fn build_expr_grammar() -> WeightedCFG {
-    let mut cfg = WeightedCFG::new("expr");
-
-    // expr -> expr "+" term
-    cfg.add_rule(
-        Production::new("expr", vec![
-            Symbol::NonTerminal("expr".to_string()),
-            Symbol::Terminal("+".to_string()),
-            Symbol::NonTerminal("term".to_string()),
-        ]),
-        0.3,
-    );
-
-    // expr -> expr "-" term
-    cfg.add_rule(
-        Production::new("expr", vec![
-            Symbol::NonTerminal("expr".to_string()),
-            Symbol::Terminal("-".to_string()),
-            Symbol::NonTerminal("term".to_string()),
-        ]),
-        0.2,
-    );
-
-    // expr -> term
-    cfg.add_rule(
-        Production::new("expr", vec![
-            Symbol::NonTerminal("term".to_string()),
-        ]),
-        0.5,
-    );
-
-    // term -> "(" expr ")"
-    cfg.add_rule(
-        Production::new("term", vec![
-            Symbol::Terminal("(".to_string()),
-            Symbol::NonTerminal("expr".to_string()),
-            Symbol::Terminal(")".to_string()),
-        ]),
-        0.3,
-    );
-
-    // term -> NUMBER
-    cfg.add_rule(
-        Production::new("term", vec![
-            Symbol::Terminal("NUMBER".to_string()),
-        ]),
-        0.5,
-    );
-
-    // term -> IDENTIFIER
-    cfg.add_rule(
-        Production::new("term", vec![
-            Symbol::Terminal("IDENTIFIER".to_string()),
-        ]),
-        0.2,
-    );
-
-    cfg
-}
-```
-
-## Performance
-
-| Operation | Complexity | Notes |
-|-----------|------------|-------|
-| Add rule | O(1) amortized | HashMap insertion |
-| Get probability | O(1) | Lookup and division |
-| Rules for LHS | O(1) | Pre-indexed |
-| Train from AST | O(n) | n = AST nodes |
-| Normalize | O(r) | r = number of rules |
-
-### Memory Usage
-
-The grammar stores each unique production once. For a language like Python with ~100 AST node types and average arity 3:
-
-```
-Storage ≈ O(n × a) where n = node types, a = average arity
-Typical: ~500 rules × 50 bytes = ~25 KB
-```
-
-## Thread Safety
-
-`WeightedCFG` is `Send + Sync` and can be safely shared:
-
-```rust
-use std::sync::Arc;
-
-let cfg = Arc::new(train_grammar(corpus));
-
-// Share across threads
-let cfg_clone = Arc::clone(&cfg);
-std::thread::spawn(move || {
-    let prob = cfg_clone.probability(&some_rule);
-    println!("P = {}", prob);
-});
-```
-
-Note: `PcfgTrainer` requires mutable access during training.
-
-## See Also
-
-- [Grammar Corrector](correctors/grammar.md) - Using PCFGs for correction
-- [Constrained Decoding](constrained-decoding.md) - Grammar-constrained generation
-- [WFST Export](wfst-export.md) - WFST approximation for PCFGs
-- [Pipeline](pipeline.md) - End-to-end workflow
+- [Constrained Decoding](constrained-decoding.md) — Earley parsing over this grammar
+- [WFST Export](wfst-export.md) — the finite-state approximation of a PCFG
+- [Grammar Corrector](correctors/grammar.md) — repairs driven by these rule probabilities
+- [Code Property Graph](cpg.md) — the richer graph the semantic path consumes
+- [Correctors Overview](correctors/overview.md) — where the grammar layer fits
+- [Modified Kneser-Ney](../ngram/modified-kneser-ney.md) — the analogous smoothing story for n-grams

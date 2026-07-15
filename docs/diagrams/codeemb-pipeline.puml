@@ -1,0 +1,76 @@
+@startuml codeemb-pipeline
+' The single-snippet code-embedding pipeline shared by all three ONNX embedders:
+' cache probe -> tokenize -> ONNX session (serialized by a mutex) -> pooling ->
+' L2 normalization -> cache insert. Orange = code artifacts, green = neural stages,
+' teal = cache, grey = the external ONNX Runtime and the bring-your-own weights.
+' Render: plantuml -tsvg docs/diagrams/codeemb-pipeline.puml
+' Source of truth for Figure 1 in docs/components/code-embeddings/overview.md.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Code embedding — embed_code(c, ℓ) ⟼ unit vector v ∈ ℝᵈ
+
+legend top right
+  |= Color |= Role |
+  |<#EF6C00>     | Code artifact |
+  |<#2E7D32>     | Neural stage |
+  |<#00838F>     | Embedding cache |
+  |<#546E7A>     | External runtime / weights |
+endlegend
+
+rectangle "**(code c, language ℓ)**\nsource snippet + CodeLanguage" as q #EF6C00
+
+rectangle "**CodeEmbeddingCache**\nDashMap⟨u64, Arc[f32]⟩\nkey = h(c, ℓ)" as cache #00838F
+
+rectangle "**Tokenizer**  (tokenizers::Tokenizer)\nsubword ids + attention mask,\ntruncated to max_length (512)" as tok #EF6C00
+
+rectangle "**ONNX session**  Arc⟨Mutex⟨Session⟩⟩\ninputs: input_ids, attention_mask\n(+ position_ids if the graph declares it)" as onnx #2E7D32
+
+rectangle "**Hidden states**\ntensor of rank 2 → [1, d]\nor rank 3 → [1, L, d]" as hs #2E7D32
+
+rectangle "**Pooling**\nCLS (UniXcoder · GraphCodeBERT)\nmean over L (CodeT5+)" as pool #2E7D32
+
+rectangle "**L2 normalization**\nv̂ = v ∕ ‖v‖₂   (config.normalize)" as norm #2E7D32
+
+rectangle "**embedding v̂ ∈ ℝᵈ**\nd = 256 (CodeT5+) │ 768 (others)" as out #455A64
+
+rectangle "**ONNX Runtime**  (ort 2.0)\nintra-op threads = num_threads" as rt #546E7A
+rectangle "**Weights on disk**\nmodel.onnx + tokenizer.json\n(bring your own)" as w #546E7A
+
+q --> cache : probe
+cache --> tok : **miss**
+tok --> onnx : (ids, mask)
+onnx --> hs
+hs --> pool
+pool --> norm
+norm --> out
+norm -[#00838F,dashed]-> cache : insert
+cache --> out : **hit** (Arc clone)
+
+rt -[#546E7A,dashed]-> onnx : executes graph
+w -[#546E7A,dashed]-> onnx : loaded once at ::load
+w -[#546E7A,dashed]-> tok : tokenizer.json
+
+note bottom of onnx #E8F5E9
+  One mutex per embedder ⇒ concurrent
+  embed_code calls **serialize** here.
+  Parallelism comes from ONNX intra-op
+  threads, not from caller threads.
+end note
+
+note right of cache #E0F2F1
+  Cache hits never touch the mutex:
+  DashMap is sharded and lock-free
+  on the read path.
+end note
+
+@enduml

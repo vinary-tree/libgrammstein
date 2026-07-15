@@ -1,0 +1,71 @@
+@startuml codeemb-graphcodebert
+' GraphCodeBERT's two input channels. The token channel (green) is wired in
+' libgrammstein. The data-flow channel (muted, dashed) is what the paper adds and
+' is NOT wired: `use_data_flow` is never read and no DFG tensor is ever built.
+' Render: plantuml -tsvg docs/diagrams/codeemb-graphcodebert.puml
+' Source of truth for Figure 1 in docs/components/code-embeddings/graphcodebert.md.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam package {
+  BackgroundColor #FFFFFF
+  BorderColor #90A4AE
+  FontColor #263238
+  FontStyle bold
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title GraphCodeBERT — token channel (wired) ⊕ data-flow channel (NOT wired)
+
+rectangle "**source code c**" as src #EF6C00
+
+package "Token channel — wired in GraphCodeBertEmbedder" {
+  rectangle "**Tokenizer**\nencode(c, true), truncate to 512" as tok #EF6C00
+  rectangle "**input_ids**  ·  **attention_mask**" as ids #2E7D32
+  rectangle "**position_ids** = 0‥L−1\nsupplied **iff** the graph declares\nan input whose name contains it" as pos #43A047
+}
+
+package "Data-flow channel — described by Guo et al. 2021, NOT built here" {
+  rectangle "**Parse → AST**" as ast #90A4AE
+  rectangle "**Data-flow graph** 𝒢 = (V, E)\nV = variable occurrences\n(vᵢ, vⱼ) ∈ E ⟺ value of vᵢ comes from vⱼ" as dfg #90A4AE
+  rectangle "**Graph-guided masked attention**\nMᵢⱼ = 0 if edge/alignment, −∞ otherwise" as mask #90A4AE
+}
+
+rectangle "**ONNX RoBERTa encoder**\n125M params · d = 768" as enc #2E7D32
+rectangle "**CLS pooling** → **L2 normalize**\n**v̂ ∈ ℝ⁷⁶⁸**" as out #455A64
+
+src --> tok
+tok --> ids
+tok --> pos
+ids --> enc
+pos --> enc
+enc --> out
+
+src -[#90A4AE,dashed]-> ast
+ast -[#90A4AE,dashed]-> dfg
+dfg -[#90A4AE,dashed]-> mask
+mask -[#90A4AE,dashed]-> enc : **never reaches the session**
+
+note bottom of dfg #ECEFF1
+  ""GraphCodeBertConfig::use_data_flow"" exists,
+  defaults to **false**, and is **never read**.
+  No DFG tensor is constructed and no graph-guided
+  mask is applied — you inherit only the structural
+  inductive bias baked into the pre-trained weights.
+end note
+
+note right of out #E8F5E9
+  libgrammstein //does// build data-flow edges —
+  DfgRead / DfgWrite / DfgFlow / DfgDepends in
+  the Code Property Graph (src/code/cpg.rs).
+  They are simply not fed to this encoder.
+end note
+
+@enduml

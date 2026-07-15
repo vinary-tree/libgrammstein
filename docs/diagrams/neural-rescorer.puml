@@ -1,0 +1,71 @@
+@startuml neural-rescorer
+' rescore_paths: the n-gram beam (blue) hands its candidate paths to the neural rescorer
+' (green), which truncates to top_k, scores each path by MLM pseudo-perplexity, squashes
+' the perplexity into a bounded score, mixes it with the n-gram score, and re-sorts.
+' Render: plantuml -tsvg docs/diagrams/neural-rescorer.puml
+' Source of truth for Figure 1 in docs/components/neural/rescorer.md §3.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam activity {
+  FontColor white
+  FontStyle bold
+  BackgroundColor #2E7D32
+  BorderColor #263238
+  DiamondBackgroundColor #ECEFF1
+  DiamondFontColor #263238
+  DiamondBorderColor #90A4AE
+}
+title ModernBertRescorer::rescore_paths — two-pass re-ranking of an n-gram beam
+
+|#E3F2FD|n-gram beam (blue)|
+start
+:**Vec<ScoredPath<W>>**
+tokens · ngram_score · final_score = ngram_score;<<#1565C0>>
+:sort by final_score, descending;<<#1565C0>>
+:**truncate to top_k**   (default 100)
+— everything below the cut is discarded, never scored;<<#1565C0>>
+
+|#E8F5E9|ModernBertRescorer (green)|
+:chunk the survivors by batch_size (default 32);
+repeat :take the next chunk;
+  repeat :take the next path in the chunk;
+    :text ← tokens.join(" ");
+    if (use_pseudo_perplexity?) then (true — default)
+      :**PPPL(W) = exp(−PLL(W)/T)**
+      one masked forward pass per token
+      (see the pseudo-perplexity figure);
+    else (false)
+      :**embedding coherence**
+      2 / (cos(v_W, v_½₁) + cos(v_W, v_½₂) + ε);
+    endif
+    :**squash:  s_neural = 1 / (1 + score) ∈ (0, 1]**
+    lower perplexity ⟹ higher s_neural;
+    :**mix:  s_final = α·s_ngram + β·s_neural**
+    α = ngram_weight (0.7) · β = neural_weight (0.3);
+  repeat while (more paths in chunk?) is (yes)
+  ->no;
+repeat while (more chunks?) is (yes)
+->no;
+:re-sort by s_final, descending;
+
+|#E3F2FD|caller|
+:**re-ranked Vec<ScoredPath<W>>**
+neural_score = Some(s_neural) on every survivor;<<#1565C0>>
+stop
+
+note right
+  **Scale warning.** s_neural ∈ (0, 1] but s_ngram is
+  whatever W converts to through Into<f64>. A raw
+  log-probability is negative and unbounded below, so
+  α·s_ngram + β·s_neural is then dominated by the n-gram
+  term regardless of α, β. Feed the mixer a //bounded//
+  n-gram score — e.g. exp(length-normalized log-prob), or
+  a min-max normalization over the beam — or reproduce
+  the mixture yourself in the log domain.
+end note
+
+@enduml

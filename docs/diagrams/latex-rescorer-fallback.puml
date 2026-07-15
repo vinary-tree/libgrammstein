@@ -1,0 +1,57 @@
+@startuml latex-rescorer-fallback
+' Neural rescoring with graceful degradation: each component yields Some/None and the
+' combiner renormalises over whatever is present.
+' Render: plantuml -tsvg docs/diagrams/latex-rescorer-fallback.puml
+' Source of truth for Figure 1 in docs/components/latex/rescorer.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+legend top right
+|= Concept |= Color |
+| neural path (ModernBERT) | <back:#2E7D32>        </back> |
+| LaTeX heuristic fallback | <back:#EF6C00>        </back> |
+| combine / cache | <back:#00838F>        </back> |
+endlegend
+
+rectangle "tokens : &[LaTeXToken]" as toks #455A64
+rectangle "**cache**\nHashMap⟨String, f64⟩" as cache #00838F
+
+rectangle "**neural branch**\nmodel_loaded? · feature latex-neural" as nbr #2E7D32
+rectangle "ModernBERT.score_sentence\n→ pseudo-perplexity" as bert #2E7D32
+rectangle "perplexity_to_score\n1 ÷ (1 + ln ppl)" as p2s #2E7D32
+rectangle "heuristic_neural_score\nbrace/math structure\n(bad ppl or no model)" as hfall #EF6C00
+
+rectangle "**embedding branch**\nembedder present?" as ebr #2E7D32
+rectangle "sequence centroid +\nmean cos similarity" as coh #2E7D32
+rectangle "compute_validity_score\nfraction non-Unknown" as vfall #EF6C00
+
+rectangle "combine_scores\nΣ wⱼ·sⱼ ÷ Σ wⱼ over present Options\n(ngram_score is None here)" as comb #00838F
+rectangle "**RescoreResult**\nscore · neural · ngram · embedding" as out #455A64
+
+toks --> cache : probe by text
+cache --> nbr : miss
+cache --> ebr : miss
+nbr --> bert : yes
+bert --> p2s : finite ppl ≥ 1
+bert --> hfall : else
+nbr --> hfall : no model → None
+ebr --> coh : yes
+ebr --> vfall : no
+p2s --> comb : × neural_weight 0.4
+hfall --> comb
+coh --> comb : × embedding_weight 0.2
+vfall --> comb
+comb --> out
+out -[#00838F,dashed]-> cache : insert
+cache --> out : hit
+@enduml

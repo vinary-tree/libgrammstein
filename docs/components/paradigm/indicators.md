@@ -1,591 +1,311 @@
 # Paradigm Indicators
 
-Indicators are the atomic evidence of paradigm usage in source code. Each indicator represents a matched pattern that suggests a particular programming style.
+An **indicator** is one piece of atomic evidence: *this token, at this position, is characteristic
+of this paradigm, with this much force.* The detector emits one per match; a `ParadigmProfile` is
+nothing more than those indicators, weighed and summed. This document defines the taxonomy the
+indicators are filed under, the record that carries them, and the arithmetic that turns a bag of
+them into a verdict.
 
-## Core Types
+> **Scope.** Source of truth: [`src/topic/paradigm/indicators.rs`](../../../src/topic/paradigm/indicators.rs)
+> (types) and [`src/topic/paradigm/detector.rs`](../../../src/topic/paradigm/detector.rs) (the
+> pattern tables). How matches are *produced* is [Detection](detection.md); this page is about what
+> they *mean*.
 
-### ParadigmIndicator
+## 1. The shape of the evidence
 
-Represents a single paradigm indicator found in code:
+Three types cooperate, at three levels of granularity:
+
+| Level | Type | Answers |
+|---|---|---|
+| the paradigm | `Paradigm` | *which of the four styles?* |
+| the sub-category | `IndicatorCategory` | *which aspect of that style?* — inheritance, immutability, backpressure… |
+| the match | `ParadigmIndicator` | *which token, where, how strongly?* |
+
+`IndicatorCategory::paradigm()` folds the middle level into the top one, so every indicator's
+paradigm is derivable from its category — the two are kept in the record only to save the lookup.
+
+## 2. The taxonomy
+
+![The indicator taxonomy: paradigms, categories, and weight tiers](../../diagrams/paradigm-indicators.svg)
+
+`IndicatorCategory` has **19 variants**, partitioned across the four matchable paradigms. The
+following table is the complete shipped inventory — all 170 patterns, by category:
+
+| Category | Patterns | The tokens (s = strong, m = medium, w = weak) |
+|---|---:|---|
+| `OopClass` | 3 | `class` (s), `struct` (m), `impl` (s) |
+| `OopInheritance` | 5 | `extends` (s), `implements` (s), `inherits` (s), `super` (m), `parent` (m) |
+| `OopEncapsulation` | 7 | `private` (m), `protected` (m), `internal` (m), `@property` (m), `public` (w), `get` (w), `set` (w) |
+| `OopPolymorphism` | 7 | `interface` (s), `trait` (s), `virtual` (s), `override` (s), `abstract` (s), `protocol` (m), `dyn` (m) |
+| `OopInstantiation` | 7 | `new` (s), `this` (m), `self` (m), `constructor` (m), `destructor` (m), `__init__` (w), `__new__` (w) |
+| `FpHigherOrder` | 21 | `map` `filter` `reduce` `fold` `foldl` `foldr` `flatmap` `flat_map` `lambda` `=>` `->` (s); `foreach` `find` `any` `all` `take` `drop` `zip` `concat` `fn` `\|` (m) |
+| `FpImmutability` | 5 | `immutable` (s), `readonly` (s), `const` (m), `val` (m), `let` (w) |
+| `FpPurity` | 4 | `compose` (s), `pipe` (s), `andthen` (m), `and_then` (m) |
+| `FpPatternMatch` | 4 | `match` (s), `case` (m), `when` (m), `if let` (w — the only two-token pattern) |
+| `FpAlgebraic` | 17 | `option` `some` `none` `result` `ok` `err` `either` `maybe` `just` `nothing` `monad` `functor` `applicative` `>>=` `>>` (s); `do` `return` (m) |
+| `FpRecursion` | 2 | `rec` (m), `tailrec` (m) |
+| `ReactiveObservable` | 31 | `observable` `subject` `stream` `flux` `mono` `subscribe` `signal` `computed` `switchmap` `debounce` `throttle` `!` `*` `@` `for` (s); `channel` `observer` `merge` `share` `tap` (m), … |
+| `ReactiveEvent` | 13 | `emit` (s), `on` (s), `effect` (s), `useeffect` (s), `onclick` `onchange` `dispatch` `addeventlistener` (m), … |
+| `ReactiveAsync` | 5 | `async` (m), `await` (m), `promise` (m), `future` (m), `scheduler` (m) |
+| `ReactiveBackpressure` | 3 | `backpressure` (s), `buffer` (m), `window` (m) |
+| `ProceduralControlFlow` | 10 | `goto` `for` `while` `loop` `do` (m); `if` `else` `switch` `break` `continue` (w) |
+| `ProceduralMutable` | 18 | `var` `mut` `malloc` `free` `alloc` `dealloc` `global` `static` (s); `mutable` `+=` `-=` `++` `--` `*` `&` (m); `=` (w) |
+| `ProceduralSideEffect` | 6 | `write` (m), `read` (m), `print` `println` `printf` `console` (w) |
+| `ProceduralSequential` | 2 | `;` (w), `return` (w) |
+
+Two structural facts are visible in the table and matter downstream:
+
+- **The tables are unbalanced by design.** Reactive carries 52 patterns and OOP only 29, because
+  reactive vocabulary is *specific* (`switchmap`, `combinelatest`, `backpressure` mean nothing else)
+  while OOP vocabulary is *small and general*. The per-paradigm multipliers $`\mu_p`$ exist to
+  correct for this if a corpus demands it.
+- **A token may appear in two paradigms.** `for`, `*`, `do`, `return` and `if` each sit in two
+  tables; both fire. See [Detection §5](detection.md#5-engineering).
+
+### 2.1 The three weight tiers
+
+Every pattern is constructed at exactly one of three strengths — there is no continuum:
+
+| Tier | $`w_\pi`$ | $`\sigma_\pi`$ (strong flag) | Meaning | Examples |
+|---|---|---|---|---|
+| **strong** | $`0.9`$ | $`1`$ | the token alone is near-decisive | `class`, `subscribe`, `>>=`, `malloc` |
+| **medium** | $`0.6`$ | $`0`$ | suggestive, but shared across paradigms | `struct`, `this`, `for`, `async` |
+| **weak** | $`0.3`$ | $`0`$ | ambient syntax; weak evidence | `public`, `let`, `if`, `;`, `=` |
+
+The strong flag is *derived*, not declared: $`\sigma_\pi = 1 \iff w_\pi \geq 0.7`$, which under the
+three-tier scheme selects exactly the strong tier. $`\sigma_\pi`$ is what earns the confidence bonus
+in [`(D4)`](detection.md#32-confidence); it is also exposed as `ParadigmIndicator::is_strong`, so a
+caller can filter for high-conviction evidence:
+
+```rust
+let decisive: Vec<_> = profile.indicators.iter().filter(|i| i.is_strong).collect();
+```
+
+## 3. The `Paradigm` enum
+
+```rust
+pub enum Paradigm {
+    ObjectOriented, // "OOP"
+    Functional,     // "FP"
+    Reactive,       // "Reactive"
+    Procedural,     // "Procedural"
+    Mixed,          // "Mixed" — derived, never matched
+}
+```
+
+`Mixed` is a **conclusion, not an observation.** No pattern maps to it, `Paradigm::all_primary()`
+excludes it, and `patterns_for(Mixed)` returns an empty slice. It is produced in exactly one place:
+the dominance rule of §7, when no single style leads by enough. Accessors:
+
+| Method | Returns |
+|---|---|
+| `short_name()` | `"OOP"`, `"FP"`, `"Reactive"`, `"Procedural"`, `"Mixed"` |
+| `full_name()` | e.g. `"Object-Oriented Programming"` |
+| `all_primary()` | the four matchable paradigms, as a `&'static [Paradigm]` |
+
+`Display` prints the short name, so `println!("{paradigm}")` yields `FP`.
+
+## 4. The profile
+
+```rust
+pub struct ParadigmProfile {
+    pub oop_score: f64,
+    pub fp_score: f64,
+    pub reactive_score: f64,
+    pub procedural_score: f64,
+    pub indicators: Vec<ParadigmIndicator>, // every match, in token order
+    pub total_tokens: usize,                // n — the denominator of the density (D6)
+    pub match_count: usize,                 // |indicators|
+}
+```
+
+The four scores are the $`\hat{S}_p`$ of [`(D6)`](detection.md#33-score). `score(paradigm)` reads
+whichever field corresponds — with one twist. Asking for `Paradigm::Mixed` does not read a field;
+it *computes* a mixedness index from the spread of the other four. With
+$`\bar{S} = \tfrac{1}{4}\sum_{p} \hat{S}_p`$:
+
+```math
+\mathrm{score}(\text{Mixed}) \;=\; 1 - \sqrt{\frac{1}{4} \sum_{p \in \mathcal{P}} \bigl(\hat{S}_p - \bar{S}\bigr)^2} \tag{I1}
+```
+
+That is $`1`$ minus the population standard deviation of the four scores. Four equal scores give a
+standard deviation of $`0`$ and a mixedness of $`1`$; one paradigm at $`1.0`$ with the rest at $`0`$
+gives $`\approx 1 - 0.433 = 0.567`$. It is a *spread* statistic, on the same $`[0,1]`$-ish scale as
+the scores but not comparable with them — use it to rank samples by how blended they are, not to
+compare against `oop_score`.
+
+`present_paradigms(θ)` returns every paradigm at or above a floor, sorted descending — the honest
+alternative to forcing a single winner:
+
+```math
+\mathrm{present}(\theta) = \Bigl\langle\, (p,\ \hat{S}_p) \ :\ p \in \mathcal{P},\ \hat{S}_p \geq \theta \,\Bigr\rangle \quad\text{ordered by } \hat{S}_p \text{ descending} \tag{I2}
+```
+
+The natural argument is `config.min_score_threshold` (default $`0.1`$), which the detector itself
+never applies — see [Detection §8](detection.md#8-the-configuration-surface).
+
+## 5. Indicators
 
 ```rust
 pub struct ParadigmIndicator {
-    /// The category of this indicator
+    pub paradigm: Paradigm,           // a FIELD, not a method
     pub category: IndicatorCategory,
-    /// Start position in source code (byte offset)
-    pub start: usize,
-    /// End position in source code (byte offset)
-    pub end: usize,
-    /// The matched text
-    pub matched_text: String,
+    pub pattern: String,              // the matched pattern's tokens, space-joined
+    pub weight: f64,                  // w_π ∈ {0.3, 0.6, 0.9}
+    pub position: Option<usize>,      // TOKEN index (not a byte offset), always Some from the detector
+    pub length: usize,                // the match length in TOKENS (1, except for `if let`)
+    pub is_strong: bool,              // σ_π — derived: weight ≥ 0.7
 }
 ```
 
-### IndicatorCategory
+Two properties invite mistakes and are worth stating outright:
 
-The classification of each indicator. Categories are organized by paradigm:
+- **`position` and `length` are measured in tokens, not bytes.** There is no byte offset and no line
+  number anywhere in the record: the detector consumes a token stream and never sees the original
+  text. To map a match back to a source span, keep your own token-to-span table and index it with
+  `position` — which the detector always populates, so the `Option` is always `Some`.
+- **`paradigm` is a field.** `IndicatorCategory` also has a `paradigm()` *method*
+  (`IndicatorCategory::OopClass.paradigm() == Paradigm::ObjectOriented`), and the two agree; the
+  field is simply the cached answer.
 
-```rust
-pub enum IndicatorCategory {
-    // Object-Oriented Categories
-    OopClass,
-    OopInheritance,
-    OopInterface,
-    OopEncapsulation,
-    OopConstructor,
-    OopMethod,
+`ParadigmIndicator::new(paradigm, category, pattern, weight)` derives `is_strong` from the weight
+and defaults `position` to `None` and `length` to `1`; the builders `with_position`, `with_length`
+and `with_strong` override each. Every category also offers `short_name()` — `"inheritance"`,
+`"higher-order"`, `"backpressure"` — which is what to print in a report.
 
-    // Functional Categories
-    FpHigherOrder,
-    FpLambda,
-    FpImmutability,
-    FpComposition,
-    FpPattern,
+## 6. Normalisation and merging
 
-    // Reactive Categories
-    ReactiveObservable,
-    ReactiveSubscription,
-    ReactiveOperator,
-    ReactiveEvent,
+`ParadigmProfile::normalize` is the **sum-to-one** operation, and it is *not* the same thing as the
+detector's `normalize_scores` flag (which applies the density rescale
+[`(D6)`](detection.md#33-score)). It rewrites the scores as a proper distribution over the four
+paradigms:
 
-    // Procedural Categories
-    ProceduralLoop,
-    ProceduralMutation,
-    ProceduralControl,
-    ProceduralFunction,
-}
+```math
+\tilde{S}_p \;=\; \frac{\hat{S}_p}{\sum_{q \in \mathcal{P}} \hat{S}_q} \qquad\text{when the denominator is positive} \tag{I3}
 ```
 
-## Category Details
+A zero total is left untouched, so an empty profile stays all-zero rather than becoming `NaN`.
+`normalized()` is the same operation returning a copy. Reach for it when you want *proportions*
+("this file is 60 % OOP"); leave it alone when you want *intensity* ("this file is strongly OOP and
+strongly FP") — $`(\mathrm{I3})`$ destroys the latter, because it cannot distinguish a file with
+both scores at $`1.0`$ from one with both at $`0.1`$.
 
-### Object-Oriented Categories
+`merge(other, λ)` folds a second profile in under a convex combination, for $`\lambda \in [0,1]`$:
 
-#### OopClass
-
-Identifies class definitions:
-
-```rust
-// Matches
-class UserService { }           // JavaScript/TypeScript
-class UserService: BaseService  // Python
-struct User { }                 // Rust (with impl blocks)
+```math
+\hat{S}_p \ \leftarrow\ (1 - \lambda)\, \hat{S}_p \;+\; \lambda\, \hat{S}_p^{\,\text{other}} \tag{I4}
 ```
 
-| Language | Pattern |
-|----------|---------|
-| JavaScript | `\bclass\s+\w+` |
-| Python | `\bclass\s+\w+` |
-| Rust | `\bstruct\s+\w+` + `\bimpl\s+` |
+The indicator lists are concatenated and `total_tokens` / `match_count` are summed, so a merged
+profile keeps full provenance. $`\lambda = 0.5`$ averages two files; a running $`\lambda`$ of
+$`1/k`$ at the $`k`$-th file accumulates a streaming mean over a whole repository.
 
-#### OopInheritance
+## 7. The dominance rule
 
-Identifies inheritance relationships:
+![The dominant_paradigm decision rule](../../diagrams/paradigm-dominance.svg)
 
-```rust
-// Matches
-class Admin extends User { }         // JavaScript
-class Admin(User): pass              // Python
-impl Deref for SmartPointer { }      // Rust trait impl
+`dominant_paradigm()` returns `Option<Paradigm>` — **not** `Paradigm`. Write $`\hat{S}_{(1)}`$ and
+$`\hat{S}_{(2)}`$ for the highest and second-highest of the four scores, $`\theta = 0.20`$ for the
+floor, and $`\delta = 0.10`$ for the required margin:
+
+```math
+\mathrm{dom} = \begin{cases}
+\texttt{None} & \hat{S}_{(1)} < \theta & \text{(too little evidence to call)} \\[3pt]
+\texttt{Some(Mixed)} & \hat{S}_{(1)} - \hat{S}_{(2)} < \delta & \text{(no clear lead)} \\[3pt]
+\texttt{Some}\bigl(\arg\max_p \hat{S}_p\bigr) & \text{otherwise} & \text{(a winner)}
+\end{cases} \tag{I5}
 ```
 
-| Language | Pattern |
-|----------|---------|
-| JavaScript | `\bextends\s+\w+` |
-| Python | `\bclass\s+\w+\(\w+\)` |
-| Rust | `\bimpl\s+\w+\s+for\s+` |
+The rule abstains twice, and that is the point: it returns `None` on a sample too thin to judge, and
+`Mixed` on one that is genuinely blended, rather than crowning an arbitrary winner by a hair.
 
-#### OopInterface
+> **$`\theta`$ and $`\delta`$ are literals in the method body, not configuration.** `ParadigmConfig`
+> carries no dominance field of any kind. If you need different thresholds, do not look for a knob —
+> compute them yourself from `present_paradigms`, which hands back the same scores already sorted:
+>
+> ```rust
+> let ranked = profile.present_paradigms(my_floor);   // descending
+> let verdict = match ranked.as_slice() {
+>     [] => None,                                                    // nothing clears my_floor
+>     [(p, _)] => Some(*p),                                          // only one paradigm present
+>     [(p, s1), (_, s2), ..] if s1 - s2 >= my_margin => Some(*p),    // a clear lead
+>     _ => Some(Paradigm::Mixed),
+> };
+> ```
 
-Identifies interface definitions and implementations:
+## 8. The descriptive indicator enums
 
-```rust
-// Matches
-interface Repository<T> { }          // TypeScript
-class UserRepo implements Repository // TypeScript
-trait Serialize { }                  // Rust
-```
+Four further enums enumerate the *concepts* each paradigm is made of:
 
-| Language | Pattern |
-|----------|---------|
-| TypeScript | `\binterface\s+\w+` |
-| TypeScript | `\bimplements\s+\w+` |
-| Rust | `\btrait\s+\w+` |
+| Enum | Variants | Examples |
+|---|---:|---|
+| `OopIndicator` | 15 | `ClassKeyword`, `ExtendsKeyword`, `SelfReference`, `GetterSetter`, `VirtualKeyword` |
+| `FpIndicator` | 16 | `Lambda`, `Map`, `Filter`, `Reduce`, `Curry`, `MonadicBind`, `TailRecursion` |
+| `ReactiveIndicator` | 14 | `ObservableCreate`, `Subscribe`, `Backpressure`, `HotCold`, `Signal` |
+| `ProceduralIndicator` | 13 | `ForLoop`, `MutableDecl`, `Goto`, `PointerOps`, `GlobalVariable` |
 
-#### OopEncapsulation
+They are **descriptive vocabulary for callers, not machinery.** The detector classifies with
+`IndicatorCategory`; these four enums are never produced by it, and no `ParadigmIndicator` carries
+one. They exist so that downstream code — a linter, a report generator, a teaching tool — can name
+concepts at a finer grain than the 19 categories allow, and so that such a name is spelled the same
+way in every consumer of the crate. If you are matching on the detector's output, match on
+`IndicatorCategory`.
 
-Identifies access modifiers and encapsulation:
-
-```rust
-// Matches
-private repository: Repository;      // TypeScript
-protected _name: string;             // TypeScript
-pub fn new() -> Self { }             // Rust
-```
-
-| Language | Pattern |
-|----------|---------|
-| JavaScript/TS | `\b(private|public|protected)\b` |
-| Rust | `\bpub(\s*\(crate\))?\s+(fn|struct|mod)` |
-| Python | `\b_\w+` (convention) |
-
-#### OopConstructor
-
-Identifies constructor patterns:
+## 9. Reading a profile
 
 ```rust
-// Matches
-constructor(private db: Database) { }  // TypeScript
-def __init__(self, db):                // Python
-fn new(db: Database) -> Self { }       // Rust
-```
+use libgrammstein::topic::paradigm::{Paradigm, ParadigmDetector};
 
-| Language | Pattern |
-|----------|---------|
-| JavaScript/TS | `\bconstructor\s*\(` |
-| Python | `\bdef\s+__init__\s*\(` |
-| Rust | `\bfn\s+new\s*\(` |
+let detector = ParadigmDetector::with_defaults();
+let profile = detector.analyze(
+    "class Repo extends Base { constructor() { this.cache = new Map(); } }",
+);
 
-#### OopMethod
-
-Identifies method definitions on classes/objects:
-
-```rust
-// Matches
-getUser(id: string): User { }        // TypeScript
-def get_user(self, id):              // Python
-fn get_user(&self, id: UserId) { }   // Rust
-```
-
-| Language | Pattern |
-|----------|---------|
-| JavaScript/TS | Method in class body |
-| Python | `\bdef\s+\w+\(self` |
-| Rust | `\bfn\s+\w+\(&self` |
-
----
-
-### Functional Categories
-
-#### FpHigherOrder
-
-Identifies higher-order function usage:
-
-```rust
-// Matches
-items.map(transform)                 // All languages
-items.filter(predicate)              // All languages
-items.reduce(accumulator, initial)   // All languages
-items.fold(initial, folder)          // Rust
-```
-
-| Function | Weight | Description |
-|----------|--------|-------------|
-| `map` | 0.8 | Transform each element |
-| `filter` | 0.8 | Select elements by predicate |
-| `reduce` | 0.9 | Accumulate to single value |
-| `fold` | 0.9 | Accumulate with initial value |
-| `flatMap` | 0.9 | Map and flatten |
-| `forEach` | 0.5 | Side-effectful iteration |
-
-#### FpLambda
-
-Identifies anonymous functions and closures:
-
-```rust
-// Matches
-x => x * 2                           // JavaScript arrow
-(x) => { return x * 2; }             // JavaScript arrow
-lambda x: x * 2                      // Python
-|x| x * 2                            // Rust closure
-|x: i32| -> i32 { x * 2 }            // Rust typed closure
-```
-
-| Language | Pattern |
-|----------|---------|
-| JavaScript | `\w+\s*=>\s*` |
-| Python | `\blambda\s+\w+:` |
-| Rust | `\|\w*\|\s*` |
-
-#### FpImmutability
-
-Identifies immutable binding patterns:
-
-```rust
-// Matches
-const value = 42;                    // JavaScript
-let value = 42;                      // Rust (immutable by default)
-readonly property: string;           // TypeScript
-```
-
-| Language | Pattern |
-|----------|---------|
-| JavaScript | `\bconst\s+\w+\s*=` |
-| TypeScript | `\breadonly\s+\w+` |
-| Rust | `\blet\s+\w+\s*=` (without `mut`) |
-
-#### FpComposition
-
-Identifies function composition patterns:
-
-```rust
-// Matches
-compose(f, g)(x)                     // JavaScript
-pipe(f, g, h)(x)                     // JavaScript
-f >> g                               // F#/Haskell-style
-x |> f |> g                          // Elixir/F# pipe
-```
-
-| Pattern | Weight | Description |
-|---------|--------|-------------|
-| `compose` | 0.9 | Right-to-left composition |
-| `pipe` | 0.9 | Left-to-right composition |
-| `>>` | 0.9 | Composition operator |
-| `\|>` | 0.9 | Pipe operator |
-
-#### FpPattern
-
-Identifies pattern matching (strongly FP):
-
-```rust
-// Matches
-match value {                        // Rust
-    Some(x) => x,
-    None => default,
+// 1. The verdict — always an Option.
+match profile.dominant_paradigm() {
+    Some(Paradigm::Mixed) => println!("blended"),
+    Some(p) => println!("{} ({:.2})", p.full_name(), profile.score(p)),
+    None => println!("insufficient evidence"),
 }
 
-case value of                        // Haskell
-    Just x -> x
-    Nothing -> default
-```
-
-| Language | Pattern |
-|----------|---------|
-| Rust | `\bmatch\s+\w+\s*\{` |
-| Haskell | `\bcase\s+\w+\s+of` |
-| Scala | `\bmatch\s*\{` |
-
----
-
-### Reactive Categories
-
-#### ReactiveObservable
-
-Identifies observable stream creation:
-
-```rust
-// Matches
-Observable.create(observer => { })    // RxJS
-new Observable(subscriber => { })     // RxJS
-from([1, 2, 3])                       // RxJS
-of(1, 2, 3)                           // RxJS
-interval(1000)                        // RxJS
-```
-
-| Pattern | Weight | Description |
-|---------|--------|-------------|
-| `Observable` | 1.0 | Observable type |
-| `Subject` | 0.9 | Multicast observable |
-| `BehaviorSubject` | 0.9 | Stateful subject |
-| `from` | 0.7 | Convert to observable |
-| `of` | 0.7 | Create from values |
-
-#### ReactiveSubscription
-
-Identifies subscriptions to streams:
-
-```rust
-// Matches
-observable.subscribe(value => { })    // RxJS
-observable.subscribe({                // RxJS
-    next: value => { },
-    error: err => { },
-    complete: () => { }
-})
-```
-
-| Pattern | Weight | Description |
-|---------|--------|-------------|
-| `.subscribe(` | 0.9 | Subscription |
-| `.unsubscribe(` | 0.7 | Cleanup |
-| `Subscription` | 0.7 | Subscription type |
-
-#### ReactiveOperator
-
-Identifies reactive operators:
-
-```rust
-// Matches
-observable.pipe(
-    map(x => x * 2),
-    filter(x => x > 10),
-    debounceTime(300),
-    switchMap(x => fetch(x))
-)
-```
-
-| Operator | Weight | Category |
-|----------|--------|----------|
-| `debounceTime` | 0.9 | Timing |
-| `throttleTime` | 0.9 | Timing |
-| `switchMap` | 0.9 | Transformation |
-| `mergeMap` | 0.9 | Transformation |
-| `combineLatest` | 0.9 | Combination |
-| `withLatestFrom` | 0.9 | Combination |
-
-#### ReactiveEvent
-
-Identifies event handling patterns:
-
-```rust
-// Matches
-button.addEventListener('click', handler)  // DOM
-element.onclick = handler                  // DOM
-$(element).on('click', handler)            // jQuery
-fromEvent(button, 'click')                 // RxJS
-```
-
-| Pattern | Weight | Description |
-|---------|--------|-------------|
-| `addEventListener` | 0.7 | DOM events |
-| `.on(` | 0.6 | Event binding |
-| `fromEvent` | 0.8 | RxJS event source |
-| `.emit(` | 0.7 | Event emission |
-
----
-
-### Procedural Categories
-
-#### ProceduralLoop
-
-Identifies imperative loop constructs:
-
-```rust
-// Matches
-for (let i = 0; i < n; i++) { }      // JavaScript
-while (condition) { }                 // All languages
-for item in items { }                 // Rust
-loop { break; }                       // Rust
-```
-
-| Pattern | Weight | Description |
-|---------|--------|-------------|
-| `for (` | 0.6 | C-style for loop |
-| `while` | 0.6 | While loop |
-| `do...while` | 0.6 | Do-while loop |
-| `loop` | 0.5 | Infinite loop (Rust) |
-
-#### ProceduralMutation
-
-Identifies mutable state patterns:
-
-```rust
-// Matches
-let mut counter = 0;                  // Rust
-var total = 0;                        // JavaScript
-counter++;                            // Increment
-value = newValue;                     // Reassignment
-```
-
-| Pattern | Weight | Description |
-|---------|--------|-------------|
-| `let mut` | 0.5 | Rust mutable binding |
-| `var` | 0.5 | JavaScript var |
-| `++` / `--` | 0.6 | Increment/decrement |
-| `+=` / `-=` | 0.5 | Compound assignment |
-
-#### ProceduralControl
-
-Identifies control flow statements:
-
-```rust
-// Matches
-if (condition) { } else { }           // All languages
-switch (value) { case x: }            // JavaScript
-break;                                // Loop exit
-continue;                             // Loop continue
-return value;                         // Early return
-```
-
-| Pattern | Weight | Description |
-|---------|--------|-------------|
-| `if` | 0.3 | Conditional (low weight - universal) |
-| `switch` | 0.4 | Switch statement |
-| `break` | 0.4 | Loop exit |
-| `continue` | 0.4 | Loop continue |
-| `goto` | 0.8 | Goto (strongly procedural) |
-
-#### ProceduralFunction
-
-Identifies standalone function definitions:
-
-```rust
-// Matches
-function calculateTotal(items) { }    // JavaScript
-def calculate_total(items):           // Python (without self)
-fn calculate_total(items: &[Item])    // Rust (free function)
-```
-
-| Language | Pattern |
-|----------|---------|
-| JavaScript | `\bfunction\s+\w+\s*\(` |
-| Python | `\bdef\s+\w+\([^s]` (no self) |
-| Rust | `\bfn\s+\w+\s*\(` (outside impl) |
-
----
-
-## Working with Indicators
-
-### Extracting Indicators
-
-```rust
-let profile = detector.analyze(code);
-
-// Get all indicators
-for indicator in &profile.indicators {
-    println!("{:?} at {}..{}: '{}'",
-             indicator.category,
-             indicator.start,
-             indicator.end,
-             indicator.matched_text);
-}
-```
-
-### Filtering by Paradigm
-
-```rust
-// Get only OOP indicators
-let oop_indicators: Vec<_> = profile.indicators.iter()
-    .filter(|i| matches!(i.category,
-        IndicatorCategory::OopClass |
-        IndicatorCategory::OopInheritance |
-        IndicatorCategory::OopInterface |
-        IndicatorCategory::OopEncapsulation |
-        IndicatorCategory::OopConstructor |
-        IndicatorCategory::OopMethod
-    ))
-    .collect();
-```
-
-### Paradigm from Category
-
-Each indicator can report its paradigm:
-
-```rust
-impl ParadigmIndicator {
-    pub fn paradigm(&self) -> Paradigm {
-        match self.category {
-            IndicatorCategory::OopClass |
-            IndicatorCategory::OopInheritance |
-            IndicatorCategory::OopInterface |
-            IndicatorCategory::OopEncapsulation |
-            IndicatorCategory::OopConstructor |
-            IndicatorCategory::OopMethod => Paradigm::ObjectOriented,
-
-            IndicatorCategory::FpHigherOrder |
-            IndicatorCategory::FpLambda |
-            IndicatorCategory::FpImmutability |
-            IndicatorCategory::FpComposition |
-            IndicatorCategory::FpPattern => Paradigm::Functional,
-
-            IndicatorCategory::ReactiveObservable |
-            IndicatorCategory::ReactiveSubscription |
-            IndicatorCategory::ReactiveOperator |
-            IndicatorCategory::ReactiveEvent => Paradigm::Reactive,
-
-            IndicatorCategory::ProceduralLoop |
-            IndicatorCategory::ProceduralMutation |
-            IndicatorCategory::ProceduralControl |
-            IndicatorCategory::ProceduralFunction => Paradigm::Procedural,
-        }
-    }
-}
-```
-
-### Grouping by Category
-
-```rust
-use std::collections::HashMap;
-
-fn group_by_category(indicators: &[ParadigmIndicator])
-    -> HashMap<IndicatorCategory, Vec<&ParadigmIndicator>>
-{
-    let mut groups: HashMap<IndicatorCategory, Vec<_>> = HashMap::new();
-
-    for indicator in indicators {
-        groups.entry(indicator.category)
-            .or_default()
-            .push(indicator);
-    }
-
-    groups
+// 2. Everything that cleared a floor, strongest first.
+for (paradigm, score) in profile.present_paradigms(0.1) {
+    println!("{paradigm:>10}  {score:.3}");
 }
 
-// Usage
-let groups = group_by_category(&profile.indicators);
-
-for (category, indicators) in groups {
-    println!("{:?}: {} occurrences", category, indicators.len());
+// 3. The evidence itself — why did OOP win?
+for ind in profile.indicators.iter().filter(|i| i.paradigm == Paradigm::ObjectOriented) {
+    println!(
+        "  token {:<12} category {:<14} w={:.1} {}",
+        ind.pattern,
+        ind.category.short_name(),
+        ind.weight,
+        if ind.is_strong { "STRONG" } else { "" },
+    );
 }
+// class(class, w=0.9) · extends(inheritance, w=0.9) · constructor(instantiation, w=0.6)
+// · this(instantiation, w=0.6) · new(instantiation, w=0.9)
+
+// 4. How blended is it, on a single axis?
+println!("mixedness {:.3}", profile.score(Paradigm::Mixed));   // (I1)
 ```
 
-## Indicator Statistics
+## References
 
-### Category Distribution
+1. R. W. Floyd (1979). *The paradigms of programming.* Communications of the ACM 22(8), 455–460.
+   [doi:10.1145/359138.359140](https://doi.org/10.1145/359138.359140) — the argument that paradigms
+   are *composable styles*, which is why `Mixed` is a first-class outcome here rather than a failure.
+2. E. Bainomugisha, A. L. Carreton, T. Van Cutsem, S. Mostinckx & W. De Meuter (2013). *A survey on
+   reactive programming.* ACM Computing Surveys 45(4), Article 52.
+   [doi:10.1145/2501654.2501666](https://doi.org/10.1145/2501654.2501666) — the observable / event /
+   backpressure / scheduler decomposition reproduced by the four `Reactive*` categories.
+3. L. D. Meredith & M. Radestock (2005). *A reflective higher-order calculus.* Electronic Notes in
+   Theoretical Computer Science 141(5), 49–67.
+   [doi:10.1016/j.entcs.2005.05.016](https://doi.org/10.1016/j.entcs.2005.05.016) — the rho-calculus,
+   which is why `!`, `*`, `@` and `for` are filed as `ReactiveObservable`.
 
-```rust
-fn category_distribution(profile: &ParadigmProfile)
-    -> HashMap<IndicatorCategory, usize>
-{
-    let mut dist = HashMap::new();
+## See also
 
-    for indicator in &profile.indicators {
-        *dist.entry(indicator.category).or_insert(0) += 1;
-    }
-
-    dist
-}
-```
-
-### Paradigm Distribution
-
-```rust
-fn paradigm_distribution(profile: &ParadigmProfile)
-    -> HashMap<Paradigm, usize>
-{
-    let mut dist = HashMap::new();
-
-    for indicator in &profile.indicators {
-        *dist.entry(indicator.paradigm()).or_insert(0) += 1;
-    }
-
-    dist
-}
-```
-
-### Source Location Analysis
-
-```rust
-fn indicators_by_line(code: &str, indicators: &[ParadigmIndicator])
-    -> HashMap<usize, Vec<&ParadigmIndicator>>
-{
-    let line_starts: Vec<_> = std::iter::once(0)
-        .chain(code.match_indices('\n').map(|(i, _)| i + 1))
-        .collect();
-
-    let mut by_line: HashMap<usize, Vec<_>> = HashMap::new();
-
-    for indicator in indicators {
-        let line = line_starts.partition_point(|&start| start <= indicator.start);
-        by_line.entry(line).or_default().push(indicator);
-    }
-
-    by_line
-}
-```
-
-## See Also
-
-- [Overview](overview.md) - Paradigm detection introduction
-- [Detection](detection.md) - How detection works
-- [API Patterns](api-patterns.md) - Mining API usage patterns
-- [Domain Patterns](domain-patterns.md) - Rholang and MeTTa patterns
+- [Detection](detection.md) — how matches are produced, weighted and normalised
+- [Overview](overview.md) — the three engines and the evidence model
+- [Domain Patterns](domain-patterns.md) — DSL idioms, a level below these general indicators

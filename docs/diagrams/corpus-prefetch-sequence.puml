@@ -1,0 +1,81 @@
+@startuml corpus-prefetch-sequence
+' PrefetchingReader: one producer thread, a bounded crossbeam channel of
+' capacity B batches, and the three shutdown paths (Done, Error, early Drop).
+' Render: plantuml -tsvg docs/diagrams/corpus-prefetch-sequence.puml
+' Source of truth for Figure 2 in docs/components/corpus/streaming.md, section "Prefetching: decoupling I-O from work".
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam sequence {
+  ParticipantFontColor white
+  ParticipantBorderColor #263238
+  ActorFontColor #263238
+  LifeLineBorderColor #90A4AE
+  LifeLineBackgroundColor #ECEFF1
+  GroupBackgroundColor #ECEFF1
+  GroupBorderColor #546E7A
+  DividerBackgroundColor #ECEFF1
+  BoxLineColor #546E7A
+}
+skinparam note {
+  BackgroundColor #E3F2FD
+  BorderColor #1565C0
+}
+title PrefetchingReader — producer thread, bounded channel, and the three exits
+
+participant "**consumer**\n(training loop)" as C #455A64
+participant "**bounded channel**\ncrossbeam::bounded(B)\ncapacity = B batches" as Q #00838F
+participant "**producer thread**\nproducer_loop(reader, tx, stop, S)" as P #546E7A
+participant "**stop_signal**\nArc<AtomicBool>" as F #90A4AE
+
+== construction ==
+C -> P : thread::spawn(producer_loop)
+note over P #ECEFF1
+  B = effective_buffer_batches()
+  S = config.batch_size (default 10 000)
+end note
+
+== steady state — the producer runs ahead ==
+loop until reader.sentences() is exhausted
+  P -> P : batch.push(sentence)
+  alt batch.len() >= S
+    P -> Q : send(Batch(Vec<String>))
+    note right of Q
+      **Back-pressure.** send() **blocks** while the
+      channel holds B batches, so the producer can
+      never run more than B·S sentences ahead.
+      Resident sentences ≤ (B + 2)·S.
+    end note
+  end
+  P -> F : load(Acquire)
+  F --> P : stop?  ✗ keep going
+end
+
+C -> Q : recv()
+Q --> C : Batch(Vec<String>)
+C -> C : batch.par_iter().for_each(...)
+
+== normal completion ==
+P -> Q : send(Batch(final partial batch))
+P -> Q : send(Done)
+Q --> C : Done ⇒ exhausted = true ⇒ Iterator returns None
+
+== producer panic ==
+P -> P : catch_unwind traps the panic
+P -> Q : send(Error(msg))
+Q --> C : Error ⇒ log::error! ⇒ iteration ends (no unwind in the consumer)
+
+== early drop / stop() ==
+C -> F : store(true, Release)
+C -> Q : drain with try_recv() to unblock a blocked send
+P -> F : load(Acquire) ⇒ ✓ stop
+P -> P : break out of the loop
+C -> P : handle.join()
+note over C, P
+  Drop runs this sequence automatically. Draining **before**
+  joining is what prevents the classic deadlock: a producer
+  parked inside a blocking send() on a full channel can only
+  observe the stop flag after a receive frees a slot.
+end note
+@enduml

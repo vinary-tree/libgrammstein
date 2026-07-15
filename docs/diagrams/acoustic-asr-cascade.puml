@@ -1,0 +1,47 @@
+@startuml acoustic-asr-cascade
+' Where libgrammstein's acoustic stage sits in the lling-llang ASR cascade H∘C∘L∘G.
+' Render: plantuml -tsvg docs/diagrams/acoustic-asr-cascade.puml
+' Source of truth for Figure 2 in docs/components/acoustic/overview.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title Acoustic stage in the ASR cascade
+
+legend top right
+  |= Color |= Concept |
+  |<#2E7D32>     | libgrammstein acoustic (audio / neural) |
+  |<#1565C0>     | statistical LM core (n-gram) |
+  |<#546E7A>     | lling-llang WFST / decoder |
+endlegend
+
+rectangle "**Raw audio**" as audio #546E7A
+
+package "libgrammstein" {
+  rectangle "**FeatureExtractor**\nMFCC / filterbank  [T, F]" as feat #2E7D32
+  rectangle "**AcousticModel**\nTransformer / Linear\nforward ⇒ log posteriors [T, U]" as am #2E7D32
+}
+
+package "lling-llang" {
+  rectangle "**CTC / HMM decoder**\nemission ⇒ H (blank_id)" as ctc #546E7A
+  rectangle "**WFST composition**\nH ∘ C ∘ L ∘ G" as wfst #546E7A
+}
+
+rectangle "**N-gram LM (G)**\nModified Kneser-Ney" as lm #1565C0
+rectangle "**Transcription**" as text #546E7A
+
+audio --> feat
+feat --> am : frame features
+am --> ctc : log ℙ(unit | frame)
+ctc --> wfst : lattice
+lm -[#1565C0]-> wfst : grammar weights
+wfst --> text : best path
+
+@enduml

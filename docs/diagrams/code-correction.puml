@@ -1,0 +1,69 @@
+@startuml code-correction
+' The correction data model: Correction, its taxonomy, the CodeCorrector trait, and ranked candidates.
+' Render: plantuml -tsvg docs/diagrams/code-correction.puml
+' Source of truth for Figure 1 in docs/components/code/correction.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam class {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  AttributeFontColor white
+}
+title Correction model & CodeCorrector trait
+
+class Correction #EF6C00 {
+  +kind : CorrectionKind
+  +start_byte : usize
+  +end_byte : usize
+  +original : String
+  +replacement : String
+  +confidence : f64  (0..1)
+  +source : CorrectionSource
+  +context : Option<String>
+  --
+  +edit_distance() : usize   ▷ liblevenshtein
+  +apply(source) : String
+  +is_noop() : bool
+}
+
+enum CorrectionKind #1565C0 {
+  Spelling · Insertion · Deletion
+  Replacement · VariableMisuse
+  TypeError · MissingImport
+  SyntaxError · Formatting · Other
+  --
+  +is_semantic() : bool
+}
+
+enum CorrectionSource #2E7D32 {
+  Lexical · Grammar · Neural
+  TypeInference · ControlFlow
+  DataFlow · Combined · Unknown
+}
+
+interface CodeCorrector <<trait: Send + Sync>> #455A64 {
+  +correct_token(token, context) : Vec<Correction>
+  +correct_range(source, start, end) : Vec<Correction>
+  +max_edit_distance() : usize
+  +name() : &str
+}
+
+class CorrectionCandidates #00838F {
+  -corrections : Vec<Correction>
+  -max_candidates : usize
+  --
+  +add(c) ▷ sort by confidence, truncate
+  +best() : Option<&Correction>
+  +ranked() : &[Correction]
+  +filter_by_confidence / kind / source
+}
+
+Correction *-- CorrectionKind : kind
+Correction *-- CorrectionSource : source
+CodeCorrector ..> Correction : produces ▷
+CorrectionCandidates o-- Correction : ranks ▷
+
+@enduml

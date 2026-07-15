@@ -1,0 +1,49 @@
+@startuml codecorr-wfst
+' PCFG → WFST finite-state approximation: depth-bounded unrolling of productions
+' into weighted arcs over a semiring, for lling-llang composition.
+' Render: plantuml -tsvg docs/diagrams/codecorr-wfst.puml
+' Source of truth for Figure 1 in docs/components/code/wfst-export.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title PCFG → WFST — depth-bounded unrolling (finite-state approximation)
+
+rectangle "**WeightedCFG**\ncontext-free — unbounded recursion" as cfg #EF6C00
+
+rectangle "**PcfgWfstBuilder**\nunroll_symbol(S, depth = 0)\nbounded by max_depth · max_states" as build #EF6C00
+
+package "unroll_production(A → α)" {
+  rectangle "**Terminal** t\narc  t : t / w   → new state" as term #EF6C00
+  rectangle "**Non-terminal** ⟨B⟩\nε-arc → memoized (B, depth+1)\nrecurse unroll_symbol(B)" as nt #EF6C00
+}
+
+rectangle "**Semiring weight**\nw = FromLogProb::from_log_prob(ln ℙ(A → α))\nLog · Tropical · Probability" as w #C62828
+
+rectangle "**VectorWfst⟨SymbolId, W⟩**\n+ SymbolVocabulary  (0 = ⟨eps⟩)" as wfst #00838F
+
+rectangle "**lling-llang**\ncompose ∘ with correction lattices" as llang #546E7A
+
+cfg --> build : rules_for(S), prob ≥ min_probability
+build --> term
+build --> nt
+nt --> build : depth < max_depth
+term --> w
+nt --> w
+w --> wfst
+wfst --> llang : PcfgWfstExport::to_wfst
+
+note bottom of build #FFF3E0
+  CFGs are strictly more expressive than FSAs, so
+  this is a lossy approximation; exact constraints
+  use the pushdown Earley path (constrained-decoding).
+end note
+
+@enduml

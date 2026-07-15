@@ -1,0 +1,80 @@
+@startuml rag-builder
+' IndexBuilder (sequential) vs ParallelIndexBuilder (rayon): both share ONE
+' embedder and ONE summarizer, whose &self methods are thread-safe. Colour:
+'   #6A1B9A purple = retrieval / build control   #2E7D32 green = neural workers
+'   #00838F teal   = the resulting index          #455A64 grey  = corpus I/O
+' `linetype ortho` is deliberately NOT set here: the two build paths converge on
+' one shared pair of workers, and diagonal routing keeps those edges legible. The
+' workers container uses a LIGHT fill (the rag-hnsw idiom) so the edge label
+' drawn across it stays legible.
+' Render: plantuml -tsvg docs/diagrams/rag-builder.puml
+' Source of truth for Figure 1 in docs/components/rag/builder.md §3.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam nodesep 30
+skinparam ranksep 40
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Index construction — sequential and data-parallel
+
+rectangle "**Corpus**\nscan_directory: .txt · .md · .html  (one level, non-recursive)\nor a Vec<DocumentBuilder> supplied by the caller" as corpus #455A64
+
+rectangle "**IndexBuilder**  //sequential//\n\nfor each builder:\n   id ← index.allocate_id()\n   doc ← process_builder(builder, id)\n   index.add_document(doc)\n   progress(i+1, total) every progress_interval = 100" as seq #6A1B9A
+
+rectangle "**ParallelIndexBuilder**  //rayon//\n\nbuilders.**into_par_iter()**.map(|b| {\n   id ← DocumentId(next_id.fetch_add(1, Relaxed))\n   embed  ‖  summarise\n   b.build(id, synopsis, embedding)\n}).collect::<Vec<Result<Document>>>()" as par #6A1B9A
+
+rectangle "<color:#1B5E20>**Shared neural workers** — both take &self" as workers #E8F5E9 {
+  rectangle "**ModernBertEmbedder**\nembed_document(title, content) → Vec<f32>" as emb #2E7D32
+  rectangle "**Summarizer**\ncreate_synopsis(explicit, content) → Synopsis\nfrom_model(embedder.model_arc())" as sum #2E7D32
+}
+
+rectangle "**Serial drain**\nfor doc in results: index.add_document(doc)?\n//needs &mut self//" as drain #6A1B9A
+
+rectangle "**RagIndex<ExactCosineBackend>**" as index #00838F
+
+corpus -down-> seq
+corpus -down-> par
+
+seq -right-> emb
+seq -right-> sum
+par -right-> emb
+par -right-> sum
+
+emb -[#2E7D32]down-> sum : **model_arc()**\n//shared Arc<ModernBertModel>//
+
+seq -down-> index : add_document
+par -down-> drain : Vec<Result<Document>>
+drain -down-> index
+
+note bottom of workers
+  Both builders take **&self**, not &mut self, so every
+  rayon worker shares **one** embedder and **one**
+  summarizer. The 149 M-parameter ModernBERT weights
+  are held once behind an ""Arc"": memory is Θ(1) in the
+  thread count, not Θ(p).
+end note
+
+note right of drain
+  The ""map"" is parallel; the drain is **serial**, because
+  ""add_document"" needs ""&mut self"". With embedding-
+  dominated work (f ≈ 0.95) Amdahl still yields ≈ 9× on
+  16 cores — the serial tail is one ""HashMap"" insert plus
+  one matrix-row push per document.
+end note
+
+note left of seq
+  **IDs differ by construction path.**
+  sequential ⇒ ""index.allocate_id()""
+  parallel   ⇒ an ""AtomicU32"" counter from 0
+  ""extend_index"" instead derives ids from
+  ""index.len() + added"", which **collides**
+  when the index has holes from removals.
+end note
+@enduml

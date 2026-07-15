@@ -1,0 +1,51 @@
+@startuml latex-scorer-components
+' Self-contained heuristic scorer: three structural/fluency/coherence proxies fused
+' by weight, then a variance-based confidence, memoized in a bounded cache.
+' Render: plantuml -tsvg docs/diagrams/latex-scorer-components.puml
+' Source of truth for Figure 1 in docs/components/latex/scorer.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+legend top right
+|= Concept |= Color |
+| LaTeX heuristic scorer | <back:#EF6C00>        </back> |
+| memo cache | <back:#00838F>        </back> |
+| reserved (not computed here) | <back:#546E7A>        </back> |
+endlegend
+
+rectangle "tokens : &[LaTeXToken]" as toks #455A64
+rectangle "**cache**\nHashMap⟨String, ScoringResult⟩\ncap 10 000 · clear-on-full" as cache #00838F
+
+rectangle "**structural**\nbrace/math stack balance\npenalise mismatches + Unknown" as st #EF6C00
+rectangle "**ngram** (local fluency)\nadjacent-token transitions +\ncommand density — not an LM query" as ng #EF6C00
+rectangle "**embedding** (coherence)\nmode agreement +\ncommand-category compatibility" as em #EF6C00
+
+rectangle "combine\nΣ nⱼ·wⱼ ÷ Σ wⱼ" as comb #EF6C00
+rectangle "compute_confidence\n1 − 2·min(σ, ½)" as conf #EF6C00
+rectangle "**ScoringResult**\nscore · components ·\nmode · confidence" as out #455A64
+
+rectangle "neural_weight · rag_weight\nconfig fields, ignored by score()" as reserved #546E7A
+
+toks --> cache : probe by text
+cache --> st : miss
+cache --> ng : miss
+cache --> em : miss
+st --> comb : w = structural_weight 0.20
+ng --> comb : w = ngram_weight 0.30
+em --> comb : w = embedding_weight 0.15
+comb --> conf
+conf --> out
+out -[#00838F,dashed]-> cache : insert
+cache --> out : hit
+reserved -[#546E7A,dashed]-> comb : reserved for\ndownstream wiring
+@enduml

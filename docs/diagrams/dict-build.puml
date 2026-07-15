@@ -1,0 +1,70 @@
+@startuml dict-build
+' DictionaryBuilder: two entry points, one shared four-step construction, and the
+' invariant that makes rank() free — entries are sorted by descending frequency.
+' Render: plantuml -tsvg docs/diagrams/dict-build.puml
+' Source of truth for Figure 1 in docs/components/dictionary/building.md, section "The build, step by step".
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam note {
+  BackgroundColor #E3F2FD
+  BorderColor #1565C0
+}
+title DictionaryBuilder — from counts to a frequency-ranked, read-only dictionary
+
+rectangle "**build_from_extractor(&WordExtractor)**\nN = extractor.total_tokens()\n(every token the extractor accepted)" as bfe #546E7A
+rectangle "**build_from_counts(HashMap<String, u64>)**\nN = Σ counts.values()\n(including words about to be filtered out)" as bfc #546E7A
+
+rectangle "**1 · threshold**\nkeep w iff f(w) ≥ min_frequency\n(default 1 — i.e. keep everything)" as st1 #1565C0
+rectangle "**2 · score**\nlog_prob(w) = ln(f(w) / N)  if compute_log_probs\nelse None" as st2 #1565C0
+rectangle "**3 · sort**\nentries.sort_by(|a, b| b.frequency.cmp(&a.frequency))\nO(V log V) — descending" as st3 #1565C0
+rectangle "**4 · index**\nword_index : HashMap<String, usize>\ni ↦ position in the sorted Vec" as st4 #1565C0
+
+rectangle "**DictionaryMetadata**\nversion = 1 · language · word_count\ntotal_tokens = N · min_frequency\ncreated_at = now() · source" as meta #1565C0
+
+rectangle "**SpellingDictionary**" as sd #00838F
+rectangle "**rank(w) = word_index[w]**\n0 = most frequent — the index **is** the Zipf rank" as rank #455A64
+
+bfe --> st1
+bfc --> st1
+st1 --> st2
+st2 --> st3
+st3 --> st4
+st4 --> sd
+meta --> sd
+sd --> rank
+
+note right of st2
+  **N is the pre-threshold token count.** Words dropped in
+  step 1 still sit in the denominator, so the retained mass
+  Σ p(w) over the kept words is **< 1** whenever
+  min_frequency > 1. The deficit is exactly the OOV mass —
+  a feature for back-off scoring, a trap if you assume the
+  dictionary is a normalised distribution.
+end note
+
+note bottom of sd
+  **merge(&other) re-bases the denominator.** It sums per-word
+  frequencies, then sets total_tokens = Σ of the **merged, retained**
+  frequencies — not N_A + N_B. Every log_prob is recomputed against
+  that new N, so probabilities from a merged dictionary are not
+  comparable with those of its parents.
+end note
+
+legend right
+  |= Colour |= Role |
+  |<#546E7A> | entry points |
+  |<#1565C0> | statistical construction |
+  |<#00838F> | the built dictionary (storage) |
+  |<#455A64> | what callers use it for |
+endlegend
+@enduml

@@ -1,0 +1,69 @@
+@startuml example-spell-correction
+' The spell-correction example as a *code* flow: what the program constructs once
+' (left package) and what happens on every call to correct() (right package).
+' Colours follow correction-pipeline.puml so the two figures read as one family:
+' text I/O (slate), spelling / n-gram (blue), grammar (purple), LM (green),
+' decode (dark slate), persistent dictionary (teal), corpora (grey).
+' Render: plantuml -tsvg docs/diagrams/example-spell-correction.puml
+' Source of truth for Figure 1 in docs/examples/spell-correction.md §3
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam package {
+  BackgroundColor #F1F3F4
+  BorderColor #B0BEC5
+  FontColor #37474F
+  FontStyle bold
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Spell correction — assemble once (①), then correct each input (②)
+
+package "① assemble — once, at start-up" {
+  rectangle "**corpus.txt**" as corpus #546E7A
+  rectangle "**PlaintextReader::from_file**" as reader #546E7A
+  rectangle "**TrainerBuilder::new(dictionary)**\n.order(3).train(reader)\n⇒ NgramModel — legacy '|' keys (§7)" as train #1565C0
+  rectangle "**create_vocabulary(path)**\nSharedVocabARTrie · .insert(word)\nthe **spelling** dictionary, not the n-gram encoder" as vocab #00838F
+  rectangle "**HierarchicalCorrector::from_ngram_model**\n(vocabulary, model, CorrectorConfig)" as corr #1B6CA8
+}
+
+package "② correct(text) — per input" {
+  rectangle "**input**\n“teh quikc brwon fox”" as in #455A64
+  rectangle "**tokenize → linear lattice**\none zero-cost original edge per token" as lat #455A64
+  rectangle "**LevenshteinCorrectionLayer**  (channel)\nautomaton ∩ vocabulary, distance ≤ 2\ncost(edge) = edit distance  (Tropical)" as lev #1565C0
+  rectangle "**CfgFilterLayer** — optional  (syntax)\nattached with .with_grammar(g)\nprunes ungrammatical paths" as cfg #6A1B9A
+  rectangle "**LanguageModelLayer**  (prior)\nw′ = (1−λ)·w + λ·(−log ℙ(w | h))\nλ = config.lm_weight = 0.75" as lm #2E7D32
+  rectangle "**viterbi**  (k_best = 1)\n**nbest**   (k_best > 1)\nargmin over ⊕ = min, ⊗ = +" as dec #37474F
+  rectangle "**Vec<CorrectionResult>**\n{ text, score } — **lower score is better**\n“the quick brown fox”" as out #455A64
+}
+
+corpus --> reader
+reader --> train
+train --> corr : GrammsteinLanguageModel::from_ngram
+vocab --> corr : spelling dictionary
+corr --> lev
+corr --> cfg
+corr --> lm
+in --> lat
+lat --> lev : EXPAND
+lev --> cfg : PRUNE
+cfg --> lm : REWEIGHT
+lm --> dec : COLLAPSE
+dec --> out
+vocab -[#00838F,dashed]-> lev : automaton traverses the\npersistent trie **in place**
+
+note bottom of lm #E8F5E9
+  The prior is what overturns a
+  **real-word** error: "to" is a
+  zero-edit token, so only fluency
+  can prefer "two".
+end note
+
+@enduml

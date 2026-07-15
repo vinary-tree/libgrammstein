@@ -1,0 +1,62 @@
+@startuml ngram-training
+' Two-pass n-gram training: Pass 1 counts every order in parallel (lock-free atomic
+' increments); Pass 2 derives the Kneser-Ney continuation statistics; the discounts are
+' then estimated from the count-of-counts and sealed into an immutable NgramModel.
+' Render: plantuml -tsvg docs/diagrams/ngram-training.puml
+' Source of truth for Figure 1 in docs/components/ngram/overview.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title N-gram training — two passes over the corpus
+
+legend top right
+  |= Color |= Concept |
+  |<#1565C0>     | Statistical LM core |
+  |<#00838F>     | Storage / persistence |
+  |<#546E7A>     | Corpus / external |
+endlegend
+
+rectangle "**CorpusReader**\nPlaintextReader · Wikipedia · Google Books" as corpus #546E7A
+rectangle "**Tokenizer**\nsentence → [w₁ … w_m]" as tok #546E7A
+
+rectangle "**Pass 1 — count**\nfor every order k ∈ 1..n\nemit each k-gram window\ncount.fetch_add(1, Relaxed)" as p1 #1565C0
+rectangle "**Pass 2 — continuation stats**\nN₁₊(•, w) = |{h : c(h·w) > 0}|\nN₁₊(h, •) = |{w : c(h·w) > 0}|" as p2 #1565C0
+rectangle "**Discount estimation**\nn₁ n₂ n₃ n₄ → Y, D₁, D₂, D₃₊\nN₁₊(•,•) = Σ_w N₁₊(•, w)" as disc #1565C0
+rectangle "**NgramModel**\ntrie · smoothing · |V| · total_count\n(immutable — Send + Sync)" as model #1565C0
+
+rectangle "**Vocabulary ARTrie**\nword → u64 index (lock-free CAS)\nWAL + crash recovery" as vocab #00838F
+rectangle "**N-gram trie**\nLEB128 varint keys → NgramEntry\nDynamicDawgChar · PathMap · ARTrie" as trie #00838F
+
+corpus --> tok
+tok --> p1
+p1 --> vocab : intern words
+p1 --> trie : insert / increment
+p1 --> p2 : counts complete
+p2 --> trie : set N₁₊ fields
+p2 --> disc
+trie --> disc : count-of-counts
+disc --> model
+trie --> model : moved in
+vocab -[#00838F,dashed]-> trie : encodes keys
+
+note bottom of p1 #E3F2FD
+  Rayon splits the corpus into batches; NgramEntry's
+  three fields are atomics, so workers never lock.
+end note
+
+note bottom of p2 #E3F2FD
+  Continuation counts are what make Kneser-Ney
+  measure a word's *versatility* rather than its
+  raw frequency (the "San Francisco" effect).
+end note
+
+@enduml

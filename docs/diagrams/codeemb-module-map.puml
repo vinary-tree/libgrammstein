@@ -1,0 +1,85 @@
+@startuml codeemb-module-map
+' Module map of neural::code and the two distinct types both named CodeEmbedder:
+' the TRAIT in neural::code (green) and the STRUCT in code::embeddings (orange),
+' which wraps the trait object as its Onnx backend alongside its Candle backends.
+' Render: plantuml -tsvg docs/diagrams/codeemb-module-map.puml
+' Source of truth for Figure 2 in docs/components/code-embeddings/overview.md.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam package {
+  BackgroundColor #FFFFFF
+  BorderColor #90A4AE
+  FontColor #263238
+  FontStyle bold
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title neural::code — module map (feature code-neural = code + neural-rescore + ort)
+
+package "libgrammstein::neural::code  (this document)" {
+  rectangle "**trait CodeEmbedder**\nembed_code · embed_code_batch\nembedding_dim · model_name\nmax_sequence_length\nsupported_languages" as tr #1B5E20
+
+  rectangle "**CodeT5Embedder**\n110M · d = 256 · mean-pool\noptional ⟨lang⟩ prefix" as t5 #2E7D32
+  rectangle "**UniXcoderEmbedder**\n125M · d = 768 · CLS-pool" as ux #388E3C
+  rectangle "**GraphCodeBertEmbedder**\n125M · d = 768 · CLS-pool" as gc #43A047
+
+  rectangle "**EnsembleCodeEmbedder**\nConcatenate │ WeightedAverage\nMaxPooling │ MeanPooling" as ens #66BB6A
+  rectangle "**CodeEmbeddingCache**\nDashMap⟨u64, Arc[f32]⟩" as ch #00838F
+  rectangle "**free fns**\ncosine_similarity\nnormalize_embedding" as fns #455A64
+}
+
+package "libgrammstein::code  (see ../code/embeddings.md)" {
+  rectangle "**struct CodeEmbedder**\nfaçade · from_path auto-detects format" as fac #EF6C00
+  rectangle "**EmbedderBackend::Onnx**\nBox⟨dyn neural::code::CodeEmbedder⟩" as bo #F57C00
+  rectangle "**EmbedderBackend::Bert / ModernBert**\nCandle + SafeTensors" as bc #FB8C00
+}
+
+rectangle "**ort 2.0**  ONNX Runtime" as ort #546E7A
+rectangle "**tokenizers**  ·  **ndarray**" as tk #546E7A
+rectangle "**candle-core / candle-nn**\n(via neural-rescore)" as cd #78909C
+
+t5 .up.> tr : impl
+ux .up.> tr : impl
+gc .up.> tr : impl
+ens .up.> tr : impl
+ens --> tr : holds Vec⟨Arc⟨dyn ·⟩⟩
+
+t5 --> ch : owns (optional)
+ux --> ch : owns (optional)
+gc --> ch : owns (optional)
+
+t5 --> ort
+ux --> ort
+gc --> ort
+t5 --> tk
+ux --> tk
+gc --> tk
+
+fac --> bo
+fac --> bc
+bo --> tr : **dyn dispatch**\nUniXcoder │ GraphCodeBERT
+bc --> cd
+
+note right of ens #E8F5E9
+  The ensemble has **no cache of its own**;
+  it delegates to each member's cache and
+  invokes members **sequentially**.
+end note
+
+note bottom of bo #FFF3E0
+  The façade always passes
+  CodeLanguage::Unknown, and can
+  reach only UniXcoder / GraphCodeBERT —
+  **CodeT5Embedder is not routable**
+  through code::CodeEmbedder::from_path.
+end note
+
+@enduml

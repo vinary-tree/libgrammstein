@@ -1,0 +1,35 @@
+@startuml subtree-pipeline
+' Source code to frequent subtree patterns via TreeMinerD over a FlatTree forest.
+' Render: plantuml -tsvg docs/diagrams/subtree-pipeline.puml
+' Source of truth for Figure 1 in docs/components/subtree/overview.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+legend top right
+|= Concept |= Color |
+| code / AST / mining | <back:#EF6C00>        </back> |
+| result patterns | <back:#00838F>        </back> |
+| source / I-O | <back:#546E7A>        </back> |
+endlegend
+
+rectangle "Source files\n(.rs, .py, .rho, …)" as src #546E7A
+rectangle "Tree-sitter parser\n→ AstNode tree" as parse #546E7A
+rectangle "FlatTree forest\ndepth-first encoded\n(label, depth, scope)" as forest #EF6C00
+rectangle "TreeMinerD\nvertical rep → frequent 1-subtrees\n→ level-wise extension → prune" as miner #EF6C00
+rectangle "SubtreePattern set\nnodes · support · support_ratio\noccurrences · pattern_id" as pat #00838F
+
+src --> parse
+parse --> forest : FlatTree::from_ast_node
+forest --> miner : &[FlatTree]
+miner --> pat : MiningResult
+@enduml

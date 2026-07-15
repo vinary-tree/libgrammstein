@@ -3,8 +3,13 @@
 This document is the design record for running the `T_lex ∘ T_gram` grammar corrector
 (`src/integration/grammar_corrector.rs`) over the **sharded** Google-Books n-gram
 corpus. It captures the one-seam refactor, the blocker and four must-fixes a design
-review surfaced, and how each is resolved — enough to reconstruct the design from
-scratch.
+review surfaced (plus a fifth completeness gap found in a later pass), and how each is
+resolved — enough to reconstruct the design from scratch.
+
+**See also:** the reader's-eye summary in
+[lling-llang/hierarchical-correction.md](lling-llang/hierarchical-correction.md) §6.9, and
+the façade's API surface in
+[lling-llang/pipeline-assembly.md](lling-llang/pipeline-assembly.md).
 
 ## 1. Motivation
 
@@ -22,7 +27,9 @@ store without duplicating the decoder and without losing the soundness guarantee
 single-store path enjoys.
 
 A review of the first cut found the algorithmic core sound but flagged **one blocker
-(B1) and four must-fixes (M1–M4)**:
+(B1) and four must-fixes (M1–M4)**; a later completeness pass surfaced a fifth
+(**M5**) — an empty-history successor gap that silently left first-position insertion
+unavailable on the sharded path:
 
 | # | Finding | Resolution (this design) |
 |---|---------|--------------------------|
@@ -30,7 +37,8 @@ A review of the first cut found the algorithmic core sound but flagged **one blo
 | **M1** | The view trait's node constraints were a comment, not real bounds. | Pin them as associated-type bounds on `NgramViewSource` (§5). |
 | **M2** | A lazy shard open can evict another shard and call `checkpoint()` — a write — mid-query; "checkpoint-when-clean is a no-op" is false. | `max_open_shards = 0` + an open-only `get_shard_readonly` (§7). |
 | **M3** | `correct()` touches up to `order` first-token shards per score, which can thrash a bounded LRU. | Query mode is all-resident (`max_open_shards = 0`) and never evicts (§8). |
-| **M4** | A single-shard-anchored `grammar_neighbors` silently drops first-token-edit neighbors, breaking soundness + completeness. | Narrow the anchored contract + add opt-in `grammar_neighbors_fanout` (§9). |
+| **M4** | A single-shard-anchored `grammar_neighbors` silently drops first-token-edit neighbors, breaking soundness + completeness. | Narrow the anchored contract + add opt-in `grammar_neighbors_fanout` (§9.1). |
+| **M5** | `ShardedView::whole_view()` is `None`, so at an EMPTY history (a boundary-less sentence start, `bos_id = None`) the successor oracle could not enumerate the stored first-tokens — the sharded decoder could not insert a word *before* the first token. | Add a `successors` seam method whose `ShardedView` override fans out over every shard's root at an empty history, at parity with the single store (§9.2). |
 
 ## 2. The one seam
 
@@ -55,20 +63,28 @@ pub trait NgramViewSource: Clone + Send + Sync + 'static {
     fn view_for(&self, first_id: u64, key_len: usize) -> Option<Self::View>;
     /// A view rooted at the WHOLE store, if the source can provide one.
     fn whole_view(&self) -> Option<Self::View>;
+    /// The successor term-ids of `history` (its known continuations); at an EMPTY
+    /// history, every stored first-token. Defaulted via `view_for` / `whole_view`;
+    /// `ShardedView` overrides only the empty-history case with an all-shards fan-out.
+    fn successors(&self, history: &[u64]) -> Vec<u64>;
 }
 ```
 
 - **`SingleView<D>`** wraps one whole count store; `view_for` ignores its arguments and
-  returns the one `U64NgramView<D>`. Behavior is identical to the pre-sharding corrector.
+  returns the one `U64NgramView<D>`, and it inherits the default `successors` unchanged.
+  Behavior is identical to the pre-sharding corrector.
 - **`ShardedView`** routes `(first_id, key_len)` to a shard and returns a read-only view
   of it (§6). `whole_view()` is `None`: unigrams — and the roots of every length class —
-  are spread across all shards, so no single view is the whole store.
+  are spread across all shards, so no single view is the whole store. It **overrides**
+  `successors` so that an empty history still enumerates every stored first-token, by
+  fanning out over all shards' roots (§9.2).
 
-`whole_view()` is consulted only where the decoder genuinely needs the un-rooted store:
-the successor oracle at an *empty* history (an insertion before the first token,
-reachable only without a boundary model) and an empty-sequence neighbor query. Returning
-`None` honestly disables just those two whole-store operations for the sharded path while
-preserving them exactly for the single-store path.
+For the single-store path, `whole_view()` backs both whole-store operations the decoder
+can reach: the default `successors` at an *empty* history (an insertion before the first
+token, reachable only without a boundary model) and an empty-sequence neighbor query. The
+sharded path keeps the first at parity by *overriding* `successors` with an all-shards
+root fan-out (§9.2), so its `whole_view() = None` now disables only the second — the
+degenerate empty-sequence neighbor query — while first-position insertion is preserved.
 
 **The seam rule.** Because different lookups in one score can hit different shards, every
 store touch derives `(first_id = seq[0], key_len = seq.len())` from the sequence it is
@@ -202,6 +218,12 @@ lock-free reads** — the "no TLA+ transition / no concurrent writer" claim is h
 `ShardHandle` has no `Drop`; the only teardown write is `PersistentARTrie::Drop → close()`
 at coordinator teardown, which is not concurrent with any reader.
 
+This write-freedom is stated **over a checkpoint-finalized corpus**. The eviction and
+file-creation writes are unreachable as argued above; the one remaining on-open write is
+WAL replay for crash recovery, which is a no-op *only* on a cleanly-finalized corpus
+(§13, risk 2). So "read-only" means: serve queries against a finalized corpus, and the
+query path performs no writes.
+
 **Required query configuration:** `max_open_shards = 0` **and** `overlay_budget_bytes =
 None` **and** the open-only `view_for`.
 
@@ -215,7 +237,14 @@ would. Query mode sidesteps the question entirely: `max_open_shards = 0` keeps e
 touched shard resident and never evicts, so residency is all-resident by construction. The
 constructor warns if a positive `max_open_shards` is configured.
 
-## 9. M4 — anchored vs. fanout neighbors
+## 9. M4 & M5 — completeness under sharding
+
+Sharding threatens two of the single-store cascade's completeness properties, each
+restored below: neighbor recall under a **first-token edit** (M4, the anchored/fanout
+split) and the **empty-history successor set** at a boundary-less sentence start (M5, the
+all-shards root fan-out).
+
+### 9.1 M4 — anchored vs. fanout neighbors
 
 Under sharding a **first-token edit** lands in a *different* shard, and hash routing
 destroys prefix locality, so a query anchored to its own first-token's shard cannot see
@@ -225,8 +254,9 @@ two surfaces:
 - **`grammar_neighbors` (anchored)** — walks the single shard of the query's own
   `(first-token, length)`. It returns exactly `` $`\{\,s \in \text{stored} : d(s,q) \le k
   \wedge \operatorname{shard}(s) = \operatorname{shard}(q)\,\}`$ ``. This is *precisely*
-  what the decoder relies on — the successor oracle only ever consults co-located
-  continuations — so it is the honest default and imposes no cost on the hot path.
+  what the decoder relies on — the successor oracle consults co-located continuations for a
+  **non-empty** history (its common case); at an empty history it fans out over every shard
+  instead (§9.2) — so it is the honest default and imposes no cost on the hot path.
 - **`grammar_neighbors_fanout` (opt-in)** — walks **every** shard
   (`discover_shard_files`), runs the word-level Levenshtein query against each, and merges
   by term-id sequence (min distance, max frequency). It restores the full single-store
@@ -235,6 +265,79 @@ two surfaces:
 
 `d(\cdot,\cdot)` is standard word-level Levenshtein distance (unit-cost insert / delete /
 substitute).
+
+### 9.2 M5 — empty-history successor parity (first-position insertion)
+
+**The gap.** The layered beam can insert a word *before* consuming the next observed
+token by asking the successor oracle for the known continuations of the current history
+(the insertion arm, `grammar_corrector.rs:753-838`). At the very start of a
+**boundary-less** sentence — the Google-Books reality, where the corpus carries no
+`<s>` / `</s>` so `bos_id = None` — that history is *empty*, and the oracle needs every
+stored first-token (every unigram). The single store answers from
+`whole_view().root().edges()`. The sharded store cannot: `ShardedView::whole_view()`
+returns `None` (unigrams span every shard — §2), so before this fix the empty-history
+oracle returned nothing and the sharded decoder could **not** insert a first word.
+First-position insertion silently worked on the single store and silently did not on the
+sharded one — a completeness gap, not a modeling choice.
+
+**The seam.** The oracle no longer reaches for `whole_view()` directly; it asks the view
+source for `successors(history) → Vec<u64>` — every `v` such that `history · v` is a stored
+path (`grammar_corrector.rs:306-318`, called from the insertion arm at
+`grammar_corrector.rs:782`). The **default** implementation is bit-identical to the old
+oracle path: it routes a non-empty history by `(history[0], |history|+1)` (the *produced*
+length — the Adaptive caveat of §3) and an empty history through `whole_view()`, then walks
+to the `history` node and collects its edge ids. `SingleView` therefore inherits it
+unchanged (no override). `ShardedView` **overrides** it
+(`sharded_grammar_corrector.rs:268-285`): a non-empty history takes the same anchored
+`view_for` path; an **empty** history calls the private `all_shards_root_successors`
+(`sharded_grammar_corrector.rs:217-238`), a read-only fan-out that opens **every** shard
+(`discover_shard_files` + `get_shard_readonly`, via the shared `open_view`), unions their
+root edge ids, and de-duplicates (a first-token can root several length classes that, under
+`Adaptive` granularity, live in different shards). `whole_view()` now serves only the
+degenerate empty-sequence `grammar_neighbors` query.
+
+**Completeness (set equality).** The fan-out returns *exactly* the unigram set the single
+store enumerates from its whole view. Writing `` $`\varepsilon`$ `` for the empty history
+and `` $`\operatorname{RootEdges}(\cdot)`$ `` for the set of term-ids on a trie root's
+out-edges:
+
+```math
+\texttt{successors}_{\text{sharded}}(\varepsilon)
+\;=\;
+\bigcup_{s \,\in\, \text{shards}} \operatorname{RootEdges}(s)
+\;=\;
+\operatorname{RootEdges}(\text{whole store})
+\;=\;
+\texttt{successors}_{\text{single}}(\varepsilon) .
+```
+
+The middle equality is the payoff of co-location (§3): sharding **partitions** the stored
+n-grams, so every stored first-token lives in exactly one shard's root; the union of the
+per-shard root edge sets is therefore the whole-store root edge set, and the `HashSet`
+de-dup only collapses a first-token id reached through several length-class shards. This is
+a **parity** property, verified *directly at the view level* — not merely through decoder
+output — by `sharded_successors_match_single_store_empty_and_nonempty_history`
+(`tests/sharded_grammar_corrector_proptest.rs`), which asserts
+`` $`\texttt{successors}_{\text{sharded}}(\varepsilon) = \texttt{successors}_{\text{single}}(\varepsilon)`$ ``
+(and agreement on a non-empty history) under both a length-invariant (`TwoChar`) and a
+length-sensitive (`Adaptive`) granularity. It fails without the fix: `whole_view() = None`
+gives an empty sharded successor set.
+
+**Cost — no new asymptotic price.** First-position insertion is *already*
+`` $`O(\lvert V\rvert)`$ `` on the single store: at an empty history it enumerates all
+`` $`\lvert V\rvert`$ `` unigrams and bridge-checks each. The sharded fan-out visits each
+shard's root once, so it is the same `` $`O(\lvert V\rvert)`$ `` total edge walk plus an
+`` $`O(n_{\text{shards}})`$ `` shard-open overhead. It fires **at most once per
+`correct()`** — only when the history is empty, i.e. only for a boundary-less corpus — so it
+adds no new order of cost to the decode. It is *parity*, not a performance gate.
+
+**Honest future work.** The `` $`O(\lvert V\rvert)`$ `` first-position enumeration is
+intrinsic to *both* backends, not an artifact of sharding: neither store carries a
+**reverse (predecessor) index**. The genuinely efficient direction — for the single store
+and the sharded store alike — is to build one, turning "which words can precede this
+context" into an `` $`O(\lvert\text{predecessors}\rvert)`$ `` lookup instead of an
+`` $`O(\lvert V\rvert)`$ `` scan plus bridge filter. That is a future enhancement of the
+model, not a defect in this fix, which only restores single-store parity.
 
 ## 10. Corpus total `N`
 
@@ -251,7 +354,7 @@ already accumulates the token total, supplies it.
 |-------|-----------------------|--------|
 | B1 (libdictenstein) | `cargo test --lib --features persistent-artrie` | 1772 passed; the two B1 tests (functional read-through-`Arc` + a compile witness for `MappedDictionary<Value=u64> + Clone`) green; fmt + clippy clean |
 | Decoder parity (libgrammstein) | `cargo test --features lling-llang-integration` on `grammar_corrector` | 12 unit tests + 4 proptests pass **unchanged** — the `SingleView` extraction is behavior-preserving |
-| Sharded (libgrammstein) | `cargo test --features "lling-llang-integration google-books" --test sharded_grammar_corrector_proptest` | 6 tests pass |
+| Sharded (libgrammstein) | `cargo test --features "lling-llang-integration google-books" --test sharded_grammar_corrector_proptest` | 8 tests pass |
 
 The sharded suite (`tests/sharded_grammar_corrector_proptest.rs`) pins:
 
@@ -269,6 +372,16 @@ The sharded suite (`tests/sharded_grammar_corrector_proptest.rs`) pins:
   coordinator over the same shard directory answers `grammar_neighbors_fanout` and
   `correct()` identically to the resident corrector (the real deployment path — reading
   pre-built shards from disk, not a resident overlay).
+- **`sharded_correct_matches_single_store_adaptive`** — the decoder-parity differential
+  under the length-sensitive `Adaptive` granularity, where order-1 and order-≥2 n-grams
+  split across shards, pinning the produced-length successor routing and each backoff
+  level's own-length routing.
+- **`sharded_successors_match_single_store_empty_and_nonempty_history`** — the M5
+  view-level parity proof: over a **boundary-less** corpus (`bos_id = None`),
+  `ShardedView::successors(&[])` (the all-shards root fan-out) equals
+  `SingleView::successors(&[])` (its whole-view root edges), and the two agree on a
+  non-empty history too, under both `TwoChar` and `Adaptive` granularities. It fails
+  without the fix.
 
 ## 12. Feature gating
 
@@ -290,8 +403,12 @@ requires **both** features.
    on a *cleanly-finalized* corpus but a write otherwise. Serve queries only against a
    finalized corpus, or add a true read-only mmap open.
 3. **Real Google-Books n-grams carry no `<s>` / `</s>`,** so boundary modeling
-   self-disables at web scale (pre-existing); with no BOS the empty-history insertion is
-   also disabled for the sharded path (`whole_view() = None`).
+   self-disables at web scale (pre-existing, and shared by both backends). With no BOS the
+   decoder reaches the empty-history insertion oracle at the sentence start; the sharded
+   path now serves it **at parity** with the single store via the all-shards root fan-out
+   (§9.2), so first-position insertion is *not* disabled under sharding. The only
+   whole-store operation `whole_view() = None` still disables is the degenerate
+   empty-sequence `grammar_neighbors` query (a non-decode call).
 
 ## 14. Where things live
 
@@ -300,6 +417,7 @@ requires **both** features.
 | B1 impls | libdictenstein `src/persistent_artrie/shared_trait_impl.rs` |
 | Trait + `SingleView` + `GrammarCore` + `GrammarCorrector` | `src/integration/grammar_corrector.rs` |
 | `ShardedView` + `ShardedGrammarCorrector` | `src/integration/sharded_grammar_corrector.rs` |
+| `successors` seam (default) + empty-history fan-out (`all_shards_root_successors`, override) | `src/integration/grammar_corrector.rs` · `src/integration/sharded_grammar_corrector.rs` |
 | `trie_arc()` | `src/sources/google_books/sharding/shard.rs` |
 | `get_shard_readonly()` | `src/sources/google_books/sharding/coordinator/mod.rs` |
 | Routing (`compute_shard_key_from_token`) | `src/sources/google_books/sharding/routing.rs` |

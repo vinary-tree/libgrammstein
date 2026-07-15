@@ -1,0 +1,62 @@
+@startuml correction-dependency-contract
+' Dependency contract for hierarchical correction: a one-directional, acyclic
+' crate DAG. Solid = mandatory path-dependency; dashed = optional / feature-gated.
+' duallity is drawn detached (muted) because libgrammstein does not depend on it.
+' The note on libgrammstein names the two ways it feeds the language-model
+' dimensions to lling-llang.
+' Render: plantuml -tsvg docs/diagrams/correction-dependency-contract.puml
+' Source of truth for Figure 7 in docs/integration/lling-llang/hierarchical-correction.md §7.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Dependency contract — one-directional & acyclic (dashed = optional / feature-gated)
+
+rectangle "**libgrammstein**\nLM factory + HierarchicalCorrector\n+ LevenshteinCorrectionLayer" as gram #2E7D32
+rectangle "**lling-llang**\nWFST host: Lattice, layers,\ncompose, viterbi / nbest" as llang #6A1B9A
+rectangle "**liblevenshtein**\nLevenshtein Transducer\n+ Zompist phonetics" as lev #1565C0
+rectangle "**libdictenstein**\nDictionary traits +\nPersistentVocabARTrie" as dict #37474F
+rectangle "**duallity**\necosystem Levenshtein->WFST adapter\n(NOT a libgrammstein dependency)" as dual #90A4AE
+
+gram --> lev : mandatory
+gram --> dict : mandatory
+gram ..> llang : opt · feature\nlling-llang-integration
+llang ..> lev : opt (levenshtein)
+llang ..> dict : opt (lattice)
+
+dual .[#90A4AE,dashed].> lev : ecosystem
+dual .[#90A4AE,dashed].> llang : ecosystem
+
+note right of gram
+  libgrammstein feeds lling-llang two ways:
+  (a) implements lling-llang's LanguageModel trait
+      (score_sequence / score_continuation) via
+      GrammsteinLanguageModel → LanguageModelLayer
+  (b) NgramWfstExport::to_ngram_transducer::<W>()
+      produces an lling-llang NgramTransducer with
+      backoff ε-arcs (for cascade composition)
+end note
+
+note bottom of llang
+  lling-llang has **no** libgrammstein dependency.
+  Modified Kneser-Ney lives in libgrammstein;
+  lling-llang's asr/ngram.rs uses Katz backoff.
+end note
+
+legend right
+  | Colour | Crate |
+  |<#2E7D32> | libgrammstein |
+  |<#6A1B9A> | lling-llang |
+  |<#1565C0> | liblevenshtein |
+  |<#37474F> | libdictenstein |
+  |<#90A4AE> | duallity (ecosystem, not a dep) |
+endlegend
+@enduml

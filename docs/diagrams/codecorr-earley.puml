@@ -1,0 +1,46 @@
+@startuml codecorr-earley
+' Earley chart-parser cycle used for grammar-constrained decoding: predict,
+' scan, complete, then project valid terminals into a decoding token mask.
+' Render: plantuml -tsvg docs/diagrams/codecorr-earley.puml
+' Source of truth for Figure 1 in docs/components/code/constrained-decoding.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title Earley Chart — predict · scan · complete → token mask
+
+rectangle "**GrammarConstraint**\nchart position i · start symbol S" as gc #EF6C00
+
+package "complete_chart(i) — closure over states (rule, dot, start)" {
+  rectangle "**Predict**\ndot before ⟨NT⟩ ⇒ add (r, 0, i)\nfor every rule r of NT" as pred #EF6C00
+  rectangle "**Complete**\ndot at end of NT ⇒ advance\nwaiting states at start_pos" as comp #EF6C00
+}
+
+rectangle "**Scan** — advance(token)\ndot before terminal t == token\n⇒ add (r, dot+1, start) at i+1" as scan #1565C0
+
+rectangle "**valid_tokens()**\nterminals expected at dot" as valid #455A64
+rectangle "**TokenMask**\nallowed ids → logits\ndisallowed ← −∞" as mask #2E7D32
+
+gc --> pred
+pred --> comp
+comp --> pred : new states appended
+comp --> valid
+pred --> valid
+valid --> scan : model picks allowed token
+scan --> gc : position ← i+1, cache invalidated
+valid --> mask : DecodingVocabulary.create_mask
+
+note bottom of scan #E3F2FD
+  index-based iteration over the per-position
+  Vec<EarleyState> — new states are appended
+  and processed in the same pass, no cloning.
+end note
+
+@enduml

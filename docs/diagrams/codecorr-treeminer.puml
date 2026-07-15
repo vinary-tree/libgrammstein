@@ -1,0 +1,45 @@
+@startuml codecorr-treeminer
+' TreeminerD frequent-subtree mining: vertical representation, then level-wise
+' equivalence-class extension with anti-monotone support pruning.
+' Render: plantuml -tsvg docs/diagrams/codecorr-treeminer.puml
+' Source of truth for Figure 1 in docs/components/code/subtree-mining.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title TreeminerD — level-wise frequent subtree mining
+
+rectangle "**Forest**  Vec⟨FlatTree⟩\ndepth-first encoded ASTs" as forest #546E7A
+
+rectangle "**Vertical representation**\nlabel → [(tree_id, positions)]" as vert #EF6C00
+
+rectangle "**Frequent 1-subtrees**  F₁\nsupport(label) ≥ min_support_count" as f1 #EF6C00
+
+rectangle "**Extend** Fₖ → Fₖ₊₁\nfind_pattern_matches → find_extensions\nkey = encode_pattern(nodes)" as ext #EF6C00
+
+rectangle "**Support prune**\nsupport = |distinct tree_ids| ≥ min\nelse patterns_pruned += 1" as prune #C62828
+
+rectangle "**MiningResult**\npatterns · candidates_generated · pruned" as out #455A64
+
+forest --> vert : build_vertical_representation
+vert --> f1 : find_frequent_1_subtrees
+f1 --> ext
+ext --> prune
+prune --> ext : Fₖ₊₁ non-empty, size ≤ max_pattern_size
+prune --> out : accumulate frequent patterns
+
+note right of ext #FFF3E0
+  rayon par_iter over patterns with a
+  DashMap candidate table when parallel;
+  anti-monotonicity: a pattern can be frequent
+  only if all its subpatterns are frequent.
+end note
+
+@enduml

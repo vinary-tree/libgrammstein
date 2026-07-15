@@ -1,0 +1,66 @@
+@startuml codeemb-codet5
+' CodeT5+ embed_code path: optional language prefix, tokenize+truncate, ONNX run,
+' rank-dispatch on the output tensor (rank 2 pass-through, rank 3 mean-pool),
+' L2 normalize, cache. Muted nodes are configured-but-off by default.
+' Render: plantuml -tsvg docs/diagrams/codeemb-codet5.puml
+' Source of truth for Figure 1 in docs/components/code-embeddings/codet5.md.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title CodeT5+ — CodeT5Embedder::embed_code (Salesforce/codet5p-110m-embedding)
+
+rectangle "**(code c, language ℓ)**" as q #EF6C00
+
+rectangle "**CodeEmbeddingCache**\nkey = h(c, ℓ)" as cache #00838F
+
+rectangle "**Language prefix**  (off by default)\nuse_language_prefix ∧ ℓ ≠ Unknown\n⇒ input = \"⟨rust⟩ \" ++ c" as pre #90A4AE
+
+rectangle "**Tokenizer**\nencode(input, add_special_tokens = true)\nthen hard truncate to max_length = 512" as tok #EF6C00
+
+rectangle "**ONNX encoder**  (110M params)\nT5 encoder + contrastive projection\ninput_ids · attention_mask" as enc #2E7D32
+
+rectangle "**Rank dispatch**" as disp #388E3C
+rectangle "rank 2 → [1, 256]\nthe export already pooled" as r2 #43A047
+rectangle "rank 3 → [1, L, d]\n**mean-pool** over L" as r3 #43A047
+rectangle "otherwise →\nError::Inference" as rx #90A4AE
+
+rectangle "**L2 normalize**  (normalize = true)" as norm #2E7D32
+rectangle "**v̂ ∈ ℝ²⁵⁶**" as out #455A64
+
+q --> cache : probe
+cache --> pre : miss
+pre --> tok
+tok --> enc : (ids, mask)
+enc --> disp
+disp --> r2
+disp --> r3
+disp --> rx
+r2 --> norm
+r3 --> norm
+norm --> out
+norm -[#00838F,dashed]-> cache : insert
+cache --> out : hit
+
+note bottom of enc #E8F5E9
+  d is **not** auto-detected: ort 2.0 exposes no
+  output-shape inspection, so ""embedding_dim""
+  falls back to ""config.embedding_dim"" (Some(256)
+  from ""codet5p_110m_embedding"", else 256).
+end note
+
+note right of pre #ECEFF1
+  CodeT5+ is the **only** shipped embedder that
+  can emit a language prefix — and ""use_language_prefix""
+  defaults to **false**, so it is off unless you set it.
+end note
+
+@enduml

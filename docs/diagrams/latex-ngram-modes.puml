@@ -1,0 +1,57 @@
+@startuml latex-ngram-modes
+' Mode-separated n-gram scoring: detect_transitions carves the token stream into
+' homogeneous regions, routes each to its model, and fuses mode-weighted log-probs.
+' Render: plantuml -tsvg docs/diagrams/latex-ngram-modes.puml
+' Source of truth for Figure 1 in docs/components/latex/ngram.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+legend top right
+|= Concept |= Color |
+| LaTeX mode routing | <back:#EF6C00>        </back> |
+| statistical n-gram core | <back:#1565C0>        </back> |
+endlegend
+
+rectangle "Token stream\n\\textbf intro $ x ^ 2 $" as toks #546E7A
+rectangle "**detect_transitions**\nsplit at mode changes →\n(start, end, LaTeXMode)" as split #EF6C00
+
+rectangle "region: Command\ntokens[0..k)" as rc #EF6C00
+rectangle "region: Text\ntokens[k..m)" as rt #EF6C00
+rectangle "region: Math\ntokens[m..n)" as rm #EF6C00
+
+rectangle "command_model\nNgramModel⟨D⟩" as mc #1565C0
+rectangle "text_model\nNgramModel⟨D⟩" as mt #1565C0
+rectangle "math_model\nNgramModel⟨D⟩" as mm #1565C0
+
+rectangle "weighted fuse\nΣ wₘ·sₘ over regions\n÷ Σ wₘ·len × N" as fuse #1565C0
+rectangle "sequence log-prob\n(f64)" as out #455A64
+
+toks --> split
+split --> rc
+split --> rt
+split --> rm
+rc --> mc : sentence_log_prob
+rt --> mt : sentence_log_prob
+rm --> mm : sentence_log_prob
+mc --> fuse : × command_weight 1.5
+mt --> fuse : × text_weight 1.0
+mm --> fuse : × math_weight 2.0
+fuse --> out
+
+note right of fuse
+  Weights wₘ = LaTeXMode::weight(config).
+  Math is up-weighted (2.0): formula
+  fluency is the strongest correctness
+  signal for LaTeX correction.
+end note
+@enduml

@@ -1,0 +1,74 @@
+@startuml corpus-streaming
+' Why a 20 GB dump fits in a laptop: what is resident at each rung of the lazy
+' pull chain, and what the *unit of residency* is for each shipped reader.
+' Render: plantuml -tsvg docs/diagrams/corpus-streaming.puml
+' Source of truth for Figure 1 in docs/components/corpus/streaming.md, section "The residency ladder".
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam note {
+  BackgroundColor #E3F2FD
+  BorderColor #1565C0
+}
+title The residency ladder — what is actually in RAM while streaming a dump
+
+rectangle "**On disk**\nenwiki-latest-pages-articles.xml.bz2 — tens of GB\nnever fully read, never fully decompressed" as disk #546E7A
+rectangle "**File**\nstd::fs::File" as fh #546E7A
+rectangle "**BzDecoder**\nstreaming bzip2 — one block at a time\n(Burrows-Wheeler; blocks are 100–900 kB)" as bz #546E7A
+rectangle "**BufReader**\nwith_capacity(64 KiB)" as buf #546E7A
+rectangle "**quick_xml::Reader**\npull parser · read_event_into(&mut buf)\nbuf reused: Vec::with_capacity(8192)" as xml #546E7A
+
+rectangle "**One article**\ncurrent_title + current_text\ncleared at every <page>" as art #1565C0
+rectangle "**One Document**\nafter strip_wiki_markup + normalize" as doc #1565C0
+rectangle "**That document's sentences**\ntokenizer.sentences(&doc.content).collect::<Vec<_>>()" as sv #1565C0
+rectangle "**One sentence**\nyielded to the consumer, then dropped" as one #455A64
+
+disk --> fh : File::open
+fh --> bz : path ends in .bz2
+bz --> buf
+buf --> xml
+xml --> art : Event::Text ⇒ push_str
+art --> doc : Event::End(</page>)\n⇒ 4 filters ⇒ emit
+doc --> sv : flat_map
+sv --> one : Iterator::next()
+
+note right of bz
+  Decompression is **incremental**: BzDecoder is a Read
+  adaptor, so bytes are inflated only as the XML parser
+  asks for them. Back-pressure therefore reaches all the
+  way down to the disk — nothing runs ahead.
+end note
+
+note right of sv
+  **The one eager step.** sentences() collects each
+  *document's* sentences into a Vec before flattening
+  (the borrow of doc.content may not escape the closure).
+  Peak residency is therefore *one document's* sentences —
+  far less than the corpus, but more than one sentence.
+end note
+
+note bottom of doc
+  **Unit of residency, per reader**
+  · WikipediaReader — one <page> element
+  · GutenbergReader — one whole book (read_to_string)
+  · PlaintextReader — one whole file (read_to_string)
+  ⇒ shard a large plaintext corpus into many files, or use
+  LineIterator for true line-at-a-time residency.
+end note
+
+legend right
+  |= Colour |= Role |
+  |<#546E7A> | external I-O / decompression |
+  |<#1565C0> | in-memory working set |
+  |<#455A64> | consumer |
+endlegend
+@enduml

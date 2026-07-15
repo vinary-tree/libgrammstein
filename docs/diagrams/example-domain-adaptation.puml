@@ -1,0 +1,64 @@
+@startuml example-domain-adaptation
+' Domain adaptation as a two-expert mixture whose weight λ is fitted on a held-out
+' in-domain development set, then reported on a disjoint test set. Colour: corpora
+' (grey), general expert (blue), domain expert (green), mixture (steel blue),
+' the tuning search (purple), the report (teal).
+' Render: plantuml -tsvg docs/diagrams/example-domain-adaptation.puml
+' Source of truth for Figure 1 in docs/examples/domain-adaptation.md §3
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Domain adaptation — mixture of two experts, λ fitted on a held-out dev set
+
+rectangle "**general corpus**\nbroad · large · out-of-domain" as gc #546E7A
+rectangle "**domain corpus**\nnarrow · small · in-domain" as dc #546E7A
+
+rectangle "**ℙ_g — general expert**\nTrainerBuilder.order(n).train(reader)\nwide coverage, wrong priors" as g #1565C0
+rectangle "**ℙ_d — domain expert**\nsame order · same tokenizer\nright priors, sparse & narrow" as d #2E7D32
+
+rectangle "**mixture**\nℙ_λ(w | h) = (1−λ)·ℙ_g(w | h) + λ·ℙ_d(w | h)\nλ = 0 ⇒ general · λ = 1 ⇒ domain" as mix #1B6CA8
+
+rectangle "**dev set**\nheld out · in-domain" as dev #546E7A
+rectangle "**fit λ**\nLL(λ) = Σ log ℙ_λ is **concave** (Lemma 1)\n⇒ grid / ternary search or EM finds\nthe **global** optimum λ*" as tune #6A1B9A
+
+rectangle "**test set**\nheld out · in-domain · disjoint from dev" as test #546E7A
+rectangle "**report**\nPP_general vs PP_domain vs PP(λ*)\nOOV coverage · per-word scores" as rep #00838F
+
+gc --> g
+dc --> d
+g --> mix : ℙ_g
+d --> mix : ℙ_d
+dev --> tune
+mix --> tune : evaluate PP_dev(λ)
+tune --> mix : λ ← λ* = argmin PP_dev(λ)
+mix --> rep : score with λ*
+test --> rep
+g --> rep : baseline
+d --> rep : baseline
+
+note right of tune #F3E5F5
+  PP is monotone-decreasing in LL,
+  so **min PP ≡ max LL**. Any local
+  optimum of a concave objective on
+  [0, 1] is the global one — a coarse
+  grid followed by a ternary search
+  is sufficient and safe.
+end note
+
+note bottom of d #E8F5E9
+  Small domain corpus? Lower its order
+  (sparser data) and lean toward ℙ_g;
+  embeddings can instead be **fine-tuned**
+  with EmbeddingTrainer::train_continued.
+end note
+
+@enduml

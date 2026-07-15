@@ -1,0 +1,51 @@
+@startuml code-cpg-construction
+' Three-pass CPG build over one AST: build_from_ast -> build_cfg -> build_dfg into a petgraph DiGraph.
+' Render: plantuml -tsvg docs/diagrams/code-cpg-construction.puml
+' Source of truth for Figure 2 in docs/components/code/cpg.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam activity {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+}
+title Code Property Graph — Three Construction Passes
+
+start
+:ParsedCode.root() ▷ AstNode::from_ts_node;
+partition "Pass 1 — build_from_ast  (syntax)" {
+  #EF6C00:classify_ast_node(kind) ▷ CpgNodeKind;
+  #EF6C00:add CpgNode · AstChild edge to parent
+· AstSibling edge between children;
+  #EF6C00:record Variable / Parameter names
+into variable_defs;
+}
+partition "Pass 2 — build_cfg  (control flow)" {
+  #EF6C00:Function ▷ entry_node;
+  #EF6C00:Return ▷ exit_nodes;
+  #EF6C00:Branch ▷ CfgTrue / CfgFalse edges;
+  #EF6C00:Loop ▷ CfgTrue(body) · CfgBack · CfgFalse(exit);
+}
+partition "Pass 3 — build_dfg  (data flow)" {
+  #EF6C00:Assignment ▷ DfgWrite(lhs) · DfgRead(rhs);
+  #EF6C00:Variable use ▷ DfgFlow from each def;
+}
+#00838F:**CodePropertyGraph**
+petgraph DiGraph<CpgNode, CpgEdge>
++ location_map + variable_defs;
+:queries ▷ cfg_successors · data_flow_for_variable
+· find_by_kind · compute_depths;
+stop
+
+legend bottom
+  |= Edge family |= CpgEdgeKind |
+  | AST | AstChild · AstSibling |
+  | CFG | CfgNext · CfgTrue · CfgFalse · CfgBack · CfgException |
+  | DFG | DfgRead · DfgWrite · DfgFlow · DfgDepends |
+  | Call / Type | Calls · Argument · Returns · HasType · Inherits |
+endlegend
+
+@enduml

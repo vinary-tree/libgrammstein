@@ -1,0 +1,83 @@
+@startuml arch-layer-contracts
+' The trait seams between libgrammstein's layers: what each layer PROMISES to the
+' layer above it, and what it REQUIRES from the layer below. Complements
+' architecture.puml (which draws the layers) by drawing the CONTRACTS between them.
+' Colour legend (semantic, shared across all repo diagrams — see architecture.puml):
+'   #1565C0 blue = statistical LM core   #2E7D32 green = embeddings / neural
+'   #6A1B9A purple = retrieval / topic   #EF6C00 orange = code / LaTeX
+'   #00838F teal = storage / persistence #C62828 red = formal verification
+'   #546E7A grey = external crates / corpora
+' Render: plantuml -tsvg docs/diagrams/arch-layer-contracts.puml
+' Source of truth for Figure 2 in docs/architecture/overview.md §4
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam NoteBackgroundColor #FFF3E0
+skinparam NoteBorderColor #EF6C00
+title Layer contracts — the traits that separate the layers
+
+rectangle "**Consumers**\nlling-llang WFST rescoring · CLI · applications" as consumer #455A64
+
+rectangle "**LanguageModel**  (trait defined by lling-llang)\nscore_sequence(&[&str]) → f64\nscore_continuation(&[&str], &str) → f64\n**strings, never vocabulary IDs** — no lattice internals leak in" as lm_trait #1B6CA8
+
+rectangle "**HybridLanguageModel<D>**\ninterpolates <latex>\mathbb{P}_n \oplus \mathbb{P}_e</latex> · lock-free score cache" as hybrid #1B6CA8
+
+together {
+  rectangle "**NgramModel<D>**\nModified Kneser-Ney · orders 1–5" as ngram #1565C0
+  rectangle "**SubwordEmbedding**\nFastText subword vectors" as embed #2E7D32
+}
+
+rectangle "**MutableMappedDictionary<V>**  (trait defined by libdictenstein)\nget_value(&str) → Option<&V>   ·   update_or_insert(…)\n**V = NgramEntry** — three atomics, so writers need no lock" as dict_trait #00838F
+
+together {
+  rectangle "**PersistentARTrie<u64>**\nmmap image + lock-free overlay\nWAL · CX · eviction" as artrie #00838F
+  rectangle "**DynamicDawgChar** · **DoubleArrayTrieChar** · **PathMapDictionary**\nmutable · read-optimized · distributed" as others #00838F
+}
+
+rectangle "**SharedVocabARTrie**\nword ↔ index — a **bijection**, WAL-durable\nn-gram key = concatenated LEB128 varints" as vocab #00838F
+
+rectangle "**Corpora**\nWikipedia · Gutenberg · plaintext · Google Books n-grams" as corpus #546E7A
+
+rectangle "**TLA+ · TLAPS · Rocq**\ndurability + concurrency invariants" as formal #C62828
+
+consumer --> lm_trait : depends on
+lm_trait <|.. hybrid : **implements**
+hybrid --> ngram : delegates
+hybrid --> embed : delegates
+ngram --> dict_trait : **requires**
+embed -[#2E7D32,dashed]-> dict_trait : optional persistence
+dict_trait <|.. artrie : implements
+dict_trait <|.. others : implements
+artrie --> vocab : encodes keys via
+corpus --> ngram : trains
+corpus --> embed : trains
+formal -[#C62828,dashed]-> artrie : machine-checks\ndurability
+formal -[#C62828,dashed]-> vocab : machine-checks\nbijection
+
+note right of dict_trait
+  The **inversion of control** that keeps the
+  statistical core backend-agnostic: NgramModel
+  names only the trait, so the same model runs
+  over an in-memory DAWG in a unit test and over
+  a memory-mapped ARTrie on a 2-billion-n-gram
+  Google Books build.
+end note
+
+note right of lm_trait
+  The **anti-corruption layer** at the top:
+  &[&str] in, f64 out. libgrammstein never
+  learns lling-llang's lattice vocabulary, and
+  lling-llang never learns libgrammstein's
+  varint key encoding.
+end note
+
+@enduml

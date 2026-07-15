@@ -1,0 +1,88 @@
+@startuml neural-summarizer-pipeline
+' Summarizer::extractive end-to-end, including the two short-circuits and the
+' index-provenance that the MMR step depends on (and currently breaks — see the note).
+' Render: plantuml -tsvg docs/diagrams/neural-summarizer-pipeline.puml
+' Source of truth for Figure 2 in docs/components/neural/summarizer.md §5.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam activity {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  BackgroundColor #2E7D32
+  DiamondBackgroundColor #ECEFF1
+  DiamondFontColor #263238
+  DiamondBorderColor #90A4AE
+}
+title Summarizer::extractive — split ▸ filter ▸ embed ▸ centroid ▸ MMR ▸ re-order
+
+start
+:**split_sentences(text)**
+break on . ! ? — unless the buffer ends in a
+known abbreviation (Dr. Mr. e.g. i.e. etc. …),
+in which case keep accumulating;
+
+if (sentences empty?) then (yes)
+  :return "";
+  stop
+else (no)
+endif
+
+if (|sentences| ≤ num_sentences?) then (yes)
+  :**return the whole text**
+  nothing to select;
+  stop
+else (no)
+endif
+
+:**length filter**
+keep min_sentence_length ≤ |s| ≤ max_sentence_length
+(20 … 500 characters by default);
+
+if (none survive?) then (yes)
+  :return the first num_sentences sentences
+  (unfiltered fallback);
+  stop
+else (no)
+endif
+
+:**embedder.embed_batch(valid)**
+→ v₁ … vₙ  (cached, ℓ₂-normalized);
+
+:**centroid**  c = v̄ / ‖v̄‖;
+
+:**relevance**  rel(sᵢ) = cos(vᵢ, c)
+paired with each sentence's //original// index;
+
+:**select_diverse** — greedy MMR
+(see the MMR figure);
+
+if (preserve_order?) then (true — default)
+  :sort the picks by original index
+  → the summary reads in document order;
+else (false)
+  :keep MMR selection order
+  → most central sentence first;
+endif
+
+:join with " "  ⟶  **summary**;
+stop
+
+note right
+  **Known defect — index misalignment.**
+  select_diverse sorts its `scored` slice by relevance
+  //in place//, but `embeddings` keeps document order.
+  The redundancy term then reads embeddings[i] with i =
+  position in the **sorted** slice, so it compares the
+  wrong vectors (src/neural/summarizer.rs:202, :212).
+  Relevance is carried inside the tuple and is therefore
+  correct; selection still favours central, distinct
+  sentences, but the diversity penalty is not the MMR
+  quantity of the figure. Reported, not worked around.
+end note
+
+@enduml

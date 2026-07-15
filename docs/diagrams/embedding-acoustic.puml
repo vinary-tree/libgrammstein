@@ -1,0 +1,45 @@
+@startuml embedding-acoustic
+' Acoustic word embedding: variable-length frames → encoder → pooling → optional
+' text projection → optional L2 norm → fixed vector, indexed for query-by-example.
+' Render: plantuml -tsvg docs/diagrams/embedding-acoustic.puml
+' Source of truth for Figure 1 in docs/components/embedding/acoustic-word.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title Acoustic word embedding — encode + query-by-example
+
+legend top right
+  |= Color |= Concept |
+  |<#2E7D32>     | Encoder / embedding |
+  |<#00838F>     | Word index store |
+  |<#546E7A>     | Audio / features / result |
+endlegend
+
+rectangle "raw audio\n(16 kHz PCM)" as audio #546E7A
+rectangle "FeatureExtractor\nmel filterbank / MFCC\nframes [ T × F ]  (F = 40)" as feat #546E7A
+rectangle "AcousticEncoder\n(LinearEncoder / BiLSTM / …)\n[ T × H ]" as enc #2E7D32
+rectangle "PoolingStrategy\nMean · Max · Last · Attention · MeanMax\n[ H ]  (MeanMax → [ 2H ])" as pool #2E7D32
+rectangle "text_projection?\n[ H × text_dim ]  (optional)" as proj #2E7D32
+rectangle "L2 normalize?\nv / ‖v‖  (if normalize)" as normv #2E7D32
+rectangle "**embedding**  [ D ]" as emb #2E7D32
+rectangle "word_index\nVec<(word, [D])>\nadd_word / add_word_embedding" as idx #00838F
+rectangle "query_by_example(audio, k)\ncosine vs index → top-k" as query #546E7A
+
+audio --> feat
+feat --> enc
+enc --> pool
+pool --> proj
+proj --> normv
+normv --> emb
+emb --> idx : index build
+emb --> query : query path
+idx --> query : cosine scan
+@enduml

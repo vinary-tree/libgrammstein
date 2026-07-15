@@ -1,475 +1,265 @@
-# AST Module
+# AST Parsing with tree-sitter
 
-The AST module provides tree-sitter integration for incremental parsing with error recovery, enabling correction of partially valid code.
+The **AST** (Abstract Syntax Tree) layer wraps [tree-sitter](https://tree-sitter.github.io/) to
+turn source text into a parse tree — even when that text is syntactically broken. tree-sitter is
+an incremental **GLR** (Generalized LR) parser with *error recovery*: it never fails, always
+returning a tree in which the unparseable regions are marked with `ERROR` and `MISSING` nodes.
+Those markers are exactly what a code corrector needs to localize a repair.
 
-## Overview
+> **Scope.** Source of truth: [`src/code/ast.rs`](../../../src/code/ast.rs). The tree produced
+> here feeds the [Tokenizer](tokenizer.md) and the [Code Property Graph](cpg.md); the
+> [Pipeline](pipeline.md) owns the parser. Language-specific node kinds come from the
+> [`CodeLanguage`](language.md) implementations.
 
-This module wraps tree-sitter's parsing capabilities to provide:
+## What & why: incremental parsing and error recovery
 
-- **Incremental parsing**: Re-parse only changed portions of code
-- **Error recovery**: Continue parsing past syntax errors
-- **Error location**: Precise byte and line/column positions
-- **AST traversal**: Depth-first iteration over nodes
+Two properties make tree-sitter the right front-end for correction:
 
-## Key Types
+- **Error recovery.** A classic LR parser aborts at the first unexpected token. tree-sitter
+  instead splices an `ERROR` node around the offending span and resynchronizes, and inserts a
+  zero-width `MISSING` node where the grammar required a token that was absent. The rest of the
+  file still parses into a usable tree. This is what lets the pipeline correct *partial* code.
+- **Incremental reparse.** After an edit, re-parsing the whole file is wasteful in an editor.
+  Given the previous tree and a description of the edit, tree-sitter reuses unaffected subtrees
+  and only re-derives the neighborhood of the change — work proportional to the edited region
+  and its affected ancestors, not to file size [[1]](#references).
 
-| Type | Description |
-|------|-------------|
-| `ParsedCode` | Parse result with tree, source, and error information |
-| `AstNode` | Simplified representation of a tree-sitter node |
-| `CodeParser<L>` | Parser configured for a specific language |
-| `ErrorRange` | Location and content of a syntax error |
-| `EditInfo` | Description of a source code edit |
-| `AstError` | Error types for parsing operations |
+## Theory: the tree, formally
 
-## ParsedCode
+An abstract syntax tree is a **rooted, ordered, labeled tree**
 
-The `ParsedCode` struct contains the parse tree and metadata:
+```math
+A = (V,\; E,\; r,\; \prec,\; \kappa) \tag{A1}
+```
+
+where $`V`$ is the set of nodes, $`E \subseteq V \times V`$ the parent→child edges, $`r \in V`$
+the root, $`\prec`$ a total left-to-right order on the children of each node (source order), and
+$`\kappa : V \to \Sigma`$ a labeling that assigns every node a *kind* drawn from the language's
+grammar alphabet $`\Sigma`$ (for example `function_definition`, `identifier`, `string`). Leaves
+carry source text; interior nodes do not.
+
+Error recovery extends the alphabet with two synthetic kinds. Write
+$`\text{span}(v) = [\,b_s(v),\, b_e(v)\,)`$ for the half-open byte range of node $`v`$:
+
+- an **`ERROR`** node $`v`$ has $`b_e(v) > b_s(v)`$ and wraps text the grammar could not accept;
+- a **`MISSING`** node $`v`$ has $`b_e(v) = b_s(v)`$ (zero width) and marks a token the grammar
+  expected but did not find.
+
+`ParsedCode` records `has_errors` iff the tree contains at least one node of either kind, and
+collects their spans into `error_ranges`.
+
+### Positions
+
+tree-sitter reports positions as **0-indexed** `(row, column)` pairs, and `column` counts
+Unicode scalar values, not bytes. The helper `byte_offset_to_position(source, offset)` converts
+a byte offset to that convention, clamping $`\text{offset}`$ to $`\lvert \text{source} \rvert`$
+and counting characters from the last newline so multi-byte UTF-8 is handled correctly:
+
+```rust
+use libgrammstein::code::byte_offset_to_position;
+
+let source = "héllo\nworld";     // 'é' is two UTF-8 bytes
+assert_eq!(byte_offset_to_position(source, 0), (0, 0));  // 'h'
+assert_eq!(byte_offset_to_position(source, 7), (1, 0));  // 'w' (after the newline)
+```
+
+## Key types
+
+| Type | Role |
+|---|---|
+| `ParsedCode` | parse tree + source + `has_errors` + `error_ranges` |
+| `ErrorRange` | byte span, `(row, column)` span, text, and `kind` of one error |
+| `AstNode` | owned, cloneable, depth-first-traversable node |
+| `CodeParser<L>` | a parser bound to language `L`, with a bounded parse cache |
+| `EditInfo` | a described edit, convertible to a tree-sitter `InputEdit` |
+| `AstError` | `ParserInit(String)`, `ParseFailed`, `LanguageMismatch { expected, got }` |
+
+### `ParsedCode`
 
 ```rust
 pub struct ParsedCode {
-    /// The tree-sitter parse tree
-    pub tree: Tree,
-    /// The original source code
-    pub source: String,
-    /// Language used for parsing
-    pub language_name: String,
-    /// Whether the parse tree contains any errors
-    pub has_errors: bool,
-    /// Error nodes in the tree
+    pub tree: tree_sitter::Tree,   // the live tree-sitter tree (borrow-based, not Clone)
+    pub source: String,            // the exact text that was parsed
+    pub language_name: String,     // e.g. "python"
+    pub has_errors: bool,          // any ERROR or MISSING node present?
     pub error_ranges: Vec<ErrorRange>,
 }
 ```
 
-### Methods
+Its methods are thin, allocation-free accessors: `root() -> Node<'_>`, `errors() -> impl
+Iterator<Item = &ErrorRange>`, `error_count() -> usize`, and `is_in_error(byte_offset) -> bool`
+(true when the offset falls inside any error span — the pipeline uses it to scope corrections).
 
-```rust
-impl ParsedCode {
-    /// Returns the root node of the AST.
-    pub fn root(&self) -> Node;
+### `AstNode`: an owned mirror of the tree
 
-    /// Returns an iterator over all error ranges.
-    pub fn errors(&self) -> impl Iterator<Item = &ErrorRange>;
+`tree_sitter::Node<'_>` borrows its `Tree`, which is inconvenient to pass around. `AstNode` is an
+owned, `Clone`-able snapshot built by `AstNode::from_ts_node(node, source)`. Leaf text is
+captured only for childless nodes (`text: Option<String>`); interior nodes leave `text` `None`.
+It records `kind`, byte span, `(row, column)` span, and the tree-sitter predicates `is_named`,
+`is_error`, `is_missing`.
 
-    /// Returns the number of syntax errors.
-    pub fn error_count(&self) -> usize;
+Traversal is depth-first and pre-order via an explicit stack (children are pushed in reverse so
+they pop in source order):
 
-    /// Checks if a byte offset is within an error region.
-    pub fn is_in_error(&self, byte_offset: usize) -> bool;
-}
-```
+- `descendants()` — every node, root first;
+- `find_by_kind(kind)` — descendants whose `kind` matches;
+- `find_errors()` — descendants where `is_error || is_missing`.
 
-### Example: Checking for Errors
+All three return iterators (no intermediate `Vec`); call `.collect()` when you need one.
 
-```rust
-use libgrammstein::code::{CodeParser, Python};
-use std::sync::Arc;
-
-let python = Arc::new(Python::new());
-let mut parser = CodeParser::new(python)?;
-
-// Parse code with a syntax error
-let source = "def foo(\n    return 42";
-let parsed = parser.parse(source)?;
-
-if parsed.has_errors {
-    println!("Found {} errors:", parsed.error_count());
-    for error in parsed.errors() {
-        println!(
-            "  Line {}, Column {}: {:?} - '{}'",
-            error.start_position.0 + 1,
-            error.start_position.1,
-            error.kind,
-            error.text
-        );
-    }
-}
-```
-
-## ErrorRange
-
-The `ErrorRange` struct provides detailed error location information:
-
-```rust
-pub struct ErrorRange {
-    /// Start byte offset
-    pub start_byte: usize,
-    /// End byte offset
-    pub end_byte: usize,
-    /// Start position (line, column) - 0-indexed
-    pub start_position: (usize, usize),
-    /// End position (line, column) - 0-indexed
-    pub end_position: (usize, usize),
-    /// The erroneous text
-    pub text: String,
-    /// The node kind (usually "ERROR" or "MISSING")
-    pub kind: String,
-}
-```
-
-### Error Kinds
-
-| Kind | Description |
-|------|-------------|
-| `ERROR` | Unexpected token or malformed syntax |
-| `MISSING` | Expected token not present (e.g., missing `)`) |
-
-## AstNode
-
-The `AstNode` struct provides a simplified, owned representation of tree-sitter nodes:
-
-```rust
-pub struct AstNode {
-    /// The node kind (e.g., "function_definition", "identifier")
-    pub kind: String,
-    /// Start byte offset
-    pub start_byte: usize,
-    /// End byte offset
-    pub end_byte: usize,
-    /// Start position (line, column)
-    pub start_position: (usize, usize),
-    /// End position (line, column)
-    pub end_position: (usize, usize),
-    /// Whether this is a named node
-    pub is_named: bool,
-    /// Whether this node is an error node
-    pub is_error: bool,
-    /// Whether this node is missing (expected but not present)
-    pub is_missing: bool,
-    /// Child nodes
-    pub children: Vec<AstNode>,
-    /// The text content (for leaf nodes)
-    pub text: Option<String>,
-}
-```
-
-### Creating from Tree-sitter
-
-```rust
-use libgrammstein::code::AstNode;
-
-// Convert a tree-sitter node to AstNode
-let ast_node = AstNode::from_ts_node(parsed.root(), &source);
-```
-
-### Traversal Methods
-
-```rust
-impl AstNode {
-    /// Returns an iterator over all descendant nodes (depth-first).
-    pub fn descendants(&self) -> impl Iterator<Item = &AstNode>;
-
-    /// Finds nodes by kind. Returns an iterator to avoid allocating a Vec.
-    pub fn find_by_kind<'a>(&'a self, kind: &'a str) -> impl Iterator<Item = &'a AstNode>;
-
-    /// Finds all error nodes. Returns an iterator to avoid allocating a Vec.
-    pub fn find_errors(&self) -> impl Iterator<Item = &AstNode>;
-}
-```
-
-### Example: Finding All Functions
-
-```rust
-let ast = AstNode::from_ts_node(parsed.root(), &source);
-
-// Find all function definitions
-let functions = ast.find_by_kind("function_definition");
-for func in functions {
-    println!("Function at line {}", func.start_position.0 + 1);
-
-    // Find the function name
-    if let Some(name_node) = func.children.iter()
-        .find(|c| c.kind == "identifier")
-    {
-        if let Some(name) = &name_node.text {
-            println!("  Name: {}", name);
-        }
-    }
-}
-```
-
-### Example: Finding Errors
-
-```rust
-let ast = AstNode::from_ts_node(parsed.root(), &source);
-
-// Find all error and missing nodes
-let errors = ast.find_errors();
-for error in errors {
-    if error.is_missing {
-        println!("Missing token at {:?}", error.start_position);
-    } else {
-        println!("Error: '{}' at {:?}",
-            error.text.as_deref().unwrap_or(""),
-            error.start_position
-        );
-    }
-}
-```
-
-## CodeParser
-
-The `CodeParser<L>` struct provides parsing with caching support:
-
-```rust
-pub struct CodeParser<L: CodeLanguage> {
-    language: Arc<L>,
-    parser: Parser,
-    tree_cache: HashMap<u64, Tree>,
-}
-```
-
-### Creating a Parser
-
-```rust
-use libgrammstein::code::{CodeParser, Python, Rust, JavaScript};
-use std::sync::Arc;
-
-// Create parsers for different languages
-let python_parser = CodeParser::new(Arc::new(Python::new()))?;
-let rust_parser = CodeParser::new(Arc::new(Rust::new()))?;
-let js_parser = CodeParser::new(Arc::new(JavaScript::new()))?;
-```
-
-### Basic Parsing
-
-```rust
-let mut parser = CodeParser::new(Arc::new(Python::new()))?;
-
-let source = r#"
-def greet(name):
-    print(f"Hello, {name}!")
-
-greet("World")
-"#;
-
-let parsed = parser.parse(source)?;
-
-println!("Language: {}", parsed.language_name);
-println!("Has errors: {}", parsed.has_errors);
-println!("Root node kind: {}", parsed.root().kind());
-```
-
-### Incremental Parsing
-
-For editor integration, incremental parsing re-parses only changed portions:
-
-```rust
-use libgrammstein::code::EditInfo;
-
-let mut parser = CodeParser::new(Arc::new(Python::new()))?;
-
-// Initial parse
-let source = "def foo():\n    pass";
-let mut parsed = parser.parse(source)?;
-let mut tree = parsed.tree;
-
-// User types " + 1" after "pass"
-let edit = EditInfo::insertion(
-    19,      // byte position
-    1,       // row
-    8,       // column
-    " + 1"   // inserted text
-);
-
-let new_source = "def foo():\n    pass + 1";
-let new_parsed = parser.parse_incremental(new_source, &mut tree, &edit)?;
-```
-
-## EditInfo
-
-The `EditInfo` struct describes source code modifications:
+### `EditInfo`: describing a change for incremental reparse
 
 ```rust
 pub struct EditInfo {
-    /// Start byte of the edit
     pub start_byte: usize,
-    /// Old end byte (before edit)
-    pub old_end_byte: usize,
-    /// New end byte (after edit)
-    pub new_end_byte: usize,
-    /// Start position (row, column)
+    pub old_end_byte: usize,      // end of the replaced span, before the edit
+    pub new_end_byte: usize,      // end of the inserted text, after the edit
     pub start_position: (usize, usize),
-    /// Old end position
     pub old_end_position: (usize, usize),
-    /// New end position
     pub new_end_position: (usize, usize),
 }
 ```
 
-### Factory Methods
+The constructors `EditInfo::insertion(position, row, column, inserted_text)` and
+`EditInfo::deletion(start_byte, end_byte, start_pos, end_pos)` compute the six fields for the two
+common cases; `to_input_edit()` converts to the `tree_sitter::InputEdit` that
+`Tree::edit` consumes.
 
-```rust
-impl EditInfo {
-    /// Creates an EditInfo for an insertion at a position.
-    pub fn insertion(
-        position: usize,
-        row: usize,
-        column: usize,
-        inserted_text: &str
-    ) -> Self;
+## The parse algorithm, literately
 
-    /// Creates an EditInfo for a deletion.
-    pub fn deletion(
-        start_byte: usize,
-        end_byte: usize,
-        start_pos: (usize, usize),
-        end_pos: (usize, usize),
-    ) -> Self;
-}
+`CodeParser::parse` mirrors the following. `⟨…⟩` names a refinement expanded below; `safe_hash`
+is the crate's collision-resistant digest (xxh3 for short inputs, gxhash for $`\geq 16`$ bytes).
+
+```
+function parse(source):                               ▸ CodeParser::parse
+    key <- safe_hash(source)                          ▸ 64-bit digest of the bytes
+    if key in cache and cache[key].source == source:  ▸ verify text to defeat hash collisions
+        return parsed_code_from_tree(clone(cache[key].tree), source)
+    parsed <- ⟨Fresh parse⟩
+    if size(cache) >= MAX_PARSE_CACHE_ENTRIES:        ▸ 16 entries
+        clear(cache)                                  ▸ bounded memory: drop all, then insert
+    cache[key] <- (source, clone(parsed.tree))
+    return parsed
+
+⟨Fresh parse⟩ ≡                                       ▸ parse_with_old_tree(source, None)
+    tree <- ts_parser.parse(source, old_tree = None)
+    if tree is None: raise AstError::ParseFailed      ▸ only on allocation failure
+    return parsed_code_from_tree(tree, source)
+
+function parsed_code_from_tree(tree, source):
+    has_errors <- tree.root().has_error()
+    ranges <- collect_errors(tree, source) if has_errors else []   ▸ recursive ERROR/MISSING scan
+    return ParsedCode { tree, source, language_name, has_errors, error_ranges = ranges }
+
+function parse_incremental(source, old_tree, edit):   ▸ editor path
+    old_tree.edit(edit.to_input_edit())               ▸ shift byte/point offsets past the edit
+    return parse_with_old_tree(source, Some(old_tree)) ▸ tree-sitter reuses unaffected subtrees
 ```
 
-### Example: Handling Edits
+`collect_errors` walks the tree and, for every node where `is_error() || is_missing()`, records
+an `ErrorRange` carrying the byte span, the `(row, column)` span, the offending text
+(`utf8_text`, empty for a zero-width `MISSING`), and the node `kind`.
 
-```rust
-// User inserts "x" at position (0, 5)
-let insert_edit = EditInfo::insertion(5, 0, 5, "x");
+## Engineering
 
-// User deletes characters from (0, 10) to (0, 15)
-let delete_edit = EditInfo::deletion(10, 15, (0, 10), (0, 15));
+### Bounded parse cache
 
-// User replaces text (delete then insert)
-let replace_edit = EditInfo {
-    start_byte: 10,
-    old_end_byte: 15,
-    new_end_byte: 13,
-    start_position: (0, 10),
-    old_end_position: (0, 15),
-    new_end_position: (0, 13),
-};
-```
+`CodeParser<L>` holds `tree_cache: HashMap<u64, (String, Tree)>` keyed by `safe_hash(source)`.
+Two design points matter:
 
-## AstError
+1. **Stored source, not just the hash.** The value keeps the full source string, and a cache hit
+   is confirmed by `cached_source == source`. A 64-bit hash collision therefore causes a re-parse,
+   never a wrong tree.
+2. **Bounded to `MAX_PARSE_CACHE_ENTRIES = 16`.** When the map reaches capacity it is *cleared
+   wholesale* before the next insert. This is a deliberately trivial eviction policy — the cache
+   exists to make *repeated analysis of the same buffer* free (the common editor case), not to be
+   a general LRU — and it caps memory at sixteen trees regardless of workload.
 
-Error types for AST operations:
+### Complexity
 
-```rust
-pub enum AstError {
-    /// Parser initialization failed
-    ParserInit(String),
-    /// Parsing failed completely (no tree produced)
-    ParseFailed,
-    /// Language mismatch
-    LanguageMismatch { expected: String, got: String },
-}
-```
+| Operation | Cost | Notes |
+|---|---|---|
+| First full parse | $`O(n)`$ | linear in source bytes $`n`$ |
+| Incremental reparse | $`O(\Delta + h)`$ | edited region $`\Delta`$ plus affected ancestors $`h`$ [[1]](#references) |
+| `collect_errors` | $`O(V)`$ | one pass; only run when `has_errors` |
+| `AstNode::from_ts_node` | $`O(V)`$ | builds an owned mirror of all $`V`$ nodes |
+| `descendants` / `find_*` | $`O(V)`$ | stack-based, no allocation beyond the stack |
 
-### Error Handling
+### Thread-safety
 
-```rust
-use libgrammstein::code::{CodeParser, Python, AstError};
-use std::sync::Arc;
+`CodeParser<L>` wraps tree-sitter's `Parser`, which is **not** `Sync`; keep one parser per
+thread. The *outputs* are freely shareable — `ParsedCode` and `AstNode` are plain owned data, so
+wrap them in `Arc` and fan out to worker threads for analysis.
 
-fn parse_python(source: &str) -> Result<(), AstError> {
-    let mut parser = CodeParser::new(Arc::new(Python::new()))?;
-    let parsed = parser.parse(source)?;
+![AST parsing and incremental reparse flow](../../diagrams/code-ast-flow.svg)
 
-    if parsed.has_errors {
-        // Note: parsing still succeeds with errors due to error recovery
-        println!("Parsed with {} errors", parsed.error_count());
-    }
+*Figure 1. The parse path: a `safe_hash` cache probe, a tree-sitter parse (fresh or incremental
+against an edited old tree), an `ERROR`/`MISSING` scan into `error_ranges`, and finally an owned
+`AstNode` mirror for downstream traversal.*
 
-    Ok(())
-}
+## Usage
 
-match parse_python("def broken(") {
-    Ok(()) => println!("Parsed successfully"),
-    Err(AstError::ParserInit(msg)) => {
-        eprintln!("Failed to initialize parser: {}", msg);
-    }
-    Err(AstError::ParseFailed) => {
-        eprintln!("Parsing failed completely");
-    }
-    Err(AstError::LanguageMismatch { expected, got }) => {
-        eprintln!("Wrong language: expected {}, got {}", expected, got);
-    }
-}
-```
-
-## Tree-sitter Node Kinds
-
-Common tree-sitter node kinds by language:
-
-### Python
-
-| Kind | Description |
-|------|-------------|
-| `module` | Root node |
-| `function_definition` | `def` function |
-| `class_definition` | `class` definition |
-| `if_statement` | `if` block |
-| `for_statement` | `for` loop |
-| `identifier` | Variable/function name |
-| `string` | String literal |
-| `integer` | Integer literal |
-| `ERROR` | Parse error |
-
-### Rust
-
-| Kind | Description |
-|------|-------------|
-| `source_file` | Root node |
-| `function_item` | `fn` function |
-| `impl_item` | `impl` block |
-| `struct_item` | `struct` definition |
-| `identifier` | Name |
-| `type_identifier` | Type name |
-| `string_literal` | String |
-| `integer_literal` | Number |
-
-### JavaScript
-
-| Kind | Description |
-|------|-------------|
-| `program` | Root node |
-| `function_declaration` | `function` declaration |
-| `arrow_function` | Arrow function |
-| `class_declaration` | `class` |
-| `identifier` | Name |
-| `string` | String literal |
-| `number` | Number literal |
-
-## Performance Considerations
-
-| Operation | Complexity | Notes |
-|-----------|------------|-------|
-| Full parse | O(n) | Linear in source length |
-| Incremental parse | O(k) | k = size of changed region |
-| Error collection | O(e) | e = number of errors |
-| AST traversal | O(n) | n = number of nodes |
-
-### Best Practices
-
-1. **Use incremental parsing** for editor integration
-2. **Reuse parsers** across parses (they cache state)
-3. **Check `has_errors`** before expensive operations
-4. **Use `is_in_error()`** to scope correction efforts
-
-## Thread Safety
-
-`CodeParser<L>` is not `Sync` due to tree-sitter's internal state, but `ParsedCode` can be shared:
+Detecting and reporting syntax errors:
 
 ```rust
 use std::sync::Arc;
-use std::thread;
+use libgrammstein::code::{CodeParser, Python};
 
-// Parse in main thread
 let mut parser = CodeParser::new(Arc::new(Python::new()))?;
-let parsed = Arc::new(parser.parse(source)?);
+let parsed = parser.parse("def foo(\n    return 42")?;   // missing ')'
 
-// Share parsed result across threads
-let parsed1 = Arc::clone(&parsed);
-let parsed2 = Arc::clone(&parsed);
-
-let handles = vec![
-    thread::spawn(move || parsed1.error_count()),
-    thread::spawn(move || parsed2.root().kind().to_string()),
-];
+if parsed.has_errors {
+    for e in parsed.errors() {
+        let (row, col) = e.start_position;
+        println!("{} at line {}, col {}: {:?}", e.kind, row + 1, col, e.text);
+    }
+}
+# Ok::<(), libgrammstein::code::AstError>(())
 ```
 
-## See Also
+Incremental reparse after an edit (the editor case):
 
-- [Language Framework](language.md) - `CodeLanguage` trait
-- [Tokenizer](tokenizer.md) - Token extraction from AST
-- [CPG](cpg.md) - Code Property Graphs built from AST
-- [Pipeline](pipeline.md) - End-to-end correction using AST
+```rust
+use std::sync::Arc;
+use libgrammstein::code::{CodeParser, EditInfo, Python};
+
+let mut parser = CodeParser::new(Arc::new(Python::new()))?;
+let mut parsed = parser.parse("def foo():\n    pass")?;
+let mut tree = parsed.tree;
+
+// User appends " + 1" after "pass" at byte 19, (row 1, col 8).
+let edit = EditInfo::insertion(19, 1, 8, " + 1");
+let reparsed = parser.parse_incremental("def foo():\n    pass + 1", &mut tree, &edit)?;
+assert!(!reparsed.has_errors);
+# Ok::<(), libgrammstein::code::AstError>(())
+```
+
+Finding structure with the owned tree:
+
+```rust
+use libgrammstein::code::AstNode;
+
+let ast = AstNode::from_ts_node(parsed.root(), &parsed.source);
+for func in ast.find_by_kind("function_definition") {
+    if let Some(name) = func.children.iter().find(|c| c.kind == "identifier") {
+        println!("function {:?} at row {}", name.text, func.start_position.0);
+    }
+}
+```
+
+## References
+
+1. T. A. Wagner & S. L. Graham (1998). *Efficient and flexible incremental parsing.* ACM
+   Transactions on Programming Languages and Systems 20(5), 980–1013.
+   [doi:10.1145/293677.293678](https://doi.org/10.1145/293677.293678)
+2. F. Yamaguchi, N. Golde, D. Arp & K. Rieck (2014). *Modeling and Discovering Vulnerabilities
+   with Code Property Graphs.* IEEE Symposium on Security and Privacy, 590–604.
+   [doi:10.1109/SP.2014.44](https://doi.org/10.1109/SP.2014.44)
+
+## See also
+
+- [Language](language.md) — `CodeLanguage` and the node kinds each grammar emits
+- [Tokenizer](tokenizer.md) — extracting typed tokens from this tree
+- [CPG](cpg.md) — the Code Property Graph built from the AST
+- [Pipeline](pipeline.md) — where the parser is owned and driven
+- [Overview](overview.md) — how AST parsing fits the whole module

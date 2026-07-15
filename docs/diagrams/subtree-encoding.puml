@@ -1,0 +1,37 @@
+@startuml subtree-encoding
+' A small AST and its depth-first FlatTree encoding with (label, depth, scope).
+' Render: plantuml -tsvg docs/diagrams/subtree-encoding.puml
+' Source of truth for Figure 2 in docs/components/subtree/overview.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+rectangle "A  ·  depth 0" as a #EF6C00
+rectangle "B  ·  depth 1" as b #EF6C00
+rectangle "D  ·  depth 2" as d #EF6C00
+rectangle "C  ·  depth 1" as c #EF6C00
+
+a --> b
+b --> d
+a --> c
+
+note right of a
+  <b>Depth-first flat encoding</b>
+  index 0: (A, depth 0, scope 0)
+  index 1: (B, depth 1, scope 1)
+  index 2: (D, depth 2, scope 2)
+  index 3: (C, depth 1, scope 3)
+  ----
+  canonical pattern string
+  0:A | 1:B | 2:D | 1:C
+end note
+@enduml

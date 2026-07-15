@@ -1,0 +1,55 @@
+@startuml embedding-bpe
+' Byte-Pair Encoding: the trainer grows a subword vocabulary by greedily merging
+' the most frequent adjacent symbol pair; the tokenizer replays merges by rank.
+' Render: plantuml -tsvg docs/diagrams/embedding-bpe.puml
+' Source of truth for Figure 1 in docs/components/embedding/bpe.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam activity {
+  BackgroundColor #2E7D32
+  FontColor white
+  BorderColor #263238
+  FontStyle bold
+  DiamondBackgroundColor #EF6C00
+  DiamondFontColor white
+}
+skinparam activityStart {
+  Color #263238
+}
+skinparam activityEnd {
+  Color #263238
+}
+title BPE — train (learn merges)  vs.  encode (replay merges)
+
+|#E8F5E9|Train: BpeTrainer::train|
+start
+:count_word_frequencies  (rayon par_iter);
+:initialize_vocab — split each word to chars + «</w>»;
+repeat
+  :count_pair_frequencies over all word splits;
+  :pick argmax-frequency pair (l, r);
+  if (freq(l,r) ≥ min_frequency ?) then (yes)
+    :record MergeOp  (l, r) → «lr»;
+    :apply_merge to every word split;
+  else (no — stop)
+    break
+  endif
+repeat while (|vocab| < vocab_size ?) is (more)
+->done;
+:emit BpeTokenizer (vocab + ordered merges);
+stop
+
+|#E8F5E9|Encode: BpeTokenizer::encode_word|
+start
+:split word to chars + «</w>»;
+repeat
+  :scan adjacent pairs → lowest merge_rank;
+  :merge that pair in place;
+repeat while (any pair has a rank ?) is (yes)
+->no more;
+:emit subword tokens;
+stop
+@enduml

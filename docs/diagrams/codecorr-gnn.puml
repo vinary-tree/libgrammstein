@@ -1,0 +1,50 @@
+@startuml codecorr-gnn
+' GNN semantic scorer: featurize the CPG, propagate with graph convolutions,
+' emit semantic issues — with a deterministic graph-rule fallback.
+' Render: plantuml -tsvg docs/diagrams/codecorr-gnn.puml
+' Source of truth for Figure 1 in docs/components/code/gnn.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title GNN Semantic Scorer over the Code Property Graph
+
+rectangle "**Code Property Graph**\nAST ⊕ CFG ⊕ DFG (petgraph DiGraph)" as cpg #EF6C00
+
+package "extract_features → GnnFeatures" {
+  rectangle "**NodeFeatures**\ntoken ⊕ structural ⊕ type\n(depth, child-count, span, kind)" as nf #2E7D32
+  rectangle "**EdgeFeatures**\n6-way one-hot\nAST · CFG · DFG · Call · Type" as ef #2E7D32
+}
+
+rectangle "**Graph convolution** (× num_layers)\nH⁽ˡ⁺¹⁾ = σ( Ã · H⁽ˡ⁾ · W⁽ˡ⁾ )" as gcn #2E7D32
+
+package "detect_issues" {
+  rectangle "**Learned path** 🟨\nembedding magnitude → anomaly score" as learned #2E7D32
+  rectangle "**Graph-rule fallback**\nDFG in-but-no-out ⇒ UnusedBinding\nunwrap/expect ⇒ MissingErrorHandling" as rules #EF6C00
+}
+
+rectangle "**SemanticIssue**\n{ node_idx, IssueType, confidence, suggestion }" as issue #455A64
+
+cpg --> nf
+cpg --> ef
+nf --> gcn
+ef --> gcn
+gcn --> learned
+cpg --> rules : no cached embeddings
+learned --> issue
+rules --> issue
+
+note right of gcn #E8F5E9
+  Ã = D^{−½}(A+I)D^{−½}  (Kipf & Welling GCN):
+  symmetric-normalized adjacency with self-loops.
+  σ = nonlinearity; W⁽ˡ⁾ = learned layer weights.
+end note
+
+@enduml

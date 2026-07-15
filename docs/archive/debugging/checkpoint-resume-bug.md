@@ -1,3 +1,10 @@
+> ⚠ **Archived — historical record, not current design.**
+> A point-in-time report for a specific interrupted-import defect and its fix. The
+> vocabulary-checkpoint path it describes (`checkpoint_vocabulary()` / `sync_vocabulary()`) has
+> since been replaced by `merge_and_rotate_vocabulary_wal()`. For the current importer design see
+> [`../../architecture/memory-optimization.md`](../../architecture/memory-optimization.md) and
+> [`../../architecture/google-books-importer.md`](../../architecture/google-books-importer.md).
+
 # Checkpoint Resume Bug: Count Mismatch After Interrupted Import
 
 ## Problem Summary

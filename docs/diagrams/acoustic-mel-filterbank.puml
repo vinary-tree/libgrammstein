@@ -1,0 +1,56 @@
+@startuml acoustic-mel-filterbank
+' How the triangular mel filterbank bins a linear-frequency power spectrum into M perceptual channels.
+' Render: plantuml -tsvg docs/diagrams/acoustic-mel-filterbank.puml
+' Source of truth for Figure 2 in docs/components/acoustic/features.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title Triangular Mel Filterbank — linear Hz bins ⇒ M perceptual channels
+
+legend top right
+  |= Color |= Concept |
+  |<#2E7D32>     | audio feature-extraction stage |
+  |<#546E7A>     | FFT bins in / mel energies out |
+endlegend
+
+rectangle "**Power spectrum** Pₜ\nK/2+1 linear-Hz bins\n(hz_per_bin = f_s / K)" as spec #546E7A
+
+rectangle "**mel(f) = 2595·log₁₀(1 + f/700)**\nM+2 equally-spaced mel points\n⇒ f(mel) = 700·(10^(mel/2595) − 1)" as scale #2E7D32
+
+package "Triangular filters Hₘ[k]  (rising then falling)" {
+  rectangle "H₀\nnarrow · low Hz" as h0 #2E7D32
+  rectangle "H₁" as h1 #2E7D32
+  rectangle "…" as hd #2E7D32
+  rectangle "H_{M−2}" as hm2 #2E7D32
+  rectangle "H_{M−1}\nwide · high Hz" as hm1 #2E7D32
+}
+
+rectangle "**Mel energies** Eₜ[m] = Σₖ Hₘ[k]·Pₜ[k]\n[M]  (M = num_mels)" as energies #546E7A
+
+spec --> scale : bin ⇒ Hz ⇒ mel
+scale --> h0
+scale --> h1
+scale --> hd
+scale --> hm2
+scale --> hm1
+h0 --> energies
+h1 --> energies
+hd --> energies
+hm2 --> energies
+hm1 --> energies
+
+note bottom of energies
+  Filters are uniform on the mel axis but
+  widen on the Hz axis — matching the ear's
+  finer resolution at low frequencies.
+end note
+
+@enduml

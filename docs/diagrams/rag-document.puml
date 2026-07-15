@@ -1,0 +1,111 @@
+@startuml rag-document
+' The document model: DocumentBuilder (staging) → Document (embedded, indexable)
+' → DocumentMeta (the projection the index actually stores). Also shows the
+' Synopsis provenance fork and the LanguageTag value object. Colour:
+'   #6A1B9A purple = retrieval-side types    #2E7D32 green = neural producers
+'   #00838F teal   = what is persisted       #546E7A grey  = value objects
+' Render: plantuml -tsvg docs/diagrams/rag-document.puml
+' Source of truth for Figure 1 in docs/components/rag/document.md §2.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam linetype ortho
+skinparam class {
+  BackgroundColor #6A1B9A
+  FontColor white
+  AttributeFontColor white
+  BorderColor #263238
+  HeaderBackgroundColor #4A148C
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title The document model — stage, embed, project
+
+class DocumentBuilder <<staging>> {
+  uri: String
+  title: Option<String>
+  content: Option<String>
+  explicit_synopsis: Option<String>
+  language: LanguageTag
+  metadata: DocumentMetadata
+  ..
+  build(id, synopsis, embedding) → Document
+}
+
+class Document <<indexable>> {
+  id: DocumentId
+  uri: String
+  title: Option<String>
+  **synopsis: Synopsis**
+  language: LanguageTag
+  **embedding: Vec<f32>**  //serde skip//
+  metadata: DocumentMetadata
+  topic_ids: Vec<TopicId>
+}
+
+class DocumentMeta <<stored>> #00838F {
+  uri · title
+  synopsis: String
+  synopsis_source: SynopsisSource
+  language: LanguageTag
+  metadata: DocumentMetadata
+  topic_ids: Vec<TopicId>
+  ..
+  //no embedding — the backend owns it//
+}
+
+class DocumentId <<newtype>> #546E7A {
+  0: u32
+  ..
+  ≤ 2³² − 1 documents
+}
+
+class LanguageTag <<value>> #546E7A {
+  language: String  //ISO 639-1//
+  dialect: Option<String>
+  ..
+  "en-US" ⇄ from_tag_string / to_tag_string
+}
+
+class DocumentMetadata <<value>> #546E7A {
+  content_type · source · date
+  authors: Vec<String>
+  extra: HashMap<String, String>
+}
+
+class Synopsis <<provenance>> #2E7D32 {
+  text: String
+  source: SynopsisSource
+  ..
+  **Explicit**  — author-supplied, used verbatim
+  **Generated** — MMR-extractive over sentences
+}
+
+class ModernBertEmbedder <<neural>> #2E7D32 {
+  embed_document(title, content) → Vec<f32>
+}
+
+DocumentBuilder --> Document : **build**\n(id, synopsis, embedding)
+ModernBertEmbedder --> Document : embedding ∈ ℝ⁷⁶⁸
+Synopsis --> Document : synopsis
+Document --> DocumentMeta : **from_document**\n(drops the embedding)
+Document *-- DocumentId
+Document *-- LanguageTag
+Document *-- DocumentMetadata
+
+note bottom of DocumentMeta
+  The projection **π** is lossy by design:
+  π(Document) = Document ∖ {embedding}.
+  Geometry lives in the backend, prose lives
+  in the index — so ""metadata.json"" stays
+  small and human-readable while the
+  embeddings go to a packed binary blob.
+end note
+
+note right of Synopsis
+  ""create_synopsis(explicit, content)""
+  returns **Explicit** when the author gave
+  one, else **Generated**. ""RetrievalConfig""
+  can include or exclude each kind, so a
+  caller may demand author-written prose.
+end note
+@enduml

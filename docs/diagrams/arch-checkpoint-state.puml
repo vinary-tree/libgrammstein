@@ -1,0 +1,87 @@
+@startuml arch-checkpoint-state
+' The two state machines that make a crash survivable: a PREFIX's lifecycle (tracked
+' in the global ImportCheckpoint) and a SHARD's sync lifecycle (ShardSyncCoordinator).
+' Each is a live TLA+ model — the red notes name the machine-checked invariants.
+' Colour legend (semantic, shared across all repo diagrams — see architecture.puml):
+'   #1565C0 blue = in-flight / statistical core   #2E7D32 green = durable, terminal-good
+'   #00838F teal = storage / persistence          #EF6C00 orange = error states
+'   #546E7A grey = not-yet-started                #C62828 red = formal verification
+' Render: plantuml -tsvg docs/diagrams/arch-checkpoint-state.puml
+' Source of truth for Figure 4 in docs/architecture/google-books-importer.md §5
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam NoteBackgroundColor #FFEBEE
+skinparam NoteBorderColor #C62828
+skinparam state {
+  BackgroundColor #ECEFF1
+  FontColor #263238
+  BorderColor #455A64
+  FontStyle bold
+  BackgroundColor<<init>> #546E7A
+  FontColor<<init>> #FFFFFF
+  BackgroundColor<<active>> #1565C0
+  FontColor<<active>> #FFFFFF
+  BackgroundColor<<store>> #00838F
+  FontColor<<store>> #FFFFFF
+  BackgroundColor<<durable>> #2E7D32
+  FontColor<<durable>> #FFFFFF
+  BackgroundColor<<error>> #EF6C00
+  FontColor<<error>> #FFFFFF
+}
+title Crash-safety state machines — prefix lifecycle (left) · shard sync (right)
+
+state "PREFIX  —  ImportCheckpoint,  one instance per (order, prefix)" as PrefixSM {
+  state "NotStarted" as NS <<init>>
+  state "InProgress" as IP <<active>>
+  state "Completed" as CO <<durable>>
+  state "Failed" as FA <<error>>
+
+  [*] --> NS
+  NS --> IP : start_prefix\n(a worker claims it)
+  IP --> CO : commit_prefix_tx\n**data durable first**
+  IP --> FA : stream or storage error
+  FA --> IP : retry with backoff
+  IP --> FA : **crash, then reopen**\nrecover_in_progress_as_failed
+  CO --> [*]
+}
+
+note bottom of PrefixSM
+  **CheckpointStateMachine.tla**  (TLC + TLAPS)
+  · **DisjointSets** — a prefix sits in **exactly one** set, so it
+    can never be counted twice.
+  · **CrashRecoverySound** — every prefix recorded in-progress
+    at the crash is, after restart, either still in-progress or
+    Failed. Never silently Completed.
+  · **NoDoubleProcessing** — Completed ∩ InProgress = ∅.
+end note
+
+state "SHARD  —  ShardSyncCoordinator,  an AtomicU8 driven by CAS" as ShardSM {
+  state "Clean" as CL <<durable>>
+  state "Dirty" as DI <<store>>
+  state "Syncing" as SY <<active>>
+  state "SyncFailed" as SF <<error>>
+
+  [*] --> CL
+  CL --> DI : first increment_cas\nmark_dirty (a **Clean-only** CAS)
+  DI --> SY : try_start_sync\nCAS Dirty → Syncing — **elects the one syncer**
+  SY --> CL : complete_sync(lsn)
+  SY --> SF : fail_sync(err)
+  SF --> DI : retry_sync
+  DI --> DI : further writes\n(**already Dirty** — no transition)
+  SY --> SY : writes **continue** during the sync\n(the snapshot is an immutable RCU point-in-time)
+}
+
+note bottom of ShardSM
+  **AsyncShardSync.tla**  (TLC + TLAPS — 249 proof obligations)
+  · **AtMostOneSyncer** — the Dirty → Syncing CAS means two
+    checkpoint threads can never publish the same shard.
+  · **CleanMeansZeroDirty** — Clean implies no unpublished write.
+  · A write landing //during// Syncing is safe **by delegation**:
+    libdictenstein's LockFreeDurableCheckpoint retains any
+    post-watermark write in the WAL and replays it on reopen.
+end note
+
+@enduml

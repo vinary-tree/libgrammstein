@@ -1,0 +1,121 @@
+@startuml corpus-reader-trait
+' The CorpusReader abstraction: two required iterator methods, two defaulted size
+' hints, three concrete readers, and the blanket impl for Box<dyn CorpusReader>
+' that lets the CLI dispatch on --format at run time.
+' Render: plantuml -tsvg docs/diagrams/corpus-reader-trait.puml
+' Source of truth for Figure 2 in docs/components/corpus/overview.md, section "The CorpusReader contract".
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam class {
+  BorderColor #263238
+  FontColor white
+  AttributeFontColor #263238
+  StemColor #37474F
+}
+skinparam note {
+  BackgroundColor #ECEFF1
+  BorderColor #90A4AE
+}
+title The CorpusReader contract and its implementors
+
+interface "CorpusReader : Send + Sync" as CR #1565C0 {
+  + documents() : Box<dyn Iterator<Item = Document> + Send>
+  + sentences() : Box<dyn Iterator<Item = String> + Send>
+  ..  provided (defaulted)  ..
+  + estimated_tokens() : Option<usize> = None
+  + document_count() : Option<usize> = None
+}
+
+class Document #546E7A {
+  + id : Option<String>
+  + title : Option<String>
+  + content : String
+  + source : Option<PathBuf>
+  --
+  + new(content)
+  + with_title(title, content)
+}
+
+class PlaintextReader #546E7A {
+  - paths : Vec<PathBuf>
+  - normalizer : Normalizer
+  - tokenizer : Tokenizer
+  - extensions : Vec<String>
+  --
+  + from_file(path)
+  + from_directory(path)
+  + from_paths(paths)
+  + with_normalizer(n)
+  + with_tokenizer(t)
+  + with_extensions(exts)
+  --
+  document_count = Some(paths.len())
+}
+
+class GutenbergReader #546E7A {
+  - paths : Vec<PathBuf>
+  --
+  + from_file(path)
+  + from_directory(dir)
+  + from_paths(paths)
+  --
+  document_count = Some(paths.len())
+}
+
+class WikipediaReader #546E7A {
+  - path : PathBuf
+  - config : WikipediaConfig
+  --
+  + new(path)
+  + with_config(path, config)
+  + from_url(url, config) †
+  + from_url_with_strategy(url, config, s) †
+  --
+  document_count = None
+}
+
+class "Box<dyn CorpusReader>" as BOX #90A4AE {
+  blanket impl —
+  forwards all four
+  methods to (**self)
+}
+
+class PrefetchingReader #90A4AE {
+  + new(reader)
+  + with_config(reader, cfg)
+  + batches() : PrefetchBatchIterator
+  --
+  impl Iterator<Item = String>
+}
+
+CR <|.. PlaintextReader
+CR <|.. GutenbergReader
+CR <|.. WikipediaReader
+CR <|.. BOX
+PrefetchingReader o--> CR : wraps R : CorpusReader
+CR ..> Document : yields
+
+note left of CR
+  Both required methods borrow &self and return a
+  **lazily evaluated, Send** boxed iterator, so a reader
+  may be iterated more than once and moved across
+  threads. No shipped reader overrides estimated_tokens,
+  so it is **always None** — progress bars must fall back
+  to byte or document counts.
+end note
+
+note bottom of WikipediaReader
+  † from_url* require the **http-corpus** feature.
+  Only **bzip2** is decompressed (.bz2 suffix);
+  there is no gzip / xz / zstd support.
+end note
+
+note bottom of BOX
+  create_corpus_reader(path, CorpusFormat) in the CLI returns
+  Box<dyn CorpusReader>, so the reader is chosen at run time
+  from **--format** — the format is never sniffed from content.
+end note
+@enduml

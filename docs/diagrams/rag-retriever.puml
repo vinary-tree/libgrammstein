@@ -1,0 +1,72 @@
+@startuml rag-retriever
+' The retriever query pipeline as a sequence: text → embedding → backend top-k →
+' metadata join → threshold/synopsis filter → ranked results. Colour:
+'   #2E7D32 green = embeddings   #6A1B9A purple = retrieval   #00838F teal = storage
+' Render: plantuml -tsvg docs/diagrams/rag-retriever.puml
+' Source of truth for Figure 1 in docs/components/rag/retriever.md §3.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+skinparam ParticipantFontColor white
+skinparam ParticipantFontStyle bold
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam sequence {
+  LifeLineBorderColor #90A4AE
+  LifeLineBackgroundColor #ECEFF1
+}
+title Retriever<B>::query — one text query, end to end
+
+actor "Caller" as user #455A64
+participant "Retriever<B>" as r #6A1B9A
+participant "ModernBertEmbedder" as e #2E7D32
+participant "RagIndex<B>" as idx #00838F
+participant "B: RetrievalBackend" as b #6A1B9A
+
+user -> r : **query(“what is dense retrieval?”)**\n&mut self — the embedder caches
+activate r
+
+r -> e : embed_query(q)
+activate e
+note right of e
+  Tokenise (≤ 8 192 tokens) → ModernBERT
+  → pool (CLS) → normalise.
+  A **query** and a **document** are embedded by
+  the //same// encoder into the //same// ℝ⁷⁶⁸ —
+  that shared space is what makes ⟨v̂_q , v̂_d⟩
+  meaningful.
+end note
+e --> r : v_q ∈ ℝ⁷⁶⁸
+deactivate e
+
+r -> idx : query(v_q, config.top_k)
+activate idx
+
+idx -> b : query(v_q, top_k)
+activate b
+note right of b
+  Exact: one ""sgemv"" over the n × d matrix,
+  then introselect for the k largest.
+  HNSW: greedy descent, beam ef_search.
+end note
+b --> idx : Vec<(DocumentId, f32)>\nsorted by score ↓
+deactivate b
+
+idx -> idx : **filter_map** id ↦ documents[id]\n(ids with no metadata are dropped)
+idx --> r : Vec<(DocumentMeta, f32)>
+deactivate idx
+
+r -> r : **filter**\n① score ≥ min_similarity\n② include_explicit_synopsis\n③ include_generated_synopsis
+r -> r : **rank** — enumerate() ⇒ rank = i + 1
+
+r --> user : Vec<RetrievalResult>\nuri · title · synopsis · score · rank
+deactivate r
+
+note over r, b
+  **Ranks are assigned before filtering is applied.**
+  ""enumerate()"" runs on the raw top-k, so a result
+  surviving a ""min_similarity"" cut keeps the index it
+  had among the //unfiltered// hits: ranks stay faithful
+  to the backend's ordering but may contain gaps.
+end note
+@enduml

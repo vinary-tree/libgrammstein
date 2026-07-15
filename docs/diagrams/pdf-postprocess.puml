@@ -1,0 +1,51 @@
+@startuml pdf-postprocess
+' PostProcessor::process_content — six order-dependent passes, each gated by a flag.
+' Render: plantuml -tsvg docs/diagrams/pdf-postprocess.puml
+' Source of truth for Figure 3 in docs/components/sources/pdf.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+legend top right
+|= Concept |= Color |
+| postprocessing pass | <back:#EF6C00>        </back> |
+| informational only | <back:#00838F>        </back> |
+| dead configuration | <back:#455A64>        </back> |
+| corruption hazard | <back:#C62828>        </back> |
+endlegend
+
+rectangle "**raw LaTeX**\nfrom markdown_to_latex or\nmathpix_markdown_to_latex" as raw #546E7A
+
+rectangle "**① normalize_whitespace**\ncollapse runs of space/tab\ncap consecutive newlines at 2\ndrop CR · trim" as p1 #EF6C00
+rectangle "**② fix_ocr_errors**\n26 literal substitutions, in order\n\\bgin{ ⇒ \\begin{ · \\frc{ ⇒ \\frac{\n\\Ieft ⇒ \\left · tabIe ⇒ table" as p2 #EF6C00
+rectangle "**③ normalize_math_delimiters**\n$$ … $$ ⇒ \\[ … \\]\nsurround with newlines\ncollapse \\n\\n\\n ⇒ \\n\\n" as p3 #EF6C00
+rectangle "**④ fix_brace_matching**\nstack-match { } [ ] ( )\ndrop unmatched closers\nappend missing closers at EOF" as p4 #EF6C00
+rectangle "**⑤ remove_artifacts**\nstrip U+FFFD · NUL · BOM\nZWSP · ZWNJ · ZWJ · word-joiner\ncollapse .. and ...." as p5 #EF6C00
+rectangle "**⑥ wrap_lines**\nonly when max_line_length > 0\nnever wraps lines starting with \\\nor containing \\[ / \\]" as p6 #EF6C00
+
+rectangle "**validate_latex**\nbrace/bracket/paren balance\nodd '$' count · \\begin vs \\end\n⇒ eprintln! warnings, never an Err" as validate #00838F
+rectangle "**PostProcessorConfig::normalize**\nset by normalize_output(bool)\nnever read by process_content" as dead #455A64
+rectangle "**half-open intervals**\n[0,1) ⇒ [0,1]\n')' does not match '[' on the stack,\nso it is dropped and ']' is appended" as hazard #C62828
+
+rectangle "**ExtractedDocument**\npages[*].latex and pages[*].markdown\nboth rewritten in place" as out #EF6C00
+
+raw --> p1
+p1 --> p2
+p2 --> p3
+p3 --> p4
+p4 --> p5
+p5 --> p6
+p6 --> out
+out --> validate : if validate_latex
+p4 -[#C62828,bold]-> hazard : LaTeX ≠ balanced-bracket language
+dead -[#455A64,dashed]-> p1 : never consulted
+@enduml

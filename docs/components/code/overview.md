@@ -1,280 +1,211 @@
-# Code Module Overview
+# Code Correction: Module Overview
 
-The code module provides a comprehensive framework for programming language modeling, syntactic analysis, and intelligent code correction in libgrammstein.
+The **code** module is libgrammstein's framework for modeling programming languages and
+performing syntactic and semantic **code correction**. Where the rest of the crate models
+*natural* language with n-grams and embeddings, this module models *formal* languages: it parses
+source with tree-sitter, fuses three program representations into a Code Property Graph, and
+runs an ensemble of correctors — lexical, grammatical, and semantic — to propose ranked repairs
+for buggy or partially written code.
 
-## What is the Code Module?
+> **Scope.** Source of truth: [`src/code/mod.rs`](../../../src/code/mod.rs) and the submodules it
+> re-exports. This page is the map; each concept has a dedicated page — [Language](language.md),
+> [Languages](languages.md), [AST](ast.md), [CPG](cpg.md), [Tokenizer](tokenizer.md),
+> [Correction](correction.md), and [Pipeline](pipeline.md). The corrector implementations live
+> under [Correctors](correctors/overview.md); the grammar and neural machinery under
+> [PCFG](pcfg.md), [GNN](gnn.md), and [Embeddings](embeddings.md).
 
-The code module enables error detection and correction in source code through a layered architecture combining:
+## Acronyms
 
-- **Lexical correction**: Token-level fuzzy matching using liblevenshtein
-- **Grammar correction**: PCFG-based structural validation with Earley parsing
-- **Semantic correction**: GNN-powered analysis using Code Property Graphs
+Every acronym is defined here before it is used below.
 
-It supports multiple programming languages (Python, Rust, JavaScript, Rholang, MeTTa) with a pluggable language interface.
+| Acronym | Expansion | Meaning in this module |
+|---|---|---|
+| **AST** | Abstract Syntax Tree | tree-sitter's syntactic parse tree |
+| **CFG** | Control-Flow Graph | edges for possible execution order |
+| **DFG** | Data-Flow Graph | def→use edges between variable definitions and reads |
+| **CPG** | Code Property Graph | the joint graph $`\text{AST} \cup \text{CFG} \cup \text{DFG}`$ [[1]](#references) |
+| **PCFG** | Probabilistic Context-Free Grammar | production rules weighted by corpus frequency |
+| **GNN** | Graph Neural Network | message-passing scorer over the CPG |
+| **WFST** | Weighted Finite-State Transducer | export target for lling-llang composition |
+| **DSL** | Domain-Specific Language | here: Rholang and MeTTa |
 
-## Architecture
+## What the module does, and why
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           Code Module                                    │
-│                                                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                      Source Code Input                           │    │
-│  └──────────────────────────────┬──────────────────────────────────┘    │
-│                                 │                                        │
-│                                 ▼                                        │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │              Tree-sitter (Incremental Parsing)                   │    │
-│  │           ParsedCode with AST + ERROR nodes                      │    │
-│  └──────────────────────────────┬──────────────────────────────────┘    │
-│                                 │                                        │
-│         ┌───────────────────────┼───────────────────────┐               │
-│         │                       │                       │               │
-│         ▼                       ▼                       ▼               │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐  │
-│  │    Lexical      │  │    Grammar      │  │      Semantic           │  │
-│  │   Corrector     │  │   Corrector     │  │      Corrector          │  │
-│  │                 │  │                 │  │                         │  │
-│  │ • fuzzy match   │  │ • PCFG rules    │  │ • CPG analysis          │  │
-│  │ • edit distance │  │ • Earley parse  │  │ • GNN scoring           │  │
-│  │ • dictionaries  │  │ • completions   │  │ • embeddings            │  │
-│  └────────┬────────┘  └────────┬────────┘  └────────────┬────────────┘  │
-│           │                    │                        │               │
-│           └────────────────────┼────────────────────────┘               │
-│                                ▼                                        │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    Ensemble Corrector                            │    │
-│  │  • weighted combination    • deduplication    • agreement boost  │    │
-│  └──────────────────────────────┬──────────────────────────────────┘    │
-│                                 │                                        │
-│                                 ▼                                        │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    Correction Pipeline                           │    │
-│  │            Parse → Tokenize → Analyze → Correct → Rank          │    │
-│  └──────────────────────────────┬──────────────────────────────────┘    │
-│                                 │                                        │
-│                                 ▼                                        │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                   Ranked Corrections                             │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+A code corrector faces a problem a natural-language corrector does not: **most tokens are drawn
+from a fixed, formally specified vocabulary**, and a single wrong character can make a file
+syntactically invalid. Yet real editors must analyze code *while it is being typed* — that is,
+while it is still ungrammatical. The module is built around that tension:
 
-## Key Components
+1. **Parse permissively.** tree-sitter is an incremental **GLR** parser with *error recovery*:
+   it always returns a tree, inserting `ERROR` and `MISSING` marker nodes where the input
+   violates the grammar [[2]](#references). Correction can therefore target exactly the broken
+   regions (see [AST](ast.md)).
+2. **Represent richly.** Beyond syntax, semantic bugs (a misused variable, a type error) need
+   *control* and *data* flow. The CPG unifies all three into one queryable graph
+   [[1]](#references) (see [CPG](cpg.md)).
+3. **Correct in complementary ways.** No single signal catches every error, so three correctors
+   with independent failure modes vote, and their agreement is rewarded (see
+   [Correctors](correctors/overview.md)).
 
-| Component | Description |
-|-----------|-------------|
-| `CodeLanguage` | Trait defining language-specific behavior (keywords, syntax, parsing) |
-| `ParsedCode` | Tree-sitter parse result with error recovery |
-| `CodePropertyGraph` | Unified AST + CFG + DFG representation |
-| `WeightedCFG` | Probabilistic context-free grammar for structure |
-| `Correction` | Single correction suggestion with confidence score |
-| `CorrectionPipeline` | End-to-end orchestration of correction phases |
+The three correctors mirror the three classic error strata of a compiler front-end:
 
-## Quick Start
+- **Lexical** — token-level typos (`retrun` → `return`). Fuzzy matching over the language's
+  keyword/type/identifier dictionaries with liblevenshtein automata (see
+  [Lexical corrector](correctors/lexical.md)).
+- **Grammar** — structural errors (a missing `)` or `;`). A PCFG scores token sequences and an
+  Earley parser proposes valid completions (see [Grammar corrector](correctors/grammar.md) and
+  [PCFG](pcfg.md)).
+- **Semantic** — meaning-level errors (variable misuse, type mismatch). A GNN reads the CPG (see
+  [Semantic corrector](correctors/semantic.md) and [GNN](gnn.md)).
+
+![Code correction module: parse, analyze, correct, rank](../../diagrams/code-overview.svg)
+
+*Figure 1. Source flows through one tree-sitter parse into two representations — a typed token
+stream and a Code Property Graph — which feed the three correctors. The `EnsembleCorrector`
+merges their suggestions through a bounded streaming collector into ranked corrections.*
+
+## Core types
+
+Each type below is re-exported from `libgrammstein::code`; the "Defined in" column links its
+page.
+
+| Type | Role | Defined in |
+|---|---|---|
+| [`CodeLanguage`](language.md) | trait: grammar, keywords, token classification | `language.rs` |
+| [`Python`, `Rust`, `JavaScript`, `Rholang`, `MeTTa`](languages.md) | language implementations | `languages/` |
+| [`ParsedCode`](ast.md) | tree-sitter parse result with error ranges | `ast.rs` |
+| [`AstNode`](ast.md) | owned, traversable syntax node | `ast.rs` |
+| [`CodeToken`](tokenizer.md) | typed token with `TokenContext` | `tokenizer.rs` |
+| [`CodePropertyGraph`](cpg.md) | fused AST + CFG + DFG | `cpg.rs` |
+| [`WeightedCFG`](pcfg.md) | trained probabilistic grammar | `pcfg.rs` |
+| [`Correction`](correction.md) | one ranked repair suggestion | `correction.rs` |
+| [`CodeCorrector`](correction.md) | trait implemented by every corrector | `correction.rs` |
+| [`CorrectionPipeline`](pipeline.md) | end-to-end orchestration | `pipeline.rs` |
+
+## Quick start
+
+The pipeline is the one-call front door. Note that `CorrectionPipeline::new` takes an **optional
+grammar** and returns a `Result`, and that `analyze` takes `&mut self` (the parser caches trees):
 
 ```rust
 use std::sync::Arc;
-use libgrammstein::code::{
-    CorrectionPipeline, PipelineConfig, Python,
-    CodeCorrector, Correction,
-};
+use libgrammstein::code::{CorrectionPipeline, PipelineConfig, Python};
 
-// Create a Python language handler
+// A Python pipeline with no PCFG grammar (lexical + semantic correctors only).
 let python = Arc::new(Python::new());
+let mut pipeline = CorrectionPipeline::new(python, None, PipelineConfig::default())?;
 
-// Create a correction pipeline
-let config = PipelineConfig::default();
-let pipeline = CorrectionPipeline::new(python, config);
-
-// Analyze code with errors
-let source = r#"
-def calcluate_total(items):
-    retrun sum(items)
-"#;
-
+let source = "def calcluate_total(items):\n    retrun sum(items)\n";
 let result = pipeline.analyze(source)?;
 
-// Print corrections
-for correction in result.corrections {
+// Corrections are ranked by descending confidence.
+for c in result.corrections.ranked() {
     println!(
-        "Line {}: {} -> {} (confidence: {:.2})",
-        correction.start_byte,
-        correction.original,
-        correction.replacement,
-        correction.confidence
+        "bytes {}..{}: {} -> {} (confidence {:.2}, {:?})",
+        c.start_byte, c.end_byte, c.original, c.replacement, c.confidence, c.source
     );
 }
+# Ok::<(), libgrammstein::code::PipelineError>(())
 ```
 
-## Correction Layers
-
-### Layer 1: Lexical Correction
-
-Token-level spelling correction using liblevenshtein:
-
-- **Keywords**: Correct `retrun` → `return`, `whlie` → `while`
-- **Identifiers**: Suggest similar names from project corpus
-- **Types**: Fix `stirng` → `string`, `boolen` → `boolean`
+To teach the ensemble your project's identifiers and variables directly (both take `&mut`):
 
 ```rust
-use libgrammstein::code::correctors::LexicalCorrector;
+use std::sync::Arc;
+use libgrammstein::code::{EnsembleCorrector, Python};
 
-let mut corrector = LexicalCorrector::with_defaults(python.clone());
-corrector.add_identifier("calculate_total");  // Learn from codebase
-
-let corrections = corrector.correct_token(&token, &context);
+let python = Arc::new(Python::new());
+// with_defaults(language, grammar): lexical + semantic; add grammar with Some(cfg).
+let mut ensemble = EnsembleCorrector::with_defaults(python, None);
+ensemble.add_identifiers(&["calculate_total", "user_count"]);
+ensemble.register_variables(&[("user_count".to_string(), Some("int".to_string()))]);
 ```
 
-### Layer 2: Grammar Correction
+## Supported languages
 
-PCFG-based structural validation:
+Five languages ship, each behind its own feature so a binary pulls in only the tree-sitter
+grammars it needs. Details and per-language token tables are in [Languages](languages.md).
 
-- Detect missing tokens (`;`, `)`, `}`)
-- Suggest valid completions based on grammar rules
-- Use Earley parsing for incremental validation
+| Language | Feature | Tree-sitter grammar | Extensions |
+|---|---|---|---|
+| Python | `code-python` | `tree-sitter-python` | `py`, `pyw`, `pyi` |
+| Rust | `code-rust` | `tree-sitter-rust` | `rs` |
+| JavaScript | `code-javascript` | `tree-sitter-javascript` | `js`, `jsx`, `mjs`, `cjs` |
+| Rholang | `code-rholang` | `rholang-tree-sitter` | `rho` |
+| MeTTa | `code-metta` | `tree-sitter-metta` | `metta`, `mt` |
 
-```rust
-use libgrammstein::code::correctors::GrammarCorrector;
-use libgrammstein::code::pcfg::WeightedCFG;
+## Feature gates
 
-let grammar = WeightedCFG::from_corpus(&corpus)?;
-let corrector = GrammarCorrector::with_defaults(python.clone(), grammar);
-
-let corrections = corrector.correct_token(&token, &context);
-```
-
-### Layer 3: Semantic Correction
-
-CPG and GNN-based semantic analysis:
-
-- **Variable misuse**: Detect undefined or shadowed variables
-- **Type errors**: Identify type mismatches
-- **API misuse**: Flag incorrect API usage patterns
-
-```rust
-use libgrammstein::code::correctors::SemanticCorrector;
-
-let corrector = SemanticCorrector::with_defaults(python.clone());
-
-// Register known variables
-corrector.register_variable("user_count".into(), Some("int".into()), 0);
-
-let corrections = corrector.correct_token(&token, &context);
-```
-
-### Ensemble Combination
-
-Combine all layers with configurable weights:
-
-```rust
-use libgrammstein::code::correctors::{EnsembleCorrector, EnsembleCorrectorConfig};
-
-let config = EnsembleCorrectorConfig {
-    lexical_weight: 0.4,
-    grammar_weight: 0.35,
-    semantic_weight: 0.25,
-    min_confidence: 0.3,
-    agreement_boost: true,
-    ..Default::default()
-};
-
-let corrector = EnsembleCorrector::new(python.clone(), Some(grammar), config);
-```
-
-## Supported Languages
-
-| Language | Feature Flag | Tree-sitter Grammar |
-|----------|--------------|---------------------|
-| Python | `code-python` | `tree-sitter-python` |
-| Rust | `code-rust` | `tree-sitter-rust` |
-| JavaScript | `code-javascript` | `tree-sitter-javascript` |
-| Rholang | `code-rholang` | `rholang-tree-sitter` |
-| MeTTa | `code-metta` | `tree-sitter-metta` |
-
-## Feature Flags
-
-Enable the code module with feature flags in `Cargo.toml`:
+The module is entirely optional; enable it and the languages you need in `Cargo.toml`:
 
 ```toml
 [dependencies]
-libgrammstein = { version = "0.1", features = ["code", "code-python"] }
+libgrammstein = { version = "0.1", features = ["code-python", "code-rust"] }
 ```
 
-| Feature | Description |
-|---------|-------------|
-| `code` | Core code module (tree-sitter, petgraph) |
-| `code-python` | Python language support |
-| `code-rust` | Rust language support |
-| `code-javascript` | JavaScript language support |
-| `code-rholang` | Rholang (blockchain) support |
-| `code-metta` | MeTTa (reasoning) support |
-| `code-neural` | Neural embeddings (UniXcoder, GraphCodeBERT) |
-| `code-mainstream` | All mainstream languages |
-| `code-dsl` | All domain-specific languages |
-| `code-full` | All languages + neural features |
+| Feature | Pulls in | Enables |
+|---|---|---|
+| `code` | `tree-sitter`, `petgraph`, `walkdir` | core module (parse, CPG, tokenize, correct) |
+| `code-python` / `-rust` / `-javascript` | mainstream grammars | one mainstream language each |
+| `code-rholang` / `-metta` | DSL grammars | one domain-specific language each |
+| `code-mainstream` | Python + Rust + JavaScript | all mainstream languages |
+| `code-dsl` | Rholang + MeTTa | all domain-specific languages |
+| `code-neural` | `neural-rescore`, `ort` | CodeT5+ / UniXcoder / GraphCodeBERT embeddings |
+| `code-full` | `code-neural` + `code-mainstream` + `code-dsl` | everything |
+| `lling-llang-integration` | `lling-llang` | WFST export of PCFGs |
+
+Each language feature transitively enables `code`, so `features = ["code-python"]` is
+sufficient; the bare `code` feature gives the framework with no languages.
+
+## Concurrency
+
+The module follows the crate-wide preference for immutable, shareable state (see
+[Threading Model](../../architecture/threading.md)):
+
+- every `CodeLanguage` implementation is `Send + Sync` and stateless (a unit struct);
+- `CodeCorrector::correct_token` and `correct_range` take `&self`, so one corrector can serve
+  many threads;
+- `CodePropertyGraph`, `ParsedCode`, and `AstNode` are plain data, freely wrapped in `Arc`.
+
+The one exception is `CodeParser` (inside `CorrectionPipeline`): it owns a mutable tree-sitter
+`Parser` and a bounded parse cache, so `analyze` is `&mut self`. For multi-threaded analysis,
+build one pipeline per worker thread rather than sharing a single `&mut` pipeline.
+
+## Complexity at a glance
+
+For source of $`n`$ bytes producing $`V`$ graph nodes and $`E`$ edges:
+
+| Stage | Cost | Note |
+|---|---|---|
+| tree-sitter parse | $`O(n)`$ amortized | incremental after the first parse [[2]](#references) |
+| Tokenization | $`O(V)`$ | one pass over AST leaves |
+| CPG construction | $`O(V + E)`$ | three linear passes (see [CPG](cpg.md)) |
+| Lexical correction | $`O(\lvert D \rvert \cdot d)`$ | dictionary size $`\lvert D \rvert`$, max edit distance $`d`$ |
+| Grammar (Earley) | $`O(n^3)`$ worst case | linear for many practical grammars |
+| GNN scoring | $`O(L \cdot E)`$ | $`L`$ message-passing layers |
 
 ## Integration with lling-llang
 
-Export grammars to WFSTs for composition with lling-llang pipelines:
+Under the `lling-llang-integration` feature, a trained `WeightedCFG` exports to a **WFST** through
+the `PcfgWfstExport` trait, so a grammar can be composed into an lling-llang lexical∘grammar∘
+semantic transducer cascade. See [WFST Export](wfst-export.md) and the ecosystem
+[integration docs](../../integration/lling-llang/overview.md).
 
-```rust
-#[cfg(feature = "lling-llang-integration")]
-use libgrammstein::code::{PcfgWfstConfig, PcfgWfstExport};
+## References
 
-let config = PcfgWfstConfig {
-    max_depth: 5,
-    min_probability: 1e-10,
-    ..Default::default()
-};
+1. F. Yamaguchi, N. Golde, D. Arp & K. Rieck (2014). *Modeling and Discovering Vulnerabilities
+   with Code Property Graphs.* IEEE Symposium on Security and Privacy, 590–604.
+   [doi:10.1109/SP.2014.44](https://doi.org/10.1109/SP.2014.44)
+2. T. A. Wagner & S. L. Graham (1998). *Efficient and flexible incremental parsing.* ACM
+   Transactions on Programming Languages and Systems 20(5), 980–1013.
+   [doi:10.1145/293677.293678](https://doi.org/10.1145/293677.293678)
 
-let (wfst, vocabulary) = grammar.to_wfst::<TropicalWeight>(config);
-```
+## See also
 
-## Thread Safety
-
-All code module components support concurrent access:
-
-- `CodeLanguage` implementations are `Send + Sync`
-- Correctors use `&self` (immutable) API for thread-safe sharing
-- `CorrectionPipeline` can be wrapped in `Arc` for multi-threaded use
-
-```rust
-use std::sync::Arc;
-use std::thread;
-
-let pipeline = Arc::new(CorrectionPipeline::new(python, config));
-
-let handles: Vec<_> = sources.iter().map(|source| {
-    let pipeline = Arc::clone(&pipeline);
-    let source = source.clone();
-    thread::spawn(move || pipeline.analyze(&source))
-}).collect();
-```
-
-## Performance Considerations
-
-| Operation | Complexity | Notes |
-|-----------|------------|-------|
-| Parsing | O(n) | Incremental with tree-sitter |
-| Lexical correction | O(k * d) | k = dictionary size, d = max edit distance |
-| Grammar validation | O(n³) | Earley parser worst case |
-| CPG construction | O(n + e) | n = nodes, e = edges |
-| GNN scoring | O(L * n²) | L = layers, n = nodes |
-
-For large codebases, consider:
-- Incremental parsing for real-time analysis
-- Caching embeddings for repeated queries
-- Limiting correction scope to error regions
-
-## See Also
-
-- [Language](language.md) - CodeLanguage trait and TokenType system
-- [Languages](languages.md) - Language implementations
-- [AST](ast.md) - Tree-sitter integration
-- [CPG](cpg.md) - Code Property Graphs
-- [Correction](correction.md) - Correction types and framework
-- [Correctors](correctors/overview.md) - Corrector implementations
-- [Pipeline](pipeline.md) - End-to-end correction workflow
-- [PCFG](pcfg.md) - Probabilistic context-free grammars
-- [GNN](gnn.md) - Graph neural networks for code
+- [Language](language.md) — the `CodeLanguage` trait and `TokenType` taxonomy
+- [Languages](languages.md) — the five shipped language implementations
+- [AST](ast.md) — tree-sitter parsing, error recovery, incremental reparse
+- [CPG](cpg.md) — the Code Property Graph in depth
+- [Correction](correction.md) — the correction data model
+- [Pipeline](pipeline.md) — the end-to-end `analyze` workflow
+- [Correctors](correctors/overview.md) — lexical, grammar, semantic, and ensemble correctors

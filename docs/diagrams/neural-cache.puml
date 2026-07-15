@@ -1,0 +1,59 @@
+@startuml neural-cache
+' EmbeddingCache internals: a lock-free DashMap for the payload, a mutex-guarded VecDeque
+' for LRU recency. Shows precisely where a lock IS and IS NOT taken, and the two costs.
+' Render: plantuml -tsvg docs/diagrams/neural-cache.puml
+' Source of truth for Figure 1 in docs/components/neural/cache.md §3.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title EmbeddingCache — lock-free payload, mutex-guarded recency
+
+rectangle "**Caller** (any thread)\nembedder.embed(text)" as caller #2E7D32
+
+rectangle "**hash_text**\nutil::hash::safe_hash\n≥ 16 B ⟶ gxhash64\n< 16 B ⟶ xxh3_64" as hash #00838F
+
+rectangle "**entries**\nDashMap<u64, Arc<[f32]>>\n**lock-free** sharded probe\nhit ⟹ Arc::clone (no copy)" as map #00838F
+
+rectangle "**access_order**\nparking_lot::Mutex<VecDeque<u64>>\n⚠ **the only lock**" as order #00838F
+
+rectangle "**Encoder**\nModernBertModel forward pass\n≈ 10⁶ × the cost of a probe" as model #2E7D32
+
+caller --> hash : text
+hash --> map : 64-bit key
+map --> caller : **hit** — Arc<[f32]>
+map --> model : **miss**
+model --> map : insert(key, Arc<[f32]>)
+
+map ..> order : get: touch (move key to back)
+map ..> order : insert: evict front if full,\nthen push key to back
+
+note right of order #FFEBEE
+  **Cost of the touch.** `order.iter().position(…)`
+  is a linear scan of up to max_entries keys, and it
+  runs **while holding the mutex** — on both get and
+  insert. The map probe is 𝒪(1) and lock-free; the
+  recency update is 𝒪(N) and serialized. With 10 000
+  entries and many threads this is the contention
+  point, not DashMap. It is still ≈ 10⁻⁶ of a forward
+  pass, so it never dominates a //miss// — only a
+  hit-heavy, highly-parallel workload feels it.
+end note
+
+note bottom of map #E0F2F1
+  **Digest-only keying.** The text is not stored, only its
+  64-bit digest. Two distinct texts that collide return the
+  //wrong// vector. At N = 10 000 entries the birthday bound
+  gives ≈ N²/2⁶⁵ ≈ 2.7 × 10⁻¹² — negligible, but it is a
+  correctness trade, not an impossibility.
+end note
+
+@enduml

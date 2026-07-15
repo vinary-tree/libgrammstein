@@ -1,0 +1,82 @@
+@startuml hybrid-oov
+' Out-of-vocabulary handling. Two INDEPENDENT surfaces exist: (a) the always-on floor
+' and fallback built into HybridLanguageModel::score, and (b) the standalone OovHandler,
+' which the hybrid model does NOT call — a caller wires it up explicitly.
+' Render: plantuml -tsvg docs/diagrams/hybrid-oov.puml
+' Source of truth for Figure 1 in docs/components/hybrid/oov-handling.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Out-of-vocabulary handling — two independent surfaces
+
+legend top right
+  |= Color |= Concept |
+  |<#1565C0>     | N-gram expert |
+  |<#2E7D32>     | Embedding expert |
+  |<#6A1B9A>     | OovHandler strategy |
+  |<#455A64>     | Caller / result |
+endlegend
+
+rectangle "**word w, context h**" as q #455A64
+
+package "(a) always on — inside HybridLanguageModel::score" {
+  rectangle "**MKN unigram floor**\nc(w) = 0 ⇒ ℙ = 1/|V|\nlog ℙ is always finite" as floor #1565C0
+  rectangle "**embedding_log_prob**\ncos(v_w, v_h)/τ − 1\nfloor: max(·, ln ε), ε = 1e−8" as elp #2E7D32
+  rectangle "**NgramWithEmbeddingFallback**\nc(w) > 0 ? log ℙₙ : log ℙₑ\nboth clamped to ≥ −50" as fb #1565C0
+}
+
+package "(b) opt-in — standalone OovHandler" {
+  rectangle "**SubwordEmbedding** (default)\ncos(v_w, v_h) − 1\nclamped to [−20, −1e−6]" as sub #6A1B9A
+  rectangle "**SimilarWords(k)**\nΣᵢ sim(w,wᵢ)·cos(v_wᵢ, v_h) ÷ Σᵢ sim(w,wᵢ)\nover the k nearest in-vocab words" as sim #6A1B9A
+  rectangle "**Uniform**\n−ln |V_e|" as uni #6A1B9A
+  rectangle "**FixedProbability**\nthe configured constant" as fix #6A1B9A
+}
+
+rectangle "**log ℙ(w | h)**" as out #455A64
+
+' --- surface (a): both experts always run, the strategy fuses them
+q --> floor : n-gram branch
+q --> elp : embedding branch
+floor --> fb
+elp --> fb
+fb --> out
+
+' --- surface (b): the caller asks is_oov() first, then estimates
+q -[#6A1B9A,dashed]-> sub : is_oov(w) ⇒ estimate_log_prob(w, h)
+sub --> out
+sim --> out
+uni --> out
+fix --> out
+
+' stack the four strategies vertically to keep the figure narrow
+sub -[hidden]-> sim
+sim -[hidden]-> uni
+uni -[hidden]-> fix
+
+note right of sub #F3E5F5
+  is_oov(w) consults **SubwordEmbedding::contains** —
+  the vocabulary here is the EMBEDDING's, not the
+  n-gram's.
+  Degenerate inputs: SubwordEmbedding falls back to
+  −ln |V_e| on an empty context; SimilarWords falls
+  back to −ln |V_e| when no neighbour has positive
+  similarity, but yields exactly −1.0 on an empty
+  context (every cosine against the zero vector is 0).
+end note
+
+note right of floor #E3F2FD
+  Surface (a) needs no OOV *detection*: the MKN
+  recursion bottoms out at a strictly positive
+  unigram, so an unseen word simply lands on 1/|V|.
+end note
+
+@enduml

@@ -1,0 +1,56 @@
+@startuml example-perplexity-eval
+' How Perplexity::corpus_perplexity turns a test corpus into PP + OOV statistics:
+' a single streaming pass, one (word | context) query per token, accumulation in
+' log space, and exactly one exp() at the end. Colour: corpus / readers (grey),
+' statistical LM core (blue), accumulator & application (slate), result (teal).
+' Render: plantuml -tsvg docs/diagrams/example-perplexity-eval.puml
+' Source of truth for Figure 1 in docs/examples/perplexity-scoring.md §3
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Perplexity — one streaming pass · log-space accumulation · a single exp
+
+rectangle "**test corpus**\nheld out — never seen in training" as corpus #546E7A
+rectangle "**reader.sentences()**\nlowercased · split on [.!?]+␣\n(min 10 characters)" as sent #546E7A
+rectangle "**sentence.split_whitespace()**\ntokens w₁ … w_N\npunctuation is **not** stripped here — §5" as tok #546E7A
+
+rectangle "**context window**\nhᵢ = the ≤ n−1 tokens preceding wᵢ\n(clamped at the sentence start)" as ctx #1565C0
+rectangle "**model.log_prob(wᵢ, hᵢ)**\nModified Kneser-Ney backoff\nalways finite, always < 0" as lp #1565C0
+
+rectangle "**accumulate**\nΣ ← Σ + log ℙ(wᵢ | hᵢ)\nN ← N + 1\nOOV++ if log ℙ ≤ log(1/|V|)" as acc #455A64
+rectangle "**PerplexityResult**\nperplexity = exp(−Σ / N)\noov_count · oov_rate · total_tokens\ntotal_log_prob · sentence_count" as res #00838F
+
+corpus --> sent
+sent --> tok
+tok --> ctx : for i = 1 … N
+ctx --> lp
+lp --> acc
+acc --> ctx : next token
+acc --> res : after the last token
+
+note right of lp #E3F2FD
+  The recursion terminates in the
+  strictly-positive unigram term 1/|V|,
+  so ℙ > 0 always, log ℙ never reaches
+  −∞, and PP is always finite. The
+  backoff weight λ(h) < 1 scales that
+  term down — which is why the OOV
+  test below is ≤, not =.
+end note
+
+note bottom of acc #ECEFF1
+  Summing logs (never multiplying
+  probabilities) is what keeps a
+  10⁶-token corpus from underflowing.
+end note
+
+@enduml

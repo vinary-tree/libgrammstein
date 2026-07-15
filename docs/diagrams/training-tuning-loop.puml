@@ -1,0 +1,75 @@
+@startuml training-tuning-loop
+' The hyperparameter search loop, expressed in terms of the commands that
+' actually implement each step. Held-out perplexity is the objective; the
+' train/dev/test split discipline is what keeps the reported number honest. The
+' loop distinguishes the two cost classes: re-fitting an expert (expensive - one
+' corpus pass per candidate) from re-assembling a hybrid (cheap - no corpus pass
+' at all), which is why alpha and strategy are the cheapest knobs to sweep.
+' Render: plantuml -tsvg docs/diagrams/training-tuning-loop.puml
+' Source of truth for Figure 1 in docs/training/hyperparameters.md §2.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam note {
+  BackgroundColor #ECEFF1
+  BorderColor #546E7A
+  FontColor #263238
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Hyperparameter tuning — a held-out perplexity loop
+
+rectangle "**Corpus**" as corpus #455A64
+rectangle "**Split**\ntrain 80% · dev 10% · test 10%" as split #546E7A
+rectangle "**train.txt**\nfits the parameters" as train #455A64
+rectangle "**dev.txt**\nselects the hyperparameters" as dev #455A64
+rectangle "**test.txt**\nreported once, at the very end" as test #455A64
+
+rectangle "**Candidate θ**\norder · min-count · dim · window\nepochs · neg-samples · α · strategy" as cand #6A1B9A
+
+rectangle "**Expensive arm**\n""train ngram"" / ""train embedding""\n**one corpus pass per candidate**" as fit #1565C0
+rectangle "**Cheap arm**\n""train hybrid""\n**re-assembly only — no corpus pass**" as assemble #1B6CA8
+
+rectangle "**eval perplexity**\n⟨MODEL⟩ dev.txt" as evaluate #546E7A
+rectangle "**PPL(θ)**\nexp(−(1/N)·Σ log ℙ)" as score #6A1B9A
+rectangle "**θ\* = argmin PPL**" as best #6A1B9A
+rectangle "**eval perplexity**\n⟨MODEL⟩ test.txt\nthe unbiased number" as final #546E7A
+
+corpus --> split
+split --> train
+split --> dev
+split --> test
+
+cand --> fit : order / dim / window /\nepochs / min-count changed
+cand --> assemble : only α or strategy changed
+train --> fit
+fit --> assemble : ngram.bin + embed.bin
+assemble --> evaluate
+dev --> evaluate
+evaluate --> score
+score --> cand : next candidate
+score --> best : grid exhausted
+best --> final
+test --> final
+
+note right of assemble
+  Sweeping **α** or **""--strategy""** never touches the
+  corpus: hold the two experts fixed and re-assemble.
+  A whole α grid costs one model load, not one
+  training run per point.
+end note
+
+note bottom of score
+  Compare candidates on **dev** only. Touch **test** once,
+  after θ\* is frozen — otherwise the reported perplexity
+  is a selection artefact rather than a measurement.
+end note
+
+@enduml

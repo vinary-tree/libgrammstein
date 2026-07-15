@@ -1,0 +1,45 @@
+@startuml topic-dendrogram
+' Binary merge tree with a horizontal cut yielding two clusters.
+' Render: plantuml -tsvg docs/diagrams/topic-dendrogram.puml
+' Source of truth for Figure 1 in docs/components/topic/dendrogram.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+legend top right
+|= Concept |= Color |
+| internal (merged) node | <back:#6A1B9A>        </back> |
+| leaf (document) | <back:#546E7A>        </back> |
+endlegend
+
+rectangle "n6  ·  root\ndistance = 0.80  ·  count = 4" as n6 #6A1B9A
+rectangle "n4\ndistance = 0.20  ·  count = 2" as n4 #6A1B9A
+rectangle "n5\ndistance = 0.30  ·  count = 2" as n5 #6A1B9A
+rectangle "D0" as d0 #546E7A
+rectangle "D1" as d1 #546E7A
+rectangle "D2" as d2 #546E7A
+rectangle "D3" as d3 #546E7A
+
+n6 --> n4
+n6 --> n5
+n4 --> d0
+n4 --> d1
+n5 --> d2
+n5 --> d3
+
+note right of n6
+  cut_at_distance(0.50)
+  drops the 0.80 merge, keeps 0.20 and 0.30
+  ⇒ 2 clusters:  {D0, D1}  and  {D2, D3}
+  equivalently cut_to_k_clusters(2)
+end note
+@enduml

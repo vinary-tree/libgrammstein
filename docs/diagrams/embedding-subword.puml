@@ -1,0 +1,42 @@
+@startuml embedding-subword
+' FastText-style subword composition: a word becomes the mean of its character
+' n-gram bucket vectors, averaged with its word-embedding row (OOV skips the row).
+' Render: plantuml -tsvg docs/diagrams/embedding-subword.puml
+' Source of truth for Figure 1 in docs/components/embedding/overview.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title Subword composition — word_vector(w)
+
+legend top right
+  |= Color |= Concept |
+  |<#2E7D32>     | Embedding vector / logic |
+  |<#00838F>     | Stored weight matrix |
+  |<#546E7A>     | Input token / I-O |
+endlegend
+
+rectangle "word  w = «running»" as w #546E7A
+rectangle "extract_subwords(w, 3, 6)\n«<ru» «run» «unn» … «ng>»\nboundary-marked char n-grams  G" as sub #546E7A
+rectangle "hash_subword(g, B)\nFNV-1a  mod  B   (B = 2 000 000)" as hash #2E7D32
+rectangle "subword_embeddings\n[ B × d ]" as subM #00838F
+rectangle "v_sub  =  (1/|G|) Σ rows\n(mean of bucket rows)" as vsub #2E7D32
+rectangle "word_embeddings\n[ |V| × d ]" as wordM #00838F
+rectangle "v_word  =  row(w)\nonly if  w ∈ V" as vword #2E7D32
+rectangle "**word_vector(w)**\nin-vocab:  (v_word ⊕ v_sub) / 2\nOOV:         v_sub" as out #2E7D32
+
+w --> sub
+sub --> hash
+hash --> subM
+subM --> vsub
+wordM --> vword
+vsub --> out
+vword ..> out : known w only
+@enduml

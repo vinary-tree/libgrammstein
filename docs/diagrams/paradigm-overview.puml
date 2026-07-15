@@ -1,0 +1,69 @@
+@startuml paradigm-overview
+' The three engines of the paradigm subsystem and the artifacts that flow
+' between them. Colour encodes role: code artifacts (orange), topic/analysis
+' engines (purple), configuration (slate), results (green).
+' Render: plantuml -tsvg docs/diagrams/paradigm-overview.puml
+' Source of truth for Figure 1 in docs/components/paradigm/overview.md §2
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam package {
+  BackgroundColor #ECEFF1
+  BorderColor #90A4AE
+  FontColor #4A148C
+  FontStyle bold
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title libgrammstein::topic::paradigm — three independent engines over one code sample  (feature "rag")
+
+rectangle "**Source code**\n.rs · .py · .js · .java\n.rho · .metta" as src #EF6C00
+rectangle "**Token stream**\nVec<String>  (analyze_tokens)\n&[&str]  (detect_*_patterns)" as toks #F57C00
+rectangle "**API-call sequences**\nVec<Vec<&str>> — one sequence\nper function / trace" as seqs #FB8C00
+
+package "topic::paradigm" {
+  rectangle "**ParadigmDetector**\n170 weighted PatternDefs\nOOP · FP · Reactive · Procedural\n→ what //style// is this code?" as det #6A1B9A
+  rectangle "**ApiPatternMiner**\nPrefixSpan sequential mining\n→ which call //orders// recur?" as mine #8E24AA
+  rectangle "**DomainPatternDetector**\nRholang (14) · MeTTa (22)\n→ which //DSL idioms// occur?" as dom #AB47BC
+}
+
+rectangle "**ParadigmConfig**\nweights · context_window\nnormalize_scores" as cfg #546E7A
+rectangle "**ApiPatternConfig**\nmin_support · max_gap\nclosed_only · max_patterns" as acfg #546E7A
+
+rectangle "**ParadigmProfile**\n4 scores ∈ [0,1] + indicators\n+ dominant_paradigm()" as prof #2E7D32
+rectangle "**Vec<ApiPattern>**\nsequence · support · support_ratio" as apat #2E7D32
+rectangle "**Vec<RholangPatternMatch>**\n**Vec<MettaPatternMatch>**\nname · category · position · weight" as dmat #2E7D32
+
+src --> toks : tokenize
+src --> seqs : extracted by the caller\n(e.g. from a CPG / AST)
+
+toks --> det
+toks --> dom
+seqs --> mine
+
+cfg -[#546E7A]-> det
+acfg -[#546E7A]-> mine
+
+det --> prof
+mine --> apat
+dom --> dmat
+
+note bottom of mine
+  The miner is **language-agnostic**:
+  it consumes any sequence of strings,
+  so the caller — not the miner —
+  decides what an "API call" is.
+end note
+
+note bottom of dom
+  Catalogs are **open**: add_pattern()
+  extends either catalog at run time.
+end note
+@enduml

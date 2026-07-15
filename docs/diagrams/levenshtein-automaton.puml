@@ -1,0 +1,77 @@
+@startuml levenshtein-automaton
+' How a Levenshtein query actually executes: the automaton for the query term W
+' is SIMULATED (never materialized) while the dictionary trie is walked, so the
+' two advance in lock-step — one trie edge consumed = one automaton transition.
+' The transition is driven only by the characteristic vector, which is what makes
+' a single, W-independent rule sufficient (Schulz & Mihov's "imitation" method).
+' Labels use Unicode glyphs, not <latex>: house style, see docs/diagrams/README.md.
+' Render: plantuml -tsvg docs/diagrams/levenshtein-automaton.puml
+' Source of truth for Figure 2 in docs/integration/liblevenshtein/overview.md §4.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam NoteBackgroundColor #ECEFF1
+skinparam NoteBorderColor #90A4AE
+skinparam NoteFontColor #263238
+title Levenshtein query — the automaton and the dictionary walk in lock-step
+
+legend top right
+  |= Color |= Concept |
+  |<#1565C0>     | Automaton (query side) |
+  |<#00838F>     | Dictionary trie (storage side) |
+  |<#546E7A>     | Result / pruning |
+endlegend
+
+rectangle "**Query**\nterm W  (∣W∣ = m)\nmax edit distance k" as q #1565C0
+rectangle "**Automaton state**  S\nreduced set of positions ⟨i, e⟩\ni = symbols of W consumed\ne = errors accumulated  (e ≤ k)\nS₀ = { ⟨0, 0⟩ }" as state #1565C0
+rectangle "**Characteristic vector**  χ\nχ(x, W, i, k) ∈ { 0, 1 }^(2k+1)\nmarks where the trie symbol x\nmatches inside the window of W" as chi #1565C0
+rectangle "**Transition**  δ(S, χ)\none fixed rule, independent of W;\nsubsumption ⊑ prunes dominated\npositions to keep ∣S∣ bounded" as delta #1565C0
+
+rectangle "**Trie node**\nany ""D: Dictionary"" —\nDAWG · DoubleArray · ARTrie · PathMap" as node #00838F
+rectangle "**Trie edge**\nsymbol x ∈ Σ\nunit = ""u8"" (byte) or ""char""" as edge #00838F
+
+rectangle "**Accept**\nnode is final ∧ ∃ ⟨i, e⟩ ∈ S : i = ∣W∣\n⟹ **Candidate** { term, distance = e }" as accept #546E7A
+rectangle "**Prune**\nS = ∅ ⟹ abandon the\nwhole subtree at once" as prune #546E7A
+
+q --> state : initialize
+state --> node : walk together
+node --> edge : descend
+edge --> chi : emit symbol x
+chi --> delta
+state --> delta
+delta --> state : S′ = δ(S, χ)\n(one edge = one transition)
+delta --> accept
+delta --> prune
+
+note right of delta
+  δ depends ONLY on χ — never on the concrete symbols
+  of W. One W-independent rule therefore drives *every*
+  query, so the automaton is never constructed: it is
+  **simulated** during the dictionary walk.
+  — Schulz & Mihov (2002), the //imitation// method.
+end note
+
+note right of prune
+  Pruning is what keeps the search sublinear in the
+  dictionary: a subtree whose prefix already costs
+  more than k edits is cut **once**, not re-tested
+  once per term below it.
+end note
+
+note bottom of accept
+  One candidate path costs 𝒪(m) transitions, each 𝒪(k) work on a
+  state of bounded size — independent of the number of stored terms n.
+  The distance e is returned with the term, so the caller can rank
+  candidates without recomputing any edit distance.
+end note
+
+@enduml

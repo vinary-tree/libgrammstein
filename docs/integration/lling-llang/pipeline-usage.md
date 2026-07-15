@@ -6,51 +6,22 @@ This document provides complete examples of using libgrammstein in lling-llang c
 
 A correction pipeline is a sequence of layers that transform a lattice:
 
-```
-Input Text: "teh quikc brwon fox"
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ Layer 1: Tokenization                                                        │
-│   Convert text to initial lattice with one path                             │
-│   ["teh", "quikc", "brwon", "fox"]                                          │
-└─────────────────────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ Layer 2: Spelling Correction (liblevenshtein)                               │
-│   Add fuzzy matching alternatives at each position                          │
-│                                                                             │
-│   Position 0: teh → [the, tea, ten, ...]                                   │
-│   Position 1: quikc → [quick, quack, ...]                                  │
-│   Position 2: brwon → [brown, brawn, ...]                                  │
-│   Position 3: fox → [fox] (correct)                                        │
-│                                                                             │
-│   Lattice now has multiple paths                                            │
-└─────────────────────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ Layer 3: Grammar Filter (optional)                                          │
-│   Remove paths that violate grammar rules                                   │
-│   e.g., "the quack brown fox" might be filtered                            │
-└─────────────────────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ Layer 4: Language Model (libgrammstein)                                     │
-│   Rescore paths based on fluency                                            │
-│                                                                             │
-│   P("the quick brown fox") = -12.3 (high)                                  │
-│   P("tea quick brown fox") = -18.5 (lower)                                 │
-│   P("the quick brawn fox") = -16.2 (medium)                                │
-│                                                                             │
-│   Best path: "the quick brown fox"                                          │
-└─────────────────────────────────────────────────────────────────────────────┘
-      │
-      ▼
-Output: "the quick brown fox"
-```
+![The correction pipeline as four layers transforming a single lattice, traced on the input "teh quikc brwon fox". Layer 1 tokenizes the text into a lattice with one path. Layer 2, spelling correction via liblevenshtein, adds fuzzy-matching alternatives at each position - teh becomes the, tea, ten; quikc becomes quick, quack; brwon becomes brown, brawn; fox is already correct - so the lattice now has multiple paths. Layer 3, an optional grammar filter, removes paths that violate grammar rules. Layer 4, the libgrammstein language model, rescores each path by fluency, and the best path, "the quick brown fox", is emitted.](../../diagrams/lling-pipeline-usage.svg)
+
+**Figure 1.** The four layers a lattice passes through — tokenize, expand with
+spelling candidates, prune with the grammar filter, reweight with the language
+model — and the best path that falls out.
+*(Rendered from `docs/diagrams/lling-pipeline-usage.puml`.)*
+
+> **Two correctors.** The examples on this page drive the lling-llang `LayerPipeline`
+> — the **lattice** path. libgrammstein also ships the **cascade** `GrammarCorrector`,
+> which composes two liblevenshtein automata over a shared term-id alphabet and adds
+> word-level insertions and deletions; it does not use the `LayerPipeline`. Its API is
+> documented in [pipeline-assembly.md](pipeline-assembly.md) and its model in
+> [hierarchical-correction.md](hierarchical-correction.md) §6. The cascade in turn ships
+> in two store backends sharing one decoder — the in-memory `GrammarCorrector` and the
+> `ShardedGrammarCorrector` over the sharded Google-Books corpus (§6.9; full design record
+> in [multi-shard-grammar-corrector.md](../multi-shard-grammar-corrector.md)).
 
 ## Complete Example: Spelling Correction
 
@@ -498,6 +469,8 @@ mod tests {
 ## Next Steps
 
 - [Overview](overview.md): Integration architecture
-- [PathMap Synergy](pathmap-synergy.md): Shared infrastructure
+- [Pipeline Assembly](pipeline-assembly.md): the `HierarchicalCorrector` and `GrammarCorrector` APIs
+- [Multi-shard grammar corrector](../multi-shard-grammar-corrector.md): the cascade over the sharded Google-Books corpus
+- [PathMap Synergy](../liblevenshtein/pathmap-synergy.md): Shared infrastructure
 - [liblevenshtein Integration](../liblevenshtein/overview.md): Dictionary backends
 - [Hybrid Model](../../components/hybrid/overview.md): Model details

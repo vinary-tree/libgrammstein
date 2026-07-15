@@ -1,412 +1,267 @@
 # Training on Large Corpora
 
-This guide covers strategies for training models on large-scale text corpora.
-
-## Memory Challenges
-
-Large corpora present several challenges:
-
-| Challenge | Cause | Solution |
-|-----------|-------|----------|
-| Corpus doesn't fit in RAM | Loading all text | Streaming readers |
-| Model doesn't fit | Large vocabulary | Filtering, compression |
-| Slow training | Sequential processing | Parallelization |
-| Disk space | Storing corpus | Streaming from HTTP |
-
-## Streaming Corpus Readers
-
-### Wikipedia Streaming
-
-Process Wikipedia dumps without downloading:
-
-```rust
-use libgrammstein::corpus::{WikipediaReader, WikipediaConfig, LoadStrategy};
-
-// HTTP streaming - processes on-the-fly
-let config = WikipediaConfig {
-    load_strategy: LoadStrategy::HttpStreaming,
-    max_articles: Some(1_000_000),  // Limit for testing
-    ..Default::default()
-};
-
-let reader = WikipediaReader::from_url(
-    "https://dumps.wikimedia.org/enwiki/latest/enwiki-latest-pages-articles.xml.bz2"
-)?;
-
-// Train directly from stream
-let model = TrainerBuilder::new(dictionary)
-    .order(5)
-    .train(&reader)?;
-```
-
-### Chunked Processing
-
-Process large files in chunks:
-
-```rust
-use std::io::{BufRead, BufReader};
-use std::fs::File;
-
-fn process_large_file<D, F>(path: &str, chunk_size: usize, mut processor: F)
-where
-    D: MutableMappedDictionary<Value = NgramEntry>,
-    F: FnMut(&[String]) -> Result<()>,
-{
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-
-    let mut chunk = Vec::with_capacity(chunk_size);
-
-    for line in reader.lines() {
-        chunk.push(line?);
-
-        if chunk.len() >= chunk_size {
-            processor(&chunk)?;
-            chunk.clear();
-        }
-    }
-
-    // Process remaining
-    if !chunk.is_empty() {
-        processor(&chunk)?;
-    }
-}
-```
-
-## Vocabulary Reduction
-
-### Frequency Filtering
-
-Remove rare words:
-
-```rust
-let model = TrainerBuilder::new(dictionary)
-    .order(5)
-    .min_word_freq(10)  // Words appearing < 10 times ignored
-    .train(&reader)?;
-```
-
-Memory impact:
-| min_word_freq | Vocabulary Reduction | Memory Savings |
-|---------------|---------------------|----------------|
-| 1 | 0% | 0% |
-| 5 | ~50% | ~30% |
-| 10 | ~70% | ~50% |
-| 100 | ~90% | ~70% |
-
-### Vocabulary Capping
-
-Limit vocabulary size:
-
-```rust
-fn cap_vocabulary(word_counts: &mut HashMap<String, u64>, max_vocab: usize) {
-    if word_counts.len() <= max_vocab {
-        return;
-    }
-
-    // Sort by frequency
-    let mut sorted: Vec<_> = word_counts.iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(a.1));
-
-    // Keep only top words
-    let to_remove: Vec<_> = sorted[max_vocab..].iter()
-        .map(|(w, _)| w.to_string())
-        .collect();
-
-    for word in to_remove {
-        word_counts.remove(&word);
-    }
-}
-```
-
-## N-gram Pruning
-
-### Count-based Pruning
-
-Remove low-count n-grams:
-
-```rust
-fn prune_ngrams<D>(model: &mut NgramModel<D>, min_count: u64)
-where
-    D: IterableDictionary + MutableMappedDictionary<Value = NgramEntry>,
-{
-    let to_remove: Vec<String> = model.trie()
-        .iter_entries()
-        .filter(|(_, entry)| entry.count() < min_count)
-        .map(|(key, _)| key)
-        .collect();
-
-    for key in to_remove {
-        model.trie_mut().remove(&key);
-    }
-}
-```
-
-### Entropy-based Pruning
-
-Keep only informative n-grams:
-
-```rust
-fn entropy_prune<D>(model: &mut NgramModel<D>, threshold: f64)
-where
-    D: IterableDictionary + MutableMappedDictionary<Value = NgramEntry>,
-{
-    // Remove n-grams that add little information beyond backoff
-    // (Advanced technique - requires careful implementation)
-}
-```
-
-## Parallel Processing
-
-### Multi-threaded Training
-
-libgrammstein uses Rayon for parallel processing:
-
-```rust
-// Configure thread pool
-rayon::ThreadPoolBuilder::new()
-    .num_threads(16)  // Use 16 threads
-    .build_global()
-    .unwrap();
-
-// Training automatically parallelizes
-let model = TrainerBuilder::new(dictionary)
-    .order(5)
-    .batch_size(100_000)  // Larger batches = better parallelism
-    .train(&reader)?;
-```
-
-### Distributed Training
-
-For very large corpora, split across machines:
-
-```rust
-// Machine 1: Train on first half
-let model1 = train_on_shard("shard1.txt")?;
-model1.save("model_shard1.bin")?;
-
-// Machine 2: Train on second half
-let model2 = train_on_shard("shard2.txt")?;
-model2.save("model_shard2.bin")?;
-
-// Merge (on coordinator)
-let merged = merge_models(&[model1, model2])?;
-```
-
-## Checkpointing
-
-### Periodic Saves
-
-Save progress during long training:
-
-```rust
-use std::time::{Duration, Instant};
-
-struct CheckpointManager {
-    interval: Duration,
-    last_checkpoint: Instant,
-    path: PathBuf,
-}
-
-impl CheckpointManager {
-    fn maybe_checkpoint<D>(&mut self, model: &NgramModel<D>) -> Result<()>
-    where
-        D: MutableMappedDictionary<Value = NgramEntry> + Serialize,
-    {
-        if self.last_checkpoint.elapsed() >= self.interval {
-            let checkpoint_path = self.path.join(format!(
-                "checkpoint_{}.bin",
-                chrono::Utc::now().format("%Y%m%d_%H%M%S")
-            ));
-            model.save(&checkpoint_path)?;
-            self.last_checkpoint = Instant::now();
-            log::info!("Checkpoint saved: {:?}", checkpoint_path);
-        }
-        Ok(())
-    }
-}
-```
-
-### Resume from Checkpoint
-
-```rust
-fn resume_training(checkpoint_path: &str, corpus: &impl CorpusReader) -> Result<NgramModel<D>> {
-    // Load checkpoint
-    let mut model: NgramModel<D> = NgramModel::load(checkpoint_path)?;
-
-    // Continue training (implementation depends on your needs)
-    // For n-grams, you might track which sentences were processed
-    // and resume from there
-
-    Ok(model)
-}
-```
-
-## Memory-Mapped Files
-
-For very large models:
-
-```rust
-use memmap2::MmapMut;
-
-fn mmap_model_storage(path: &str, size: usize) -> Result<MmapMut> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(path)?;
-
-    file.set_len(size as u64)?;
-
-    unsafe { MmapMut::map_mut(&file) }
-}
-```
-
-## Dictionary Backend Selection
-
-| Backend | Memory | Build Time | Query Time |
-|---------|--------|------------|------------|
-| `PathMapDictionary` | High | Fast | Fast |
-| `DynamicDawgChar` | Low | Medium | Medium |
-| `DoubleArrayTrieChar` | Lowest | Slow | Fastest |
-
-For large corpora, use compressed backends:
-
-```rust
-// Start with DynamicDawgChar for training (allows updates)
-let training_dict = DynamicDawgChar::new();
-let model = TrainerBuilder::new(training_dict)
-    .order(5)
-    .train(&reader)?;
-
-// Save to portable format
-model.save_portable("model.portable.bin")?;
-
-// Load into DoubleArrayTrieChar for production (smallest, fastest)
-let production_model = NgramModel::load_portable(
-    "model.portable.bin",
-    || DoubleArrayTrieChar::new()
-)?;
-```
-
-## Memory Estimation
-
-Estimate memory requirements before training:
-
-```rust
-fn estimate_memory(
-    corpus_words: u64,
-    vocab_size: u64,
-    order: usize,
-    dim: usize,  // For embeddings
-) -> (u64, u64) {
-    // N-gram estimate (rough)
-    // Assumes ~10 bytes per n-gram entry average
-    let ngram_entries = corpus_words * order as u64;
-    let ngram_memory = ngram_entries * 10;
-
-    // Embedding estimate
-    // vocab_size * dim * 4 bytes (f32)
-    // + bucket_count * dim * 4 bytes
-    let bucket_count = 2_000_000u64;
-    let embedding_memory = (vocab_size + bucket_count) * dim as u64 * 4;
-
-    (ngram_memory, embedding_memory)
-}
-
-let (ngram_mb, embed_mb) = estimate_memory(1_000_000_000, 1_000_000, 5, 100);
-println!("Estimated N-gram memory: {} MB", ngram_mb / 1_000_000);
-println!("Estimated Embedding memory: {} MB", embed_mb / 1_000_000);
-```
-
-## CLI for Large Corpora
-
-```bash
-# Train with checkpoints
-grammstein train ngram enwiki.xml.bz2 model.bin \
-    --order 5 \
-    --min-count 10 \
-    --checkpoint ./checkpoints \
-    --checkpoint-interval 100000
-
-# Resume from checkpoint
-grammstein train ngram enwiki.xml.bz2 model.bin \
-    --resume ./checkpoints/latest.ckpt
-
-# HTTP streaming (no download required)
-grammstein train ngram \
-    "https://dumps.wikimedia.org/enwiki/latest/enwiki-latest-pages-articles.xml.bz2" \
-    model.bin \
-    --order 5
-```
-
-## Best Practices
-
-1. **Profile first** - Understand where memory is going
-2. **Stream when possible** - Don't load entire corpus into RAM
-3. **Filter aggressively** - Remove rare words early
-4. **Checkpoint frequently** - Long jobs can fail
-5. **Use appropriate backends** - Compressed for storage, fast for serving
-6. **Monitor progress** - Know when something is wrong
-
-## Scaling Guidelines
-
-| Corpus Size | Order | min_count | Approx. Memory |
-|-------------|-------|-----------|----------------|
-| 10M words | 5 | 5 | 2-4 GB |
-| 100M words | 5 | 10 | 10-20 GB |
-| 1B words | 5 | 20 | 50-100 GB |
-| 10B+ words | 3-4 | 50+ | 200+ GB |
-
-## Google Books N-gram Import: Cached-File Mode
-
-For Google Books n-gram imports specifically, the `--cache-files` flag
-decouples the download from the parse pipeline. Each worker downloads the
-raw `.gz` to a local cache directory first, then imports from disk.
-
-```bash
-grammstein train import-google-books \
-    --language en \
-    --orders 1..=5 \
-    --output english.artrie \
-    --parallel 8 \
-    --cache-files
-```
-
-### When to enable
-
-- **Unstable upstream connection.** A failed HTTP stream mid-parse wastes
-  hours of CPU; cached-file mode lets a retry resume from the local copy
-  (or from a partial download via HTTP 206 Range).
-- **Long-running imports.** Network blips ~6 hours into a 30-hour import
-  are recoverable without restarting from scratch.
-- **Debugging.** Reproducing parser/encoder issues against a fixed input
-  is easier when the input lives on disk.
-
-### Mechanics
-
-| Property | Value |
+Small corpora train themselves. What follows is for the case where the corpus does **not** fit
+comfortably in RAM — tens of gigabytes of Wikipedia, a Gutenberg mirror, or the billions of records
+in Google Books. There are exactly four places where such a corpus can exhaust memory, and each one
+has exactly one mechanism that bounds it. This document names all four, explains the bound, and
+tells you which of the three training modes to use.
+
+> **Scope.** Source of truth: [`src/corpus/prefetch.rs`](../../src/corpus/prefetch.rs) (bounded
+> streaming), [`src/ngram/accumulator.rs`](../../src/ngram/accumulator.rs) (the WAL accumulator),
+> [`src/ngram/trainer.rs`](../../src/ngram/trainer.rs) (the continuation-count pass) and
+> [`src/sources/google_books/`](../../src/sources/google_books/) (the sharded importer). For the
+> importer's flags see the [Google Books guide](../cli/import-google-books.md); for the design story
+> see [Memory Optimization](../architecture/memory-optimization.md).
+
+## Notation
+
+| Symbol | Meaning |
 |---|---|
-| Cache location | `{output_path_parent}/grammstein-cache/` |
-| Filename scheme | `googlebooks-{corpus_id}-all-{order}gram-{VERSION}-{prefix}.gz` |
-| Atomicity | Downloads to `.gz.downloading` and atomically renames on completion |
-| Resume on partial | HTTP Range request from existing byte offset |
-| 416 recovery | Stale partial deleted, full re-download issued |
-| Cleanup | Removed on successful import and on final failure (all retries exhausted) |
-| Retained on retry | Cached file preserved across retryable errors so the retry reuses it |
+| $`T`$ | corpus size in tokens |
+| $`n`$ | n-gram order |
+| $`U`$ | the number of **distinct** n-grams (trie entries) |
+| $`\lvert V \rvert`$ | vocabulary size |
+| $`d`$ | embedding dimension; $`B`$ the subword bucket count |
+| $`E`$ | embedding epochs |
+| $`R`$ | total system RAM |
 
-The cache layer is orthogonal to the chunked-transaction
-(`--tx-chunk-size`) and lock-free-flush-threshold
-(`--lockfree-flush-threshold`) memory bounds — those affect the *write*
-path, while `--cache-files` affects the *download* path.
+## 1. What actually grows
 
-See `docs/cli/import-google-books.md` for the full flag reference and
-`docs/architecture/memory-optimization.md` for the broader design context.
+Three quantities scale with the corpus, and only one of them is the corpus itself:
 
-## See Also
+```math
+\underbrace{T}_{\text{tokens — streamed, never resident}}
+\qquad
+\underbrace{U \le n\,T}_{\text{distinct n-grams — resident}}
+\qquad
+\underbrace{\lvert V \rvert}_{\text{vocabulary — resident, but Heaps-slow}} \tag{L1}
+```
 
-- [N-gram Training](ngram.md) - Training workflow
-- [Hyperparameters](hyperparameters.md) - Tuning for size/quality
-- [CLI Reference](../cli/README.md) - Command-line options
-- [Google Books Import Flags](../cli/import-google-books.md) - Memory + reliability tuning
-- [Memory Optimization Architecture](../architecture/memory-optimization.md) - Importer internals
+The corpus text is never the problem: every reader streams. The **n-gram table** is the problem, and
+it grows with $`U`$, the number of *distinct* n-grams. Zipf's law keeps $`U`$ well below the
+$`n\,T`$ upper bound — but $`U`$ still reaches hundreds of millions on a Wikipedia-scale corpus, and
+each entry costs a key plus a 16-byte `NgramEntry` plus trie overhead.
+
+## 2. The four pressures
+
+![The four memory pressures and their bounds](../diagrams/training-large-corpora-memory.svg)
+
+*Figure 1 — each hazard (red) and the single mechanism that bounds it (teal), and the training mode
+each combination implies (blue).*
+
+## 3. The four pressures, in detail
+
+### ① The corpus in RAM — bounded by `PrefetchingReader`
+
+Every `CorpusReader` yields sentences lazily, and the trainer wraps the reader in a
+`PrefetchingReader` that fills a **bounded** queue of batches on a background thread while the
+`rayon` workers drain it. The queue is capped at a fraction of system RAM:
+
+```math
+\text{queue bytes} \;\lesssim\; 0.10 \cdot R \qquad (\texttt{ram\_fraction} = 0.10) \tag{L2}
+```
+
+So corpus size does not enter the resident set at all — a 50 GB dump streams through a 4 GB process
+without complaint. Nothing here needs configuring; `--batch-size` (default `10 000`) only trades
+scheduling granularity against per-batch overhead.
+
+### ② The n-gram table — bounded by `NgramAccumulator`
+
+This is the resident structure that grows. Two ways to bound it:
+
+**Prune it.** `--min-count` drops rare n-grams — which, by Zipf, is most of them. Note the trap: it
+is only applied on the checkpointed path (see [N-gram Training §3.3](ngram.md#33---min-count-does-not-prune-the-in-memory-model)).
+
+**Spill it to disk.** `--checkpoint <DIR>` replaces the in-memory trie with the WAL-backed
+`NgramAccumulator`: counts live in an on-disk structure, are `sync`ed periodically, and only the
+survivors of the `--min-count` filter are ever loaded into an in-memory trie — at the very end, in
+`finalize_ngram_model`.
+
+```bash
+grammstein train ngram wikipedia.txt model.bin \
+  --order 5 --min-count 5 \
+  --checkpoint ./ckpt --checkpoint-interval 500000 --keep-checkpoints 3
+```
+
+### ③ The continuation-count pass — the one that kills builds
+
+MKN needs $`N_{1+}(\bullet, w)`$ and $`N_{1+}(h, \bullet)`$ (equation (N2)), and
+`collect_continuation_counts` computes them in a **second, in-memory pass over every n-gram**, using
+a `HashMap<String, HashSet<String>>`. Its footprint is proportional to $`U`$ and *independent of
+every memory flag you have set*:
+
+| $`U`$ | Approximate footprint |
+|---|---|
+| $`10^{6}`$ | a few hundred MB |
+| $`5 \times 10^{6}`$ | the code logs a warning here |
+| $`10^{7}`$ and beyond | **2–5 GB and climbing** |
+
+This pass runs on the library path *and* is the reason a from-scratch build on a very large corpus
+can survive counting and then die during smoothing. Three ways out:
+
+1. **Prune harder** (`--min-count`, on the checkpointed path) so $`U`$ never gets there;
+2. **Lower the order** — $`U`$ falls roughly linearly in $`n`$;
+3. **Use the Google Books importer**, which derives the MKN statistics during its merge from the
+   already-materialised shards, and never builds the hash-of-sets at all.
+
+### ④ The importer overlay — bounded by three nested flags
+
+Only relevant to `train import-google-books`. Each shard has a lock-free overlay (its concurrent
+write buffer), and three flags bound three different buffers:
+
+| Flag | Bounds | Default |
+|---|---|---|
+| `--tx-chunk-size` | entries buffered inside one transaction | `500000` |
+| `--lockfree-flush-threshold` | overlay entries per shard between checkpoints | auto (`50000` at `--parallel >= 8`) |
+| `--overlay-budget-gib` | resident overlay heap retained after each checkpoint | `10` |
+
+Peak transaction memory scales as $`O(P \cdot T_{\text{chunk}})`$ in the number of workers $`P`$, so
+halve the chunk size when you double `--parallel`. The full treatment, with sizing tables, is in the
+[Google Books guide](../cli/import-google-books.md).
+
+## 4. Choosing a mode
+
+| Mode | Command | Bounded by | Resumable | Parallel | Use when |
+|---|---|---|---|---|---|
+| **In-memory** | `train ngram` (no `--checkpoint`) | prefetch queue only | no | yes (rayon) | the n-gram table fits in RAM |
+| **Checkpointed** | `train ngram --checkpoint` | WAL accumulator | **yes** | no (streamed) | it does not fit, or the run is too long to risk |
+| **Sharded import** | `train import-google-books` | overlay + tx + budget | **yes** | yes (async) | Google Books, $`10^{9}`$+ n-grams |
+
+The checkpointed path trades throughput for safety: it streams single-threaded rather than
+prefetch-parallel. That is the cost of never losing a long run. `Ctrl-C` writes a checkpoint before
+exiting, and `--resume latest` picks it up.
+
+## 5. Streaming corpus readers
+
+Every reader is lazy; none of them materialise the corpus.
+
+```rust
+use libgrammstein::corpus::{GutenbergReader, PlaintextReader, WikipediaReader};
+
+// A directory of plain-text files, streamed file by file.
+let reader = PlaintextReader::from_directory("corpus/")?;
+
+// A Wikipedia dump on disk (bz2 is handled transparently).
+let reader = WikipediaReader::new("enwiki-latest-pages-articles.xml.bz2")?;
+
+// A directory of Project Gutenberg books.
+let reader = GutenbergReader::from_directory("gutenberg/")?;
+# Ok::<(), libgrammstein::Error>(())
+```
+
+A Wikipedia dump can be streamed **straight from the URL** — no local copy at all — with the
+`http-corpus` feature (enabled by `cli`):
+
+```bash
+grammstein train ngram \
+  "https://dumps.wikimedia.org/enwiki/latest/enwiki-latest-pages-articles.xml.bz2" \
+  model.bin --format wikipedia --checkpoint ./ckpt
+```
+
+> **A URL only works with `--format wikipedia`.** The plaintext and gutenberg readers resolve their
+> argument as a filesystem path; a URL handed to them fails with "file not found". This is the
+> single most common mistake in a large-corpus run.
+
+## 6. Embeddings on a large corpus
+
+The embedding trainer has the same in-memory/streaming split, and the choice is explicit:
+
+| Entry point | Corpus handling | Passes |
+|---|---|---|
+| `train(reader)` | **buffers every sentence in RAM** (warns above $`10^{6}`$ sentences) | $`1`$ |
+| `train_streaming(factory)` | re-reads the corpus from a fresh reader **each epoch** | $`1 + E`$ |
+
+```rust
+use std::path::Path;
+use libgrammstein::corpus::PlaintextReader;
+use libgrammstein::embedding::EmbeddingTrainerBuilder;
+
+let path = Path::new("wikipedia.txt");
+let model = EmbeddingTrainerBuilder::new()
+    .dim(100)
+    .epochs(5)
+    .train_streaming(|| Ok(PlaintextReader::from_file(path)?))?;   // bounded memory
+# Ok::<(), libgrammstein::Error>(())
+```
+
+The CLI's `train embedding` uses the buffering `train`, so for a corpus you cannot buffer, drive
+`train_streaming` from the library. Note also that the $`B \times d`$ subword matrix is a fixed cost
+independent of corpus size — 800 MB at $`B = 2 \times 10^{6}`$, $`d = 100`$ (see
+[Embedding Training §6](embedding.md#6-memory)).
+
+## 7. Controlling parallelism
+
+`--threads` **parses but is never read** (see [CLI Reference §11](../cli/README.md#11-flags-that-parse-but-do-nothing)).
+Training parallelism comes from `rayon`'s global pool, so control it the way rayon expects:
+
+```bash
+RAYON_NUM_THREADS=16 grammstein train ngram corpus.txt model.bin --order 5
+```
+
+or, from the library, before training:
+
+```rust
+rayon::ThreadPoolBuilder::new()
+    .num_threads(16)
+    .build_global()
+    .expect("global rayon pool must not be initialised twice");
+```
+
+The Google Books importer is the exception: its `--parallel` **is** honoured, and sizes both the
+download streams and the Tokio worker pool.
+
+## 8. Estimating memory before you start
+
+For the n-gram table, with $`U`$ distinct n-grams:
+
+```math
+\text{bytes} \;\approx\; U \cdot \bigl(\underbrace{16}_{\texttt{NgramEntry}} + \bar{k} + \omega\bigr) \tag{L3}
+```
+
+where $`\bar{k}`$ is the mean key length in bytes and $`\omega`$ the per-node trie overhead
+(backend-dependent). `NgramEntry` is exactly 16 bytes: one `AtomicU64` count plus two `AtomicU32`
+continuation statistics. Vocabulary-indexed keys (one PUA character per word) shrink $`\bar{k}`$
+substantially versus pipe-separated legacy keys — see
+[N-gram Training §4](ngram.md#4-key-encoding-legacy-vs-vocabulary-indexed).
+
+Do not trust the estimate; **measure**. Run a single prefix or a truncated corpus first:
+
+```bash
+head -c 500M wikipedia.txt > sample.txt
+/usr/bin/time -v grammstein train ngram sample.txt sample.bin --order 5 2>&1 | grep 'Maximum resident'
+```
+
+then extrapolate — sub-linearly, because $`U`$ grows sub-linearly in $`T`$.
+
+## 9. Best practices
+
+1. **Measure on a sample first.** A 500 MB slice tells you the shape of the curve for the price of a
+   coffee.
+2. **Checkpoint anything that runs longer than you are willing to lose.** It also makes
+   `--min-count` work.
+3. **Prune early.** `--min-count 5` on a large corpus typically removes the majority of distinct
+   n-grams and costs almost nothing in perplexity.
+4. **Do not raise the order to compensate for a small corpus.** It inflates $`U`$, inflates the
+   continuation pass, and produces singletons that MKN discounts away regardless.
+5. **Stream from the URL** rather than downloading, when the dump is only needed once.
+6. **Freeze for inference.** `convert to-static` rebuilds the model on a `DoubleArrayTrie`: faster
+   reads, smaller resident set, no write capability (which you no longer need).
+7. **Watch the OOV rate**, not just perplexity. Aggressive pruning shows up there first.
+
+## References
+
+1. S. F. Chen & J. Goodman (1999). *An empirical study of smoothing techniques for language
+   modeling.* Computer Speech & Language 13(4), 359–393.
+   [doi:10.1006/csla.1999.0128](https://doi.org/10.1006/csla.1999.0128)
+2. G. K. Zipf (1949). *Human Behavior and the Principle of Least Effort.* Addison-Wesley.
+3. H. S. Heaps (1978). *Information Retrieval: Computational and Theoretical Aspects.* Academic
+   Press. (Vocabulary growth: $`\lvert V \rvert \approx k\,T^{\beta}`$, $`\beta \approx 0.5`$.)
+
+## See also
+
+- [Google Books Import](../cli/import-google-books.md) — the four importer flags, with sizing tables
+- [Memory Optimization](../architecture/memory-optimization.md) — the design story behind the bounds
+- [N-gram Training](ngram.md) — the two training paths and the `--min-count` trap
+- [Embedding Training](embedding.md) — `train` versus `train_streaming`
+- [Hyperparameter Tuning](hyperparameters.md) — how corpus size should move your defaults
+- [CLI Reference](../cli/README.md) — every flag, with its default

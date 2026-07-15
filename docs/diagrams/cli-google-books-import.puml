@@ -1,0 +1,81 @@
+@startuml cli-google-books-import
+' Where each memory/reliability flag of `train import-google-books` acts.
+' The import is a two-stage pipeline: a DOWNLOAD path (HTTP or local .gz) and a
+' WRITE path (parse -> lock-free overlay -> chunked transaction -> shard
+' checkpoint + eviction -> merge). --cache-files bounds the download path;
+' --tx-chunk-size, --lockfree-flush-threshold and --overlay-budget-gib each bound
+' a distinct buffer on the write path. Flag callouts are notes on the exact stage
+' they govern.
+' Render: plantuml -tsvg docs/diagrams/cli-google-books-import.puml
+' Source of truth for Figure 1 in docs/cli/import-google-books.md §3.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam note {
+  BackgroundColor #ECEFF1
+  BorderColor #546E7A
+  FontColor #263238
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title train import-google-books — which flag bounds which buffer
+
+rectangle "**Google Books n-gram files**\n.gz, one per (order × prefix)" as src #455A64
+rectangle "**Download workers**\n""--parallel"" (default 4)" as dl #546E7A
+rectangle "**Local cache**\n{output_dir}/grammstein-cache/" as cache #546E7A
+rectangle "**Local files**\n""--local-files <DIR>""" as local #546E7A
+
+rectangle "**Parser + filters**\nrecord ⟶ (n-gram, year, count)\n""--min-count"" · ""--min-year"" / ""--max-year""\n""--skip-pos-tags"" · ""--prefix""" as parse #1565C0
+rectangle "**Lock-free overlay**\nper-shard concurrent write buffer" as overlay #1565C0
+rectangle "**Chunked transaction**\nbuffer entries, then commit" as tx #00838F
+rectangle "**Shard checkpoint + eviction**\ncoldest resident overlay nodes evicted\n(lossless — they fault back on read)" as ckpt #00838F
+rectangle "**Merge**\nshards ⟶ PersistentARTrie\n""--sharding"" · ""--keep-shards""" as merge #00838F
+rectangle "**OUTPUT**\npositional argument" as out #455A64
+
+src --> dl : HTTP
+dl --> cache : ""--cache-files""
+cache --> parse
+dl --> parse : streamed\n(default)
+local --> parse
+src ..> local : pre-downloaded\nby the operator
+
+parse --> overlay
+overlay --> tx : flush
+tx --> ckpt : commit
+ckpt --> merge
+merge --> out
+
+note right of cache
+  ""--cache-files"" (default: off)
+  Download each .gz to disk first, then parse
+  from the local file. Survives a mid-stream
+  network blip; costs local disk.
+end note
+
+note right of overlay
+  ""--lockfree-flush-threshold <ENTRIES>""
+  Auto: 50 000 when ""--parallel"" ≥ 8, else
+  100 000. Caps **inter-checkpoint** overlay growth.
+end note
+
+note right of tx
+  ""--tx-chunk-size <ENTRIES>"" (default 500 000)
+  Entries buffered per transaction.
+  0 disables chunking (whole file in one tx).
+end note
+
+note right of ckpt
+  ""--overlay-budget-gib <GIB>"" (default 10)
+  Global **post-checkpoint resident** overlay
+  budget, divided across resident shards.
+  0 disables eviction.
+end note
+
+@enduml

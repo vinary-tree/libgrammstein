@@ -1,416 +1,298 @@
 # Subword Embeddings
 
-This document explains what subword embeddings are, how they work, and how libgrammstein implements them in the FastText style.
+The **embedding model** is libgrammstein's semantic expert: it maps every word — including
+words never seen in training — to a dense vector so that words used in similar contexts land
+near one another in space. It follows the **FastText** recipe [[2]](#references): a word's vector
+is built from the vectors of its **character n-grams** (subwords), which is what gives the model
+its out-of-vocabulary (OOV) coverage. This document explains *what* subword embeddings are, the
+*mathematics* of how a word vector is composed, and *how libgrammstein implements it* — including
+the two places where the shipped code deliberately departs from canonical FastText.
 
-## What are Word Embeddings?
+> **Scope.** Source of truth: [`src/embedding/model.rs`](../../../src/embedding/model.rs),
+> [`src/embedding/mod.rs`](../../../src/embedding/mod.rs), and
+> [`src/embedding/bpe.rs`](../../../src/embedding/bpe.rs). Training is covered in
+> [Skip-gram Training](skip-gram.md); the subword mechanics in [BPE & Subword Extraction](bpe.md);
+> ranking in [Similarity](similarity.md). This model is the embedding half of the
+> [Hybrid Model](../hybrid/interpolation.md).
 
-**Word embeddings** are dense vector representations of words. Each word is mapped to a fixed-dimensional vector (typically 100-300 dimensions) where semantically similar words have similar vectors.
+## Notation
 
-### The Core Idea
+Every symbol is defined before it is used in a formula.
 
-Instead of representing words as sparse one-hot vectors (vocabulary-sized, mostly zeros), embeddings use dense vectors:
+| Symbol | Meaning |
+|---|---|
+| $`w`$ | the word (token) whose vector is being computed |
+| $`V`$ | the in-vocabulary word set; $`\lvert V \rvert`$ its size |
+| $`d`$ | the embedding dimension (`dim`; default $`100`$) |
+| $`B`$ | the number of subword hash buckets (`bucket_count`; default $`2\,000\,000`$) |
+| $`G(w)`$ | the set of boundary-marked character n-grams of $`w`$; $`\lvert G(w) \rvert`$ its size |
+| $`g`$ | a single subword (character n-gram) in $`G(w)`$ |
+| $`h(g)`$ | the FNV-1a bucket index of subword $`g`$, in $`\{0, \dots, B-1\}`$ |
+| $`E_{\mathrm{word}}`$ | the word-embedding matrix, shape $`\lvert V \rvert \times d`$ |
+| $`E_{\mathrm{sub}}`$ | the subword-embedding matrix, shape $`B \times d`$ |
+| $`v_{\mathrm{word}}(w)`$ | the word-embedding row of $`w`$ (only when $`w \in V`$) |
+| $`v_{\mathrm{sub}}(w)`$ | the mean of $`w`$'s subword bucket rows |
+| $`\cos(a,b)`$ | cosine similarity between vectors $`a`$ and $`b`$ |
+
+**Acronyms.** *OOV* — Out-Of-Vocabulary; *FNV* — Fowler-Noll-Vo (a hash function);
+*BPE* — Byte-Pair Encoding.
+
+## What & why: from one-hot to subwords
+
+A naive representation gives each word a **one-hot** vector of length $`\lvert V \rvert`$ — all
+zeros but a single one. One-hot vectors are enormous, and any two distinct words are exactly
+equidistant, so they carry *no* notion of similarity. **Embeddings** replace them with short dense
+vectors learned so that geometric closeness reflects distributional similarity ("a word is known
+by the company it keeps").
+
+| Property | One-hot | Dense embedding |
+|---|---|---|
+| Size per word | $`O(\lvert V \rvert)`$ | $`O(d)`$, $`d \approx 100`$ |
+| Similarity | none (all pairs equidistant) | cosine captures semantic closeness |
+| OOV word | inexpressible | approximated from its subwords |
+
+Classic word embeddings still have one fatal gap: a word absent from the training vocabulary has
+**no** vector at all. FastText closes the gap by representing a word through its **character
+n-grams**. Because *running*, *runner*, and *runs* share the subwords $`\texttt{run}`$,
+$`\texttt{<ru}`$, $`\texttt{unn}`$, they end up with related vectors even if one of them never
+appeared in training. The same mechanism lets a fresh OOV word such as *fastly* inherit meaning
+from the subwords it shares with *fast* and *quickly*.
+
+## Theory: composing a word vector
+
+### Step 1 — subword decomposition
+
+libgrammstein wraps the word in boundary markers $`\texttt{<}\,w\,\texttt{>}`$ and enumerates
+every character n-gram of length $`n \in [\,\texttt{min\_subword\_len},\ \texttt{max\_subword\_len}\,]`$
+(default $`[3, 6]`$). The markers let the model distinguish a prefix/suffix from an interior
+occurrence — $`\texttt{<he}`$ (word start) differs from $`\texttt{he}`$ inside *the*. For
+$`w = \texttt{hello}`$ the marked form is $`\texttt{<hello>}`$ and:
+
+| $`n`$ | subwords $`g \in G(\texttt{hello})`$ |
+|---|---|
+| 3 | $`\texttt{<he}`$, $`\texttt{hel}`$, $`\texttt{ell}`$, $`\texttt{llo}`$, $`\texttt{lo>}`$ |
+| 4 | $`\texttt{<hel}`$, $`\texttt{hell}`$, $`\texttt{ello}`$, $`\texttt{llo>}`$ |
+| 5 | $`\texttt{<hell}`$, $`\texttt{hello}`$, $`\texttt{ello>}`$ |
+| 6 | $`\texttt{<hello}`$, $`\texttt{hello>}`$ |
+
+This is [`extract_subwords`](bpe.md#character-n-gram-subwords).
+
+### Step 2 — hashing to a fixed bucket table
+
+Storing a row per distinct subword is unbounded, so each subword is hashed to one of $`B`$
+buckets with 64-bit **FNV-1a**, and buckets share their embedding rows:
+
+```math
+h(g) = \mathrm{FNV\text{-}1a}(g) \bmod B \tag{E1}
+```
+
+Collisions are tolerated: with $`B = 2 \times 10^{6}`$ they are rare, and the skip-gram objective
+averages out the few that occur. The bucket table $`E_{\mathrm{sub}}`$ is the model's dominant
+memory cost.
+
+### Step 3 — the subword vector and the word vector
+
+The **subword vector** is the *mean* of the bucket rows of the word's n-grams:
+
+```math
+v_{\mathrm{sub}}(w) = \frac{1}{\lvert G(w) \rvert} \sum_{g \in G(w)} E_{\mathrm{sub}}\bigl[h(g)\bigr] \tag{E2}
+```
+
+The final **word vector** averages the word row with the subword vector for a known word, and
+falls back to the subword vector alone for an OOV word — so *every* string yields a vector:
+
+```math
+\mathrm{word\_vector}(w) =
+\begin{cases}
+\tfrac{1}{2}\bigl(v_{\mathrm{word}}(w) + v_{\mathrm{sub}}(w)\bigr) & w \in V \\[2pt]
+v_{\mathrm{sub}}(w) & w \notin V
+\end{cases} \tag{E3}
+```
+
+> **Two honest departures from canonical FastText.** Canonical FastText [[2]](#references)
+> represents a word as the **sum** $`\sum_{g} z_g`$ of its subword vectors (plus a dedicated
+> whole-word row) and does not renormalize. libgrammstein instead (i) **averages** the subword
+> rows in $`(\mathrm{E2})`$ and (ii) **averages** that with the word row in $`(\mathrm{E3})`$.
+> Averaging keeps a word's vector norm roughly independent of its length (long words have many
+> subwords), which stabilizes the cosine comparisons in [Similarity](similarity.md); the trade-off
+> is that raw additive compositionality is weaker than in the summed formulation. Note also that
+> `word_vector` does **not** L2-normalize its output — cosine routines normalize on demand.
+
+A **sentence vector** is simply the mean of its word vectors (used as the context vector by the
+hybrid model — see [Hybrid Interpolation](../hybrid/interpolation.md)):
+
+```math
+\mathrm{sentence\_vector}(w_1 \dots w_m) = \frac{1}{m} \sum_{i=1}^{m} \mathrm{word\_vector}(w_i) \tag{E4}
+```
+
+![Subword composition of a word vector](../../diagrams/embedding-subword.svg)
+
+## The algorithm, literately
+
+The following mirrors [`SubwordEmbedding::word_vector`](../../../src/embedding/model.rs) and its
+private helper `subword_vector`. `⟨…⟩` names a refinement expanded below; `▸` marks a
+side-comment. Inside pseudocode all operators are ASCII.
 
 ```
-One-hot (vocabulary = 10,000):
-"cat"  → [0, 0, 0, ..., 1, ..., 0, 0, 0]  (10,000 dimensions)
-"dog"  → [0, 0, 0, ..., 0, ..., 1, 0, 0]  (10,000 dimensions)
+function word_vector(w):                          ▸ public, memoized entry point
+    if w in cache: return cache[w]                ▸ lock-free DashMap probe
+    v_sub <- subword_vector(w)
+    if w in V:                                     ▸ known word
+        v_word <- word_embeddings[ index_of(w) ]
+        v <- (v_word + v_sub) / 2                  ▸ (E3), in-vocab branch
+    else:                                          ▸ OOV: subwords carry all the signal
+        v <- v_sub                                 ▸ (E3), OOV branch
+    if size(cache) < max_cache_size: cache[w] <- v ▸ bounded insert (default 100_000)
+    return v
 
-Embedding (dimension = 100):
-"cat"  → [0.23, -0.15, 0.89, ..., 0.42]   (100 dimensions)
-"dog"  → [0.25, -0.12, 0.85, ..., 0.39]   (100 dimensions)
+function subword_vector(w):                        ▸ (E2)
+    G <- extract_subwords(w, min_subword_len, max_subword_len)
+    if G is empty: return zeros(d)                 ▸ e.g. a word shorter than min_n
+    s <- zeros(d)
+    for g in G:
+        b <- hash_subword(g, B)                    ▸ FNV-1a mod B, per (E1)
+        s <- s + subword_embeddings[b]
+    return s / |G|                                 ▸ MEAN of bucket rows
 ```
 
-Similar words have similar vectors (high cosine similarity).
+`word_vector_uncached` is the identical computation without the cache probe/insert; training uses
+it to avoid populating the cache with transient values.
 
-### Why Embeddings?
+## Engineering
 
-| Problem | One-Hot | Embeddings |
-|---------|---------|------------|
-| Memory | O(vocabulary) per word | O(dimension) per word |
-| Similarity | No notion of similarity | Semantic similarity captured |
-| OOV words | Cannot represent | Can approximate via subwords |
-| Context | No context awareness | Trained on context |
+### The `SubwordEmbedding` struct
 
-## The Out-of-Vocabulary (OOV) Problem
-
-Standard word embeddings fail for words not seen during training:
-
-```
-Training vocabulary: ["cat", "dog", "running", "quickly"]
-
-Query: "fastly"  → ??? (not in vocabulary)
-Query: "doggo"   → ??? (not in vocabulary)
-```
-
-**Subword embeddings** solve this by learning representations for character sequences.
-
-## Subword Enrichment (FastText-style)
-
-libgrammstein uses FastText-style subword enrichment:
-
-1. Each word is represented as the sum of:
-   - Its own word embedding (if it exists)
-   - The embeddings of its character n-grams (subwords)
-
-2. Subwords are character sequences of length 3-6:
-
-```
-Word: "running"
-Subwords (n=3-6):
-  "<ru", "run", "unn", "nni", "nin", "ing", "ng>"     (3-grams)
-  "<run", "runn", "unni", "nnin", "ning", "ing>"     (4-grams)
-  "<runn", "runni", "unnin", "nning", "ning>"        (5-grams)
-  "<runni", "runnin", "unning", "nning>"             (6-grams)
-
-Where < and > are word boundary markers.
-```
-
-### Hashing Subwords
-
-Storing embeddings for all possible subwords is impractical. Instead, subwords are hashed to a fixed number of buckets:
-
-```
-bucket_count = 2,000,000  (typical value)
-
-hash("run") mod bucket_count → bucket 123456
-hash("ing") mod bucket_count → bucket 789012
-
-Each bucket has a learnable embedding vector.
-```
-
-### Computing Word Embeddings
+Fields are private; the two dense matrices are `ndarray::Array2<f32>` in row-major (C) order, so a
+word's $`d`$ values are contiguous.
 
 ```rust
-pub fn get_embedding(&self, word: &str) -> Array1<f32> {
-    let mut embedding = Array1::zeros(self.dim);
+use ndarray::{Array1, Array2};
+use dashmap::DashMap;
+use std::{collections::HashMap, sync::Arc};
 
-    // Add word embedding if known
-    if let Some(&idx) = self.word_to_idx.get(word) {
-        embedding += &self.word_embeddings.row(idx);
-    }
-
-    // Add subword embeddings
-    for subword in self.extract_subwords(word) {
-        let bucket = self.hash_subword(&subword) % self.bucket_count;
-        embedding += &self.subword_embeddings.row(bucket);
-    }
-
-    // Normalize
-    let norm = embedding.dot(&embedding).sqrt();
-    if norm > 0.0 {
-        embedding /= norm;
-    }
-
-    embedding
-}
-```
-
-## libgrammstein Implementation
-
-### SubwordEmbedding Struct
-
-```rust
 pub struct SubwordEmbedding {
-    /// Word embeddings: [vocab_size × dimension]
-    word_embeddings: Array2<f32>,
-
-    /// Subword embeddings: [bucket_count × dimension]
-    subword_embeddings: Array2<f32>,
-
-    /// Word to index mapping
+    word_embeddings: Array2<f32>,     // [ |V| x d ]  E_word
+    subword_embeddings: Array2<f32>,  // [ B  x d ]  E_sub  (dominant memory cost)
     word_to_idx: HashMap<String, usize>,
-
-    /// Index to word mapping
-    idx_to_word: Vec<String>,
-
-    /// Embedding dimension (100-300 typical)
-    dim: usize,
-
-    /// Number of subword buckets
-    bucket_count: usize,
-
-    /// Minimum subword length (typically 3)
-    min_subword_len: usize,
-
-    /// Maximum subword length (typically 6)
-    max_subword_len: usize,
-
-    /// Optional BPE tokenizer
-    tokenizer: Option<BpeTokenizer>,
-
-    /// LRU cache for computed embeddings
-    cache: Arc<DashMap<String, Array1<f32>>>,
+    idx_to_word: Vec<String>,         // index-ordered vocabulary; keeps rows aligned
+    dim: usize,                       // d
+    bucket_count: usize,              // B
+    min_subword_len: usize,           // default 3
+    max_subword_len: usize,           // default 6
+    tokenizer: Option<BpeTokenizer>,  // optional BPE segmenter (see bpe.md)
+    cache: Arc<DashMap<String, Array1<f32>>>, // #[serde(skip)] — rebuilt empty on load
+    max_cache_size: usize,            // default 100_000
 }
 ```
 
-### Key Methods
+The exported defaults are `DEFAULT_EMBEDDING_DIM = 100`, `DEFAULT_BUCKET_COUNT = 2_000_000`,
+`DEFAULT_MIN_SUBWORD_LEN = 3`, and `DEFAULT_MAX_SUBWORD_LEN = 6`.
+
+### Concurrency and persistence
+
+- The two weight matrices are **immutable after training**, so any number of threads may read
+  vectors concurrently.
+- The vector `cache` is an `Arc<DashMap<..>>` — **lock-free** concurrent get/insert. It is bounded
+  by `max_cache_size` (a simple length gate, not strict LRU), marked `#[serde(skip)]`, and
+  `Clone` deliberately gives the clone a **fresh empty** cache.
+- Persistence is feature-gated on `serde-extras`: `save`/`load` use `bincode` to write/read the
+  whole model (`SubwordEmbedding::save`, `SubwordEmbedding::load`).
+
+### Complexity
+
+Let $`s = \lvert G(w) \rvert`$ be the subword count of $`w`$ (bounded by word length and the
+n-gram range).
+
+| Operation | Cost | Notes |
+|---|---|---|
+| `word_vector` (cache hit) | $`O(d)`$ | DashMap probe + clone |
+| `word_vector` (miss) | $`O(s\,d)`$ | one bucket row summed per subword |
+| `similarity` | $`O(d)`$ | two vectors + one dot product |
+| `most_similar` | $`O(\lvert V \rvert\,d)`$ | full scan of $`E_{\mathrm{word}}`$ (see [Similarity](similarity.md)) |
+
+### Memory layout
+
+With the defaults $`d = 100`$, $`B = 2 \times 10^{6}`$, and $`\lvert V \rvert = 2 \times 10^{5}`$
+(and $`4`$ bytes per `f32`):
+
+```math
+\underbrace{2{\times}10^{5} \cdot 100 \cdot 4}_{E_{\mathrm{word}} \approx 80\ \text{MB}}
+\;+\;
+\underbrace{2{\times}10^{6} \cdot 100 \cdot 4}_{E_{\mathrm{sub}} \approx 800\ \text{MB}} \tag{E5}
+```
+
+The subword table dominates; shrinking $`B`$ trades memory for a higher subword collision rate.
+
+## Usage
+
+Train a model, then query it through the real API. `word_vector` never fails — an OOV word still
+returns a subword-derived vector.
 
 ```rust
-impl SubwordEmbedding {
-    /// Get the embedding for a word (cached)
-    pub fn get_embedding(&self, word: &str) -> Array1<f32> {
-        if let Some(cached) = self.cache.get(word) {
-            return cached.clone();
-        }
+use libgrammstein::embedding::{EmbeddingTrainerBuilder, SubwordEmbedding};
+use libgrammstein::corpus::PlaintextReader;
 
-        let embedding = self.compute_embedding(word);
-        self.cache.insert(word.to_string(), embedding.clone());
-        embedding
-    }
+// Train FastText-style subword embeddings from a plaintext corpus.
+let reader = PlaintextReader::from_file("corpus.txt")?;
+let model: SubwordEmbedding = EmbeddingTrainerBuilder::new()
+    .dim(100)
+    .window_size(5)
+    .min_count(5)
+    .epochs(5)
+    .train(reader)?;
 
-    /// Compute cosine similarity between two words
-    pub fn similarity(&self, word1: &str, word2: &str) -> f32 {
-        let emb1 = self.get_embedding(word1);
-        let emb2 = self.get_embedding(word2);
-        emb1.dot(&emb2)  // Already normalized
-    }
+// A known word: word row averaged with its subword vector.
+let v = model.word_vector("running");
+assert_eq!(v.len(), model.dim());
 
-    /// Find k nearest neighbors to a word
-    pub fn nearest_neighbors(&self, word: &str, k: usize) -> Vec<(String, f32)> {
-        let query_emb = self.get_embedding(word);
+// An OOV word still resolves, via shared subwords with the vocabulary.
+let oov = model.word_vector("fastly");
+assert_eq!(oov.len(), model.dim());
 
-        let mut similarities: Vec<_> = self.idx_to_word
-            .iter()
-            .enumerate()
-            .map(|(idx, w)| {
-                let sim = query_emb.dot(&self.word_embeddings.row(idx));
-                (w.clone(), sim)
-            })
-            .collect();
-
-        similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        similarities.truncate(k);
-        similarities
-    }
-}
-```
-
-## Training: Skip-gram with Negative Sampling
-
-libgrammstein uses the **skip-gram** training objective with **negative sampling**.
-
-### Skip-gram Objective
-
-Given a center word, predict its context words:
-
-```
-Sentence: "the quick brown fox jumps"
-Window size: 2
-
-Center: "brown"
-Context: ["the", "quick", "fox", "jumps"]
-
-Training samples:
-  (brown, the)   → positive
-  (brown, quick) → positive
-  (brown, fox)   → positive
-  (brown, jumps) → positive
-```
-
-### Negative Sampling
-
-Instead of computing a full softmax over the vocabulary, sample a few "negative" examples:
-
-```
-Positive: (brown, fox)   → should be similar
-Negatives: (brown, table), (brown, computer), ... → should be dissimilar
-```
-
-The loss function:
-
-```
-L = -log σ(v_fox · v_brown) - Σᵢ log σ(-v_negᵢ · v_brown)
-
-Where σ(x) = 1 / (1 + e^(-x))
-```
-
-### Training Loop
-
-```rust
-pub fn train<R: CorpusReader>(
-    reader: R,
-    config: EmbeddingConfig,
-) -> Result<SubwordEmbedding> {
-    let mut model = SubwordEmbedding::new(config);
-
-    for epoch in 0..config.epochs {
-        reader.sentences()
-            .par_bridge()  // Rayon parallelism
-            .for_each(|sentence| {
-                let tokens = tokenize(&sentence);
-
-                for i in 0..tokens.len() {
-                    let center = &tokens[i];
-
-                    // Context window
-                    for j in (i.saturating_sub(config.window))..=(i + config.window).min(tokens.len() - 1) {
-                        if i == j { continue; }
-                        let context = &tokens[j];
-
-                        // Update embeddings
-                        model.train_pair(center, context, true);   // Positive
-                        for neg in model.sample_negatives(config.neg_samples) {
-                            model.train_pair(center, &neg, false); // Negative
-                        }
-                    }
-                }
-            });
-
-        // Decay learning rate
-        model.learning_rate *= 0.95;
-    }
-
-    Ok(model)
-}
-```
-
-## BPE Tokenization (Optional)
-
-For more sophisticated subword segmentation, libgrammstein supports **Byte-Pair Encoding (BPE)**.
-
-### What is BPE?
-
-BPE learns a vocabulary of subword units by iteratively merging the most frequent character pairs:
-
-```
-Initial: ["l", "o", "w", "e", "r", "</w>", "n", "e", "w", "e", "s", "t", "</w>"]
-
-Iteration 1: Merge ("e", "s") → "es"
-Iteration 2: Merge ("es", "t") → "est"
-Iteration 3: Merge ("l", "o") → "lo"
-...
-
-Final vocabulary: ["lo", "w", "er</w>", "new", "est</w>", ...]
-```
-
-### BPE Tokenizer
-
-```rust
-pub struct BpeTokenizer {
-    /// BPE merges in priority order
-    merges: Vec<(String, String)>,
-
-    /// Vocabulary of subword tokens
-    vocab: HashMap<String, usize>,
-
-    /// End-of-word marker
-    eow: String,
-}
-
-impl BpeTokenizer {
-    /// Train BPE vocabulary from corpus
-    pub fn train<R: CorpusReader>(
-        reader: R,
-        vocab_size: usize,
-    ) -> Self {
-        // Count word frequencies
-        // Initialize with character vocabulary
-        // Iteratively merge most frequent pairs
-        // Stop when vocab_size reached
-    }
-
-    /// Tokenize a word into BPE tokens
-    pub fn tokenize(&self, word: &str) -> Vec<String> {
-        // Apply learned merges greedily
-    }
-}
-```
-
-### Using BPE with Embeddings
-
-```rust
-let tokenizer = BpeTokenizer::train(&reader, 50_000)?;
-let config = EmbeddingConfig {
-    tokenizer: Some(tokenizer),
-    ..Default::default()
-};
-let embeddings = EmbeddingTrainer::train(&reader, config)?;
-```
-
-## Similarity Scoring for Language Modeling
-
-Embeddings contribute to language model scoring via **context similarity**:
-
-```rust
-impl SubwordEmbedding {
-    /// Score how well a word fits the context
-    pub fn context_score(&self, word: &str, context: &[&str]) -> f64 {
-        let word_emb = self.get_embedding(word);
-
-        // Compute context embedding (average of context words)
-        let mut context_emb = Array1::zeros(self.dim);
-        for ctx_word in context {
-            context_emb += &self.get_embedding(ctx_word);
-        }
-        if !context.is_empty() {
-            context_emb /= context.len() as f32;
-        }
-
-        // Cosine similarity
-        word_emb.dot(&context_emb) as f64
-    }
-}
-```
-
-## Thread Safety
-
-`SubwordEmbedding` is designed for concurrent access:
-
-| Component | Thread Safety |
-|-----------|---------------|
-| `word_embeddings` | Immutable after training |
-| `subword_embeddings` | Immutable after training |
-| `cache` | `Arc<DashMap>` for lock-free concurrent access |
-
-## Performance Characteristics
-
-| Operation | Time Complexity | Notes |
-|-----------|-----------------|-------|
-| `get_embedding` (cached) | O(1) | DashMap lookup |
-| `get_embedding` (uncached) | O(s × d) | s = subwords, d = dimension |
-| `similarity` | O(d) | Dot product |
-| `nearest_neighbors` | O(V × d) | V = vocabulary size |
-| Training (per epoch) | O(C × w × d) | C = corpus tokens, w = window |
-
-## Memory Layout
-
-```
-SubwordEmbedding
-├── word_embeddings: Array2<f32>
-│   └── [vocab_size × dim] contiguous memory
-│       e.g., [200,000 × 100] = 80MB
-│
-├── subword_embeddings: Array2<f32>
-│   └── [bucket_count × dim] contiguous memory
-│       e.g., [2,000,000 × 100] = 800MB
-│
-├── word_to_idx: HashMap<String, usize>
-│   └── ~200,000 entries
-│
-├── idx_to_word: Vec<String>
-│   └── ~200,000 strings
-│
-└── cache: Arc<DashMap<String, Array1<f32>>>
-    └── LRU-evicted, max ~10,000 entries
+// Nearest neighbours and a sentence (context) vector.
+let neighbours = model.most_similar("king", 10);   // Vec<(String, f32)>
+let ctx = model.sentence_vector(&["the", "quick", "brown"]);
+println!("vocab = {}, neighbours[0] = {:?}", model.vocab_size(), neighbours.first());
+# Ok::<(), libgrammstein::Error>(())
 ```
 
 ## Hyperparameters
 
-| Parameter | Typical Value | Effect |
-|-----------|---------------|--------|
-| `dim` | 100-300 | Higher = more expressive, more memory |
-| `window` | 5 | Larger = more context, slower training |
-| `min_count` | 5 | Filter rare words |
-| `bucket_count` | 2,000,000 | More = fewer hash collisions |
-| `min_subword_len` | 3 | Character n-gram minimum |
-| `max_subword_len` | 6 | Character n-gram maximum |
-| `neg_samples` | 5-10 | More = slower but better gradients |
-| `epochs` | 5-20 | More = better quality, longer training |
-| `learning_rate` | 0.025 | Initial learning rate |
+These are the fields of [`EmbeddingConfig`](../../../src/embedding/trainer.rs) with their shipped
+defaults; the builder in the snippet above sets a subset. See [Skip-gram Training](skip-gram.md)
+for the training-specific ones and [Hyperparameters](../../training/hyperparameters.md) for tuning.
 
-## Next Steps
+| Parameter | Default | Effect |
+|---|---|---|
+| `dim` | $`100`$ | vector width — higher is more expressive, more memory |
+| `window_size` | $`5`$ | context radius during training |
+| `min_count` | $`5`$ | drop words rarer than this from $`V`$ |
+| `neg_samples` | $`5`$ | negative samples per positive (see skip-gram) |
+| `epochs` | $`5`$ | passes over the corpus |
+| `learning_rate` | $`0.05`$ | initial step size (linearly decayed per epoch) |
+| `bucket_count` | $`2\,000\,000`$ | subword hash table size $`B`$ |
+| `min_subword_len` | $`3`$ | shortest character n-gram |
+| `max_subword_len` | $`6`$ | longest character n-gram |
+| `subsample_threshold` | $`10^{-4}`$ | frequent-word down-sampling threshold |
+| `batch_size` | $`10\,000`$ | prefetch/streaming batch size |
 
-- [BPE Tokenizer](bpe-tokenizer.md): Detailed BPE algorithm
-- [Skip-gram Training](skip-gram.md): Training with negative sampling
-- [Similarity](similarity.md): Cosine similarity and nearest neighbors
-- [Hybrid Overview](../hybrid/overview.md): Combining with N-gram models
+## References
+
+1. T. Mikolov, I. Sutskever, K. Chen, G. Corrado & J. Dean (2013). *Distributed representations of
+   words and phrases and their compositionality* (word2vec / skip-gram with negative sampling).
+   NeurIPS 26. [arXiv:1310.4546](https://arxiv.org/abs/1310.4546)
+2. P. Bojanowski, E. Grave, A. Joulin & T. Mikolov (2017). *Enriching word vectors with subword
+   information* (FastText). TACL 5, 135–146.
+   [doi:10.1162/tacl_a_00051](https://doi.org/10.1162/tacl_a_00051)
+3. R. Sennrich, B. Haddow & A. Birch (2016). *Neural machine translation of rare words with subword
+   units* (BPE). ACL 2016, 1715–1725.
+   [doi:10.18653/v1/P16-1162](https://doi.org/10.18653/v1/P16-1162)
+
+## See also
+
+- [BPE & Subword Extraction](bpe.md) — `extract_subwords`, `hash_subword`, and the BPE tokenizer
+- [Skip-gram Training](skip-gram.md) — how $`E_{\mathrm{word}}`$ and $`E_{\mathrm{sub}}`$ are learned
+- [Similarity](similarity.md) — cosine, `most_similar`, and analogies
+- [Phonetic Embeddings](phonetic.md) — sound-aware similarity on top of this model
+- [Hybrid Interpolation](../hybrid/interpolation.md) — fusing this model with the n-gram expert
+- [Embedding API reference](../../api/embedding.md) — the full method surface

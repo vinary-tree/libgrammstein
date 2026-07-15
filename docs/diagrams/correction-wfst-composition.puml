@@ -2,6 +2,8 @@
 ' Why the joint search is *literally* N-dimensional: WFST composition builds a
 ' product automaton whose states are tuples (q1,q2), and the path weight is the
 ' semiring product of the per-dimension weights.
+' Render: plantuml -tsvg docs/diagrams/correction-wfst-composition.puml
+' Source of truth for Figure 3 in docs/integration/lling-llang/hierarchical-correction.md §4.
 skinparam backgroundColor #FAFAFA
 skinparam shadowing false
 skinparam defaultTextAlignment center

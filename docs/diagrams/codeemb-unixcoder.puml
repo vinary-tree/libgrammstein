@@ -1,0 +1,65 @@
+@startuml codeemb-unixcoder
+' UniXcoder: the paper's three prefix-selected modes (top, one of which the shipped
+' path implicitly uses) versus what UniXcoderEmbedder actually feeds the graph
+' (bottom). Muted = described by the paper but NOT emitted by libgrammstein.
+' Render: plantuml -tsvg docs/diagrams/codeemb-unixcoder.puml
+' Source of truth for Figure 1 in docs/components/code-embeddings/unixcoder.md.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam package {
+  BackgroundColor #FFFFFF
+  BorderColor #90A4AE
+  FontColor #263238
+  FontStyle bold
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title UniXcoder — prefix-controlled modes (paper) vs. the shipped encoder-only path
+
+package "Guo et al. 2022 — mode is selected by a prefix token" {
+  rectangle "**⟨encoder-only⟩**\nbidirectional self-attention\n⇒ understanding: search, clone" as m1 #388E3C
+  rectangle "**⟨decoder-only⟩**\ncausal self-attention\n⇒ generation: completion" as m2 #90A4AE
+  rectangle "**⟨encoder-decoder⟩**\ncausal-prefix attention\n⇒ seq2seq: summarization" as m3 #90A4AE
+  rectangle "**flattened AST + comments**\nlossless serialization used\nduring pre-training" as ast #90A4AE
+}
+
+package "libgrammstein — UniXcoderEmbedder::embed_code" {
+  rectangle "**(code c, language ℓ)**\nℓ reaches only the cache key" as q #EF6C00
+  rectangle "**Tokenizer**\nencode(c, true) — **raw code, no mode prefix**\ntruncate to max_length = 512" as tok #EF6C00
+  rectangle "**ONNX RoBERTa encoder**\n125M params · 12 layers · d = 768" as enc #2E7D32
+  rectangle "**CLS pooling**\nv = H₀ = data[..768]" as cls #2E7D32
+  rectangle "**L2 normalize** → **v̂ ∈ ℝ⁷⁶⁸**" as out #455A64
+}
+
+m1 -[#90A4AE,dashed]-> enc : the mode the weights\nare used **as if** in
+ast -[#90A4AE,dashed]-> tok : **not performed**\n(plain text in)
+
+q --> tok
+tok --> enc : (ids, mask)
+enc --> cls
+cls --> out
+
+note bottom of tok #ECEFF1
+  The shipped tokenizer call passes the code **verbatim**.
+  It emits no ⟨encoder-only⟩ mode prefix, so the model is
+  driven off-protocol relative to the paper. In practice the
+  bidirectional export is already encoder-only, but a checkpoint
+  that keys on the prefix will be under-conditioned.
+end note
+
+note right of cls #E8F5E9
+  Contrastive pre-training (multi-modal
+  contrastive learning + cross-modal
+  generation) is what makes the CLS row
+  a usable similarity vector.
+end note
+
+@enduml

@@ -1,188 +1,205 @@
 # Acoustic Processing
 
-Audio feature extraction for speech recognition and acoustic modeling.
+The **acoustic module** turns a raw audio waveform into the compact, perceptually-motivated
+feature frames that speech recognizers consume, and — behind an optional feature gate — runs
+those frames through a neural **acoustic model** to produce per-frame log posteriors over output
+units. It is libgrammstein's bridge from *sound* to the symbolic world of the n-gram and hybrid
+language models. This document introduces *what* the module produces, *why* those representations
+are the right ones, and *how* the pieces compose into an automatic-speech-recognition (ASR)
+cascade.
 
-## What is Acoustic Processing?
+> **Scope.** Source of truth: [`src/acoustic/mod.rs`](../../../src/acoustic/mod.rs),
+> [`src/acoustic/features.rs`](../../../src/acoustic/features.rs), and (feature-gated)
+> [`src/acoustic/model.rs`](../../../src/acoustic/model.rs). For the extraction API in depth see
+> [Feature Extraction](features.md); for the neural models see [Acoustic Models](models.md); for
+> the phonetic *embedding* that shares this vocabulary of ideas see
+> [Acoustic-Word Embeddings](../embedding/acoustic-word.md).
 
-Acoustic processing transforms raw audio waveforms into compact feature representations suitable for speech recognition. Just as humans perceive sound through the cochlea's frequency analysis, acoustic feature extraction mimics this process computationally.
+## What & why
 
-The acoustic module provides:
+A microphone delivers roughly $`16{,}000`$ samples per second. That stream is highly redundant
+for recognition: the ear does not hear individual samples, it hears the *short-time spectral
+envelope* — how energy is distributed across frequency bands over windows of a few tens of
+milliseconds. Acoustic feature extraction reproduces this computationally. It slices the signal
+into overlapping **frames**, measures the energy in a bank of **mel-scaled** frequency bands
+(spaced the way the cochlea resolves pitch [[2]](#references)), and log-compresses the result so
+that multiplicative gain becomes additive offset. The output is a short vector per frame —
+typically $`40`$ numbers every $`10`$ ms instead of $`160`$ raw samples — that is far easier for a
+statistical or neural model to classify.
 
-- **Mel Filterbank Features**: Perceptually-motivated frequency representation
-- **MFCC**: Mel-frequency cepstral coefficients for traditional ASR
-- **Streaming Extraction**: Real-time processing for live audio
-- **Neural Models**: Transformer-based acoustic models via Candle
+The module offers four feature families and, when the `candle-model` gate is on, three neural
+models that map frames to log posteriors:
 
-## Terminology
+| Feature (method) | Dimensions | Best for |
+|---|---|---|
+| **Filterbank** (`extract_filterbank`) | $`40`$–$`80`$ | neural encoders (Conformer, Whisper-style) |
+| **MFCC** (`extract_mfcc`) | $`13`$–$`39`$ | GMM-HMM systems; compact decorrelated features |
+| **Log-mel** (`extract_log_mel`) | $`40`$–$`80`$ | streaming ASR (frame-local, no utterance normalization) |
+| **Spectrogram** (`extract_spectrogram`) | $`K/2 + 1`$ | visualization, debugging, custom front-ends |
 
-| Term | Definition |
-|------|------------|
-| **Frame** | A short segment of audio (typically 25ms) analyzed as a unit |
-| **Frame Shift** | Time between consecutive frames (typically 10ms), creating overlap |
-| **Mel Scale** | Perceptual frequency scale where equal distances sound equally spaced |
-| **Filterbank** | Set of triangular filters that bin frequency energy |
-| **MFCC** | Cepstral coefficients from DCT of log mel filterbank |
-| **Spectrogram** | Time-frequency representation of audio |
+## Notation
 
-## Feature Extraction Pipeline
+Every symbol below is defined before it is used in a formula.
 
+| Symbol | Meaning |
+|---|---|
+| $`x[n]`$ | raw audio sample at index $`n`$ |
+| $`f_s`$ | sample rate in Hz (`sample_rate`; default $`16{,}000`$) |
+| $`N`$ | frame size in samples (`frame_size`; default $`400 = 25`$ ms) |
+| $`S`$ | frame shift (hop) in samples (`frame_shift`; default $`160 = 10`$ ms) |
+| $`K`$ | FFT size (`fft_size`; a power of two $`\geq N`$) |
+| $`M`$ | number of mel channels (`num_mels`; default $`40`$) |
+| $`J`$ | number of MFCC coefficients (`num_mfcc`; default $`13`$) |
+| $`T`$ | number of frames extracted from an utterance |
+| $`U`$ | number of acoustic-model output units (`num_units`) |
+| $`f`$ | a frequency in Hz |
+| $`\mathrm{mel}(f)`$ | the mel value of frequency $`f`$ |
+
+**Acronyms.** *ASR* — Automatic Speech Recognition; *MFCC* — Mel-Frequency Cepstral
+Coefficients; *FFT* — Fast Fourier Transform; *DCT* — Discrete Cosine Transform; *CMVN* —
+Cepstral Mean-and-Variance Normalization; *CTC* — Connectionist Temporal Classification;
+*WFST* — Weighted Finite-State Transducer.
+
+## The extraction pipeline
+
+Every extraction method walks the same trunk and taps out at a different stage. Pre-emphasis
+lifts the high frequencies, the signal is cut into windowed frames, each frame is transformed to
+a power spectrum, the spectrum is binned by the mel filterbank and log-compressed; MFCC then
+applies a DCT, and filterbank/MFCC optionally add mean-variance normalization and delta features.
+
+![Audio feature-extraction pipeline: pre-emphasis, framing, windowing, FFT, mel filterbank, log, optional DCT and normalization, with the four output taps](../../diagrams/acoustic-mfcc-pipeline.svg)
+
+The mel warping is the perceptual heart of the pipeline. Frequency in Hz is mapped to the mel
+scale before the triangular filters are laid down, so the filters are uniformly spaced in *pitch*
+even though they widen in *Hz*:
+
+```math
+\mathrm{mel}(f) = 2595 \, \log_{10}\!\left(1 + \frac{f}{700}\right),
+\qquad
+f(\mathrm{mel}) = 700 \left(10^{\,\mathrm{mel}/2595} - 1\right) \tag{A1}
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Audio Feature Extraction Pipeline                     │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐             │
-│  │   Raw    │───►│   Pre-   │───►│ Framing  │───►│ Windowing│             │
-│  │  Audio   │    │ emphasis │    │ (25ms)   │    │ (Hanning)│             │
-│  └──────────┘    └──────────┘    └──────────┘    └────┬─────┘             │
-│                                                       │                     │
-│                                                       ▼                     │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐             │
-│  │  Output  │◄───│   Log    │◄───│   Mel    │◄───│   FFT    │             │
-│  │ Features │    │ Compress │    │Filterbank│    │ (Power)  │             │
-│  └──────────┘    └──────────┘    └──────────┘    └──────────┘             │
-│       │                                                                     │
-│       ▼                                                                     │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                        Optional Processing                           │   │
-│  │   ┌────────┐    ┌────────────┐    ┌───────────────────────────┐    │   │
-│  │   │  DCT   │    │   Delta    │    │  Mean/Variance            │    │   │
-│  │   │(→MFCC) │    │  Features  │    │  Normalization            │    │   │
-│  │   └────────┘    └────────────┘    └───────────────────────────┘    │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+
+The full stage-by-stage mathematics — pre-emphasis, windowing, the power spectrum, the triangular
+filters, log compression, the DCT, and the delta regression — is derived in
+[Feature Extraction](features.md#theory). The number of frames an utterance yields is
+
+```math
+T = \left\lfloor \frac{L - N}{S} \right\rfloor + 1 \qquad (L > N) \tag{A2}
 ```
 
-### Pipeline Stages
+for an audio length of $`L`$ samples; a non-empty utterance shorter than one frame yields a
+single frame, and empty audio yields none.
 
-1. **Pre-emphasis**: Boosts high frequencies to compensate for spectral tilt
-   - Formula: `y[n] = x[n] - α·x[n-1]` where α ≈ 0.97
+## Configurations
 
-2. **Framing**: Segments audio into overlapping frames
-   - Default: 25ms frames with 10ms shift (15ms overlap)
-
-3. **Windowing**: Applies window function to reduce spectral leakage
-   - Hanning (default), Hamming, Blackman, or Rectangular
-
-4. **FFT**: Computes frequency spectrum via Fast Fourier Transform
-
-5. **Mel Filterbank**: Applies triangular filters on mel scale
-   - Mel formula: `mel = 2595 × log₁₀(1 + f/700)`
-
-6. **Log Compression**: Applies logarithm for dynamic range compression
-
-7. **DCT** (optional): Discrete Cosine Transform produces MFCC
-
-## Feature Types Comparison
-
-| Feature Type | Dimensions | Best For | Normalization |
-|--------------|------------|----------|---------------|
-| **Mel Filterbank** | 40-80 | Neural models (Conformer, Whisper) | Per-utterance |
-| **Log-Mel** | 40-80 | Streaming ASR, real-time | Frame-level |
-| **MFCC** | 13-39 | GMM-HMM, legacy systems | Per-utterance |
-| **Spectrogram** | FFT/2+1 | Visualization, debugging | None |
-
-## Quick Start
+`FeatureConfig` bundles every knob. Three named presets cover the common sample rates, and
+`wideband()` is an alias for `default()`.
 
 ```rust
-use libgrammstein::acoustic::{FeatureExtractor, FeatureConfig};
+use libgrammstein::acoustic::FeatureConfig;
 
-// Create feature extractor for 16kHz audio
-let config = FeatureConfig::default();
-let extractor = FeatureExtractor::new(config);
-
-// Load mono 16kHz audio (values in [-1.0, 1.0])
-let audio: Vec<f32> = load_audio_file("speech.wav");
-
-// Extract 40-dimensional mel filterbank features
-let filterbank = extractor.extract_filterbank(&audio);
-println!("Extracted {} frames of {} dimensions",
-    filterbank.len(),        // e.g., 98 frames for 1s audio
-    filterbank[0].len()      // 40 dimensions
-);
-
-// Or extract 13-dimensional MFCC
-let mfcc = extractor.extract_mfcc(&audio);
+let wideband  = FeatureConfig::default();    // 16 kHz: N=400, S=160, K=512, M=40, J=13
+let narrow    = FeatureConfig::telephony();  //  8 kHz: N=200, S=80,  K=256, high_freq=4000
+let hifi      = FeatureConfig::music();      // 44.1 kHz: N=1102, S=441, K=2048, M=80
 ```
 
-## Common Configurations
+| Preset | `sample_rate` | `frame_size` | `frame_shift` | `fft_size` | `num_mels` | `high_freq` |
+|---|---|---|---|---|---|---|
+| `default` / `wideband` | $`16{,}000`$ | $`400`$ | $`160`$ | $`512`$ | $`40`$ | $`8000`$ |
+| `telephony` | $`8000`$ | $`200`$ | $`80`$ | $`256`$ | $`40`$ | $`4000`$ |
+| `music` | $`44{,}100`$ | $`1102`$ | $`441`$ | $`2048`$ | $`80`$ | $`22{,}050`$ |
 
-### Wideband Speech (Default)
+The `high_freq` bound tracks the Nyquist frequency $`f_s / 2`$ of each rate, so the filterbank
+never places a filter above the representable band. See
+[Feature Extraction](features.md#featureconfig) for the full field table and defaults.
 
-```rust
-let config = FeatureConfig::default();
-// sample_rate: 16000 Hz
-// frame_size: 400 samples (25ms)
-// frame_shift: 160 samples (10ms)
-// num_mels: 40
-// low_freq: 20 Hz, high_freq: 8000 Hz
-```
+## From features to transcription
 
-### Telephony (Narrowband)
+Features are only the front end. In the lling-llang ASR cascade they feed an `AcousticModel`
+whose `forward` method returns per-frame log posteriors $`\log \mathbb{P}(u \mid \text{frame})`$
+over $`U`$ output units; a CTC or HMM decoder folds those emissions into the search transducer
+$`H`$, which is composed with the context, lexicon, and grammar transducers
+($`H \circ C \circ L \circ G`$) — the grammar $`G`$ being a libgrammstein n-gram language model.
 
-```rust
-let config = FeatureConfig::telephony();
-// sample_rate: 8000 Hz
-// high_freq: 4000 Hz (Nyquist limit)
-// Suitable for phone audio
-```
+![Acoustic stage in the ASR cascade: FeatureExtractor to AcousticModel to CTC decoder to WFST composition with the n-gram grammar](../../diagrams/acoustic-asr-cascade.svg)
 
-### Music / High-Fidelity
+The `AcousticModel` trait defined here is a deliberate local mirror of lling-llang's trait, kept
+inside libgrammstein to avoid a circular crate dependency; any type implementing it adapts
+cleanly into the cascade. See [Acoustic Models](models.md) for the trait, the concrete models,
+and the CTC blank-token contract, and the
+[lling-llang integration overview](../../integration/lling-llang/overview.md) for how the
+transducers are assembled.
 
-```rust
-let config = FeatureConfig::music();
-// sample_rate: 44100 Hz
-// num_mels: 80
-// Suitable for music analysis
-```
+## Engineering
 
-## Integration with ASR
+### Feature gates
 
-The acoustic module integrates with lling-llang's ASR cascade:
+Acoustic support is opt-in so that a pure text-modeling build pulls in neither an FFT library nor
+a tensor framework.
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           ASR Pipeline Integration                           │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│   libgrammstein                        lling-llang                          │
-│  ┌─────────────────┐                ┌──────────────────────────────────┐   │
-│  │FeatureExtractor │───────────────►│        AcousticModel             │   │
-│  │  (MFCC/FB)      │  features      │   (TransformerAcousticModel)    │   │
-│  └─────────────────┘                └────────────┬─────────────────────┘   │
-│                                                  │ posteriors              │
-│                                                  ▼                         │
-│                                     ┌──────────────────────────────────┐   │
-│                                     │      CTC/HMM Decoder             │   │
-│                                     │   (Compose with LM WFST)         │   │
-│                                     └────────────┬─────────────────────┘   │
-│                                                  │                         │
-│                                                  ▼                         │
-│                                            Transcription                   │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-## Feature Flags
-
-| Flag | Dependencies | Description |
-|------|--------------|-------------|
-| `acoustic` | rustfft, realfft | Audio feature extraction |
-| `candle-model` | candle-core, candle-nn | Neural acoustic models |
-
-Enable in `Cargo.toml`:
+| Feature flag | Pulls in | Enables |
+|---|---|---|
+| `acoustic` | `rustfft`, `realfft` | `FeatureExtractor`, `StreamingFeatureExtractor`, `MelFilterbank` |
+| `candle-model` | `candle-core`, `candle-nn` (+ `acoustic`) | `AcousticModel` trait and the neural models |
 
 ```toml
 [dependencies]
+# feature extraction only
 libgrammstein = { version = "0.1", features = ["acoustic"] }
-
-# Or with neural models:
+# ...or add the neural acoustic models
 libgrammstein = { version = "0.1", features = ["candle-model"] }
 ```
 
-## Related Documentation
+### Types at a glance
 
-- [Feature Extraction](features.md) - Detailed FeatureExtractor API
-- [Acoustic Models](models.md) - Candle-based neural models
-- [lling-llang Acoustic Integration](../../../lling-llang/docs/acoustic/overview.md)
+- [`FeatureConfig`](features.md#featureconfig) — the configuration record, with `default`,
+  `telephony`, `wideband`, and `music` constructors.
+- [`FeatureExtractor`](features.md#featureextractor) — batch extraction (`extract_filterbank`,
+  `extract_mfcc`, `extract_log_mel`, `extract_spectrogram`), backed by a pre-planned real FFT, a
+  cached mel filterbank, and a cached DCT matrix.
+- [`StreamingFeatureExtractor`](features.md#streamingfeatureextractor) — a buffered wrapper for
+  real-time audio that emits complete frames as they become available.
+- [`MelFilterbank`](features.md#the-mel-filterbank), `WindowType` — the perceptual filterbank and
+  the window-function selector.
+- [`AcousticModel`](models.md) and `LinearAcousticModel`, `TransformerAcousticModel`,
+  `MockAcousticModel`, `AcousticModelConfig` — the neural side (`candle-model`).
+
+## Usage
+
+```rust
+use libgrammstein::acoustic::{FeatureConfig, FeatureExtractor};
+
+// A wideband (16 kHz) extractor.
+let extractor = FeatureExtractor::new(FeatureConfig::default());
+
+// Mono audio in [-1.0, 1.0] at the configured sample rate.
+let audio: Vec<f32> = load_audio("speech.wav");
+
+// 40-dimensional log-mel filterbank features, one vector per ~10 ms frame.
+let filterbank = extractor.extract_filterbank(&audio);
+println!("{} frames x {} dims", filterbank.len(), filterbank[0].len());
+
+// ...or 13-dimensional MFCC for a GMM-HMM front end.
+let mfcc = extractor.extract_mfcc(&audio);
+```
+
+## References
+
+1. S. B. Davis & P. Mermelstein (1980). *Comparison of parametric representations for
+   monosyllabic word recognition in continuously spoken sentences.* IEEE Transactions on
+   Acoustics, Speech, and Signal Processing 28(4), 357–366.
+   [doi:10.1109/TASSP.1980.1163420](https://doi.org/10.1109/TASSP.1980.1163420)
+2. S. S. Stevens, J. Volkmann & E. B. Newman (1937). *A scale for the measurement of the
+   psychological magnitude pitch.* Journal of the Acoustical Society of America 8(3), 185–190.
+   [doi:10.1121/1.1915893](https://doi.org/10.1121/1.1915893)
+3. A. Graves, S. Fernández, F. Gomez & J. Schmidhuber (2006). *Connectionist temporal
+   classification: labelling unsegmented sequence data with recurrent neural networks.* ICML,
+   369–376. [doi:10.1145/1143844.1143891](https://doi.org/10.1145/1143844.1143891)
+
+## See also
+
+- [Feature Extraction](features.md) — the `FeatureExtractor` API and the full MFCC mathematics
+- [Acoustic Models](models.md) — the Candle-based neural acoustic models and CTC contract
+- [Acoustic-Word Embeddings](../embedding/acoustic-word.md) — the phonetic embedding companion
+- [Modified Kneser-Ney](../ngram/modified-kneser-ney.md) — the grammar $`G`$ in the cascade
+- [lling-llang integration overview](../../integration/lling-llang/overview.md) — WFST assembly

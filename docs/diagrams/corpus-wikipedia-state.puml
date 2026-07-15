@@ -1,0 +1,63 @@
+@startuml corpus-wikipedia-state
+' WikipediaIterator is a four-flag state machine over quick-xml pull events.
+' A Document is emitted only at </page>, and only if all four filters pass.
+' Render: plantuml -tsvg docs/diagrams/corpus-wikipedia-state.puml
+' Source of truth for Figure 2 in docs/components/corpus/formats.md, section "Wikipedia XML dumps".
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam state {
+  BackgroundColor #546E7A
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  AttributeFontColor #263238
+  StartColor #455A64
+  EndColor #455A64
+}
+skinparam note {
+  BackgroundColor #E3F2FD
+  BorderColor #1565C0
+}
+title WikipediaIterator — a pull-parser state machine over the MediaWiki XML dump
+
+[*] --> Idle
+
+state "**Idle**\noutside any <page>" as Idle #90A4AE
+state "**InPage**\nin_page = true\ntitle / text / ns cleared" as InPage #546E7A
+state "**InTitle**\naccumulating <title>" as InTitle #1565C0
+state "**InNs**\nparsing <ns> as i32" as InNs #1565C0
+state "**InText**\naccumulating <text>\n(Text and CData events)" as InText #1565C0
+state "**Gate**\nevaluated at </page>" as Gate #1565C0
+state "**Emit**\nDocument { id = title, title,\ncontent = normalized, source = None }" as Emit #455A64
+
+Idle --> InPage : Start(<page>)
+InPage --> InTitle : Start(<title>)
+InTitle --> InPage : End(</title>)
+InPage --> InNs : Start(<ns>)
+InNs --> InPage : End(</ns>)
+InPage --> InText : Start(<text>)
+InText --> InPage : End(</text>)
+InPage --> Gate : End(</page>)
+
+Gate --> Idle : ✗ any filter fails ⇒ **continue** (article skipped)
+Gate --> Emit : ✓ all four pass
+Emit --> Idle : yield Document;\narticles_read += 1
+Idle --> [*] : Event::Eof, or\narticles_read = max_articles
+
+note right of Gate
+  **The four filters, in order**
+  1. namespace_filter.contains(ns)   (default: [0], main space)
+  2. skip_redirects ∧ text starts with #REDIRECT / #redirect
+  3. text.len() ≥ min_text_length   (default: 100 **bytes**)
+  4. after strip_wiki_markup + normalize:
+     normalized.len() ≥ min_text_length  (re-checked)
+end note
+
+note bottom of InText
+  A malformed-XML event is **logged and skipped**
+  (the loop continues), so one corrupt page cannot
+  abort a multi-hour import.
+end note
+@enduml

@@ -1,0 +1,49 @@
+@startuml code-ast-flow
+' AST parsing pipeline: cache probe -> tree-sitter -> ParsedCode -> owned AstNode; incremental edit path.
+' Render: plantuml -tsvg docs/diagrams/code-ast-flow.puml
+' Source of truth for Figure 1 in docs/components/code/ast.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam activity {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  DiamondBackgroundColor #ECEFF1
+  DiamondFontColor #263238
+}
+title AST Parsing & Incremental Reparse
+
+start
+:**source: &str** (+ optional old Tree, EditInfo);
+#546E7A:safe_hash(source) ▷ parse-cache probe
+(≤ 16 entries, cleared on overflow);
+if (cached source matches?) then (hit)
+  #00838F:reuse cached Tree;
+else (miss)
+  #546E7A:tree-sitter Parser::parse(source, old_tree);
+  if (tree produced?) then (yes)
+    #EF6C00:insert (source, tree) into cache;
+  else (no)
+    #C62828:AstError::ParseFailed;
+    stop
+  endif
+endif
+#EF6C00:root_node().has_error()?;
+if (has errors?) then (yes)
+  #EF6C00:collect_errors ▷ Vec<ErrorRange>
+(ERROR / MISSING spans);
+else (clean)
+  #EF6C00:error_ranges = [];
+endif
+:**ParsedCode**
+{ tree, source, language_name,
+  has_errors, error_ranges };
+#EF6C00:AstNode::from_ts_node ▷ owned
+depth-first AST (kind, span, text);
+:descendants() · find_by_kind() · find_errors();
+stop
+
+@enduml

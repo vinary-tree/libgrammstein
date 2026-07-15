@@ -1,0 +1,48 @@
+@startuml lang-detection
+' detect_language: whatlang Info -> confidence gate -> ISO 639-1 remap -> LanguageTag.
+' The three failure modes are the three LanguageDetectionError variants.
+' Render: plantuml -tsvg docs/diagrams/lang-detection.puml
+' Source of truth for Figure 1 in docs/components/language/overview.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+legend top right
+|= Concept |= Color |
+| language core (libgrammstein) | <back:#1565C0>        </back> |
+| external crate (whatlang) | <back:#546E7A>        </back> |
+| error path | <back:#C62828>        </back> |
+endlegend
+
+rectangle "**text: &str**\nsentence · document · corpus sample" as text #546E7A
+rectangle "**detect_from_sentences**\ntake(max_samples) · join with ' '\nempty ⇒ InsufficientText" as sample #1565C0
+rectangle "**whatlang::detect(text)**\ntrigram profile vs. 69 language models\n⇒ Option<Info>" as whatlang #546E7A
+rectangle "**Info**\nlang: Lang · confidence: f64 ∈ [0,1]\nscript: Script" as info #546E7A
+rectangle "**confidence gate**\nconfidence < min_confidence ?" as gate #1565C0
+rectangle "**ISO 639-1 remap**\nmatch Lang { Eng ⇒ en, Cmn ⇒ zh, Nob ⇒ no, … }\n58 of whatlang's 69 languages mapped" as remap #1565C0
+rectangle "**LanguageTag::new(code)**\nlanguage · script · region · variant" as tag #1565C0
+
+rectangle "**InsufficientText**\ndetect() returned None" as e_short #C62828
+rectangle "**LowConfidence**\n{ confidence, minimum } as percentages" as e_conf #C62828
+rectangle "**UnsupportedLanguage(Lang)**\nthe 11 unmapped whatlang variants" as e_unsup #C62828
+
+text --> sample : iterator of sentences
+sample --> whatlang : concatenated sample
+text --> whatlang : single &str
+whatlang --> info : Some(info)
+whatlang -[#C62828]-> e_short : None
+info --> gate
+gate -[#C62828]-> e_conf : below threshold
+gate --> remap : at or above threshold
+remap -[#C62828]-> e_unsup : catch-all arm
+remap --> tag : mapped code
+@enduml

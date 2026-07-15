@@ -1,431 +1,335 @@
-# N-gram Training Guide
+# N-gram Training
 
-This guide covers the complete workflow for training n-gram language models with libgrammstein.
+Training an n-gram model in libgrammstein means three things: **counting** every n-gram up to some
+order $`n`$, **collecting the continuation statistics** that Modified Kneser-Ney needs, and
+**estimating the discounts** from the corpus's own count-of-counts. This document explains each
+phase, the two paths the code offers (in-memory and checkpointed), and how the knobs on the builder
+and on the CLI map onto them.
 
-## Overview
+> **Scope.** Source of truth: [`src/ngram/trainer.rs`](../../src/ngram/trainer.rs) (the pipeline),
+> [`src/cli/commands/train/ngram.rs`](../../src/cli/commands/train/ngram.rs) (the CLI paths) and
+> [`src/ngram/accumulator.rs`](../../src/ngram/accumulator.rs) (the WAL accumulator). For the
+> smoother see [Modified Kneser-Ney](../components/ngram/modified-kneser-ney.md); for storage see
+> [Trie Storage](../components/ngram/trie-storage.md); for scale see [Large Corpora](large-corpora.md).
 
-N-gram models estimate word probabilities based on preceding context. Training involves:
+## Notation
 
-1. **Corpus preparation** - Loading and preprocessing text
-2. **N-gram counting** - Counting word sequences in parallel
-3. **Smoothing** - Computing Modified Kneser-Ney parameters
-4. **Serialization** - Saving the trained model
+| Symbol | Meaning |
+|---|---|
+| $`n`$ | maximum n-gram order (`--order`, `TrainerBuilder::order`) |
+| $`w`$, $`h`$ | a word (token), and a history (context) |
+| $`c(h\,w)`$ | raw corpus count of the n-gram formed by appending $`w`$ to $`h`$ |
+| $`\ell`$ | the length of a sentence, in tokens |
+| $`T`$ | total tokens in the corpus |
+| $`\lvert V \rvert`$ | vocabulary size — the number of distinct unigrams |
+| $`n_i`$ | the *count-of-counts*: how many distinct n-grams occur exactly $`i`$ times |
+| $`N_{1+}(\bullet, w)`$ | continuation count of $`w`$ — distinct contexts it completes |
+| $`N_{1+}(h, \bullet)`$ | number of distinct words that follow $`h`$ |
+| $`D_1, D_2, D_{3+}`$ | the three Modified Kneser-Ney discounts |
 
-## Quick Start
+**Acronyms.** *MKN* — Modified Kneser-Ney; *WAL* — Write-Ahead Log; *OOV* — Out-Of-Vocabulary;
+*PUA* — Private Use Area (the Unicode block used for vocabulary-indexed keys).
+
+## 1. What training produces
+
+A trained `NgramModel<D>` bundles four things:
+
+1. an **n-gram trie** over a dictionary backend $`D`$, mapping each key to an `NgramEntry` that
+   holds $`c(h\,w)`$, $`N_{1+}(\bullet, w)`$ and $`N_{1+}(h, \bullet)`$ as atomics;
+2. a **`KneserNeySmoothing`** carrying $`D_1, D_2, D_{3+}`$ and $`N_{1+}(\bullet, \bullet)`$;
+3. the **vocabulary size** $`\lvert V \rvert`$, which supplies the OOV floor $`1/\lvert V \rvert`$;
+4. the **total token count** $`T`$, the unigram denominator.
+
+Everything downstream — perplexity, completions, the hybrid model, WFST rescoring — reads only that
+bundle.
+
+## 2. How much will it cost?
+
+Every sentence of length $`\ell`$ emits n-grams of every order up to $`n`$:
+
+```math
+\#\{\text{n-grams emitted}\} = \sum_{k=1}^{\min(n,\ell)} (\ell - k + 1)
+\;\approx\; n\,\ell \qquad (\ell \gg n) \tag{N1}
+```
+
+so emitted work grows as $`O(n \cdot T)`$. The number of **distinct** n-grams grows more slowly —
+language is Zipfian [[3]](#references), and most long n-grams are singletons — but it still
+dominates the memory budget. Order is the most expensive knob on this page: `--order 5` costs
+roughly $`5\times`$ what `--order 1` does, in both time and space.
+
+## 3. The two training paths
+
+The library offers one pipeline; the CLI wraps it in two.
+
+![N-gram training pipeline](../diagrams/training-ngram-pipeline.svg)
+
+*Figure 1 — the library's three-phase in-memory pipeline (blue) and the CLI's WAL-backed
+checkpointed path (teal). The two differ in whether `--min-count` is applied at all.*
+
+### 3.1 The library path — `TrainerBuilder`
 
 ```rust
-use libgrammstein::ngram::{TrainerBuilder, NgramEntry};
 use libgrammstein::corpus::PlaintextReader;
-use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+use libgrammstein::ngram::{NgramEntry, TrainerBuilder};
+use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
-// Load corpus
+// The builder takes the dictionary by value; `train` takes the reader by value.
 let reader = PlaintextReader::from_file("corpus.txt")?;
-
-// Train 5-gram model
-let dictionary = DynamicDawgChar::new();
-let model = TrainerBuilder::new(dictionary)
+let model = TrainerBuilder::new(DynamicDawgChar::<NgramEntry>::new())
     .order(5)
-    .train(&reader)?;
+    .batch_size(10_000)
+    .train(reader)?;
 
-// Save model
-model.save("model.bin")?;
+println!("vocab = {}, n-grams = {}", model.vocab_size(), model.ngram_count());
+# Ok::<(), libgrammstein::Error>(())
 ```
 
-## Corpus Preparation
+`TrainerBuilder::train(reader)` is sugar for `.build().train(reader)`; call `.build()` yourself when
+you want the `NgramTrainer` itself (for example to use `train_with_progress`, §7).
 
-### Supported Formats
+| Builder method | Default | Effect |
+|---|---|---|
+| `order(n)` | `5` | maximum order |
+| `batch_size(n)` | `10_000` | sentences per prefetched, rayon-parallel batch |
+| `min_word_freq(n)` | `1` | **stored but never read** — see §3.3 |
+| `tokenizer(t)` | `Tokenizer::new()` | custom tokenization |
+| `with_vocabulary_path(p)` | — | vocabulary-indexed keys, persisted at `p` |
+| `with_vocabulary(v)` | — | vocabulary-indexed keys over an existing `SharedVocabARTrie` |
 
-| Format | Reader | Best For |
-|--------|--------|----------|
-| Plain text | `PlaintextReader` | Simple text files |
-| Wikipedia | `WikipediaReader` | Large-scale training |
-| Gutenberg | `GutenbergReader` | Book corpora |
+### 3.2 The three phases
 
-### Plain Text
+**Phase 1 — count.** A `PrefetchingReader` decouples I/O from CPU: a background thread fills a
+bounded queue of sentence batches (`batch_size`, with the queue capped at 10% of RAM), and each
+batch is counted through `rayon`'s `par_iter`. For every sentence and every
+$`k \in 1 \ldots \min(n, \ell)`$, each window of width $`k`$ is inserted into the trie. Counts are
+`AtomicU64` fetch-adds, so workers never take a lock. An empty corpus raises `Error::EmptyCorpus`.
 
-```rust
-use libgrammstein::corpus::PlaintextReader;
+**Phase 2 — continuation counts.** MKN's lower-order distribution is built from *continuation
+counts* rather than raw counts — the "San Francisco" intuition: *Francisco* is frequent but follows
+essentially only *San*, so it deserves almost no fallback mass, while *city* follows many words and
+deserves a lot. This phase walks every key, splits it into $`(h, w)`$, and accumulates
 
-// Single file
-let reader = PlaintextReader::from_file("corpus.txt")?;
-
-// Directory of files
-let reader = PlaintextReader::from_directory("corpus/")?;
-
-// In-memory string
-let text = "The quick brown fox. The lazy dog.";
-let reader = PlaintextReader::from_string(text);
+```math
+N_{1+}(\bullet, w) = \bigl\lvert \{\, h : c(h\,w) > 0 \,\} \bigr\rvert,
+\qquad
+N_{1+}(h, \bullet) = \bigl\lvert \{\, w : c(h\,w) > 0 \,\} \bigr\rvert \tag{N2}
 ```
 
-### Wikipedia
+and writes both back into the entries. It is a **second, in-memory pass over every n-gram**, held in
+a `HashMap<String, HashSet<String>>`. The code warns past $`5 \times 10^{6}`$ n-grams, where it can
+reach 2–5 GiB; this is the pass that most often ends a from-scratch build on a big corpus. See
+[Large Corpora §3](large-corpora.md#3-the-four-pressures-in-detail).
 
-```rust
-use libgrammstein::corpus::{WikipediaReader, WikipediaConfig};
+**Phase 3 — discounts.** The count-of-counts $`n_1, n_2, n_3, n_4`$ are tallied and the Chen &
+Goodman estimators evaluated [[2]](#references):
 
-// Basic usage
-let reader = WikipediaReader::from_dump("enwiki-latest.xml.bz2")?;
-
-// With configuration
-let config = WikipediaConfig {
-    max_articles: Some(100_000),  // Limit articles
-    skip_redirects: true,
-    skip_disambiguation: true,
-    ..Default::default()
-};
-let reader = WikipediaReader::from_dump_with_config("enwiki.xml.bz2", config)?;
-
-// HTTP streaming (large dumps without downloading)
-let reader = WikipediaReader::from_url(
-    "https://dumps.wikimedia.org/enwiki/latest/enwiki-latest-pages-articles.xml.bz2"
-)?;
+```math
+Y = \frac{n_1}{n_1 + 2 n_2}, \qquad
+D_1 = 1 - 2Y\frac{n_2}{n_1}, \qquad
+D_2 = 2 - 3Y\frac{n_3}{n_2}, \qquad
+D_{3+} = 3 - 4Y\frac{n_4}{n_3} \tag{N3}
 ```
 
-### Preprocessing Pipeline
-
-Apply quality filtering and normalization:
-
-```rust
-use libgrammstein::corpus::{
-    PlaintextReader, QualityFilterBuilder, DeduplicatorBuilder,
-    TextPreprocessorBuilder, PreprocessingPipelineBuilder
-};
-
-// Build pipeline
-let filter = QualityFilterBuilder::new()
-    .min_words(5)
-    .max_word_repetition(0.3)
-    .build();
-
-let dedup = DeduplicatorBuilder::new()
-    .mode(DeduplicationMode::Exact)
-    .build();
-
-let preprocessor = TextPreprocessorBuilder::new()
-    .normalize_numbers(true)
-    .normalize_urls(true)
-    .build();
-
-// Apply to corpus (use filtered sentences for training)
-let reader = PlaintextReader::from_file("corpus.txt")?;
-let filtered: Vec<String> = reader.sentences()
-    .filter(|s| filter.accept(s))
-    .filter(|s| dedup.is_unique(s))
-    .map(|s| preprocessor.process(&s))
-    .collect();
-```
-
-## Training Configuration
-
-### N-gram Order
-
-The order determines the maximum context length:
-
-| Order | Name | Context | Example |
-|-------|------|---------|---------|
-| 1 | Unigram | 0 words | P(fox) |
-| 2 | Bigram | 1 word | P(fox\|brown) |
-| 3 | Trigram | 2 words | P(fox\|quick brown) |
-| 5 | 5-gram | 4 words | P(fox\|the quick brown) |
-
-**Recommendation:** Order 5 is a good default. Higher orders need more data.
-
-### Minimum Word Frequency
-
-Filter rare words to reduce model size:
-
-```rust
-let model = TrainerBuilder::new(dictionary)
-    .order(5)
-    .min_word_freq(5)  // Ignore words appearing < 5 times
-    .train(&reader)?;
-```
-
-### Batch Size
-
-Control parallel processing granularity:
-
-```rust
-let model = TrainerBuilder::new(dictionary)
-    .order(5)
-    .batch_size(10000)  // Process 10k sentences per batch
-    .train(&reader)?;
-```
-
-**Recommendation:** Larger batches (10k-100k) are more efficient.
-
-## Dictionary Backend Selection
-
-| Backend | Memory | Speed | Updates | Best For |
-|---------|--------|-------|---------|----------|
-| `DynamicDawgChar` | Low | Good | Yes | General use |
-| `PathMapDictionary` | High | Fast | Yes | Small models |
-| `DoubleArrayTrieChar` | Low | Fastest | No | Production |
-
-### DynamicDawgChar (Recommended)
-
-```rust
-use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
-
-let dictionary = DynamicDawgChar::<NgramEntry>::new();
-```
-
-Good compression, supports incremental updates.
-
-### PathMapDictionary
-
-```rust
-use liblevenshtein::dictionary::pathmap::PathMapDictionary;
-
-let dictionary = PathMapDictionary::<NgramEntry>::new();
-```
-
-Simple hash-based storage. Good for debugging.
-
-### DoubleArrayTrieChar
-
-```rust
-use liblevenshtein::dictionary::double_array_trie_char::DoubleArrayTrieChar;
-
-let dictionary = DoubleArrayTrieChar::<NgramEntry>::new();
-```
-
-Fastest lookups but no updates after construction.
-
-## Progress Monitoring
-
-### Console Progress
-
-```rust
-use crossbeam_channel::bounded;
-use std::thread;
-
-let (tx, rx) = bounded(100);
-
-// Progress monitor thread
-thread::spawn(move || {
-    while let Ok(progress) = rx.recv() {
-        println!(
-            "\rSentences: {} | N-grams: {} | Time: {:.1}s",
-            progress.sentences_processed,
-            progress.ngrams_counted,
-            progress.elapsed_secs
-        );
-    }
-    println!();
-});
-
-// Train with progress
-let trainer = NgramTrainer::new(dictionary, TrainingConfig::new(5));
-let model = trainer.train_with_progress(&reader, tx)?;
-```
-
-### With Progress Bar (indicatif)
-
-```rust
-use indicatif::{ProgressBar, ProgressStyle};
-
-let pb = ProgressBar::new(total_sentences as u64);
-pb.set_style(ProgressStyle::default_bar()
-    .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
-    .progress_chars("#>-"));
-
-thread::spawn(move || {
-    while let Ok(progress) = rx.recv() {
-        pb.set_position(progress.sentences_processed);
-    }
-    pb.finish_with_message("Training complete");
-});
-```
-
-## Checkpointing
-
-For long training runs, save periodic checkpoints:
-
-```rust
-use std::time::{Duration, Instant};
-
-let checkpoint_interval = Duration::from_secs(300);  // Every 5 minutes
-let mut last_checkpoint = Instant::now();
-
-// During training callback
-if last_checkpoint.elapsed() > checkpoint_interval {
-    model.save("checkpoint.bin")?;
-    last_checkpoint = Instant::now();
-    log::info!("Checkpoint saved");
-}
-```
-
-## Model Evaluation
-
-### Perplexity
-
-```rust
-fn evaluate_perplexity(model: &NgramModel<D>, test_corpus: &impl CorpusReader) -> f64 {
-    let mut total_log_prob = 0.0;
-    let mut total_words = 0usize;
-
-    for sentence in test_corpus.sentences() {
-        let tokens: Vec<&str> = sentence.split_whitespace().collect();
-        total_log_prob += model.sentence_log_prob(&tokens);
-        total_words += tokens.len();
-    }
-
-    (-total_log_prob / total_words as f64).exp()
-}
-
-let test_reader = PlaintextReader::from_file("test.txt")?;
-let ppl = evaluate_perplexity(&model, &test_reader);
-println!("Test perplexity: {:.2}", ppl);
-```
-
-### Coverage
-
-```rust
-fn vocabulary_coverage(model: &NgramModel<D>, test_corpus: &impl CorpusReader) -> f64 {
-    let mut known = 0usize;
-    let mut total = 0usize;
-
-    for sentence in test_corpus.sentences() {
-        for word in sentence.split_whitespace() {
-            total += 1;
-            if model.in_vocabulary(word) {
-                known += 1;
-            }
-        }
-    }
-
-    known as f64 / total as f64
-}
-```
-
-## Memory Optimization
-
-### For Large Corpora
-
-1. **Stream the corpus** instead of loading all into memory:
-   ```rust
-   // WikipediaReader streams by default
-   let reader = WikipediaReader::from_dump("enwiki.xml.bz2")?;
-   ```
-
-2. **Use memory-efficient dictionary**:
-   ```rust
-   let dictionary = DynamicDawgChar::new();  // Best compression
-   ```
-
-3. **Filter rare words**:
-   ```rust
-   .min_word_freq(5)  // Removes rare n-grams
-   ```
-
-4. **Lower n-gram order**:
-   ```rust
-   .order(3)  // Trigrams use less memory than 5-grams
-   ```
-
-### Memory Estimates
-
-| Corpus Size | Order | Approx. Memory |
-|-------------|-------|----------------|
-| 1M sentences | 3 | ~500 MB |
-| 1M sentences | 5 | ~1.5 GB |
-| 10M sentences | 5 | ~10 GB |
-| 100M sentences | 5 | ~50+ GB |
-
-## Serialization
-
-### Binary Format
-
-Fast, compact, requires same dictionary type:
-
-```rust
-// Save
-model.save("model.bin")?;
-
-// Load (must specify dictionary type)
-let loaded: NgramModel<DynamicDawgChar<NgramEntry>> =
-    NgramModel::load("model.bin")?;
-```
-
-### Portable Format
-
-Works with any dictionary backend:
-
-```rust
-// Save portable
-model.save_portable("model.portable.bin")?;
-
-// Load with different backend
-let loaded = NgramModel::load_portable(
-    "model.portable.bin",
-    || DoubleArrayTrieChar::new()  // Different backend!
-)?;
-```
-
-## CLI Training
-
-Use the grammstein CLI for quick training:
+If **any** of $`n_1 \ldots n_4`$ is zero — a tiny or highly repetitive corpus — the estimators are
+undefined and the trainer falls back to the fixed defaults
+$`D_1 = 0.75,\ D_2 = 0.85,\ D_{3+} = 0.95`$. Finally $`N_{1+}(\bullet, \bullet)`$, the total number
+of distinct bigram types, is summed over the unigram entries and attached to the smoother as the
+denominator of the continuation distribution.
+
+### 3.3 `--min-count` does not prune the in-memory model
+
+`TrainingConfig::min_word_freq` is set by `TrainerBuilder::min_word_freq` and by the CLI's
+`--min-count`, but **no code reads it while counting**. On the library path — and therefore on the
+CLI's non-checkpointed path — every n-gram the corpus produces is retained, whatever `--min-count`
+says.
+
+Pruning happens only on the checkpointed path, in `finalize_ngram_model`, which exports an n-gram
+only when its accumulated count reaches the threshold. **If you need a frequency-pruned model today,
+train with `--checkpoint`:**
 
 ```bash
-# Train 5-gram model
-grammstein train ngram corpus.txt model.bin --order 5
-
-# With checkpoints
-grammstein train ngram large-corpus.txt model.bin \
-    --order 5 \
-    --checkpoint ./checkpoints \
-    --checkpoint-interval 100000
-
-# Resume from checkpoint
-grammstein train ngram large-corpus.txt model.bin \
-    --resume ./checkpoints/latest.ckpt
-
-# From Wikipedia dump
-grammstein train ngram enwiki.xml.bz2 model.bin --order 5
+grammstein train ngram corpus.txt model.bin --order 5 --min-count 5 --checkpoint ./ckpt
 ```
 
-## Complete Example
+### 3.4 The checkpointed path — `NgramAccumulator`
+
+Given `--checkpoint <DIR>`, the CLI replaces the in-memory trie with a WAL-backed on-disk
+accumulator. Sentences are streamed (single-threaded, not prefetched), tokenised, and every n-gram
+`increment`ed against the accumulator. Every `--checkpoint-interval` sentences (default $`10^{6}`$)
+the WAL is synced and a checkpoint written; `--keep-checkpoints` (default `5`) bounds how many are
+kept. `Ctrl-C` writes a checkpoint before exiting, so an interrupted run loses nothing.
+
+At the end, `finalize_ngram_model` filters by `--min-count`, loads the survivors into a
+`DynamicDawgChar`, attaches a `KneserNeySmoothing`, derives $`\lvert V \rvert`$ and $`T`$ from the
+unigrams, and writes the model with `save_portable`.
+
+```bash
+# Start a long run.
+grammstein train ngram big.txt model.bin --order 5 --checkpoint ./ckpt
+
+# Resume it. --resume REQUIRES --checkpoint; "latest" selects the newest checkpoint.
+grammstein train ngram big.txt model.bin --order 5 --checkpoint ./ckpt --resume latest
+```
+
+> **Trade-off.** The checkpointed path is resumable and prunes, but streams single-threaded. The
+> in-memory path is prefetched and rayon-parallel, and therefore far faster per sentence, but keeps
+> everything and cannot resume. Choose by whether losing the run would hurt more than the extra
+> wall-clock costs.
+
+## 4. Key encoding: legacy vs. vocabulary-indexed
+
+| Mode | Key for *the quick brown* | Selected by |
+|---|---|---|
+| **Legacy** (default) | `"the\|quick\|brown"` — pipe-separated | `VocabularyMode::Legacy` |
+| **Vocabulary-indexed** | one PUA character per word | `with_vocabulary_path` / `with_vocabulary` |
+
+Legacy keys are simple and backward-compatible, but they **corrupt any token containing a pipe**.
+Vocabulary-indexed keys map each distinct word to a PUA character, which makes keys compact (one
+`char` per *word*, not per byte) and pipe-safe. Use them when the corpus may contain `|`, when
+several models must share one vocabulary, or when interoperating with the Google Books importer.
 
 ```rust
-use libgrammstein::ngram::{NgramModel, TrainerBuilder, NgramEntry};
-use libgrammstein::corpus::{WikipediaReader, WikipediaConfig};
-use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+use libgrammstein::corpus::PlaintextReader;
+use libgrammstein::ngram::{NgramEntry, TrainerBuilder};
+use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+use std::path::PathBuf;
 
-fn main() -> libgrammstein::Result<()> {
-    // Configure Wikipedia reader
-    let config = WikipediaConfig {
-        max_articles: Some(100_000),
-        skip_redirects: true,
-        ..Default::default()
-    };
-    let reader = WikipediaReader::from_dump_with_config("enwiki.xml.bz2", config)?;
-
-    // Train with progress
-    let dictionary = DynamicDawgChar::new();
-    let model = TrainerBuilder::new(dictionary)
-        .order(5)
-        .min_word_freq(5)
-        .batch_size(50_000)
-        .train(&reader)?;
-
-    println!("Vocabulary size: {}", model.vocab_size());
-    println!("N-gram count: {}", model.ngram_count());
-
-    // Evaluate
-    let test = ["the", "quick", "brown", "fox"];
-    let ppl = (-model.sentence_log_prob(&test) / test.len() as f64).exp();
-    println!("Test perplexity: {:.2}", ppl);
-
-    // Save
-    model.save("wikipedia-5gram.bin")?;
-    println!("Model saved");
-
-    Ok(())
-}
+let reader = PlaintextReader::from_file("corpus.txt")?;
+let model = TrainerBuilder::new(DynamicDawgChar::<NgramEntry>::new())
+    .order(5)
+    .with_vocabulary_path(PathBuf::from("model/vocab.artrie"))
+    .train(reader)?;
+# Ok::<(), libgrammstein::Error>(())
 ```
 
-## See Also
+## 5. Choosing a dictionary backend
 
-- [NgramModel API](../api/ngram.md) - Complete API reference
-- [Hyperparameter Tuning](hyperparameters.md) - Tuning guide
-- [Large Corpora](large-corpora.md) - Memory optimization
+The trainer is generic over any `MutableMappedDictionary<Value = NgramEntry> + IterableDictionary`.
+
+| Backend | Writes | Reads | Use when |
+|---|---|---|---|
+| `DynamicDawgChar<NgramEntry>` | lock-free | fast | **the default** — what the CLI trains on |
+| `PathMapDictionary<NgramEntry>` | lock-free | fast | experiments, tests, PathMap deployments |
+| `DoubleArrayTrieChar<NgramEntry>` | immutable | fastest | **inference only** — produced by `convert to-static` |
+
+`DoubleArrayTrieChar` is immutable by construction and cannot be trained into. Train on
+`DynamicDawgChar`, then freeze:
+
+```bash
+grammstein convert to-static model.bin model-static.bin
+```
+
+## 6. The training loop, literately
+
+```
+function train(reader, order, batch_size):                ▸ mirrors NgramTrainer::train
+    count_ngrams(reader, order, batch_size)               ▸ Phase 1
+    collect_continuation_counts()                         ▸ Phase 2
+    smoothing <- compute_smoothing_params()               ▸ Phase 3
+    return NgramModel(trie, smoothing, count_unigrams(), tokens_processed)
+
+function count_ngrams(reader, order, batch_size):
+    prefetch <- PrefetchingReader(reader, batch_size, ram_fraction = 0.10)
+    for batch in prefetch.batches():                      ▸ I/O runs ahead of the CPU
+        par_iter(batch, sentence ->                       ▸ rayon: one task per sentence
+            tokens <- tokenizer.words(sentence)
+            if tokens is empty: return
+            for k in 1 ..= min(order, |tokens|):
+                for i in 0 ..= |tokens| - k:
+                    trie.insert(tokens[i .. i+k])         ▸ atomic fetch-add; no lock held
+        )
+    if no batch was ever received: raise EmptyCorpus
+
+function compute_smoothing_params():                      ▸ Phase 3, per (N3)
+    (n1, n2, n3, n4) <- count_ngram_frequencies()         ▸ one pass over the trie
+    if n1 > 0 and n2 > 0 and n3 > 0 and n4 > 0:
+        kn <- KneserNeySmoothing::from_counts(n1, n2, n3, n4)
+    else:
+        kn <- KneserNeySmoothing::new(order)              ▸ fixed fallback discounts
+    return kn.with_total_bigram_types(sum of N1+(•,w) over unigram entries)
+```
+
+## 7. Progress reporting
+
+`NgramTrainer::train_with_progress` sends a `TrainingProgress { sentences_processed,
+ngrams_counted, elapsed_secs }` down a `crossbeam_channel` every 10 000 sentences:
+
+```rust
+use crossbeam_channel::unbounded;
+use libgrammstein::corpus::PlaintextReader;
+use libgrammstein::ngram::{NgramEntry, TrainerBuilder};
+use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+
+let (tx, rx) = unbounded();
+std::thread::spawn(move || {
+    for p in rx {
+        eprintln!("{} sentences · {} n-grams · {:.1}s",
+                  p.sentences_processed, p.ngrams_counted, p.elapsed_secs);
+    }
+});
+
+let reader = PlaintextReader::from_file("corpus.txt")?;
+let model = TrainerBuilder::new(DynamicDawgChar::<NgramEntry>::new())
+    .order(5)
+    .build()
+    .train_with_progress(reader, tx)?;
+# Ok::<(), libgrammstein::Error>(())
+```
+
+The CLI wires the same statistics into an `indicatif` bar; `--no-progress` and `--quiet` silence it.
+
+## 8. Evaluating the result
+
+Perplexity on held-out text is the measurement that matters:
+
+```math
+\mathrm{PPL} = \exp\!\left(-\frac{1}{N}\sum_{i=1}^{N}\log \mathbb{P}_{\mathrm{MKN}}(w_i \mid h_i)\right) \tag{N4}
+```
+
+```bash
+grammstein eval perplexity model.bin dev.txt --per-sentence
+```
+
+Always read perplexity **together with the OOV rate** the same command prints. A low perplexity
+bought by a high OOV rate is an illusion: the tokens the model found hardest have simply been
+dropped from the average. If OOV runs to more than a few percent, lower `--min-count`, enlarge the
+corpus, or add the embedding arm ([Hybrid Training](hybrid.md)).
+
+## 9. Complete example
+
+```bash
+# 1. Sanity-check the corpus.
+grammstein corpus stats corpus.txt
+
+# 2. Train. Checkpoints make it resumable AND make --min-count effective.
+grammstein train ngram corpus.txt model.bin \
+  --order 5 --min-count 2 --lowercase \
+  --checkpoint ./ckpt --checkpoint-interval 500000
+
+# 3. Measure on held-out text.
+grammstein eval perplexity model.bin dev.txt
+
+# 4. Freeze for inference.
+grammstein convert to-static model.bin model-static.bin
+
+# 5. Use it.
+grammstein query score model-static.bin the quick brown fox --sentence
+```
+
+## References
+
+1. R. Kneser & H. Ney (1995). *Improved backing-off for M-gram language modeling.* ICASSP '95,
+   181–184. [doi:10.1109/ICASSP.1995.479394](https://doi.org/10.1109/ICASSP.1995.479394)
+2. S. F. Chen & J. Goodman (1999). *An empirical study of smoothing techniques for language
+   modeling.* Computer Speech & Language 13(4), 359–393.
+   [doi:10.1006/csla.1999.0128](https://doi.org/10.1006/csla.1999.0128)
+3. G. K. Zipf (1949). *Human Behavior and the Principle of Least Effort.* Addison-Wesley.
+
+## See also
+
+- [Modified Kneser-Ney](../components/ngram/modified-kneser-ney.md) — the smoother, in full
+- [Trie Storage](../components/ngram/trie-storage.md) — how keys and entries are stored
+- [Hyperparameter Tuning](hyperparameters.md) — choosing `--order` and `--min-count`
+- [Large Corpora](large-corpora.md) — what to do when the corpus no longer fits
+- [Hybrid Training](hybrid.md) — adding the embedding arm
+- [CLI Reference](../cli/README.md#61-train-ngram) — every flag on `train ngram`

@@ -1,0 +1,62 @@
+@startuml acoustic-model-architecture
+' Neural acoustic models: the shared encode→project→log-softmax skeleton, Linear vs Transformer.
+' Render: plantuml -tsvg docs/diagrams/acoustic-model-architecture.puml
+' Source of truth for Figure 1 in docs/components/acoustic/models.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title Neural Acoustic Models — frames ⇒ log posteriors
+
+legend top right
+  |= Color |= Concept |
+  |<#2E7D32>     | neural acoustic model (Candle) |
+  |<#546E7A>     | feature / posterior tensor (I/O) |
+endlegend
+
+rectangle "**Frames**  [T, F]\nfilterbank / MFCC" as inp #546E7A
+
+rectangle "**Input projection**\nLinear  F → H" as inproj #2E7D32
+
+package "LinearAcousticModel (baseline)" as linpkg {
+  rectangle "**ReLU**" as relu #2E7D32
+}
+
+package "TransformerAcousticModel  (× num_layers)" as tpkg {
+  rectangle "**+ Positional encoding**\nsinusoidal, base 10000" as pos #2E7D32
+  rectangle "**Multi-head self-attention**\nsoftmax(QKᵀ / √d_k)·V" as mhsa #2E7D32
+  rectangle "**Add & LayerNorm**" as an1 #2E7D32
+  rectangle "**Feed-forward**\nW₂·GELU(W₁·x)" as ffn #2E7D32
+  rectangle "**Add & LayerNorm**" as an2 #2E7D32
+}
+
+rectangle "**Output projection**\nLinear  H → U" as outproj #2E7D32
+rectangle "**Log-softmax** (dim U)\nlog softmax(z)_u = z_u − ln Σ e^{z}" as lsm #2E7D32
+rectangle "**Log posteriors**  [T, U]\nlog ℙ(unit | frame)" as outp #546E7A
+
+inp --> inproj
+inproj --> relu : Linear path
+relu --> outproj
+inproj --> pos : Transformer path
+pos --> mhsa
+mhsa --> an1
+an1 --> ffn
+ffn --> an2
+an2 --> outproj
+outproj --> lsm
+lsm --> outp
+
+note bottom of outp
+  U = num_units (senones / phones / chars + CTC blank).
+  new() initializes random weights; load() maps trained
+  safetensors. Tensor errors degrade to a zero vector.
+end note
+
+@enduml

@@ -1,479 +1,220 @@
-# Tokenizer Module
+# Code-Aware Tokenization
 
-The tokenizer module provides code-aware tokenization that preserves semantic information from tree-sitter parsing, enabling type-aware correction.
+The tokenizer turns a tree-sitter parse tree into a flat stream of **typed** tokens. Unlike a
+plain lexer, every `CodeToken` it emits carries a semantic `TokenType`, its source position, its
+raw tree-sitter node kind, and a `TokenContext` describing where it sits in the AST (its parent,
+its siblings, its depth, and whether it lies inside a parse error). That context is what makes
+correction *grammar-aware*: the same misspelling is corrected differently in a parameter list
+than in a type annotation.
 
-## Overview
+> **Scope.** Source of truth: [`src/code/tokenizer.rs`](../../../src/code/tokenizer.rs). Token
+> classification is delegated to the [`CodeLanguage`](language.md) implementation; the
+> `TokenType`/`TokenContext` types are defined there. Tokens feed the
+> [correctors](correctors/overview.md) and the [pipeline](pipeline.md).
 
-Unlike simple lexical tokenizers, the code tokenizer:
+## What & why
 
-- **Preserves AST context**: Parent nodes, siblings, depth
-- **Classifies tokens semantically**: Keywords, identifiers, types, literals
-- **Tracks error regions**: Marks tokens inside parse errors
-- **Filters selectively**: Include/exclude whitespace and comments
+A parser already produces a tree; why flatten it back into tokens? Because the *unit of
+correction* is a token — a misspelled keyword, a wrong identifier, a missing bracket — but the
+*evidence* for a good correction is structural. The tokenizer bridges the two: it walks to the
+AST leaves (the actual lexemes) yet annotates each with the structural context harvested on the
+way down. Correction then operates on a linear stream while still "seeing" the tree.
 
-## Key Types
+Formally, the token stream is the projection of the AST onto its leaves, in source order, passed
+through an inclusion filter $`\phi`$:
 
-| Type | Description |
-|------|-------------|
-| `CodeToken` | Token with text, position, type, and context |
-| `CodeTokenizer<L>` | Configurable tokenizer for a language |
-| `TokenIterator<L>` | Iterator over tokens in source code |
+```math
+S(A) = \bigl[\; \ell : \ell \in \mathrm{leaves}(A),\; \phi(\ell) \;\bigr] \tag{T1}
+```
 
-## CodeToken
+where $`\mathrm{leaves}(A)`$ are the childless nodes of the tree $`A`$ and $`\phi`$ drops
+whitespace and comment tokens unless the tokenizer is configured to keep them (see below).
 
-The `CodeToken` struct contains comprehensive token information:
+## The `CodeToken`
 
 ```rust
 pub struct CodeToken {
-    /// The token text
-    pub text: String,
-    /// Byte offset in the source
-    pub byte_offset: usize,
-    /// Line number (0-indexed)
-    pub line: usize,
-    /// Column number (0-indexed)
-    pub column: usize,
-    /// Token type classification
-    pub token_type: TokenType,
-    /// Tree-sitter node kind
-    pub node_kind: String,
-    /// Contextual information
-    pub context: TokenContext,
+    pub text: String,          // the lexeme
+    pub byte_offset: usize,    // start byte in the source
+    pub line: usize,           // 0-indexed row
+    pub column: usize,         // 0-indexed column
+    pub token_type: TokenType, // semantic classification (from CodeLanguage)
+    pub node_kind: String,     // raw tree-sitter node kind
+    pub context: TokenContext, // structural context (parent, siblings, depth, error)
 }
 ```
 
-### Methods
+Two convenience predicates delegate to the token's type: `is_correctable()` (true unless the
+token is a comment or whitespace) and `is_in_error()` (true when the token falls inside an
+`ERROR` node). See [Language](language.md) for the full `TokenType` taxonomy; the correctability
+rule is exactly:
 
 ```rust
-impl CodeToken {
-    /// Creates a new code token.
-    pub fn new(
-        text: impl Into<String>,
-        byte_offset: usize,
-        line: usize,
-        column: usize,
-        token_type: TokenType,
-        node_kind: impl Into<String>,
-    ) -> Self;
-
-    /// Returns whether this token is inside an error region.
-    pub fn is_in_error(&self) -> bool;
-
-    /// Returns whether this token should be considered for correction.
-    pub fn is_correctable(&self) -> bool;
-}
+// TokenType::is_correctable() — only comments and whitespace are excluded.
+!matches!(self, TokenType::Comment | TokenType::Whitespace)
 ```
 
-### Example: Creating Tokens
+Every other type — including `NumericLiteral` and `Punctuation` — is *correctable*; what differs
+between them is the correction *strategy* (a `Keyword` matches a fixed dictionary, an `Identifier`
+matches the project corpus), not whether correction is attempted.
 
-```rust
-use libgrammstein::code::{CodeToken, TokenType};
+## `TokenContext` enrichment
 
-let token = CodeToken::new(
-    "calculate_total",
-    0,        // byte offset
-    1,        // line (0-indexed)
-    5,        // column (0-indexed)
-    TokenType::Identifier,
-    "identifier"
-);
+As the tokenizer descends to a leaf it fills in the leaf's `TokenContext`:
 
-assert_eq!(token.text, "calculate_total");
-assert_eq!(token.token_type, TokenType::Identifier);
-assert!(token.is_correctable());  // Identifiers are correctable
-assert!(!token.is_in_error());    // Not in error region
-```
+| Field | Filled from |
+|---|---|
+| `token_type` | `language.classify_token(text, node_kind)` |
+| `depth` | recursion depth (0 at the root) |
+| `in_error_region` | true if any ancestor (or the node itself) `is_error()` |
+| `parent_node_type` | `parent.kind()` |
+| `sibling_types` | the kinds of the parent's *other* children (excluding this node by id) |
+| `expected_types` | reserved for grammar-driven expectations (empty by default) |
 
-## TokenType
+This is the payload a corrector reads to decide *what could legally go here*.
 
-Tokens are classified into semantic categories:
+## The tokenizer
 
-```rust
-pub enum TokenType {
-    Keyword,         // if, while, fn, let
-    Identifier,      // variable names, function names
-    TypeName,        // int, String, Vec
-    Operator,        // +, -, *, /
-    Punctuation,     // ;, ,, (, )
-    StringLiteral,   // "hello"
-    NumericLiteral,  // 42, 3.14
-    BooleanLiteral,  // true, false
-    Comment,         // // comment
-    Whitespace,      // spaces, tabs
-    Special,         // language-specific
-    Unknown,         // unclassified
-}
-```
-
-### Correctability
-
-Not all token types are correctable:
-
-| Token Type | Correctable | Reason |
-|------------|-------------|--------|
-| `Keyword` | Yes | Can be misspelled (`retrun` → `return`) |
-| `Identifier` | Yes | Can be misspelled or wrong |
-| `TypeName` | Yes | Can be misspelled |
-| `Operator` | Yes | Can be transposed (`=+` → `+=`) |
-| `Punctuation` | Yes | Can be missing or extra |
-| `StringLiteral` | Yes | Content can be spell-checked |
-| `NumericLiteral` | No | Format validation only |
-| `BooleanLiteral` | Yes | Limited vocabulary |
-| `Comment` | No | Natural language, not code |
-| `Whitespace` | No | Formatting only |
-
-## TokenContext
-
-The `TokenContext` struct provides structural information:
-
-```rust
-pub struct TokenContext {
-    /// The token type classification
-    pub token_type: TokenType,
-    /// Parent node type in the AST (e.g., "function_definition")
-    pub parent_node_type: Option<String>,
-    /// Sibling node types for positional context
-    pub sibling_types: Vec<String>,
-    /// Depth in the AST (0 = root)
-    pub depth: usize,
-    /// Whether the token is inside an error node
-    pub in_error_region: bool,
-    /// Expected token types at this position (from grammar)
-    pub expected_types: Vec<TokenType>,
-}
-```
-
-### Context Example
-
-```rust
-// For token "result" in: def calculate(x): result = x + 1
-let context = token.context;
-
-assert_eq!(context.parent_node_type, Some("assignment".into()));
-assert!(context.sibling_types.contains(&"=".into()));
-assert!(context.sibling_types.contains(&"binary_operator".into()));
-assert_eq!(context.depth, 3);  // module → function → block → assignment
-assert!(!context.in_error_region);
-```
-
-## CodeTokenizer
-
-The `CodeTokenizer<L>` extracts tokens from parsed code:
-
-```rust
-pub struct CodeTokenizer<'a, L: CodeLanguage> {
-    language: &'a L,
-    include_whitespace: bool,
-    include_comments: bool,
-}
-```
-
-### Builder Pattern
+`CodeTokenizer<'a, L>` borrows a language and carries two boolean switches, set with a builder:
 
 ```rust
 use libgrammstein::code::{CodeTokenizer, Python};
 
 let python = Python::new();
-
-// Default: no whitespace, no comments
-let tokenizer = CodeTokenizer::new(&python);
-
-// Include whitespace (for indentation-sensitive languages)
-let tokenizer = CodeTokenizer::new(&python)
-    .with_whitespace(true);
-
-// Include comments (for documentation analysis)
-let tokenizer = CodeTokenizer::new(&python)
-    .with_comments(true);
-
-// Include both
-let tokenizer = CodeTokenizer::new(&python)
-    .with_whitespace(true)
-    .with_comments(true);
+let tokenizer = CodeTokenizer::new(&python)   // default: no whitespace, no comments
+    .with_whitespace(true)                    // keep indentation tokens (Python)
+    .with_comments(true);                     // keep comments (doc/spell analysis)
 ```
 
-### Tokenization Methods
+It offers two extraction methods:
+
+- `tokenize(tree, source) -> Vec<CodeToken>` — every leaf, filtered;
+- `tokenize_errors(tree, source) -> Vec<CodeToken>` — only leaves beneath `ERROR`/`MISSING`
+  nodes, which is what the pipeline uses to *scope correction to the broken region*.
+
+### Traversal, literately
+
+Both methods share a recursive descent. This mirrors `traverse_node` / `create_token`:
+
+```
+function tokenize(tree, source):
+    tokens <- []
+    traverse_node(tree.root, source, tokens, depth = 0, in_error = false)
+    return tokens
+
+function traverse_node(node, source, tokens, depth, in_error):
+    in_error <- in_error or node.is_error()             ▸ error taint flows down
+    if node.child_count == 0:                           ▸ a leaf = a lexeme
+        push create_token(node, source, depth, in_error)?  ▸ may be filtered out
+    else:
+        for child in node.children:
+            traverse_node(child, source, tokens, depth + 1, in_error)
+
+function create_token(node, source, depth, in_error):
+    text <- node.utf8_text(source)
+    tt   <- language.classify_token(text, node.kind)    ▸ language decides the TokenType
+    if (tt == Whitespace and not include_whitespace)    ▸ apply the inclusion filter phi
+       or (tt == Comment and not include_comments):
+        return None
+    token <- CodeToken { text, byte_offset, line, column, token_type = tt, node_kind = node.kind }
+    token.context.depth <- depth
+    token.context.in_error_region <- in_error
+    if node.parent is Some(p):
+        token.context.parent_node_type <- Some(p.kind)
+        token.context.sibling_types    <- [ c.kind : c in p.children, c.id != node.id ]
+    return Some(token)
+
+function tokenize_errors(tree, source):                 ▸ correction-scoped variant
+    for each node where node.is_error() or node.is_missing():
+        traverse_node(node, source, tokens, depth, in_error = true)
+    ▸ (non-error subtrees are skipped entirely)
+```
+
+![Tokenization: leaf extraction, classification, context enrichment](../../diagrams/code-tokenizer.svg)
+
+*Figure 1. The tokenizer descends to AST leaves, classifies each via the language's
+`classify_token`, drops whitespace/comments unless configured otherwise, and enriches each
+surviving token with its structural `TokenContext`.*
+
+## `TokenIterator`
+
+For a self-contained, owning stream, `TokenIterator<L>` bundles the (eagerly computed) token
+vector with a cursor. Note it is parameterized only by the language `L` — it owns its `tokens`
+and a `PhantomData<L>` marker, not a borrow:
 
 ```rust
-impl<'a, L: CodeLanguage> CodeTokenizer<'a, L> {
-    /// Extracts all tokens from a parsed tree.
-    pub fn tokenize(&self, tree: &Tree, source: &str) -> Vec<CodeToken>;
-
-    /// Extracts tokens only from error regions.
-    pub fn tokenize_errors(&self, tree: &Tree, source: &str) -> Vec<CodeToken>;
-}
-```
-
-### Example: Basic Tokenization
-
-```rust
-use libgrammstein::code::{CodeParser, CodeTokenizer, Python};
-use std::sync::Arc;
-
-let python = Arc::new(Python::new());
-let mut parser = CodeParser::new(python.clone())?;
-
-let source = r#"
-def greet(name):
-    print(f"Hello, {name}!")
-"#;
-
-let parsed = parser.parse(source)?;
-let tokenizer = CodeTokenizer::new(python.as_ref());
-let tokens = tokenizer.tokenize(&parsed.tree, source);
-
-for token in &tokens {
-    println!(
-        "{:15} {:15} line {} col {}",
-        token.text,
-        format!("{:?}", token.token_type),
-        token.line + 1,
-        token.column
-    );
-}
-```
-
-Output:
-```
-def             Keyword         line 2 col 0
-greet           Identifier      line 2 col 4
-(               Punctuation     line 2 col 9
-name            Identifier      line 2 col 10
-)               Punctuation     line 2 col 14
-:               Punctuation     line 2 col 15
-print           Identifier      line 3 col 4
-...
-```
-
-### Example: Error-Focused Tokenization
-
-```rust
-let source = "def foo(\n    retrun 42";  // Missing ) and misspelled return
-let parsed = parser.parse(source)?;
-
-let tokenizer = CodeTokenizer::new(python.as_ref());
-let error_tokens = tokenizer.tokenize_errors(&parsed.tree, source);
-
-println!("Tokens in error regions:");
-for token in error_tokens {
-    println!(
-        "  '{}' ({:?}) at line {}",
-        token.text,
-        token.token_type,
-        token.line + 1
-    );
-}
-```
-
-## Token Filtering
-
-The tokenizer automatically filters based on configuration:
-
-### Default (No Whitespace/Comments)
-
-```rust
-let tokenizer = CodeTokenizer::new(&python);
-let tokens = tokenizer.tokenize(&tree, source);
-
-// Tokens: def, foo, (, x, ), :, return, x, +, 1
-// No whitespace or comments
-```
-
-### With Whitespace (Python)
-
-For Python, whitespace is significant for indentation:
-
-```rust
-let tokenizer = CodeTokenizer::new(&python)
-    .with_whitespace(true);
-
-let tokens = tokenizer.tokenize(&tree, source);
-// Now includes indentation tokens
-```
-
-### With Comments
-
-For documentation extraction or comment spell-checking:
-
-```rust
-let tokenizer = CodeTokenizer::new(&python)
-    .with_comments(true);
-
-let tokens = tokenizer.tokenize(&tree, source);
-// Now includes comment tokens
-```
-
-## Using TokenContext
-
-The token context enables grammar-aware correction:
-
-### Example: Context-Aware Correction
-
-```rust
-for token in tokens {
-    if token.is_in_error() {
-        println!("Error token: '{}'", token.text);
-
-        // Use context for better correction
-        if let Some(parent) = &token.context.parent_node_type {
-            match parent.as_str() {
-                "function_definition" => {
-                    // Likely a keyword or parameter
-                    suggest_from(&["def", "async", "return"]);
-                }
-                "assignment" => {
-                    // Likely an identifier
-                    suggest_from_corpus();
-                }
-                _ => {}
-            }
-        }
-    }
-}
-```
-
-### Example: Identifying Declaration Contexts
-
-```rust
-fn is_function_parameter(token: &CodeToken) -> bool {
-    token.context.parent_node_type.as_deref() == Some("parameters")
-}
-
-fn is_type_annotation(token: &CodeToken) -> bool {
-    token.context.parent_node_type.as_deref() == Some("type")
-}
-
-fn is_import_statement(token: &CodeToken) -> bool {
-    token.context.parent_node_type.as_deref() == Some("import_statement")
-        || token.context.parent_node_type.as_deref() == Some("import_from_statement")
-}
-```
-
-## TokenIterator
-
-For streaming tokenization:
-
-```rust
-pub struct TokenIterator<'a, L: CodeLanguage> {
-    tokenizer: CodeTokenizer<'a, L>,
-    tree: Tree,
-    source: String,
+pub struct TokenIterator<L: CodeLanguage> {
     tokens: Vec<CodeToken>,
     position: usize,
-}
-
-impl<L: CodeLanguage> Iterator for TokenIterator<'_, L> {
-    type Item = CodeToken;
-    fn next(&mut self) -> Option<Self::Item>;
+    _marker: std::marker::PhantomData<L>,
 }
 ```
 
-### Example: Iterator Usage
+`TokenIterator::new(tokenizer, tree, source)` tokenizes eagerly, then yields tokens one at a time
+via `Iterator`, so the standard combinators apply:
 
 ```rust
-let iterator = TokenIterator::new(tokenizer, tree, source);
+use libgrammstein::code::{TokenIterator, TokenType};
 
-// Find all identifiers
-let identifiers: Vec<_> = iterator
-    .filter(|t| t.token_type == TokenType::Identifier)
-    .collect();
-
-// Find correctable tokens in errors
-let correctable_errors: Vec<_> = iterator
+let it = TokenIterator::new(tokenizer, parsed.tree, parsed.source);
+let correctable_errors: Vec<_> = it
     .filter(|t| t.is_in_error() && t.is_correctable())
     .collect();
 ```
 
-## Integration with Correctors
+## Engineering
 
-The tokenizer output feeds directly into correctors:
+### Complexity
+
+| Operation | Cost | Notes |
+|---|---|---|
+| `tokenize` | $`O(V)`$ | one descent; leaf work is $`O(1)`$ plus context |
+| context per token | $`O(s)`$ | $`s`$ = sibling count (scan of the parent's children) |
+| `tokenize_errors` | $`O(V_e)`$ | $`V_e`$ = nodes under error regions only |
+
+### Thread-safety
+
+`CodeTokenizer<'a, L>` borrows its language and holds no mutable state, so tokenization is
+re-entrant and read-only; it is `Send` when the borrow is. For data-parallel tokenization, build
+a tokenizer (and parser) per worker rather than sharing one — the language handlers are cheap
+unit structs.
+
+## Usage
+
+Scoping correction to the error region, then feeding a corrector:
 
 ```rust
-use libgrammstein::code::{
-    CodeParser, CodeTokenizer, LexicalCorrector, Python
-};
 use std::sync::Arc;
+use libgrammstein::code::{CodeParser, CodeTokenizer, LexicalCorrector, Python};
 
 let python = Arc::new(Python::new());
-let mut parser = CodeParser::new(python.clone())?;
+let mut parser = CodeParser::new(Arc::clone(&python))?;
 let tokenizer = CodeTokenizer::new(python.as_ref());
 
-// Parse code with errors
-let source = "def calcluate(x):\n    retrun x";
+let source = "def calcluate(x):\n    retrun x";   // two typos, inside error regions
 let parsed = parser.parse(source)?;
 
-// Extract tokens from error regions
+// Only tokens inside ERROR / MISSING nodes.
 let error_tokens = tokenizer.tokenize_errors(&parsed.tree, source);
 
-// Create corrector
-let mut corrector = LexicalCorrector::with_defaults(python);
-
-// Correct each error token
-for token in error_tokens {
-    let corrections = corrector.correct_token(&token, &token.context);
-    for correction in corrections.top(3) {
-        println!("{} -> {} ({:.2})",
-            token.text,
-            correction.replacement,
-            correction.confidence
-        );
+let corrector = LexicalCorrector::with_defaults(python);
+for token in &error_tokens {
+    // correct_token returns a Vec<Correction>, already confidence-shaped by the corrector.
+    for c in corrector.correct_token(token, &token.context) {
+        println!("{} -> {} ({:.2})", token.text, c.replacement, c.confidence);
     }
 }
+# Ok::<(), libgrammstein::code::AstError>(())
 ```
 
-## Performance
+## References
 
-| Operation | Complexity | Notes |
-|-----------|------------|-------|
-| Full tokenization | O(n) | n = leaf nodes in AST |
-| Error tokenization | O(e) | e = nodes in error regions |
-| Token creation | O(1) | Constant per token |
-| Context extraction | O(s) | s = number of siblings |
+1. M. Brunsfeld et al. *tree-sitter: an incremental parsing system for programming tools.*
+   Project documentation, [tree-sitter.github.io](https://tree-sitter.github.io/tree-sitter/).
 
-### Optimization Tips
+## See also
 
-1. **Use `tokenize_errors()`** for correction - don't tokenize entire file
-2. **Disable whitespace/comments** unless needed
-3. **Cache tokenizer** - create once per language
-4. **Batch processing** - tokenize multiple error regions together
-
-## Thread Safety
-
-`CodeTokenizer` is `Send` but not `Sync` (holds language reference):
-
-```rust
-use std::thread;
-
-let python = Python::new();
-
-// Move tokenizer to thread
-thread::spawn(move || {
-    let tokenizer = CodeTokenizer::new(&python);
-    // Use tokenizer in this thread
-});
-```
-
-For parallel tokenization, create separate tokenizers per thread:
-
-```rust
-use rayon::prelude::*;
-
-let sources: Vec<&str> = vec![...];
-
-let results: Vec<_> = sources.par_iter()
-    .map(|source| {
-        let python = Python::new();
-        let tokenizer = CodeTokenizer::new(&python);
-        let mut parser = CodeParser::new(Arc::new(python.clone())).unwrap();
-        let parsed = parser.parse(source).unwrap();
-        tokenizer.tokenize(&parsed.tree, source)
-    })
-    .collect();
-```
-
-## See Also
-
-- [Language Framework](language.md) - `TokenType` and `TokenContext`
-- [AST](ast.md) - Tree-sitter parsing
-- [Correction](correction.md) - Using tokens for correction
-- [Correctors](correctors/overview.md) - Token-level correction
+- [Language](language.md) — `TokenType`, `TokenContext`, and `classify_token`
+- [AST](ast.md) — the tree the tokenizer walks
+- [Correction](correction.md) — how tokens become `Correction`s
+- [Correctors](correctors/overview.md) — the token-level consumers

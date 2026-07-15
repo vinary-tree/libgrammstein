@@ -1,0 +1,44 @@
+@startuml embedding-skipgram
+' Skip-gram with negative sampling: one (center, context) update. The enriched
+' input vector is scored against the shared word_embeddings rows of the true
+' context (+) and k noise words (−); gradients flow back to words and subwords.
+' Render: plantuml -tsvg docs/diagrams/embedding-skipgram.puml
+' Source of truth for Figure 1 in docs/components/embedding/skip-gram.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title Skip-gram update  J = log σ(v_c·v_w) + Σ log σ(−v_n·v_w)
+
+legend top right
+  |= Color |= Concept |
+  |<#2E7D32>     | Embedding vector / gradient |
+  |<#00838F>     | Stored weight matrix |
+  |<#546E7A>     | Corpus / sampler |
+endlegend
+
+rectangle "center word  w\n(subsampled: keep p(w))" as center #546E7A
+rectangle "input vector  v_w\n(v_word ⊕ v_sub)/2" as vw #2E7D32
+rectangle "context word  c\n(true neighbour, +)" as ctx #546E7A
+rectangle "NegativeSampler\nP(n) ∝ f(n)^¾   (table 10⁷)" as neg #546E7A
+rectangle "word_embeddings [ |V| × d ]\nrows  v_c , v_{n_i}  (shared)" as wordM #00838F
+rectangle "score  s = σ(v_w · v)\ng⁺ = (1−s)·η    g⁻ = −s·η" as score #2E7D32
+rectangle "grad_in  Σ g·v\n→ update v_w (center)\n→ update v_c , v_{n_i}" as grad #2E7D32
+rectangle "subword_embeddings [ B × d ]\neach bucket += grad_in / |G|" as subM #00838F
+
+center --> vw
+ctx --> wordM
+neg --> wordM
+vw --> score
+wordM --> score
+score --> grad
+grad --> wordM : += η·g·v_w
+grad --> subM : subword share
+@enduml

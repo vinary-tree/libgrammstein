@@ -1,0 +1,68 @@
+@startuml neural-modernbert-architecture
+' ModernBERT-base as libgrammstein drives it: BPE tokenizer → RoPE token embeddings →
+' 22 pre-norm GeGLU layers with alternating local/global attention → final norm, then the
+' two exits the wrapper exposes: (a) pooled sentence vector, (b) MLM vocabulary logits
+' through the replicated head + tied decoder.
+' Render: plantuml -tsvg docs/diagrams/neural-modernbert-architecture.puml
+' Source of truth for Figure 1 in docs/components/neural/model.md §3.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title ModernBERT-base — encoder stack and the two exits used by libgrammstein
+
+rectangle "**Input text**\n“The quick brown fox”" as text #546E7A
+
+rectangle "**Tokenizer** (BPE, 50 368 types)\nencode(text, add_special = true)\n⟶ [CLS] · sub-words · [SEP]" as tok #2E7D32
+
+rectangle "**Token embeddings** + LayerNorm\nE ∈ ℝ^(V × H),  H = 768\nno absolute positions · no token-type IDs" as emb #2E7D32
+
+rectangle "**Encoder — 22 pre-norm layers**\nattention: RoPE-rotated Q·Kᵀ\nlayer ℓ global ⟺ ℓ mod 3 = 0\nother layers: sliding window (±64)\nMLP: GeGLU, intermediate 1 152" as enc #2E7D32
+
+rectangle "**final_norm**\nhidden states  H ∈ ℝ^(B × T × 768)" as hid #2E7D32
+
+rectangle "**Pooling**\nCLS: h₀      mean: (1/T) Σₜ hₜ" as pool #2E7D32
+rectangle "**Sentence vector**\nℝ^768  (optionally ℓ₂-normalized)" as vec #2E7D32
+
+rectangle "**MLM head** (replicated)\nDense(768→768) → GELU(erf) → LayerNorm" as head #2E7D32
+rectangle "**Decoder** (weights tied to E)\nz = Eᵀ·x + b   ⟶  ℝ^(B × T × 50 368)" as dec #2E7D32
+rectangle "**Vocabulary logits**\nlog-softmax ⟶ log ℙ(token | context)" as logits #2E7D32
+
+text --> tok
+tok --> emb : token IDs (u32)
+emb --> enc
+enc --> hid
+
+hid --> pool : embed / embed_mean_pooled
+pool --> vec
+
+hid --> head : get_mlm_logits
+head --> dec
+dec --> logits
+
+note right of enc #E8F5E9
+  Local–global alternation is what buys the
+  8 192-token window: only ⌈22/3⌉ = 8 layers pay
+  the quadratic Θ(T²·H) attention bill; the other
+  14 pay Θ(T·w·H) with window w = 128.
+end note
+
+note right of head #E8F5E9
+  candle's ModernBertHead / ModernBertDecoder have
+  private constructors, and ModernBertForMaskedLM
+  hides its own encoder. libgrammstein therefore
+  rebuilds both from the //same// VarBuilder — weight
+  paths head.dense, head.norm,
+  model.embeddings.tok_embeddings.weight, decoder.bias
+  — so one 149 M-parameter encoder serves both exits.
+end note
+
+@enduml

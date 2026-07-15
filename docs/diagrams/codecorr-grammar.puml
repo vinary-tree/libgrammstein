@@ -1,0 +1,73 @@
+@startuml codecorr-grammar
+' GrammarCorrector repair flow: seed an Earley chart from the PCFG, read off the
+' admissible terminal set, and derive replace / delete / insert repairs from it.
+' Render: plantuml -tsvg docs/diagrams/codecorr-grammar.puml
+' Source of truth for Figure 1 in docs/components/code/correctors/grammar.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+title GrammarCorrector — admissible-set repairs from a PCFG + Earley chart
+
+legend top right
+  |= Color |= Concept |
+  |<#EF6C00>     | PCFG / Earley chart |
+  |<#263238>     | Decision |
+  |<#6A1B9A>     | Repair operator |
+  |<#455A64>     | Emitted correction |
+endlegend
+
+rectangle "**WeightedCFG**\nrules A → α with weights\n(trained from ASTs)" as cfg #EF6C00
+rectangle "**GrammarConstraint**\nEarley chart, predict ∪ complete\nseeded at the start symbol" as chart #EF6C00
+rectangle "**Admissible set**  𝒜\nterminals sitting just after a dot" as adm #EF6C00
+
+rectangle "**CodeToken**\ntext · byte_offset" as tok #EF6C00
+rectangle "text ∈ 𝒜 ?" as test #263238
+rectangle "**no correction**\ntoken is grammatical here" as ok #455A64
+
+package "Repair operators (token ∉ 𝒜)" {
+  rectangle "**suggest_replacements**\n∀ a ∈ 𝒜 with sim ≥ 0.3\nconf = base · sim · (0.5 + 0.5·P̂(a))" as rep #6A1B9A
+  rectangle "**suggest_deletions**\nspan → ε\nconf = base · 0.7" as del #6A1B9A
+  rectangle "**suggest_insertions**\n∀ a ∈ 𝒜, zero-width span\nconf = base · P̂(a)" as ins #6A1B9A
+}
+
+rectangle "**P̂(a)** = max { P(A → α) : a ∈ α }\nposition-independent rule scan" as prob #EF6C00
+rectangle "**Correction**\nReplacement / Deletion / Insertion\nsource = Grammar" as corr #455A64
+
+cfg --> chart : clone into constraint
+chart --> adm : valid_tokens()
+prob .[#EF6C00,dashed].> rep : scores
+prob .[#EF6C00,dashed].> ins : scores
+cfg .[#EF6C00,dashed].> prob : iter_rules()
+
+tok --> test
+adm --> test
+test --> ok : yes
+test --> rep : no
+test --> del : no
+test --> ins : no
+rep --> corr
+del --> corr
+ins --> corr
+
+note bottom of chart #FFF8E1
+  ⚠ At the CodeCorrector trait surface the chart is
+  replayed with an EMPTY history, so 𝒜 is the
+  start-column admissible set — position-blind.
+  valid_next_tokens(history) is the accurate API.
+end note
+
+note right of prob #FFF8E1
+  P̂ ignores the token's position: it is the max over
+  every rule whose right-hand side mentions a,
+  not a contextual derivation probability.
+end note
+
+@enduml

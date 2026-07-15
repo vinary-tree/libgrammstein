@@ -1,0 +1,66 @@
+@startuml scoring-sentence
+' SentenceScorer: the three views of one sentence's probability, and which of them the
+' ranking helpers actually consume. log_prob is length-biased (it is a SUM, so longer
+' sentences score lower); normalized_log_prob and perplexity divide the bias out.
+' rank_sentences / best_sentence deliberately rank by the RAW log_prob — the dashed
+' advisory edge marks the length-invariant scores a caller should use instead when the
+' candidates differ in length.
+' Render: plantuml -tsvg docs/diagrams/scoring-sentence.puml
+' Source of truth for Figure 2 in docs/components/scoring/overview.md and
+' docs/api/scoring.md (the SentenceScorer section).
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Sentence scoring — SentenceScorer over an n-gram model
+
+rectangle "**candidate sentences**\nW⁽¹⁾ … W⁽ᵏ⁾, lengths N₁ … N_k" as cands #546E7A
+
+rectangle "**log_prob(W)**\nΣᵢ log ℙ(wᵢ | hᵢ)\n**length-biased** (a sum)" as raw #1565C0
+rectangle "**normalized_log_prob(W)**\n(1/N) · Σᵢ log ℙ(wᵢ | hᵢ)\nlength-invariant" as norm #1565C0
+rectangle "**perplexity(W)**\nexp( −normalized_log_prob )\nlength-invariant" as ppl #1565C0
+
+rectangle "**rank_sentences**\nsorted by log_prob, descending" as rank #455A64
+rectangle "**best_sentence**\nargmax log_prob" as best #455A64
+
+cands --> raw
+raw --> norm : ÷ N
+norm --> ppl : exp(−·)
+
+raw --> rank
+raw --> best
+
+norm .[#2E7D32,dashed].> rank : prefer when\nlengths differ
+ppl .[#2E7D32,dashed].> best : prefer when\nlengths differ
+
+note bottom of raw #E3F2FD
+  Every log ℙ(wᵢ | hᵢ) < 0, so appending a
+  word can only //lower// log_prob. Comparing
+  unequal-length candidates by log_prob
+  therefore systematically favours the
+  shortest one.
+end note
+
+note bottom of ppl #E3F2FD
+  Equal-length candidates (spelling variants
+  of one sentence) rank identically under all
+  three scores — the bias only bites when N
+  differs.
+end note
+
+legend right
+  | Colour | Role |
+  |<#546E7A> | caller-supplied candidates |
+  |<#1565C0> | scores computed by the n-gram model |
+  |<#455A64> | ranking helpers (rank by raw log_prob) |
+  |<#2E7D32> | advisory: length-invariant alternative |
+endlegend
+@enduml

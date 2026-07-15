@@ -1,0 +1,62 @@
+@startuml example-train-eval
+' The end-to-end train → fuse → evaluate → persist workflow walked by
+' docs/examples/train-and-evaluate.md. Colour encodes the component that owns each
+' stage (repo-wide legend in architecture.puml): corpora / external crates (grey),
+' statistical LM core (blue), embeddings (green), hybrid fusion (steel blue),
+' applications & evaluation (slate), storage / persistence (teal).
+' Render: plantuml -tsvg docs/diagrams/example-train-eval.puml
+' Source of truth for Figure 1 in docs/examples/train-and-evaluate.md §2
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Train → fuse → evaluate → persist  (one reader per training pass)
+
+rectangle "**corpus.txt**\nplain text on disk" as corpus #546E7A
+rectangle "**PlaintextReader::from_file**\nNormalizer: NFC · control chars · whitespace\nTokenizer: lowercase · sentences on [.!?]+␣" as reader #546E7A
+
+rectangle "**TrainerBuilder::new(dict).order(n)**\n① count n-grams (Rayon · atomic entries)\n② continuation counts N₁₊(•,w), N₁₊(h,•)\n③ discounts D₁ D₂ D₃₊ from n₁…n₄" as ngtrain #1565C0
+rectangle "**NgramModel<D>**\nlog_prob(w, h) · sentence_log_prob(s)\nModified Kneser-Ney · O(n) look-ups" as ngram #1565C0
+
+rectangle "**EmbeddingTrainerBuilder**\ndim · window_size · min_count · epochs\nskip-gram + negative sampling" as emtrain #2E7D32
+rectangle "**SubwordEmbedding**\nword_vector · similarity · most_similar\nhashed character n-grams ⇒ OOV coverage" as embed #2E7D32
+
+rectangle "**HybridLanguageModel::new(ngram, embedding, cfg)**\nscore(w, h) = α·ℙₙ ⊕ (1−α)·ℙₑ\nInterpolationStrategy · lock-free score cache" as hybrid #1B6CA8
+
+rectangle "**Perplexity::new(&ngram)**\n.corpus_perplexity(&test_reader)\nPP · OOV rate · token & sentence counts" as eval #455A64
+rectangle "**persist** (feature `serde-extras`)\nsave / load — needs D: Serialize\nsave_portable / load_portable — any backend" as persist #00838F
+
+corpus --> reader
+reader --> ngtrain : reader moved **by value**\n(pass 1)
+reader --> emtrain : a **second** reader\n(pass 2)
+ngtrain --> ngram
+emtrain --> embed
+ngram --> hybrid
+embed --> hybrid
+ngram --> eval : baseline PP
+hybrid --> eval : fused PP
+ngram --> persist
+hybrid --> persist
+
+note bottom of reader #ECEFF1
+  CorpusReader::sentences() **streams**;
+  train() **consumes** its reader, so
+  build a fresh one for every pass.
+end note
+
+note right of eval #E3F2FD
+  Perplexity wraps an **NgramModel**.
+  Score a hybrid with
+  HybridLanguageModel::perplexity
+  (per sentence) — see §8.
+end note
+
+@enduml

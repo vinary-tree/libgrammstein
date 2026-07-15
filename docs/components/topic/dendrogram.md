@@ -1,305 +1,197 @@
 # Dendrogram
 
-The dendrogram represents the hierarchical clustering structure, enabling flexible topic count selection.
+A **dendrogram** is the binary tree of merges that hierarchical clustering produces: its leaves
+are documents, its internal nodes are merges, and the *height* of an internal node is the distance
+at which its two children fused. Because the whole hierarchy is retained, the number of topics is
+not fixed at clustering time — it is chosen afterward by **cutting** the tree, either to a target
+count or at a distance threshold. This document describes the tree the code builds and the two cut
+operations it supports.
 
-## What is a Dendrogram?
+> **Scope.** Source of truth:
+> [`src/topic/dendrogram.rs`](../../../src/topic/dendrogram.rs). The dendrogram is produced by
+> [Clustering](clustering.md) from its linkage matrix and stored on the
+> [`TopicModel`](../../../src/topic/model.rs); see the [Topic Overview](overview.md) for the
+> surrounding pipeline.
 
-A dendrogram visualizes hierarchical clustering as a tree:
+## Reading a dendrogram
 
-```
-Distance
-│
-│                                 ┌────────────────┐
-0.8 ├─────────────────────────────┤                │
-│                          ┌──────┘                │
-0.6 ├──────────────────────┤                       │
-│                   ┌──────┘                       │
-0.4 ├───────────────┤                              │
-│            ┌──────┘                              │
-0.2 ├────────┤                              ┌──────┘
-│     ┌──────┘                       ┌──────┘
-0.0 ──┼──────┼──────┼──────┼──────┼──────┼──────┼──────
-     Doc0   Doc1   Doc2   Doc3   Doc4   Doc5   Doc6
+The vertical axis is merge distance; the leaves are laid along the horizontal axis. A horizontal
+cut at height $`\tau`$ severs every merge above $`\tau`$, and the connected groups of leaves that
+remain below the cut are the clusters.
 
-Reading the dendrogram:
-- Y-axis: Distance at which clusters merge
-- X-axis: Individual documents (leaves)
-- Horizontal lines: Cluster merges
-- Height of merge: Dissimilarity between merged clusters
-```
+![Dendrogram with a distance cut yielding two clusters](../../diagrams/topic-dendrogram.svg)
 
-## Scipy-Style Linkage Matrix
+Cutting the tree above at $`\tau = 0.5`$ removes only the root merge (height $`0.80`$) and leaves
+the two subtrees $`\{D_0, D_1\}`$ (height $`0.20`$) and $`\{D_2, D_3\}`$ (height $`0.30`$) intact —
+two clusters. Lowering the cut to $`\tau = 0.25`$ also severs the $`0.30`$ merge, giving three
+clusters; raising it above $`0.80`$ gives one.
 
-The dendrogram is stored as a linkage matrix compatible with scipy:
+## The data structure
 
-```
-Linkage Matrix Format:
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Row i: [cluster_a, cluster_b, distance, size]                           │
-│                                                                          │
-│ cluster_a, cluster_b: Indices of merged clusters                        │
-│   - If index < n: It's a leaf (original document)                       │
-│   - If index >= n: It's a previous merge (index - n = row number)       │
-│ distance: Distance at which merge occurred                              │
-│ size: Total number of documents in merged cluster                       │
-└─────────────────────────────────────────────────────────────────────────┘
+A dendrogram is a map of nodes plus the id of the root
+([`src/topic/dendrogram.rs`](../../../src/topic/dendrogram.rs)). Every node — leaf or internal —
+is a [`DendrogramNode`](../../../src/topic/dendrogram.rs):
 
-Example for n=5 documents:
-┌────────┬───────────┬───────────┬──────────┬──────┐
-│ Row    │ Cluster A │ Cluster B │ Distance │ Size │
-├────────┼───────────┼───────────┼──────────┼──────┤
-│ 0      │ 0         │ 1         │ 0.05     │ 2    │
-│ 1      │ 3         │ 4         │ 0.10     │ 2    │
-│ 2      │ 5         │ 2         │ 0.20     │ 3    │
-│ 3      │ 6         │ 7         │ 0.50     │ 5    │
-└────────┴───────────┴───────────┴──────────┴──────┘
+```rust
+pub struct DendrogramNode {
+    pub id: u32,               // leaf id in 0..num_leaves; merged id in num_leaves..2*num_leaves-1
+    pub left: Option<u32>,     // child ids; both None for a leaf
+    pub right: Option<u32>,
+    pub distance: f32,         // height at which this node was formed (0.0 for a leaf)
+    pub count: usize,          // number of leaf documents beneath this node
+}
 
-Row 0: Merge documents 0 and 1 → cluster 5
-Row 1: Merge documents 3 and 4 → cluster 6
-Row 2: Merge cluster 5 (docs 0,1) with doc 2 → cluster 7
-Row 3: Merge clusters 6 and 7 → final cluster (all docs)
+pub struct Dendrogram {
+    // nodes: HashMap<u32, DendrogramNode>   (private)
+    // num_leaves: usize                     (private)
+    // root: Option<u32>                     (private)
+}
 ```
 
-## Dendrogram Structure
+The struct derives `Serialize`/`Deserialize`, so it travels inside a serialized `TopicModel`.
+
+## Building from a linkage matrix
+
+[`Dendrogram::from_linkage`](../../../src/topic/dendrogram.rs) turns the clustering's
+`Vec<(u32, u32, f32, u32)>` linkage matrix into the tree. It first creates `num_leaves` leaf
+nodes with ids $`0, \dots, n{-}1`$, then walks the linkage rows: row $`i`$ becomes an internal
+node with id $`n + i`$, children equal to the row's two cluster ids, and the row's distance and
+count. The root is the last row's node, $`n + (\lvert\text{linkage}\rvert - 1)`$. For $`n`$ leaves
+there are $`n-1`$ merges, so the finished tree holds $`2n-1`$ nodes.
 
 ```rust
 use libgrammstein::topic::Dendrogram;
 
-pub struct Dendrogram {
-    /// Linkage matrix (n-1 rows for n documents)
-    linkage: Vec<LinkageRow>,
+// Merge 0,1 at 1.0 -> node 4; merge 2,3 at 1.5 -> node 5; merge 4,5 at 2.0 -> node 6 (root).
+let linkage = vec![(0, 1, 1.0, 2), (2, 3, 1.5, 2), (4, 5, 2.0, 4)];
+let dendro = Dendrogram::from_linkage(&linkage, 4);
 
-    /// Number of original documents
-    n_samples: usize,
-}
-
-pub struct LinkageRow {
-    pub cluster_a: u32,   // First cluster merged
-    pub cluster_b: u32,   // Second cluster merged
-    pub distance: f32,    // Distance at merge
-    pub size: u32,        // Combined cluster size
-}
+assert_eq!(dendro.num_leaves(), 4);
+assert_eq!(dendro.num_nodes(), 7);                 // 4 leaves + 3 merges
+assert_eq!(dendro.root().unwrap().id, 6);
 ```
 
-## Creating a Dendrogram
+## Cutting the tree
 
-Dendrograms are created by hierarchical clustering:
+### By distance threshold
 
-```rust
-use libgrammstein::topic::{HierarchicalClustering, LinkageMethod};
+[`cut_at_distance`](../../../src/topic/dendrogram.rs) returns a `Vec<u32>` cluster label per leaf.
+It descends from the root: at an internal node whose forming distance *exceeds* the threshold it
+recurses into each child as a separate cluster; at a node whose distance is *within* the threshold
+it stops and assigns that whole subtree one label. Formally, with a fresh counter $`\kappa`$
+starting at $`0`$:
 
-let clustering = HierarchicalClustering::new(LinkageMethod::Ward);
-let (labels, dendrogram) = clustering.fit(&embeddings, num_clusters)?;
+```
+function cut_recursive(node, τ):
+    if node is a leaf:            assign leaf -> κ
+    else if node.distance > τ:    cut_recursive(left, τ);  κ <- κ + 1;  cut_recursive(right, τ)
+    else:                         assign every leaf under node -> κ    ▸ subtree stays one cluster
 ```
 
-## Cutting the Dendrogram
-
-### By Number of Clusters
-
 ```rust
-// Cut to get exactly k clusters
-let k = 10;
-let labels = dendrogram.cut_tree(k);
-
-// labels: Vec<u32> with cluster assignment for each document
-for (doc, cluster) in labels.iter().enumerate() {
-    println!("Document {} → Cluster {}", doc, cluster);
-}
+let labels = dendro.cut_at_distance(1.8);          // severs only the 2.0 merge
+assert_eq!(Dendrogram::unique_clusters(&labels).len(), 2);
 ```
 
-### By Distance Threshold
+### To a target number of clusters
 
-```rust
-// Cut at distance threshold
-let threshold = 0.5;
-let labels = dendrogram.cut_by_distance(threshold);
+[`cut_to_k_clusters`](../../../src/topic/dendrogram.rs) finds the threshold that yields exactly
+$`k`$ clusters. Intuitively, $`k`$ clusters remain after severing the $`k-1`$ tallest merges, so
+the cut is placed just below the $`(k{-}1)`$-th tallest merge distance. Let
+$`\delta_1 \le \delta_2 \le \dots \le \delta_m`$ be the *distinct* internal-node distances. The
+method sets
 
-// All merges below threshold are kept
-// Merges at or above threshold define cluster boundaries
+```math
+\tau = \frac{\delta_{m-k} + \delta_{m-k+1}}{2} \tag{D1}
 ```
 
-## Navigating the Hierarchy
-
-### Iterate Merges
+then calls `cut_at_distance` with the threshold $`\tau`$. The degenerate cases are handled
+explicitly: $`k \ge n`$
+places every leaf in its own cluster, $`k \le 1`$ places all leaves in one, and asking for more
+clusters than the tree can distinguish ($`k > m + 1`$) again gives singleton leaves.
 
 ```rust
-// Iterate from first merge to last
-for (i, merge) in dendrogram.iter().enumerate() {
-    println!(
-        "Merge {}: clusters {},{} at distance {:.4} (size {})",
-        i, merge.cluster_a, merge.cluster_b, merge.distance, merge.size
-    );
-}
+let labels = dendro.cut_to_k_clusters(2);
+assert_eq!(Dendrogram::unique_clusters(&labels).len(), 2);
+assert_eq!(labels[0], labels[1]);                  // 0 and 1 share a cluster
+assert_ne!(labels[0], labels[2]);                  // ... distinct from 2,3
 ```
 
-### Find Merge Distances
+## Navigating the hierarchy
+
+| Method | Returns | Purpose |
+|---|---|---|
+| [`root()`](../../../src/topic/dendrogram.rs) | `Option<&DendrogramNode>` | the top merge |
+| [`get(id)`](../../../src/topic/dendrogram.rs) | `Option<&DendrogramNode>` | look a node up by id |
+| [`num_leaves()`](../../../src/topic/dendrogram.rs) | `usize` | document count $`n`$ |
+| [`num_nodes()`](../../../src/topic/dendrogram.rs) | `usize` | total nodes $`2n-1`$ |
+| [`leaves_under(id)`](../../../src/topic/dendrogram.rs) | `Vec<u32>` | leaf ids beneath a node |
+| [`nodes_at_level(lo, hi)`](../../../src/topic/dendrogram.rs) | `Vec<&DendrogramNode>` | nodes whose distance is in $`[lo, hi)`$ |
+| [`depth(id)`](../../../src/topic/dendrogram.rs) | `Option<usize>` | edges from the root to a node |
+
+Two static helpers bridge to topic ids and cluster sets:
+[`assignments_to_topic_ids`](../../../src/topic/dendrogram.rs) maps a label vector to
+`Vec<TopicId>`, and [`unique_clusters`](../../../src/topic/dendrogram.rs) returns the sorted
+distinct labels — the idiom for counting clusters after a cut.
 
 ```rust
-// Get all merge distances
-let distances: Vec<f32> = dendrogram.iter()
-    .map(|m| m.distance)
-    .collect();
+let leaves = dendro.leaves_under(4);               // {0, 1}
+assert_eq!(leaves.len(), 2);
+assert_eq!(dendro.depth(6), Some(0));              // root is at depth 0
+assert_eq!(dendro.depth(0), Some(2));              // leaf 0 is two merges down
+```
 
-// Find "elbow" for optimal k
-let mut diffs: Vec<f32> = distances
+## Choosing the number of topics
+
+When neither a $`k`$ nor a threshold is supplied a priori, the sequence of merge distances
+suggests a natural cut: a large *jump* between consecutive merge heights marks the boundary
+between within-topic and across-topic fusion (the "elbow"). The merge distances are available on
+the model as the third field of each linkage row, so the elbow can be located without any
+private access:
+
+```rust
+// `model: &TopicModel`
+let mut distances: Vec<f32> = model.linkage().iter().map(|&(_, _, d, _)| d).collect();
+distances.sort_by(|a, b| a.total_cmp(b));
+
+// The largest gap between successive merge heights is a candidate cut.
+let elbow = distances
     .windows(2)
-    .map(|w| w[1] - w[0])
-    .collect();
-
-// Large jump suggests natural cluster boundary
-let max_jump_idx = diffs.iter()
     .enumerate()
-    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-    .map(|(i, _)| i);
-```
+    .max_by(|a, b| (a.1[1] - a.1[0]).total_cmp(&(b.1[1] - b.1[0])))
+    .map(|(i, _)| i + 1);
 
-### Get Cluster at Level
-
-```rust
-// Get clusters at specific number of merges
-fn clusters_at_level(dendrogram: &Dendrogram, level: usize) -> Vec<u32> {
-    // level = 0: n clusters (no merges)
-    // level = n-1: 1 cluster (all merged)
-    let n_clusters = dendrogram.n_samples() - level;
-    dendrogram.cut_tree(n_clusters)
-}
-```
-
-## Topic Count Selection
-
-### Method 1: Fixed k
-
-```rust
-// User specifies number of topics
-let config = TopicConfig {
-    num_topics: Some(20),
-    ..Default::default()
-};
-```
-
-### Method 2: Distance Threshold
-
-```rust
-// Automatic k based on distance
-let threshold = 0.3;  // Merge similar clusters only
-let labels = dendrogram.cut_by_distance(threshold);
-let num_topics = labels.iter().collect::<HashSet<_>>().len();
-```
-
-### Method 3: Elbow Method
-
-```rust
-// Find natural break in merge distances
-fn find_elbow(dendrogram: &Dendrogram) -> usize {
-    let distances: Vec<f32> = dendrogram.iter()
-        .map(|m| m.distance)
-        .collect();
-
-    // Compute second derivative (acceleration)
-    let mut max_accel = 0.0;
-    let mut elbow_idx = distances.len() / 2;
-
-    for i in 1..distances.len()-1 {
-        let accel = (distances[i+1] - distances[i])
-                  - (distances[i] - distances[i-1]);
-        if accel > max_accel {
-            max_accel = accel;
-            elbow_idx = i;
-        }
-    }
-
-    // Number of clusters = n - elbow_idx
-    dendrogram.n_samples() - elbow_idx
-}
-```
-
-### Method 4: Silhouette Score
-
-```rust
-// Evaluate cluster quality at different k
-fn optimal_k(embeddings: &[Vec<f32>], dendrogram: &Dendrogram) -> usize {
-    let mut best_k = 2;
-    let mut best_score = f32::NEG_INFINITY;
-
-    for k in 2..=20 {
-        let labels = dendrogram.cut_tree(k);
-        let score = silhouette_score(embeddings, &labels);
-        if score > best_score {
-            best_score = score;
-            best_k = k;
-        }
-    }
-
-    best_k
-}
-```
-
-## Visualization (ASCII)
-
-```rust
-fn print_dendrogram_ascii(dendrogram: &Dendrogram, width: usize) {
-    let n = dendrogram.n_samples();
-    let max_dist = dendrogram.iter().map(|m| m.distance).fold(0.0, f32::max);
-
-    println!("Distance");
-    println!("│");
-
-    for level in (0..10).rev() {
-        let threshold = max_dist * level as f32 / 10.0;
-        let labels = dendrogram.cut_by_distance(threshold);
-        let n_clusters = labels.iter().collect::<HashSet<_>>().len();
-
-        print!("{:.2} ├", threshold);
-        // Draw cluster boundaries
-        let mut prev_cluster = labels[0];
-        for label in &labels {
-            if *label != prev_cluster {
-                print!("│");
-                prev_cluster = *label;
-            } else {
-                print!("─");
-            }
-        }
-        println!(" ({} clusters)", n_clusters);
-    }
+if let Some(k) = elbow {
+    let labels = model.dendrogram().cut_to_k_clusters(k);
+    println!("elbow suggests {k} clusters -> {} labels", labels.len());
 }
 ```
 
 ## Persistence
 
-The dendrogram is stored with the topic model:
+The dendrogram is part of the serialized model, so a reloaded model can be re-cut at any
+granularity without re-running clustering:
 
 ```rust
-// Save with index
-index.extract_topics(&config, &embeddings, &texts)?;
-index.save("./index")?;
+use libgrammstein::topic::TopicModel;
 
-// Load includes dendrogram
-let index = RagIndex::load("./index")?;
-if let Some(model) = index.topic_model() {
-    let dendrogram = model.dendrogram();
-    println!("Dendrogram with {} merges", dendrogram.len());
-}
+let model = TopicModel::load("./topic_model.json")?;
+let dendro = model.dendrogram();
+println!("{} documents, {} nodes", dendro.num_leaves(), dendro.num_nodes());
+
+let coarse = dendro.cut_to_k_clusters(5);          // re-cut to 5 topics
+let fine   = dendro.cut_to_k_clusters(25);         // ... or 25, from the same tree
+# Ok::<(), libgrammstein::topic::TopicError>(())
 ```
 
-## Properties
+## Complexity
 
-```rust
-// Number of original documents
-let n = dendrogram.n_samples();
+Building from the linkage matrix is $`O(n)`$ in time and space. `cut_at_distance` visits each node
+once, $`O(n)`$; `cut_to_k_clusters` additionally sorts the $`O(n)`$ distinct merge distances,
+$`O(n \log n)`$. `leaves_under` and `depth` are linear in the size of the subtree they traverse.
 
-// Number of merges (n - 1)
-let n_merges = dendrogram.len();
+## See also
 
-// Check if empty
-let is_empty = dendrogram.is_empty();
-
-// Get specific merge
-let merge = &dendrogram[5];  // 6th merge
-```
-
-## See Also
-
-- [Overview](overview.md) - Topic module introduction
-- [Clustering](clustering.md) - Hierarchical clustering algorithm
-- [c-TF-IDF](ctfidf.md) - Keyword extraction
+- [Topic Overview](overview.md) — the end-to-end pipeline
+- [Clustering](clustering.md) — how the linkage matrix behind the tree is produced
+- [c-TF-IDF](ctfidf.md) — labeling the clusters a cut produces

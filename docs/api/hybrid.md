@@ -1,357 +1,363 @@
 # HybridLanguageModel API Reference
 
-The `HybridLanguageModel<D>` struct combines n-gram and embedding models for robust language modeling with OOV handling.
+`HybridLanguageModel<D>` fuses the two experts: the razor-sharp *local* statistics of the
+Modified Kneser-Ney n-gram model and the *semantic generalization* of the subword embedding.
+Their errors are largely independent — the n-gram fails on unseen words, the embedding fails on
+word order — so a weighted combination is more robust than either alone, and an out-of-vocabulary
+word still receives a sane score.
 
-## Overview
+> **Scope.** Source of truth: [`src/hybrid/model.rs`](../../src/hybrid/model.rs),
+> [`src/hybrid/mod.rs`](../../src/hybrid/mod.rs), [`src/hybrid/oov.rs`](../../src/hybrid/oov.rs).
+> For the mathematics of the four strategies and the score cache, see
+> [Hybrid Interpolation](../components/hybrid/interpolation.md); for OOV behavior see
+> [OOV Handling](../components/hybrid/oov-handling.md); for tuning $`\alpha`$ see the
+> [Hybrid Training guide](../training/hybrid.md).
 
-Hybrid models leverage the strengths of both approaches:
+## Exports
 
-- **N-gram models** provide accurate probabilities for seen n-grams
-- **Embedding models** provide semantic similarity for OOV words
-- **Configurable interpolation** balances the two components
+```rust
+use libgrammstein::hybrid::{
+    HybridLanguageModel, HybridConfig, InterpolationStrategy,
+    OovHandler, OovStrategy,                    // standalone helpers — see the note below
+    SerializableHybridModel, PathMapHybridModel, // type aliases
+};
 
-## Type Parameters
+#[cfg(feature = "serde-extras")]
+use libgrammstein::hybrid::PortableHybridModel;
+```
 
-| Parameter | Description |
-|-----------|-------------|
-| `D` | Dictionary backend implementing `MutableMappedDictionary<Value = NgramEntry> + Send + Sync` |
+These types are **not** in the crate prelude; import them from `libgrammstein::hybrid`.
+
+## The type parameter `D`, and its bounds
+
+`D` is the n-gram model's dictionary backend. As with `NgramModel`, the bound tightens with what
+you ask for:
+
+| Operation | Required bound on `D` |
+|---|---|
+| Construct, `score`, `perplexity`, `predict_next`, … | `MappedDictionary<Value = NgramEntry> + Send + Sync` |
+| `to_portable`, `save_portable` | `+ IterableDictionary` |
+| `load_portable` | `MutableMappedDictionary<Value = NgramEntry> + Send + Sync` |
+| `save`, `load` (direct bincode) | `+ Serialize + DeserializeOwned` |
+
+```rust
+pub type SerializableHybridModel = HybridLanguageModel<DynamicDawgChar<NgramEntry>>;
+pub type PathMapHybridModel      = HybridLanguageModel<PathMapDictionary<NgramEntry>>;
+```
 
 ## Construction
 
-### From Pre-trained Components
+There is **no trainer** for the hybrid model — you train the two components separately and
+compose them. The constructor takes **three** arguments (or two, for defaults):
 
 ```rust
-use libgrammstein::hybrid::{HybridLanguageModel, HybridConfig};
-use libgrammstein::ngram::NgramModel;
-use libgrammstein::embedding::SubwordEmbedding;
-
-let ngram_model = NgramModel::load("ngram.bin")?;
-let embedding_model = SubwordEmbedding::load("embeddings.bin")?;
-
-// With custom configuration
-let config = HybridConfig::default();
-let hybrid = HybridLanguageModel::new(ngram_model, embedding_model, config);
-
-// With defaults
-let hybrid = HybridLanguageModel::with_defaults(ngram_model, embedding_model);
+impl<D: MappedDictionary<Value = NgramEntry> + Send + Sync> HybridLanguageModel<D> {
+    pub fn new(ngram: NgramModel<D>, embedding: SubwordEmbedding, config: HybridConfig) -> Self;
+    pub fn with_defaults(ngram: NgramModel<D>, embedding: SubwordEmbedding) -> Self;
+}
 ```
 
-### Loading from File
+Both **take ownership** of the components. Borrow them back with `ngram_model()` and
+`embedding_model()`.
 
 ```rust
-use libgrammstein::hybrid::HybridLanguageModel;
-use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+use libgrammstein::corpus::PlaintextReader;
+use libgrammstein::embedding::EmbeddingTrainerBuilder;
+use libgrammstein::hybrid::{HybridConfig, HybridLanguageModel, InterpolationStrategy};
+use libgrammstein::ngram::{NgramEntry, TrainerBuilder};
+use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
-// Binary format (requires serde-extras feature)
-let model: HybridLanguageModel<DynamicDawgChar<NgramEntry>> =
-    HybridLanguageModel::load("hybrid.bin")?;
+let ngram = TrainerBuilder::new(DynamicDawgChar::<NgramEntry>::new())
+    .order(5)
+    .train(PlaintextReader::from_file("corpus.txt")?)?;
 
-// Portable format
-let model = HybridLanguageModel::load_portable(
-    "hybrid.portable.bin",
-    || DynamicDawgChar::new()
-)?;
+let embedding = EmbeddingTrainerBuilder::new()
+    .dim(100)
+    .epochs(5)
+    .train(PlaintextReader::from_file("corpus.txt")?)?;   // a FRESH reader: the first was moved
+
+// Explicit configuration …
+let config = HybridConfig {
+    strategy: InterpolationStrategy::LogLinear { alpha: 0.7 },
+    ..Default::default()
+};
+let hybrid = HybridLanguageModel::new(ngram, embedding, config);
+
+// … or the defaults (Linear { alpha: 0.8 }):
+// let hybrid = HybridLanguageModel::with_defaults(ngram, embedding);
+# Ok::<(), libgrammstein::Error>(())
 ```
 
 ## Configuration
 
-### HybridConfig
-
 ```rust
-use libgrammstein::hybrid::{HybridConfig, InterpolationStrategy};
-
-let config = HybridConfig {
-    strategy: InterpolationStrategy::Linear { alpha: 0.8 },
-    cache_size: 50_000,
-    embedding_smoothing: 1e-8,
-    temperature: 1.0,
-};
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `strategy` | `InterpolationStrategy` | `Linear { alpha: 0.8 }` | How to combine scores |
-| `cache_size` | `usize` | `50_000` | LRU cache size for scores |
-| `embedding_smoothing` | `f64` | `1e-8` | Smoothing for embedding probabilities |
-| `temperature` | `f64` | `1.0` | Temperature for similarity-to-probability |
-
-### Interpolation Strategies
-
-#### Linear Interpolation
-
-Combines probabilities: `P = α * P_ngram + (1-α) * P_embedding`
-
-```rust
-InterpolationStrategy::Linear { alpha: 0.8 }
-```
-
-#### Log-Linear Interpolation
-
-Combines log probabilities: `log P = α * log P_ngram + (1-α) * log P_embedding`
-
-```rust
-InterpolationStrategy::LogLinear { alpha: 0.7 }
-```
-
-#### N-gram with Embedding Fallback
-
-Uses n-gram for known words, embedding for OOV:
-
-```rust
-InterpolationStrategy::NgramWithEmbeddingFallback
-```
-
-#### Dynamic Weighting
-
-Adjusts weight based on context length:
-
-```rust
-InterpolationStrategy::Dynamic {
-    base_alpha: 0.5,       // Base weight for n-gram
-    alpha_per_context: 0.1, // Additional weight per context word
-    max_alpha: 0.9,        // Maximum n-gram weight
+pub struct HybridConfig {
+    pub strategy: InterpolationStrategy,  // default: Linear { alpha: 0.8 }
+    pub cache_size: usize,                // default: 50_000
+    pub embedding_smoothing: f64,         // default: 1e-8
+    pub temperature: f64,                 // default: 1.0
 }
 ```
 
-## Methods
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `strategy` | `InterpolationStrategy` | `Linear { alpha: 0.8 }` | How the two experts are fused. |
+| `cache_size` | `usize` | `50_000` | Capacity of the LRU score cache (clamped to $`\geq 1`$). |
+| `embedding_smoothing` | `f64` | `1e-8` | $`\varepsilon`$ — the floor on the embedding log-probability. |
+| `temperature` | `f64` | `1.0` | $`\tau`$ — divides the cosine similarity before it becomes a log-probability. Lower sharpens. |
 
-### Scoring
+### `InterpolationStrategy`
 
-#### `score(word, context) -> f64`
-
-Score a word given context using the configured interpolation strategy.
-
-```rust
-let score = model.score("fox", &["the", "quick", "brown"]);
-println!("log P(fox | the quick brown) = {:.4}", score);
-```
-
-**Returns:** Log probability of the word given context.
-
-#### `sentence_log_prob(words) -> f64`
-
-Compute total log probability of a sentence.
+With $`\mathbb{P}_n`$ the n-gram probability, $`\mathbb{P}_e`$ the embedding-derived probability,
+$`\alpha`$ the n-gram weight, and $`\lvert h \rvert`$ the context length:
 
 ```rust
-let log_prob = model.sentence_log_prob(&["the", "quick", "brown", "fox"]);
-```
-
-#### `perplexity(words) -> f64`
-
-Compute perplexity of a sentence.
-
-```rust
-let ppl = model.perplexity(&["the", "quick", "brown", "fox"]);
-println!("Perplexity: {:.2}", ppl);
-```
-
-Lower perplexity indicates better model fit.
-
-### Prediction
-
-#### `predict_next(context, candidates) -> Option<(String, f64)>`
-
-Find the most likely next word from candidates.
-
-```rust
-let candidates = ["fox", "dog", "cat", "bird"];
-if let Some((word, score)) = model.predict_next(&["the", "quick"], &candidates) {
-    println!("Best: {} (score: {:.4})", word, score);
+pub enum InterpolationStrategy {
+    Linear { alpha: f64 },
+    LogLinear { alpha: f64 },
+    NgramWithEmbeddingFallback,
+    Dynamic { base_alpha: f64, alpha_per_context: f64, max_alpha: f64 },
 }
 ```
 
-### Component Access
+**`Linear`** — a convex combination of the *probabilities*; predictable, and the default:
 
-#### `ngram_model() -> &NgramModel<D>`
-
-Get reference to the n-gram component.
-
-```rust
-let ngram = model.ngram_model();
-println!("N-gram order: {}", ngram.order());
+```math
+\mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n(w \mid h) + (1 - \alpha)\,\mathbb{P}_e(w \mid h) \tag{H1}
 ```
 
-#### `embedding_model() -> &SubwordEmbedding`
+**`LogLinear`** — a convex combination in *log space* (a geometric mean / product-of-experts).
+Use it when the two experts live on different scales: a low probability from *either* strongly
+suppresses the product.
 
-Get reference to the embedding component.
-
-```rust
-let embedding = model.embedding_model();
-println!("Embedding dim: {}", embedding.dim());
+```math
+\log \mathbb{P}(w \mid h) = \alpha \log \mathbb{P}_n(w \mid h) + (1 - \alpha) \log \mathbb{P}_e(w \mid h) \tag{H2}
 ```
 
-#### `config() -> &HybridConfig`
+**`NgramWithEmbeddingFallback`** — a hard switch, tested by `count(&[w]) > 0`. No interpolation
+overhead for known words:
 
-Get reference to the configuration.
-
-```rust
-let config = model.config();
-println!("Cache size: {}", config.cache_size);
+```math
+\mathbb{P}(w \mid h) = \begin{cases}
+\mathbb{P}_n(w \mid h) & \text{if } c(w) > 0 \\
+\mathbb{P}_e(w \mid h) & \text{otherwise}
+\end{cases} \tag{H3}
 ```
 
-### Cache Management
+**`Dynamic`** — linear interpolation whose weight *grows with the available context*, trusting
+the n-gram more as the history lengthens:
 
-#### `clear_cache()`
-
-Clear the score cache.
-
-```rust
-model.clear_cache();
+```math
+\alpha(h) = \min\bigl(\alpha_0 + \kappa \cdot \lvert h \rvert,\ \alpha_{\max}\bigr) \tag{H4}
 ```
 
-### Serialization (requires `serde-extras` feature)
+with `base_alpha` = $`\alpha_0`$, `alpha_per_context` = $`\kappa`$, `max_alpha` = $`\alpha_{\max}`$.
+`Dynamic` has no `Default`; supply all three fields, e.g.
+`Dynamic { base_alpha: 0.5, alpha_per_context: 0.1, max_alpha: 0.9 }`.
 
-#### `save(path) -> Result<()>`
+| Scenario | Strategy | Typical weight |
+|---|---|---|
+| General purpose, both models reliable | `Linear` | $`\alpha \approx 0.8`$ |
+| Components on different score scales | `LogLinear` | $`\alpha \approx 0.6`$–$`0.8`$ |
+| Large, high-quality n-gram corpus | `NgramWithEmbeddingFallback` | — |
+| High OOV rate / mixed vocabulary | `Dynamic` | $`\alpha_0 = 0.7,\ \alpha_{\max} = 0.95`$ |
 
-Save model to binary file (requires D: Serialize).
+## Scoring
 
 ```rust
-model.save("hybrid.bin")?;
+impl<D: MappedDictionary<Value = NgramEntry> + Send + Sync> HybridLanguageModel<D> {
+    pub fn score(&self, word: &str, context: &[&str]) -> f64;
+    pub fn sentence_log_prob(&self, words: &[&str]) -> f64;
+    pub fn perplexity(&self, words: &[&str]) -> f64;
+    pub fn predict_next(&self, context: &[&str], candidates: &[&str]) -> Option<(String, f64)>;
+    pub fn clear_cache(&self);
+    pub fn ngram_model(&self) -> &NgramModel<D>;
+    pub fn embedding_model(&self) -> &SubwordEmbedding;
+    pub fn config(&self) -> &HybridConfig;
+}
 ```
 
-#### `load(path) -> Result<Self>`
+| Method | Returns | Description |
+|---|---|---|
+| `score(word, context)` | `f64` | The interpolated **log**-probability, per the configured strategy. Memoized. |
+| `sentence_log_prob(words)` | `f64` | $`\sum_i \texttt{score}(w_i, h_i)`$, sliding a window of up to `order - 1` context words. `0.0` for an empty slice. |
+| `perplexity(words)` | `f64` | $`\exp(-\texttt{sentence\_log\_prob} / N)`$. **`f64::INFINITY`** for an empty slice. |
+| `predict_next(context, candidates)` | `Option<(String, f64)>` | The highest-scoring candidate and its score. `None` **only** if `candidates` is empty. |
+| `clear_cache()` | — | Empties the score cache. Takes `&self` (the cache is interior-mutable). |
 
-Load model from binary file.
+![Hybrid interpolation scoring flow](../diagrams/hybrid-scoring.svg)
 
 ```rust
-let model: HybridLanguageModel<DynamicDawgChar<NgramEntry>> =
+// Robust even when "brown" is rare in the n-gram corpus.
+let log_p = hybrid.score("brown", &["the", "quick"]);
+
+// An OOV word still gets a finite, meaningful score via the subword vectors.
+let oov = hybrid.score("xyzzy", &["magic", "word"]);
+
+// Rank candidate corrections in context.
+let candidates = ["their", "there", "they're"];
+if let Some((best, score)) = hybrid.predict_next(&["put", "it", "over"], &candidates) {
+    println!("best = {best} ({score:.4})");
+}
+
+let ppl = hybrid.perplexity(&["the", "quick", "brown", "fox"]);
+```
+
+### How the embedding becomes a probability
+
+For a non-empty context the model averages the context words' subword vectors into $`v_h`$,
+takes the cosine to the candidate's vector $`v_w`$, scales by $`\tau`$, and works in log space:
+
+```math
+\log \mathbb{P}_e(w \mid h) \;\approx\; \frac{\cos(v_w, v_h)}{\tau} - 1,
+\qquad \text{floored at } \log \varepsilon \tag{H5}
+```
+
+For an **empty** context it falls back to the uniform $`-\log \lvert V_e \rvert`$ over the
+*embedding* vocabulary.
+
+> **$`\mathbb{P}_e`$ is unnormalized.** The $`-1`$ in $`(\mathrm{H5})`$ is a cheap stand-in for
+> the true softmax normalizer, which would cost a sum over the whole vocabulary per query. It is
+> a *ranking* score, not a calibrated probability — the n-gram side supplies calibration, the
+> embedding side supplies OOV coverage and semantic tie-breaking. See
+> [Hybrid Interpolation](../components/hybrid/interpolation.md) for the full argument.
+
+### Guards that keep the score finite
+
+Both experts' log-probabilities are **clamped to $`\geq -50`$** before combination, so a single
+catastrophically-low term cannot annihilate the score; and `Linear` floors the combined
+probability at `f64::MIN_POSITIVE` before taking its log. `score` therefore always returns a
+finite `f64`.
+
+### The score cache
+
+Scores are memoized in a lock-free cache keyed by a hash of $`(w, h)`$: a `DashMap` for the
+entries (lock-free get and insert), an `AtomicUsize` counter, and a `Mutex<VecDeque>` recording
+insertion order for LRU eviction — the **only** lock, taken **only** when the cache is over
+`cache_size`. The model is `Send + Sync`, so one instance can be scored from many threads at
+once. The cache is never serialized; it is reconstructed empty on `load`.
+
+> **Cache invalidation is your job.** The key is $`(w, h)`$ only — it does not incorporate the
+> configuration. The config is immutable after construction, so this is sound in normal use, but
+> if you mutate the underlying components through any other path, call `clear_cache()`.
+
+## Persistence (feature `serde-extras`)
+
+| Method | Bound on `D` | Notes |
+|---|---|---|
+| `save(path)` / `load(path)` | `+ Serialize + DeserializeOwned` | Direct bincode. In practice: `DynamicDawgChar` only. |
+| `to_portable()` / `save_portable(path)` | `+ IterableDictionary` | Backend-agnostic: `PortableHybridModel { ngram, embedding, config }`. |
+| `load_portable(path, factory)` | `MutableMappedDictionary` | Rebuilds the n-gram trie through the `FnOnce() -> D` factory. |
+
+```rust
+use libgrammstein::hybrid::HybridLanguageModel;
+use libgrammstein::ngram::NgramEntry;
+use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
+
+hybrid.save("hybrid.bin")?;
+let hybrid: HybridLanguageModel<DynamicDawgChar<NgramEntry>> =
     HybridLanguageModel::load("hybrid.bin")?;
+
+// Portable — the factory supplies the empty backend to rebuild into.
+hybrid.save_portable("hybrid.portable.bin")?;
+let hybrid: HybridLanguageModel<DynamicDawgChar<NgramEntry>> =
+    HybridLanguageModel::load_portable("hybrid.portable.bin", DynamicDawgChar::new)?;
+# Ok::<(), libgrammstein::Error>(())
 ```
 
-#### `save_portable(path) -> Result<()>`
+## `OovHandler` and `OovStrategy`
 
-Save in portable format (works with any dictionary backend).
+`libgrammstein::hybrid` also exports a **standalone** OOV utility:
 
 ```rust
-model.save_portable("hybrid.portable.bin")?;
+pub enum OovStrategy {
+    SubwordEmbedding,                    // default: cosine of the subword-composed vector
+    FixedProbability { log_prob: f64 },
+    Uniform,                             // -ln(vocab_size)
+    SimilarWords { k: usize },           // estimate from the k nearest in-vocabulary words
+}
+
+pub struct OovHandler<'a> { /* borrows a &'a SubwordEmbedding */ }
+impl<'a> OovHandler<'a> {
+    pub fn new(embedding: &'a SubwordEmbedding, strategy: OovStrategy) -> Self;
+    pub fn estimate_log_prob(&self, word: &str, context: &[&str]) -> f64;
+}
 ```
 
-#### `load_portable(path, factory) -> Result<Self>`
+> **`HybridLanguageModel::score` does not route through `OovHandler`.** The model inlines its own
+> embedding path ($`(\mathrm{H5})`$, with `temperature` and `embedding_smoothing`), and never
+> consults `OovStrategy`. `OovHandler` is a separate, composable helper for callers who want an
+> OOV estimate — in particular `SimilarWords`, which the model itself does not offer. Configuring
+> an `OovStrategy` has **no effect** on the hybrid model's scores.
 
-Load from portable format with dictionary factory.
-
-```rust
-let model = HybridLanguageModel::load_portable(
-    "hybrid.portable.bin",
-    || DynamicDawgChar::new()
-)?;
-```
-
-## How Embedding Probabilities Work
-
-The embedding model converts similarity to probability:
-
-1. Compute context vector (average of context word embeddings)
-2. Compute cosine similarity between word and context
-3. Apply temperature scaling: `scaled_sim = similarity / temperature`
-4. Convert to log probability: `log_prob = scaled_sim - 1.0`
-
-For OOV words:
-- Subword embeddings provide the word vector
-- Even completely unseen words get reasonable probabilities
-
-## Performance Considerations
-
-1. **Cache Size**
-   - Larger cache = better performance for repeated queries
-   - Trade-off with memory usage
-
-2. **Interpolation Strategy**
-   - Linear: Simple, well-understood
-   - LogLinear: Better for combining log-space models
-   - Fallback: Fast for known words
-   - Dynamic: Adapts to context availability
-
-3. **Temperature**
-   - Lower temperature = sharper probability distribution
-   - Higher temperature = smoother distribution
-
-## Example: Complete Workflow
+## Complete workflow
 
 ```rust
-use libgrammstein::hybrid::{HybridLanguageModel, HybridConfig, InterpolationStrategy};
-use libgrammstein::ngram::{NgramModel, TrainerBuilder, NgramEntry};
-use libgrammstein::embedding::EmbeddingTrainerBuilder;
 use libgrammstein::corpus::PlaintextReader;
-use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+use libgrammstein::embedding::EmbeddingTrainerBuilder;
+use libgrammstein::hybrid::{HybridConfig, HybridLanguageModel, InterpolationStrategy};
+use libgrammstein::ngram::{NgramEntry, TrainerBuilder};
+use libdictenstein::dynamic_dawg::char::DynamicDawgChar;
 
 fn main() -> libgrammstein::Result<()> {
-    // 1. Train components
-    let reader = PlaintextReader::from_file("corpus.txt")?;
-
-    let ngram_model = TrainerBuilder::new(DynamicDawgChar::new())
+    // 1. Train the two experts (each trainer moves its reader — build a fresh one).
+    let ngram = TrainerBuilder::new(DynamicDawgChar::<NgramEntry>::new())
         .order(5)
-        .train(&reader)?;
+        .train(PlaintextReader::from_file("corpus.txt")?)?;
 
-    let reader2 = PlaintextReader::from_file("corpus.txt")?;
-    let embedding_model = EmbeddingTrainerBuilder::new()
+    let embedding = EmbeddingTrainerBuilder::new()
         .dim(100)
         .epochs(5)
-        .train(&reader2)?;
+        .train(PlaintextReader::from_file("corpus.txt")?)?;
 
-    // 2. Create hybrid model
-    let config = HybridConfig {
-        strategy: InterpolationStrategy::Linear { alpha: 0.7 },
-        ..Default::default()
-    };
-    let hybrid = HybridLanguageModel::new(ngram_model, embedding_model, config);
+    // 2. Fuse them.
+    let hybrid = HybridLanguageModel::new(
+        ngram,
+        embedding,
+        HybridConfig {
+            strategy: InterpolationStrategy::Linear { alpha: 0.7 },
+            ..Default::default()
+        },
+    );
 
-    // 3. Score sentences
+    // 3. Score.
     let sentence = ["the", "quick", "brown", "fox"];
-    let log_prob = hybrid.sentence_log_prob(&sentence);
-    let ppl = hybrid.perplexity(&sentence);
+    println!("log P   = {:.4}", hybrid.sentence_log_prob(&sentence));
+    println!("PP      = {:.2}", hybrid.perplexity(&sentence));
+    println!("OOV     = {:.4}", hybrid.score("xyzzy", &["magic", "word"]));
 
-    println!("Log probability: {:.4}", log_prob);
-    println!("Perplexity: {:.2}", ppl);
-
-    // 4. Handle OOV words
-    let oov_score = hybrid.score("xyzzy", &["magic", "word"]);
-    println!("OOV word score: {:.4}", oov_score);  // Still gets reasonable score
-
-    // 5. Save model
+    // 4. Persist (feature: serde-extras).
     hybrid.save("hybrid.bin")?;
-
     Ok(())
 }
 ```
 
-## Use Cases
+## Notes and caveats
 
-### Spell Correction Ranking
+| Caveat | Detail |
+|---|---|
+| **No corpus-level perplexity helper** | [`scoring::Perplexity`](scoring.md) is generic over `NgramModel<D>` only. To evaluate a hybrid model over a corpus, loop the reader's sentences and accumulate `sentence_log_prob` and the token count yourself. |
+| **`perplexity(&[])` is `INFINITY`** | Not `NaN`, not an error. Guard empty input if you aggregate. |
+| **`predict_next` scans linearly** | It scores every candidate. It does not search the vocabulary — you supply the candidate set. |
+| **Cache size is clamped to $`\geq 1`$** | `cache_size: 0` becomes `1`, not "disabled". |
 
-```rust
-// Score correction candidates
-let candidates = ["their", "there", "they're"];
-let context = ["put", "it", "over"];
+## References
 
-let mut scored: Vec<_> = candidates.iter()
-    .map(|c| (c, model.score(c, &context)))
-    .collect();
+1. F. Jelinek & R. L. Mercer (1980). *Interpolated estimation of Markov source parameters from
+   sparse data.* In *Pattern Recognition in Practice*, 381–397. North-Holland.
+2. G. E. Hinton (2002). *Training products of experts by minimizing contrastive divergence.*
+   Neural Computation 14(8), 1771–1800.
+   [doi:10.1162/089976602760128018](https://doi.org/10.1162/089976602760128018)
+3. P. Bojanowski, E. Grave, A. Joulin & T. Mikolov (2017). *Enriching word vectors with subword
+   information* (FastText). Transactions of the ACL 5, 135–146.
+   [doi:10.1162/tacl_a_00051](https://doi.org/10.1162/tacl_a_00051)
 
-scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+## See also
 
-println!("Best correction: {}", scored[0].0);
-```
-
-### Language Model Perplexity Evaluation
-
-```rust
-fn evaluate_corpus(model: &HybridLanguageModel<D>, sentences: &[Vec<&str>]) -> f64 {
-    let total_log_prob: f64 = sentences.iter()
-        .map(|s| model.sentence_log_prob(s))
-        .sum();
-
-    let total_words: usize = sentences.iter()
-        .map(|s| s.len())
-        .sum();
-
-    (-total_log_prob / total_words as f64).exp()
-}
-```
-
-## See Also
-
-- [NgramModel](ngram.md) - N-gram component API
-- [SubwordEmbedding](embedding.md) - Embedding component API
-- [Training Guide](../training/hybrid.md) - Training workflow
-- [Interpolation Strategies](../components/hybrid/interpolation.md) - Strategy details
+- [Hybrid Interpolation](../components/hybrid/interpolation.md) — the four strategies in depth
+- [Hybrid overview](../components/hybrid/overview.md) — architecture of the combined model
+- [OOV Handling](../components/hybrid/oov-handling.md) — out-of-vocabulary strategies
+- [NgramModel API](ngram.md) — the statistical expert
+- [SubwordEmbedding API](embedding.md) — the semantic expert
+- [Scoring API](scoring.md) — perplexity and ranking (n-gram models)
+- [Hybrid Training guide](../training/hybrid.md) — grid-searching $`\alpha`$

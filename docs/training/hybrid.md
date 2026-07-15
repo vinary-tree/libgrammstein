@@ -1,411 +1,262 @@
-# Hybrid Model Training Guide
+# Hybrid Model Training
 
-This guide covers training and using hybrid language models that combine n-grams with embeddings.
+A **hybrid language model** fuses a Modified Kneser-Ney n-gram model with a subword embedding model,
+so that the razor-sharp *local* statistics of the former cover the latter's imprecision and the
+*semantic generalization* of the latter covers the former's out-of-vocabulary blind spot. The
+essential thing to understand before reading any further: **training a hybrid is not a training run
+at all.** It is an *assembly* step over two models you have already trained.
 
-## Overview
+> **Scope.** Source of truth: [`src/hybrid/model.rs`](../../src/hybrid/model.rs) (the model, the
+> strategies, the cache) and [`src/cli/commands/train/hybrid.rs`](../../src/cli/commands/train/hybrid.rs)
+> (the CLI's flag mapping). The mathematics of each strategy is derived in
+> [Hybrid Interpolation](../components/hybrid/interpolation.md); OOV behaviour in
+> [OOV Handling](../components/hybrid/oov-handling.md). Train the two inputs first:
+> [N-gram Training](ngram.md), [Embedding Training](embedding.md).
 
-Hybrid models leverage the strengths of both approaches:
+## Notation
 
-| Component | Strength | Weakness |
-|-----------|----------|----------|
-| N-gram | Accurate for seen n-grams | Poor OOV handling |
-| Embedding | Semantic similarity, OOV handling | Less precise probabilities |
-| **Hybrid** | Best of both | Slightly more complex |
+| Symbol | Meaning |
+|---|---|
+| $`w`$, $`h`$ | the candidate word and its history (context) |
+| $`\mathbb{P}_n(w \mid h)`$ | the n-gram (Modified Kneser-Ney) probability |
+| $`\mathbb{P}_e(w \mid h)`$ | the embedding-derived probability (cosine similarity, temperature-scaled) |
+| $`\alpha \in [0,1]`$ | the n-gram mixing weight (`--alpha`); $`1`$ = pure n-gram, $`0`$ = pure embedding |
+| $`\lvert h \rvert`$ | the context length, in words |
+| $`V`$ | the n-gram vocabulary |
+| $`\mathrm{PPL}`$ | perplexity on held-out text |
 
-## Training Workflow
+## 1. Why fuse them at all
 
-### Step 1: Train N-gram Model
+The two experts fail in **complementary** ways, and that is the entire justification:
 
-```rust
-use libgrammstein::ngram::{TrainerBuilder, NgramEntry};
-use libgrammstein::corpus::PlaintextReader;
-use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
+| Expert | Strong when | Weak when |
+|---|---|---|
+| N-gram (MKN) | the exact local context occurred in training | the word or the context is unseen |
+| Subword embedding | the word is semantically near known words | precise word order matters |
 
-let reader = PlaintextReader::from_file("corpus.txt")?;
+Because their errors are largely independent, a weighted combination is more robust than either
+alone. If your n-gram model's OOV rate on held-out text is already near zero, the hybrid buys you
+little; if it is several percent, the hybrid is the cheapest fix available.
 
-let ngram_model = TrainerBuilder::new(DynamicDawgChar::new())
-    .order(5)
-    .min_word_freq(5)
-    .train(&reader)?;
-```
+## 2. The workflow
 
-### Step 2: Train Embedding Model
+![End-to-end workflow](../diagrams/cli-workflow.svg)
 
-```rust
-use libgrammstein::embedding::EmbeddingTrainerBuilder;
+*Figure 1 — the two experts are trained independently and only then assembled. Nothing forces them
+to be trained from the same corpus, in the same run, or even on the same machine.*
 
-// Re-read corpus (readers are consumed)
-let reader2 = PlaintextReader::from_file("corpus.txt")?;
-
-let embedding_model = EmbeddingTrainerBuilder::new()
-    .dim(100)
-    .window_size(5)
-    .min_count(5)
-    .epochs(5)
-    .train(&reader2)?;
-```
-
-### Step 3: Create Hybrid Model
-
-```rust
-use libgrammstein::hybrid::{HybridLanguageModel, HybridConfig, InterpolationStrategy};
-
-let config = HybridConfig {
-    strategy: InterpolationStrategy::Linear { alpha: 0.7 },
-    cache_size: 50_000,
-    ..Default::default()
-};
-
-let hybrid = HybridLanguageModel::new(ngram_model, embedding_model, config);
-```
-
-## Interpolation Strategies
-
-### Linear Interpolation
-
-Combines probabilities in linear space:
-
-```
-P(w|c) = α × P_ngram(w|c) + (1-α) × P_embed(w|c)
-```
-
-```rust
-InterpolationStrategy::Linear { alpha: 0.7 }
-```
-
-**Best for:** General use, balanced performance.
-
-### Log-Linear Interpolation
-
-Combines log probabilities:
-
-```
-log P(w|c) = α × log P_ngram(w|c) + (1-α) × log P_embed(w|c)
-```
-
-```rust
-InterpolationStrategy::LogLinear { alpha: 0.7 }
-```
-
-**Best for:** When both models are well-calibrated.
-
-### N-gram with Fallback
-
-Uses n-gram for known words, embedding for OOV:
-
-```rust
-InterpolationStrategy::NgramWithEmbeddingFallback
-```
-
-**Best for:** When n-gram quality is high, OOV handling needed.
-
-### Dynamic Weighting
-
-Adjusts weight based on available context:
-
-```rust
-InterpolationStrategy::Dynamic {
-    base_alpha: 0.5,        // Base n-gram weight
-    alpha_per_context: 0.1, // +0.1 per context word
-    max_alpha: 0.9,         // Maximum n-gram weight
-}
-```
-
-With 3 context words: α = 0.5 + 0.1 × 3 = 0.8
-
-**Best for:** Variable-length contexts where n-gram quality improves with more context.
-
-## Choosing Alpha
-
-The alpha parameter controls the balance:
-
-| Alpha | N-gram Weight | Embedding Weight | Use Case |
-|-------|---------------|------------------|----------|
-| 0.9 | 90% | 10% | High-quality n-gram, rare OOV |
-| 0.7 | 70% | 30% | Balanced (default) |
-| 0.5 | 50% | 50% | Equal weighting |
-| 0.3 | 30% | 70% | Small n-gram corpus |
-
-### Tuning Alpha
-
-Find optimal alpha on held-out data:
-
-```rust
-fn tune_alpha(
-    ngram: &NgramModel<D>,
-    embedding: &SubwordEmbedding,
-    dev_corpus: &impl CorpusReader,
-) -> f64 {
-    let mut best_alpha = 0.5;
-    let mut best_ppl = f64::INFINITY;
-
-    for alpha_int in 1..=9 {
-        let alpha = alpha_int as f64 / 10.0;
-
-        let config = HybridConfig {
-            strategy: InterpolationStrategy::Linear { alpha },
-            ..Default::default()
-        };
-        let hybrid = HybridLanguageModel::new(
-            ngram.clone(),
-            embedding.clone(),
-            config
-        );
-
-        let ppl = evaluate_perplexity(&hybrid, dev_corpus);
-
-        if ppl < best_ppl {
-            best_ppl = ppl;
-            best_alpha = alpha;
-        }
-
-        println!("α={:.1}: perplexity={:.2}", alpha, ppl);
-    }
-
-    println!("Best: α={:.1} (ppl={:.2})", best_alpha, best_ppl);
-    best_alpha
-}
-```
-
-## Temperature Parameter
-
-Controls sharpness of embedding probabilities:
-
-```rust
-let config = HybridConfig {
-    temperature: 1.0,  // Default: neutral
-    ..Default::default()
-};
-```
-
-| Temperature | Effect |
-|-------------|--------|
-| < 1.0 | Sharper distribution, more confident |
-| 1.0 | Neutral (default) |
-| > 1.0 | Smoother distribution, less confident |
-
-## Caching
-
-The hybrid model caches computed scores:
-
-```rust
-let config = HybridConfig {
-    cache_size: 50_000,  // Cache 50k (word, context) pairs
-    ..Default::default()
-};
-
-// Clear cache when needed
-hybrid.clear_cache();
-```
-
-## Evaluation
-
-### Perplexity
-
-```rust
-fn evaluate_perplexity(
-    model: &HybridLanguageModel<D>,
-    test_corpus: &impl CorpusReader,
-) -> f64 {
-    let mut total_log_prob = 0.0;
-    let mut total_words = 0usize;
-
-    for sentence in test_corpus.sentences() {
-        let tokens: Vec<&str> = sentence.split_whitespace().collect();
-        total_log_prob += model.sentence_log_prob(&tokens);
-        total_words += tokens.len();
-    }
-
-    (-total_log_prob / total_words as f64).exp()
-}
-```
-
-### OOV Performance
-
-```rust
-fn evaluate_oov_handling(
-    model: &HybridLanguageModel<D>,
-    oov_sentences: &[Vec<&str>],
-) {
-    for sentence in oov_sentences {
-        let score = model.sentence_log_prob(sentence);
-        let ppl = model.perplexity(sentence);
-
-        println!("Sentence: {:?}", sentence);
-        println!("  Log prob: {:.4}", score);
-        println!("  Perplexity: {:.2}", ppl);
-    }
-}
-
-// Test with sentences containing OOV words
-let oov_test = vec![
-    vec!["the", "xyzzy", "jumped"],
-    vec!["qwertyuiop", "is", "a", "word"],
-];
-evaluate_oov_handling(&hybrid, &oov_test);
-```
-
-## Serialization
-
-### Binary Format
-
-```rust
-// Save (requires serde-extras feature and D: Serialize)
-hybrid.save("hybrid.bin")?;
-
-// Load
-let loaded: HybridLanguageModel<DynamicDawgChar<NgramEntry>> =
-    HybridLanguageModel::load("hybrid.bin")?;
-```
-
-### Portable Format
-
-```rust
-// Save portable (works with any D)
-hybrid.save_portable("hybrid.portable.bin")?;
-
-// Load with different backend
-let loaded = HybridLanguageModel::load_portable(
-    "hybrid.portable.bin",
-    || DoubleArrayTrieChar::new()
-)?;
-```
-
-## CLI Training
+### Step 1 — train the n-gram expert
 
 ```bash
-# Train hybrid model
-grammstein train hybrid corpus.txt hybrid.bin \
-    --ngram-order 5 \
-    --embed-dim 100 \
-    --lambda 0.7
-
-# This trains both components and saves combined model
+grammstein train ngram corpus.txt ngram.bin --order 5 --min-count 2 --checkpoint ./ckpt
 ```
 
-## Use Cases
+### Step 2 — train the embedding expert
 
-### Spell Correction Ranking
+```bash
+grammstein train embedding corpus.txt embed.bin --dim 100 --epochs 5 --learning-rate 0.05
+```
+
+### Step 3 — assemble
+
+```bash
+grammstein train hybrid ngram.bin embed.bin hybrid.bin --strategy linear --alpha 0.8
+```
+
+Three positionals — `NGRAM_MODEL`, `EMBEDDING_MODEL`, `OUTPUT` — and **no corpus argument**. The
+command loads both models, wraps them in a `HybridLanguageModel`, and writes the combined artifact
+with `save_portable`.
+
+The library equivalent:
 
 ```rust
-fn rank_corrections(
-    model: &HybridLanguageModel<D>,
-    context: &[&str],
-    candidates: &[&str],
-) -> Vec<(&str, f64)> {
-    let mut scored: Vec<_> = candidates.iter()
-        .map(|&c| (c, model.score(c, context)))
-        .collect();
+use libgrammstein::hybrid::{HybridConfig, HybridLanguageModel, InterpolationStrategy};
 
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    scored
-}
+// `ngram` and `embedding` were trained (or loaded) beforehand.
+let config = HybridConfig {
+    strategy: InterpolationStrategy::Linear { alpha: 0.8 },
+    ..Default::default()
+};
+let hybrid = HybridLanguageModel::new(ngram, embedding, config);
 
-let context = ["the", "quick", "brown"];
-let candidates = ["fox", "fix", "fax", "fog"];
-let ranked = rank_corrections(&hybrid, &context, &candidates);
+// Defaults are Linear { alpha: 0.8 }, cache 50 000, smoothing 1e-8, temperature 1.0:
+// let hybrid = HybridLanguageModel::with_defaults(ngram, embedding);
 
-println!("Best correction: {}", ranked[0].0);
+let log_p = hybrid.score("brown", &["the", "quick"]);
 ```
 
-### Language Detection Fallback
+## 3. The four strategies
 
-```rust
-fn is_likely_target_language(
-    model: &HybridLanguageModel<D>,
-    sentence: &[&str],
-    threshold: f64,
-) -> bool {
-    let ppl = model.perplexity(sentence);
-    ppl < threshold  // Lower perplexity = more likely
-}
+All four are derived in [Hybrid Interpolation](../components/hybrid/interpolation.md); this is the
+operational summary.
+
+```math
+\text{Linear:}\quad \mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n + (1-\alpha)\,\mathbb{P}_e \tag{Y1}
 ```
 
-### Sentence Generation
-
-```rust
-fn generate_next_word(
-    model: &HybridLanguageModel<D>,
-    context: &[&str],
-    vocabulary: &[&str],
-    temperature: f64,
-) -> String {
-    // Score all vocabulary words
-    let mut scores: Vec<(String, f64)> = vocabulary.iter()
-        .map(|&w| (w.to_string(), model.score(w, context)))
-        .collect();
-
-    // Apply temperature
-    let max_score = scores.iter().map(|(_, s)| *s).fold(f64::NEG_INFINITY, f64::max);
-    let probs: Vec<f64> = scores.iter()
-        .map(|(_, s)| ((s - max_score) / temperature).exp())
-        .collect();
-    let sum: f64 = probs.iter().sum();
-    let probs: Vec<f64> = probs.iter().map(|p| p / sum).collect();
-
-    // Sample from distribution
-    sample_from_distribution(&scores, &probs)
-}
+```math
+\text{Log-Linear:}\quad \log \mathbb{P}(w \mid h) = \alpha \log \mathbb{P}_n + (1-\alpha) \log \mathbb{P}_e \tag{Y2}
 ```
 
-## Complete Example
-
-```rust
-use libgrammstein::hybrid::{HybridLanguageModel, HybridConfig, InterpolationStrategy};
-use libgrammstein::ngram::{TrainerBuilder, NgramEntry};
-use libgrammstein::embedding::EmbeddingTrainerBuilder;
-use libgrammstein::corpus::PlaintextReader;
-use liblevenshtein::dictionary::dynamic_dawg_char::DynamicDawgChar;
-
-fn main() -> libgrammstein::Result<()> {
-    // Load corpus
-    let corpus_path = "corpus.txt";
-
-    // Train n-gram
-    println!("Training n-gram model...");
-    let reader1 = PlaintextReader::from_file(corpus_path)?;
-    let ngram = TrainerBuilder::new(DynamicDawgChar::new())
-        .order(5)
-        .train(&reader1)?;
-
-    // Train embeddings
-    println!("Training embeddings...");
-    let reader2 = PlaintextReader::from_file(corpus_path)?;
-    let embedding = EmbeddingTrainerBuilder::new()
-        .dim(100)
-        .epochs(5)
-        .train(&reader2)?;
-
-    // Create hybrid
-    let config = HybridConfig {
-        strategy: InterpolationStrategy::Linear { alpha: 0.7 },
-        ..Default::default()
-    };
-    let hybrid = HybridLanguageModel::new(ngram, embedding, config);
-
-    // Test
-    let test_sentence = ["the", "quick", "brown", "fox"];
-    println!("\nTest sentence: {:?}", test_sentence);
-    println!("Log probability: {:.4}", hybrid.sentence_log_prob(&test_sentence));
-    println!("Perplexity: {:.2}", hybrid.perplexity(&test_sentence));
-
-    // OOV test
-    let oov_sentence = ["the", "xyzzy", "jumped"];
-    println!("\nOOV sentence: {:?}", oov_sentence);
-    println!("Log probability: {:.4}", hybrid.sentence_log_prob(&oov_sentence));
-    println!("Perplexity: {:.2}", hybrid.perplexity(&oov_sentence));
-
-    // Save
-    hybrid.save("hybrid-model.bin")?;
-    println!("\nModel saved");
-
-    Ok(())
-}
+```math
+\text{Fallback:}\quad \mathbb{P}(w \mid h) = \begin{cases} \mathbb{P}_n & w \in V \\ \mathbb{P}_e & \text{otherwise}\end{cases} \tag{Y3}
 ```
 
-## See Also
+```math
+\text{Dynamic:}\quad \alpha(h) = \min\bigl(\alpha_0 + \kappa \lvert h \rvert,\ \alpha_{\max}\bigr),
+\qquad \mathbb{P}(w \mid h) = \alpha(h)\,\mathbb{P}_n + (1 - \alpha(h))\,\mathbb{P}_e \tag{Y4}
+```
 
-- [HybridLanguageModel API](../api/hybrid.md) - Complete API reference
-- [N-gram Training](ngram.md) - N-gram component training
-- [Embedding Training](embedding.md) - Embedding component training
-- [Hyperparameters](hyperparameters.md) - Tuning guide
+| `--strategy` | Combine | Reach for it when |
+|---|---|---|
+| `linear` (default) | probabilities | general purpose; predictable; start here |
+| `log-linear` | log-probabilities (a product of experts) | the two experts live on different scales — a low probability from *either* strongly suppresses the result |
+| `ngram-fallback` | hard switch on $`w \in V`$ | the n-gram corpus is large and trustworthy; no interpolation cost for known words |
+| `dynamic` | probabilities, with $`\alpha`$ growing in $`\lvert h \rvert`$ | high OOV / mixed vocabulary — trust the n-gram *more* as context accumulates |
+
+## 4. How `--alpha` reaches the strategy
+
+The CLI exposes a single `--alpha`, but `Dynamic` needs three parameters. The mapping is performed
+in `train_hybrid`, and it is the one place the CLI *derives* values rather than passing them
+through:
+
+![How train hybrid assembles the model](../diagrams/training-hybrid-assembly.svg)
+
+*Figure 2 — the `--strategy` / `--alpha` mapping, verbatim from `src/cli/commands/train/hybrid.rs`.*
+
+| `--strategy` | Constructed strategy | $`\alpha`$ is used as |
+|---|---|---|
+| `linear` | `Linear { alpha: α }` | the mixing weight |
+| `log-linear` | `LogLinear { alpha: α }` | the log-space mixing weight |
+| `ngram-fallback` | `NgramWithEmbeddingFallback` | **ignored entirely** |
+| `dynamic` | `Dynamic { base_alpha: 0.5·α, alpha_per_context: 0.1, max_alpha: min(α, 0.95) }` | seeds all three fields |
+
+So `--strategy dynamic --alpha 0.8` yields $`\alpha_0 = 0.4`$, $`\kappa = 0.1`$,
+$`\alpha_{\max} = 0.8`$: the weight starts at $`0.4`$ with no context and climbs by $`0.1`$ per
+context word, saturating at $`0.8`$ from four context words onward. To set the three independently,
+use the library API.
+
+`HybridConfig::embedding_smoothing` ($`10^{-8}`$, the probability floor) and `temperature`
+($`1.0`$, the cosine-to-probability scale) have **no CLI flags**; they take their defaults.
+
+## 5. Choosing $`\alpha`$
+
+$`\alpha`$ is the cheapest hyperparameter in the entire library, because sweeping it **does not
+touch the corpus** — you hold both experts fixed and re-assemble:
+
+```bash
+for a in 0.5 0.6 0.7 0.8 0.9 1.0; do
+  grammstein train hybrid ngram.bin embed.bin "hybrid-$a.bin" --alpha "$a" --quiet
+done
+
+# One comparison run over all of them; the command names the winner.
+grammstein eval compare dev.txt hybrid-0.5.bin hybrid-0.6.bin hybrid-0.7.bin \
+                                hybrid-0.8.bin hybrid-0.9.bin hybrid-1.0.bin
+```
+
+Read the curve, not just the minimum. It is usually flat-bottomed: any $`\alpha`$ within a few
+hundredths of the optimum performs the same, so prefer the *simpler* end (higher $`\alpha`$, i.e.
+more n-gram) when two values tie. $`\alpha = 1.0`$ is the pure-n-gram control — **always include
+it**. If it wins, the embedding is not earning its place and you should fix it (see
+[Embedding Training §8](embedding.md#8-evaluating-embeddings)) rather than ship the hybrid.
+
+| Situation | Start at |
+|---|---|
+| both experts trained on the same, large corpus | $`\alpha \approx 0.8`$ |
+| the two experts are on different scales (`log-linear`) | `$\alpha \approx 0.6$–$0.8$` |
+| large, high-quality n-gram corpus | `ngram-fallback` (no $`\alpha`$) |
+| high OOV rate, mixed vocabulary | `dynamic`, $`\alpha = 0.9`$ (giving $`\alpha_0 = 0.45`$, $`\alpha_{\max} = 0.9`$) |
+
+## 6. The score cache
+
+Every `score(w, h)` result is memoised in a `ScoreCache`: a `DashMap` keyed by a hash of
+$`(w, h)`$ — lock-free get and insert — plus a `Mutex<VecDeque>` recording insertion order for LRU
+eviction. **The mutex is taken only when the cache is over capacity**, so the hot path never blocks
+and a single model can be scored from many threads at once.
+
+`--cache-size` (default `50 000`) sets the capacity. Raise it when scoring long documents with
+heavy context repetition; lower it when memory is tight. The cache is never serialized — a loaded
+model starts cold.
+
+## 7. Persistence
+
+| Method | Requires | Notes |
+|---|---|---|
+| `save_portable` / `load_portable` | — | **what the CLI uses.** Backend-agnostic: `load_portable(path, DynamicDawgChar::new)` rebuilds the n-gram trie through a dictionary factory. |
+| `save` / `load` | feature `serde-extras` and a `serde`-able backend | direct serialization of the whole model |
+
+Because the CLI writes portable models, every `eval`, `query` and `repl` command can load a hybrid
+by trying `HybridLanguageModel::load_portable` first and falling back to `NgramModel::load_portable`
+— which is exactly how those commands accept both model kinds without being told which is which.
+
+## 8. Evaluating the hybrid
+
+```bash
+# The number that matters, against the baseline it must beat.
+grammstein eval compare dev.txt ngram.bin hybrid.bin
+```
+
+```math
+\mathrm{PPL} = \exp\!\left(-\frac{1}{N}\sum_{i=1}^{N}\log \mathbb{P}(w_i \mid h_i)\right) \tag{Y5}
+```
+
+`HybridLanguageModel::sentence_log_prob` scores each token against the preceding
+$`\min(i,\ n-1)`$ words, so the effective context grows to the n-gram order and then slides.
+
+Two diagnostics beyond the headline number:
+
+- **OOV rate.** `eval perplexity` prints it. The hybrid's whole reason for existing is to score OOV
+  tokens sensibly; if OOV is 0%, the embedding arm is decoration.
+- **Per-sentence spread.** `--per-sentence` gives min/max/median. A hybrid that improves the median
+  but worsens the maximum is trading tail robustness for average-case gain — usually a bad deal in
+  correction and rescoring pipelines.
+
+> **A calibration caveat.** $`\mathbb{P}_e`$ is an *unnormalized* score: computing the true softmax
+> normalizer would require a pass over the whole vocabulary per query, so the implementation uses a
+> cheap surrogate. It is sound for **ranking and interpolation** — which is all the hybrid needs —
+> but the resulting $`\mathbb{P}(w \mid h)`$ is not a calibrated distribution, and hybrid
+> perplexities are therefore only comparable *to each other*, not to an external model's. See
+> [Hybrid Interpolation §"The embedding probability"](../components/hybrid/interpolation.md#the-embedding-probability).
+
+## 9. Complete example
+
+```bash
+# 1. Two experts, one corpus, independent runs.
+grammstein train ngram     corpus.txt ngram.bin --order 5 --min-count 2 --checkpoint ./ckpt
+grammstein train embedding corpus.txt embed.bin --dim 100 --epochs 5 --learning-rate 0.05
+
+# 2. Sweep alpha (cheap: no corpus is read).
+for a in 0.6 0.7 0.8 0.9 1.0; do
+  grammstein train hybrid ngram.bin embed.bin "hybrid-$a.bin" --alpha "$a" --quiet
+done
+
+# 3. Select on dev.
+grammstein eval compare dev.txt hybrid-0.6.bin hybrid-0.7.bin hybrid-0.8.bin \
+                                hybrid-0.9.bin hybrid-1.0.bin
+
+# 4. Report the winner once, on test.
+grammstein eval perplexity hybrid-0.8.bin test.txt --per-sentence
+
+# 5. Freeze and serve.
+grammstein convert to-static hybrid-0.8.bin hybrid-static.bin
+grammstein query completions hybrid-static.bin the quick -n 10
+```
+
+## References
+
+1. F. Jelinek & R. L. Mercer (1980). *Interpolated estimation of Markov source parameters from
+   sparse data.* In *Pattern Recognition in Practice*, 381–397. North-Holland.
+2. G. E. Hinton (2002). *Training products of experts by minimizing contrastive divergence.*
+   Neural Computation 14(8), 1771–1800.
+   [doi:10.1162/089976602760128018](https://doi.org/10.1162/089976602760128018)
+3. P. Bojanowski, E. Grave, A. Joulin & T. Mikolov (2017). *Enriching word vectors with subword
+   information* (FastText). TACL 5, 135–146.
+   [doi:10.1162/tacl_a_00051](https://doi.org/10.1162/tacl_a_00051)
+
+## See also
+
+- [Hybrid Interpolation](../components/hybrid/interpolation.md) — the derivations behind (Y1)–(Y4)
+- [OOV Handling](../components/hybrid/oov-handling.md) — what happens when $`w \notin V`$
+- [N-gram Training](ngram.md) · [Embedding Training](embedding.md) — the two inputs
+- [Hyperparameter Tuning](hyperparameters.md) — the full search, of which $`\alpha`$ is one axis
+- [CLI Reference](../cli/README.md#63-train-hybrid) — every flag on `train hybrid`

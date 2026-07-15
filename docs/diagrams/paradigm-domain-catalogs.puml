@@ -1,0 +1,68 @@
+@startuml paradigm-domain-catalogs
+' The two F1R3FLY.io DSL catalogs and the matcher that runs them. Colour encodes
+' role: code/token artifacts (orange), catalogs and matcher (purple), emitted
+' matches (green). Category counts are exact as of the shipped catalogs.
+' Render: plantuml -tsvg docs/diagrams/paradigm-domain-catalogs.puml
+' Source of truth for Figure 1 in docs/components/paradigm/domain-patterns.md §2
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam package {
+  BackgroundColor #ECEFF1
+  BorderColor #90A4AE
+  FontColor #4A148C
+  FontStyle bold
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title DomainPatternDetector — two open catalogs of DSL idioms over a shared literal matcher
+
+rectangle "**Rholang tokens**  &[&str]\n[ contract · foo · ( · @ · arg · , · ret · ) ]" as rtok #EF6C00
+rectangle "**MeTTa tokens**  &[&str]\n[ ( · = · ( · foo · $x · ) · … ]" as mtok #F57C00
+
+package "RholangPatternCatalog — 14 patterns, 9 of 12 categories populated" {
+  rectangle "**ChannelOperation** (4)\nchannel_send ⟨!⟩ · channel_receive ⟨for (@⟩\nselect_receive · new_channel" as rc1 #6A1B9A
+  rectangle "**NameReflection** (2)\nname_quote ⟨@⟩ · name_dereference ⟨*⟩" as rc2 #7B1FA2
+  rectangle "**Registry** (2)  ·  **Contract** (1)\n**Replication** (1)  ·  **JoinPattern** (1)\n**StateManagement** (1)  ·  **Synchronization** (1)\n**ProcessComposition** (1)" as rc3 #8E24AA
+  rectangle "**empty, awaiting your patterns:**\nContinuation · DataMarshalling · AccessControl" as rc4 #78909C
+}
+
+package "MettaPatternCatalog — 22 patterns, all 12 categories populated" {
+  rectangle "**AtomDefinition** (3)\nsymbol_definition · expression_atom · variable_atom" as mc1 #6A1B9A
+  rectangle "**KnowledgeBase** (3)\nadd_atom · remove_atom · get_atoms" as mc2 #7B1FA2
+  rectangle "**TypePattern** (2) · **FunctionDefinition** (2)\n**PatternMatching** (2) · **InferenceRule** (2)\n**Query** (2) · **SpaceOperation** (2)\n**Unification** · **GroundedAtom**\n**ReductionRule** · **Module**  (1 each)" as mc3 #8E24AA
+}
+
+rectangle "**try_match_pattern(tokens, pos, variants)**\nfor every pattern, at every position:\n  · try each variant in declaration order\n  · **first variant that matches wins**\n  · compare  lowercase(token[pos+i])  ==  variant[i]  //verbatim//\n⇒ variants must be authored in lower case\n⇒ cost is Θ(|catalog| · n · |variant|)" as matcher #4A148C
+
+rectangle "**Vec<RholangPatternMatch>**\npattern_name · category\nposition · length · weight" as rmatch #2E7D32
+rectangle "**Vec<MettaPatternMatch>**\npattern_name · category\nposition · length · weight" as mmatch #2E7D32
+
+rtok --> matcher
+mtok --> matcher
+rc1 -[#6A1B9A]-> matcher
+rc2 -[#6A1B9A]-> matcher
+rc3 -[#6A1B9A]-> matcher
+mc1 -[#6A1B9A]-> matcher
+mc2 -[#6A1B9A]-> matcher
+mc3 -[#6A1B9A]-> matcher
+
+matcher --> rmatch : detect_rholang_patterns
+matcher --> mmatch : detect_metta_patterns
+
+note bottom of matcher
+  Matches are **positional and overlapping**:
+  every pattern is tried at every index, so one
+  token can be covered by several matches.
+  The detector reports them all and
+  **does not score or rank** them —
+  weighting is left to the caller.
+end note
+@enduml

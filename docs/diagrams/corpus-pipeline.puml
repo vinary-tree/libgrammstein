@@ -1,0 +1,86 @@
+@startuml corpus-pipeline
+' The corpus module end-to-end: a source of bytes becomes a stream of sentences.
+' Grey = corpora / external I-O; blue = statistical core; dark slate = consumers;
+' muted grey = opt-in components the shipped trainer does NOT wire in by default.
+' Render: plantuml -tsvg docs/diagrams/corpus-pipeline.puml
+' Source of truth for Figure 1 in docs/components/corpus/overview.md, section "The shape of the module".
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam note {
+  BackgroundColor #E3F2FD
+  BorderColor #1565C0
+}
+title libgrammstein corpus — from bytes on disk to a stream of sentences
+
+rectangle "**Wikipedia XML dump**\n*.xml · *.xml.bz2 · URL" as srcw #546E7A
+rectangle "**Project Gutenberg**\ndirectory of *.txt" as srcg #546E7A
+rectangle "**Plain text**\nfile · directory" as srcp #546E7A
+
+rectangle "**WikipediaReader**\nbz2 → quick-xml pull parser\n→ strip_wiki_markup" as rw #546E7A
+rectangle "**GutenbergReader**\nread file → strip header/footer\nboilerplate markers" as rg #546E7A
+rectangle "**PlaintextReader**\nread file → one Document per file" as rp #546E7A
+
+rectangle "**Normalizer**\nNFC · drop control chars\ncollapse whitespace · trim" as norm #1565C0
+rectangle "**Document**\nid · title · content · source" as doc #546E7A
+rectangle "**Tokenizer**\nsplit on [.!?]+\\s+ · min length\n· lowercase" as tok #1565C0
+rectangle "**sentences()**\nBox<dyn Iterator<Item = String> + Send>\nlazy" as sent #1565C0
+
+rectangle "**TextPreprocessor**\n<URL> <EMAIL> <NUM> · contractions\n· NFC / NFD / NFKC / NFKD" as pre #90A4AE
+rectangle "**QualityFilter**\n8 ordered gates: length · repetition\n· entropy · alpha ratio" as qf #90A4AE
+rectangle "**Deduplicator**\nExact · Normalized · MinHash" as dd #90A4AE
+rectangle "**PrefetchingReader**\nproducer thread + bounded channel\n⇒ batches() : Vec<String>" as pf #90A4AE
+
+rectangle "**Consumers** — n-gram trainer · WordExtractor · perplexity eval · BPE training" as cons #455A64
+
+srcw --> rw
+srcg --> rg
+srcp --> rp
+
+rw --> norm
+rg --> norm
+rp --> norm
+
+norm --> doc : normalize(content)
+doc --> tok : documents()
+tok --> sent : flat_map(sentences)
+
+sent --> cons : **the default path** —\nthe CLI streams sentences directly
+sent --> pre : opt-in: PreprocessingPipeline
+pre --> qf : is_quality ✓
+qf --> dd : is_unique ✓
+dd --> cons
+sent --> pf : opt-in: wraps any CorpusReader
+pf --> cons
+
+note right of norm
+  **Caveat.** Normalizer::new() enables all four passes;
+  the *derived* Normalizer::default() leaves all four **off**.
+  PlaintextReader uses new(); WikipediaReader and
+  GutenbergReader use default().
+end note
+
+note bottom of dd
+  TextPreprocessor, QualityFilter and Deduplicator are
+  **opt-in building blocks**. Nothing in the shipped trainer
+  applies them automatically — the caller composes them,
+  e.g. through PreprocessingPipeline.
+end note
+
+legend right
+  |= Colour |= Role |
+  |<#546E7A> | corpora / external I-O |
+  |<#1565C0> | statistical core (normalise · tokenise) |
+  |<#90A4AE> | opt-in, not wired by default |
+  |<#455A64> | consumers |
+endlegend
+@enduml

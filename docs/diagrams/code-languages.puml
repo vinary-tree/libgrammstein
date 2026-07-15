@@ -1,0 +1,65 @@
+@startuml code-languages
+' The five shipped CodeLanguage implementations, their feature gates and tree-sitter grammars.
+' Render: plantuml -tsvg docs/diagrams/code-languages.puml
+' Source of truth for Figure 1 in docs/components/code/languages.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam linetype ortho
+skinparam ArrowColor #37474F
+skinparam class {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  AttributeFontColor white
+}
+title CodeLanguage implementations (feature-gated)
+
+interface CodeLanguage <<trait>> #455A64
+
+package "code-mainstream" {
+  class Python #EF6C00 {
+    feature: code-python
+    grammar: tree-sitter-python
+    ext: py · pyw · pyi
+    whitespace-significant
+  }
+  class Rust #EF6C00 {
+    feature: code-rust
+    grammar: tree-sitter-rust
+    ext: rs
+    r# raw identifiers
+  }
+  class JavaScript #EF6C00 {
+    feature: code-javascript
+    grammar: tree-sitter-javascript
+    ext: js · jsx · mjs · cjs
+    $ identifiers
+  }
+}
+
+package "code-dsl" {
+  class Rholang #EF6C00 {
+    feature: code-rholang
+    grammar: rholang-tree-sitter
+    ext: rho
+    @ names · ! send · | par
+  }
+  class MeTTa #EF6C00 {
+    feature: code-metta
+    grammar: tree-sitter-metta
+    ext: metta · mt
+    $ vars · & spaces
+  }
+}
+
+Python -up-|> CodeLanguage
+Rust -up-|> CodeLanguage
+JavaScript -up-|> CodeLanguage
+Rholang -up-|> CodeLanguage
+MeTTa -up-|> CodeLanguage
+
+note bottom of CodeLanguage
+  code-full = code-neural + code-mainstream + code-dsl
+end note
+
+@enduml

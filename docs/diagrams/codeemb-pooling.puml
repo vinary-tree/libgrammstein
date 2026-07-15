@@ -1,0 +1,59 @@
+@startuml codeemb-pooling
+' How a rank-3 hidden-state tensor [1, L, d] is collapsed to a single d-vector.
+' The three shipped embedders disagree: CodeT5+ mean-pools over the sequence axis,
+' UniXcoder and GraphCodeBERT take the CLS row. A rank-2 output is passed through.
+' Render: plantuml -tsvg docs/diagrams/codeemb-pooling.puml
+' Source of truth for Figure 3 in docs/components/code-embeddings/overview.md.
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+title Pooling — collapsing hidden states H ∈ ℝ^(L×d) to one vector
+
+rectangle "**ONNX output tensor**\nshape_dims = shape.iter()" as t #2E7D32
+
+rectangle "**rank 2** → [1, d]\nalready pooled by the graph\n(CodeT5+ embedding export)" as r2 #388E3C
+rectangle "**rank 3** → [1, L, d]\nper-token hidden states H\n(encoder last_hidden_state)" as r3 #388E3C
+rectangle "**any other rank**\nCodeEmbeddingError::Inference" as rx #90A4AE
+
+rectangle "**CLS pooling**\nv = H₀ (row of the first token)\ndata[..hidden_dim]" as cls #1B5E20
+rectangle "**Mean pooling**\nv = (1∕L) · Σ_{i=0}^{L−1} Hᵢ" as mean #1B5E20
+
+rectangle "**UniXcoder**\n**GraphCodeBERT**" as ug #43A047
+rectangle "**CodeT5+**" as ct #43A047
+
+rectangle "**v ∈ ℝᵈ**  → L2 normalize" as out #455A64
+
+t --> r2
+t --> r3
+t --> rx : error
+r2 --> out : pass through
+r3 --> cls
+r3 --> mean
+cls --> ug
+mean --> ct
+ug --> out
+ct --> out
+
+note right of mean #E8F5E9
+  The mean is taken over **every** row,
+  the attention mask is not applied.
+  Sound only because the batch axis is
+  fixed at 1, so no padding row exists.
+end note
+
+note left of cls #E8F5E9
+  CLS row = ⟨s⟩ / [CLS], the position the
+  RoBERTa-family sentence objective was
+  trained to summarize the input into.
+end note
+
+@enduml

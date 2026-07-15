@@ -1,0 +1,78 @@
+@startuml dict-pipeline
+' The two ways to obtain a dictionary in libgrammstein:
+' (a) the standalone path — WordExtractor ⇒ DictionaryBuilder ⇒ SpellingDictionary;
+' (b) the zero-copy path — VocabularyDictionary over an existing n-gram model.
+' Render: plantuml -tsvg docs/diagrams/dict-pipeline.puml
+' Source of truth for Figure 1 in docs/components/dictionary/overview.md, section "Two dictionaries, one interface".
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam note {
+  BackgroundColor #E3F2FD
+  BorderColor #1565C0
+}
+title The two dictionary paths — standalone extraction vs. the vocabulary already in the model
+
+rectangle "**CorpusReader::sentences()**" as corpus #546E7A
+
+rectangle "**(a) WordExtractor**\nDashMap<String, u64, SafeGxBuildHasher>\nAtomicU64 total_tokens · AtomicUsize sentences\nadd_sentence(&self) — shared-reference writes" as wx #00838F
+rectangle "**ExtractionConfig**\nmin/max_word_length · lowercase\nfilter_digits · filter_special" as cfg #1565C0
+rectangle "**entries_filtered(min_frequency)**\nVec<WordEntry> with log_prob = ln(f / N)" as filt #1565C0
+rectangle "**DictionaryBuilder**\nmin_frequency · language · source\ncompute_log_probs" as db #1565C0
+rectangle "**SpellingDictionary**\nentries : Vec<WordEntry> (sorted by f, descending)\nword_index : HashMap<String, usize> (rebuilt on load)\nmetadata : DictionaryMetadata" as sd #00838F
+
+rectangle "**words.dict**\nb“DICT” + version + bincode\n(feature: serde-extras)" as bin #00838F
+rectangle "**words.txt**\nword \\t frequency — always available" as txt #00838F
+
+rectangle "**(b) n-gram training**\nSharedConcurrentVocab + NgramStorage" as ng #1565C0
+rectangle "**VocabularyDictionary**\nborrows the vocabulary and the unigram counts\n(feature: google-books)" as vd #00838F
+
+rectangle "**Consumers** — spell check · candidate ranking · Levenshtein automata" as cons #455A64
+
+corpus --> wx : add_sentence(s)
+cfg --> wx : normalize_word
+wx --> filt : f(w) ≥ min_frequency
+filt --> db
+db --> sd : build_from_extractor\n· build_from_counts
+sd --> bin : save()
+sd --> txt : export_text()
+bin --> sd : load()
+txt --> sd : import_text()
+sd --> cons : contains · frequency · log_prob · rank · top_n
+
+corpus --> ng
+ng --> vd : new(vocab, &storage)
+vd --> cons : contains · frequency
+
+note right of wx
+  **Not a trie.** The extractor is a sharded concurrent hash
+  map and the finished dictionary is a Vec plus a HashMap.
+  No DoubleArrayTrie, no PathMap, no PersistentARTrie is
+  constructed anywhere in src/dictionary.
+end note
+
+note bottom of vd
+  **Prefer (b) when an n-gram model already exists**: the vocabulary
+  holds every word and storage holds the unigram counts, so a second
+  copy buys nothing. frequency(w) is Some only when w is in the
+  vocabulary **and** carries a stored unigram count; call
+  storage.sync_vocabulary() first, or lock-free inserts stay invisible.
+end note
+
+legend right
+  |= Colour |= Role |
+  |<#546E7A> | corpus I-O |
+  |<#1565C0> | statistical core / configuration |
+  |<#00838F> | storage & persistence |
+  |<#455A64> | consumers |
+endlegend
+@enduml

@@ -1,0 +1,85 @@
+@startuml dict-extract-concurrency
+' Why WordExtractor::add_sentence takes &self: DashMap shards the keyspace, so P
+' rayon workers contend on 1/S of the map each, and the two counters are atomics.
+' Render: plantuml -tsvg docs/diagrams/dict-extract-concurrency.puml
+' Source of truth for Figure 1 in docs/components/dictionary/extraction.md, section "Concurrency".
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+skinparam ArrowFontColor #37474F
+skinparam note {
+  BackgroundColor #E3F2FD
+  BorderColor #1565C0
+}
+title WordExtractor — shared-reference writes over a sharded map
+
+rectangle "**rayon worker 1**\nadd_sentence(&self, s)" as w1 #546E7A
+rectangle "**rayon worker 2**" as w2 #546E7A
+rectangle "**rayon worker P**" as wp #546E7A
+
+rectangle "**normalize_word**\ntrim non-alphanumeric edges · length gate\nfilter_digits · filter_special · lowercase" as nz #1565C0
+
+rectangle "**SafeGxBuildHasher**\nh = gxhash64(w)   if |w| ≥ 16 bytes\nh = xxh3_64(w)   otherwise" as hash #1565C0
+
+rectangle "**DashMap<String, u64>**" as dm #00838F {
+  rectangle "shard 0\nRwLock<HashMap>" as s0 #00838F
+  rectangle "shard 1" as s1 #00838F
+  rectangle "…" as sd #00838F
+  rectangle "shard S−1" as sn #00838F
+}
+
+rectangle "**AtomicU64 total_tokens**\n**AtomicUsize sentences_processed**\nfetch_add(1, Relaxed)" as at #00838F
+
+rectangle "**entries_by_frequency() / entries_filtered(θ) / stats(θ) / to_hashmap()**\nsnapshot the map after the workers join" as out #455A64
+
+w1 --> nz
+w2 --> nz
+wp --> nz
+nz --> hash : Some(normalized)
+nz --> out : None ⇒ token discarded,\ncounters untouched
+hash --> dm : shard = h mod S
+s0 -[hidden]right-> s1
+s1 -[hidden]right-> sd
+sd -[hidden]right-> sn
+w1 --> at
+w2 --> at
+wp --> at
+dm --> out
+at --> out
+
+note right of dm
+  **Not lock-free.** The increment
+  counts.entry(w).or_insert(0) += 1  takes that **one shard's** write lock. With S shards and P
+  workers, the chance two workers collide on a step is ≈ 1/S
+  under a uniform hash, so contention falls as S grows — but a
+  hot word (Zipf's "the") still serialises on its shard.
+end note
+
+note bottom of at
+  Relaxed is sound here: fetch_add is **atomic**, so the totals are
+  exact. Relaxed only forgoes ordering *with respect to other data*,
+  which no reader of these counters relies on.
+end note
+
+note bottom of out
+  **merge(&other)** folds a second extractor in, summing per-word
+  counts and both counters — so a shard-per-thread design that
+  avoids the shared map entirely is a two-line change.
+end note
+
+legend right
+  |= Colour |= Role |
+  |<#546E7A> | worker threads (corpus I-O) |
+  |<#1565C0> | normalisation & hashing |
+  |<#00838F> | shared storage |
+  |<#455A64> | snapshot / results |
+endlegend
+@enduml

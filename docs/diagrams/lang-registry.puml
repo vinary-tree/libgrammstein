@@ -1,0 +1,60 @@
+@startuml lang-registry
+' ModelRegistry::scan builds a per-language index from a two-level directory tree;
+' find_best_match resolves a LanguageTag through a three-step fallback chain.
+' Render: plantuml -tsvg docs/diagrams/lang-registry.puml
+' Source of truth for Figure 3 in docs/components/language/overview.md
+skinparam backgroundColor #FAFAFA
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam linetype ortho
+skinparam rectangle {
+  FontColor white
+  FontStyle bold
+  BorderColor #263238
+  roundCorner 12
+}
+skinparam ArrowColor #37474F
+top to bottom direction
+
+legend top right
+|= Concept |= Color |
+| language core (libgrammstein) | <back:#1565C0>        </back> |
+| storage / persistence | <back:#00838F>        </back> |
+| filesystem | <back:#546E7A>        </back> |
+endlegend
+
+rectangle "**models/**\nen/en-US/ngram.bin · en/en-US/hybrid.bin\nen/en-GB/ngram.bin · de/de-DE/hybrid.bin" as tree #546E7A
+rectangle "**\\*.meta.json sidecars**\nModelMetadata: language · model_type\nvocab_size · ngram_order · embedding_dim\ncorpus_sources · trained_at · extra" as meta #00838F
+
+rectangle "**ModelRegistry::scan(root)**\nwalk lang/ then lang/dialect/\ncollect every *.bin" as scan #1565C0
+rectangle "**metadata resolution**\n① path.bin.meta.json\n② path.meta.json\n③ <stem>.meta.json\nelse ⇒ infer from file stem" as resolve #1565C0
+rectangle "**index**\nHashMap<String, Vec<ModelEntry>>\nkeyed by the primary subtag" as index #00838F
+rectangle "**ModelEntry**\npath · language · model_type\nsize_bytes · metadata" as entry #1565C0
+
+rectangle "**find_best_match(&tag)**" as fbm #1565C0
+rectangle "**① exact**\nfind(tag): language == tag\nprefer Hybrid ≻ Ngram ≻ first" as step1 #1565C0
+rectangle "**② base**\nrecurse on tag.base()\n(drop script + region)" as step2 #1565C0
+rectangle "**③ any**\nindex[tag.language()]\nprefer Hybrid ≻ Ngram ≻ first" as step3 #1565C0
+rectangle "**Option<&ModelEntry>**" as out #1565C0
+
+tree --> scan
+meta ..> resolve : sidecar lookup
+scan --> resolve : per *.bin
+resolve --> entry : model_type + LanguageTag
+entry --> index : index[lang].push(entry)
+
+index --> fbm
+fbm --> step1
+step1 --> out : hit
+step1 --> step2 : miss and tag ≠ tag.base()
+step2 --> out : hit
+step2 --> step3 : miss
+step3 --> out : hit or None
+
+note right of step1
+  Matching is by equality on the whole
+  LanguageTag, not by LanguageTag::matches —
+  the fallback semantics live in this chain,
+  not in the predicate.
+end note
+@enduml

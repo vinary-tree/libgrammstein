@@ -1,328 +1,240 @@
 # Hierarchical Agglomerative Clustering
 
-The topic module uses hierarchical agglomerative clustering (HAC) to group documents into topics.
+The topic module groups documents with **hierarchical agglomerative clustering (HAC)**: start
+with every document in its own cluster, then repeatedly merge the two closest clusters until one
+remains, recording each merge. The full sequence of merges is a *dendrogram* that can be cut at
+any granularity. This document derives the distance model, the **Lance-Williams** linkage update
+[[1]](#references) that libgrammstein uses for all four linkage methods, and the exact merge loop
+the code runs.
 
-## What is HAC?
+> **Scope.** Source of truth:
+> [`src/topic/clustering.rs`](../../../src/topic/clustering.rs) and
+> [`src/topic/config.rs`](../../../src/topic/config.rs). The result of clustering is a
+> [`Dendrogram`](dendrogram.md); the keywords that label each cluster come from
+> [c-TF-IDF](ctfidf.md). For the surrounding pipeline see the [Topic Overview](overview.md).
 
-HAC builds a hierarchy of clusters by iteratively merging the most similar clusters:
+## Notation
 
-```
-Initial: Each document is its own cluster
-         [A] [B] [C] [D] [E]
+| Symbol | Meaning |
+|---|---|
+| $`n`$ | number of documents (initial singleton clusters) |
+| $`v_i`$ | the embedding vector of document $`i`$ |
+| $`C_i, C_j, C_k`$ | clusters |
+| $`n_i`$ | size (document count) of cluster $`C_i`$ |
+| $`d(C_i, C_j)`$ | linkage distance between clusters $`C_i`$ and $`C_j`$ |
+| $`d_{ij}`$ | shorthand for $`d(C_i, C_j)`$ |
+| $`C_i \cup C_j`$ | the cluster formed by merging $`C_i`$ and $`C_j`$ |
+| $`\lVert v \rVert`$ | Euclidean norm of vector $`v`$ |
 
-Step 1:  Merge most similar pair (A, B)
-         [A,B] [C] [D] [E]
+## Distance model: cosine distance
 
-Step 2:  Merge most similar pair (D, E)
-         [A,B] [C] [D,E]
+Documents are compared by the angle between their embeddings, not their magnitude. The **cosine
+similarity** of two vectors and the derived **cosine distance** are
 
-Step 3:  Merge most similar pair (A,B) and (C)
-         [A,B,C] [D,E]
-
-Step 4:  Merge final clusters
-         [A,B,C,D,E]
-
-Dendrogram:
-              ┌───────────────┐
-         ┌────┴────┐          │
-      ┌──┴──┐      │       ┌──┴──┐
-      A     B      C       D     E
-```
-
-## Linkage Methods
-
-The linkage method determines how cluster distances are computed:
-
-### Ward Linkage (Default)
-
-Minimizes within-cluster variance:
-
-```
-Distance = Δ(variance) when merging clusters
-
-Ward produces compact, spherical clusters.
-Best for: General-purpose topic modeling
+```math
+\cos(v_i, v_j) = \frac{v_i \cdot v_j}{\lVert v_i \rVert\,\lVert v_j \rVert},
+\qquad
+d(v_i, v_j) = \bigl[\,1 - \cos(v_i, v_j)\,\bigr]^{+} \tag{C1}
 ```
 
-### Complete Linkage
+where $`[x]^{+} = \max(x, 0)`$. The implementation
+([`cosine_distance`](../../../src/topic/clustering.rs)) accumulates the dot product and both norms
+in a single pass, floors the denominator at $`10^{-10}`$ to avoid division by zero, and clamps the
+result into $`[0, 2]`$. Identical directions give distance $`0`$; orthogonal vectors give $`1`$;
+opposed vectors give $`2`$.
 
-Maximum distance between cluster members:
+## The initial distance matrix
 
-```
-Distance(A, B) = max(d(a, b)) for a ∈ A, b ∈ B
+The $`\binom{n}{2}`$ pairwise distances of $`(\mathrm{C1})`$ are precomputed once and stored as
+the **upper triangle** of a symmetric matrix. libgrammstein packs them into a *condensed* array —
+the same layout SciPy uses — indexed by
 
-Complete produces tight, uniform clusters.
-Best for: Outlier-sensitive clustering
-```
-
-### Average Linkage
-
-Mean distance between cluster members:
-
-```
-Distance(A, B) = mean(d(a, b)) for a ∈ A, b ∈ B
-
-Average balances between single and complete.
-Best for: Balanced cluster sizes
+```math
+\mathrm{idx}(i, j) = n\,i - \frac{i\,(i+1)}{2} + j - i - 1, \qquad i < j \tag{C2}
 ```
 
-### Single Linkage
+Each cell is an `AtomicU64` holding the bit pattern of the `f64` distance, so the matrix can be
+filled in parallel with no locks
+([`compute_distance_matrix_parallel`](../../../src/topic/clustering.rs)): row $`i`$ is a `rayon`
+task that writes cells $`(i, i{+}1), \dots, (i, n{-}1)`$, and a release fence publishes every write
+before the agglomeration reads them.
 
-Minimum distance between cluster members:
+## Linkage: the Lance-Williams update
+
+When two clusters $`C_i`$ and $`C_j`$ merge, the distance from the new cluster
+$`C_i \cup C_j`$ to every other cluster $`C_k`$ must be recomputed. Rather than revisit the
+underlying points, the **Lance-Williams recurrence** expresses the new distance as a fixed linear
+combination of distances that are already known [[1]](#references):
+
+```math
+d(C_i \cup C_j,\, C_k) =
+\alpha_i\,d_{ik} + \alpha_j\,d_{jk} + \beta\,d_{ij} + \gamma\,\lvert d_{ik} - d_{jk} \rvert \tag{C3}
+```
+
+The four linkage methods of
+[`LinkageMethod`](../../../src/topic/config.rs) are exactly four choices of the coefficients
+$`(\alpha_i, \alpha_j, \beta, \gamma)`$:
+
+| Method | $`\alpha_i`$ | $`\alpha_j`$ | $`\beta`$ | $`\gamma`$ | Closed form used in code |
+|---|---|---|---|---|---|
+| Single | $`\tfrac12`$ | $`\tfrac12`$ | $`0`$ | $`-\tfrac12`$ | $`\min(d_{ik}, d_{jk})`$ |
+| Complete | $`\tfrac12`$ | $`\tfrac12`$ | $`0`$ | $`+\tfrac12`$ | $`\max(d_{ik}, d_{jk})`$ |
+| Average (UPGMA) | $`\tfrac{n_i}{n_i+n_j}`$ | $`\tfrac{n_j}{n_i+n_j}`$ | $`0`$ | $`0`$ | $`\tfrac{n_i d_{ik} + n_j d_{jk}}{n_i + n_j}`$ |
+| Ward | $`\tfrac{n_i+n_k}{n_i+n_j+n_k}`$ | $`\tfrac{n_j+n_k}{n_i+n_j+n_k}`$ | $`\tfrac{-n_k}{n_i+n_j+n_k}`$ | $`0`$ | see $`(\mathrm{C4})`$ |
+
+[`linkage_distance`](../../../src/topic/clustering.rs) computes single and complete linkage
+directly as $`\min`$ and $`\max`$ (the $`\gamma = \pm\tfrac12`$ forms of $`(\mathrm{C3})`$ reduce
+to exactly these), and evaluates average and Ward from their closed forms. The Ward update in full
+is
+
+```math
+d(C_i \cup C_j,\, C_k) =
+\frac{(n_i + n_k)\,d_{ik} + (n_j + n_k)\,d_{jk} - n_k\,d_{ij}}{n_i + n_j + n_k} \tag{C4}
+```
+
+**Choosing a method.** Ward (the default) minimizes the increase in within-cluster variance and
+yields compact, similarly-sized topics — the right bias for most corpora. Complete linkage also
+favors tight clusters but is more sensitive to outliers; average linkage sits between the
+extremes; single linkage can *chain* — a bridge of near-duplicate documents will fuse two
+otherwise-distinct topics — which is occasionally useful for connected-component discovery but
+rarely for topics.
+
+## The merge loop, literately
+
+The following mirrors
+[`HierarchicalClustering::cluster_from_distances`](../../../src/topic/clustering.rs). The active
+clusters and their pairwise distances live in an
+[`ActiveDistanceMatrix`](../../../src/topic/clustering.rs) (a hash map keyed by cluster-id pairs,
+with a cached global minimum); the membership bookkeeping lives in a
+[`ClusterState`](../../../src/topic/clustering.rs) (`assignments`, `sizes`, `num_active`, and the
+`next_cluster_id` counter).
 
 ```
-Distance(A, B) = min(d(a, b)) for a ∈ A, b ∈ B
+function cluster(embeddings):
+    D <- compute_distance_matrix_parallel(embeddings)   ▸ (C1), (C2); atomic, rayon
+    return cluster_from_distances(D)
 
-Single can produce elongated "chaining" clusters.
-Best for: Detecting connected components
+function cluster_from_distances(D):
+    n     <- D.n()
+    state <- ClusterState::new(n)          ▸ n singletons, ids 0..n, next id = n
+    active <- ActiveDistanceMatrix::from_initial(D)      ▸ copy pairs, seed the min
+    linkage <- empty list                  ▸ will hold n-1 merges
+
+    repeat n - 1 times:
+        (i, j, d) <- active.find_minimum()               ▸ closest active pair
+        if none: break
+        s_i <- state.sizes[i];  s_j <- state.sizes[j]
+        append (i, j, d, s_i + s_j) to linkage           ▸ SciPy-style merge row
+        ⟨Recompute distances to every other active cluster⟩
+        new <- state.merge(i, j)           ▸ deactivate i, j; activate id = next_cluster_id++
+        active.remove_cluster(i);  active.remove_cluster(j);  active.invalidate_minimum()
+        for (k, d_new) in updated:  active.set(new, k, d_new)
+
+    dendro <- Dendrogram::from_linkage(linkage, n)
+    return ClusteringResult { linkage, dendrogram: dendro, assignments: ⟨cut⟩, num_points: n }
+
+⟨Recompute distances to every other active cluster⟩ ≡
+    updated <- empty list
+    for k in state.active_clusters() where k != i and k != j:
+        d_ik <- active.get(i, k)  else  D.get(i, k)      ▸ fall back to the base matrix
+        d_jk <- active.get(j, k)  else  D.get(j, k)
+        d_new <- linkage_distance(method, d_ik, d_jk, s_i, s_j, state.sizes[k], d)   ▸ (C3)
+        append (k, d_new) to updated
+
+⟨cut⟩ ≡                                     ▸ how the flat labels are derived
+    if config.num_clusters == Some(k):       return dendro.cut_to_k_clusters(k)
+    else if config.distance_threshold == Some(t): return dendro.cut_at_distance(t)
+    else:                                    return 0..n           ▸ every point its own cluster
 ```
 
-## Algorithm
+**The merge counter and cluster ids.** `ClusterState::merge` assigns the merged cluster the id
+`next_cluster_id`, which starts at $`n`$ and increments by one per merge. Because the loop runs
+$`n-1`$ times, the ids of merged clusters are exactly $`n, n{+}1, \dots, 2n{-}2`$ — the same
+convention SciPy's linkage matrix uses, and the convention
+[`Dendrogram::from_linkage`](../../../src/topic/dendrogram.rs) expects.
+
+## The linkage matrix
+
+`ClusteringResult::linkage` is a `Vec<(u32, u32, f32, u32)>`; row $`r`$ is
+$`(a, b, d, s)`$ meaning "cluster $`a`$ merged with cluster $`b`$ at distance $`d`$, forming a
+cluster of $`s`$ documents with id $`n + r`$." An id below $`n`$ is an original document (a leaf);
+an id at or above $`n`$ refers to the merge that produced it.
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Step 1: Distance Matrix Computation                                      │
-│                                                                          │
-│   For n documents with 768-dim embeddings:                              │
-│   D[i,j] = 1 - cosine_similarity(embed[i], embed[j])                   │
-│                                                                          │
-│   Parallel computation with rayon                                        │
-│   Memory: n × (n-1) / 2 floats (upper triangle)                         │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Step 2: Nearest Neighbor Chain Algorithm                                 │
-│                                                                          │
-│   1. Push arbitrary point onto chain                                    │
-│   2. Find nearest neighbor of chain tip                                 │
-│   3. If reciprocal (mutual) nearest neighbor:                           │
-│      - Merge the pair                                                   │
-│      - Record in linkage matrix                                         │
-│      - Pop both from chain                                              │
-│   4. Else push neighbor onto chain                                      │
-│   5. Repeat until single cluster                                        │
-│                                                                          │
-│   Complexity: O(n²) time, O(n) space (for chain)                        │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Step 3: Cluster Assignment                                               │
-│                                                                          │
-│   Cut dendrogram at k clusters or distance threshold                    │
-│   Assign each document to a cluster label                               │
-│                                                                          │
-│   Lock-free assignment using atomics                                    │
-└─────────────────────────────────────────────────────────────────────────┘
+Example for n = 5 documents:
+row 0: (0, 1, 0.05, 2)   →  merge docs 0,1                → cluster 5
+row 1: (3, 4, 0.10, 2)   →  merge docs 3,4                → cluster 6
+row 2: (5, 2, 0.20, 3)   →  merge cluster 5 with doc 2    → cluster 7
+row 3: (6, 7, 0.50, 5)   →  merge clusters 6,7 (all docs) → cluster 8 (root)
 ```
 
 ## Usage
 
-### Basic Clustering
+`HierarchicalClustering::new` takes a
+[`ClusteringConfig`](../../../src/topic/config.rs); `cluster` returns a
+[`ClusteringResult`](../../../src/topic/clustering.rs) bundling the linkage matrix, the
+dendrogram, the flat assignments, and the point count.
 
 ```rust
-use libgrammstein::topic::{HierarchicalClustering, LinkageMethod};
-
-let clustering = HierarchicalClustering::new(LinkageMethod::Ward);
-
-// Cluster embeddings into 10 groups
-let (labels, dendrogram) = clustering.fit(&embeddings, 10)?;
-
-for (i, label) in labels.iter().enumerate() {
-    println!("Document {} → Cluster {}", i, label);
-}
-```
-
-### With Configuration
-
-```rust
-use libgrammstein::topic::{ClusteringConfig, LinkageMethod};
+use libgrammstein::topic::{ClusteringConfig, HierarchicalClustering, LinkageMethod};
 
 let config = ClusteringConfig {
-    linkage: LinkageMethod::Complete,
-    distance_threshold: None,  // Use num_clusters instead
-};
-
-let clustering = HierarchicalClustering::with_config(config);
-let (labels, dendrogram) = clustering.fit(&embeddings, num_clusters)?;
-```
-
-### Cut by Distance
-
-```rust
-// Cluster with distance threshold instead of fixed k
-let config = ClusteringConfig {
+    num_clusters: Some(10),          // cut the dendrogram to 10 clusters
     linkage: LinkageMethod::Ward,
-    distance_threshold: Some(0.5),  // Merge until distance > 0.5
+    ..Default::default()
 };
 
-let clustering = HierarchicalClustering::with_config(config);
-let (labels, dendrogram) = clustering.fit_auto(&embeddings)?;
-```
+let clustering = HierarchicalClustering::new(config);
+let result = clustering.cluster(&embeddings)?;   // embeddings: &[Vec<f32>]
 
-## Distance Computation
-
-### Cosine Distance
-
-For normalized embeddings (dot product = cosine similarity):
-
-```rust
-// Distance = 1 - cosine_similarity
-let distance = 1.0 - dot_product(&embed_a, &embed_b);
-```
-
-### Parallel Distance Matrix
-
-```rust
-use rayon::prelude::*;
-
-// Compute upper triangle in parallel
-let distances: Vec<f32> = (0..n)
-    .into_par_iter()
-    .flat_map(|i| {
-        (i+1..n).map(move |j| {
-            1.0 - dot_product(&embeddings[i], &embeddings[j])
-        }).collect::<Vec<_>>()
-    })
-    .collect();
-```
-
-## Lock-Free Algorithm
-
-The clustering uses atomic operations for thread safety:
-
-### Cluster Assignment
-
-```rust
-use std::sync::atomic::{AtomicU32, Ordering};
-
-// Cluster labels as atomics
-let labels: Vec<AtomicU32> = (0..n)
-    .map(|i| AtomicU32::new(i as u32))
-    .collect();
-
-// Merge clusters atomically
-fn merge_clusters(labels: &[AtomicU32], from: u32, to: u32) {
-    labels.par_iter().for_each(|label| {
-        let current = label.load(Ordering::Relaxed);
-        if current == from {
-            label.store(to, Ordering::Relaxed);
-        }
-    });
+println!("{} merges over {} points", result.linkage.len(), result.num_points);
+for (doc, &cluster) in result.assignments.iter().enumerate() {
+    println!("document {doc} -> cluster {cluster}");
 }
+# Ok::<(), libgrammstein::topic::TopicError>(())
 ```
 
-### Union-Find with Path Compression
+To cut by a distance threshold instead of a fixed $`k`$, leave `num_clusters` as `None` and set
+`distance_threshold`:
 
 ```rust
-// Find root with path compression
-fn find(parent: &[AtomicU32], mut x: u32) -> u32 {
-    while parent[x as usize].load(Ordering::Relaxed) != x {
-        let p = parent[x as usize].load(Ordering::Relaxed);
-        let gp = parent[p as usize].load(Ordering::Relaxed);
-        parent[x as usize].store(gp, Ordering::Relaxed);  // Path compression
-        x = gp;
-    }
-    x
-}
+use libgrammstein::topic::ClusteringConfig;
+
+let config = ClusteringConfig::with_distance_threshold(0.5); // merges with d > 0.5 stay split
 ```
 
-## Performance
+Fewer than two points returns
+[`TopicError::ClusteringError`](../../../src/topic/mod.rs).
 
-### Time Complexity
+## Complexity
 
-| Operation | Complexity |
-|-----------|------------|
-| Distance matrix | O(n² × d) |
-| HAC algorithm | O(n²) |
-| Label assignment | O(n) |
-| Total | O(n² × d) |
+| Stage | Time | Space |
+|---|---|---|
+| Distance matrix | $`O(n^2 \cdot D)`$ for $`D`$-dimensional embeddings | $`O(n^2)`$ condensed cells |
+| Agglomeration | $`O(n^3)`$ worst case | $`O(n^2)`$ active distances |
+| Cut to labels | $`O(n)`$ | $`O(n)`$ |
 
-### Space Complexity
+The agglomeration is the naive Lance-Williams scheme: each of the $`n-1`$ merges invalidates the
+cached minimum, so the next `find_minimum` rescans the remaining active pairs — $`O(n^2)`$ per
+merge in the worst case, hence $`O(n^3)`$ overall. This is comfortably fast for the few-thousand
+document corpora topic extraction targets; the $`O(n^2)`$ distance matrix dominates memory, so for
+very large collections cluster a representative sample. (The implementation does **not** use the
+nearest-neighbor-chain optimization or a union-find structure — it selects the true global minimum
+each step, which keeps every linkage method exact.)
 
-| Component | Memory |
-|-----------|--------|
-| Distance matrix | O(n²) |
-| Linkage matrix | O(n) |
-| Labels | O(n) |
-| Total | O(n²) |
+## References
 
-### Practical Limits
+1. G. N. Lance & W. T. Williams (1967). *A general theory of classificatory sorting strategies:
+   1. Hierarchical systems.* The Computer Journal 9(4), 373–380.
+   [doi:10.1093/comjnl/9.4.373](https://doi.org/10.1093/comjnl/9.4.373)
+2. J. H. Ward Jr. (1963). *Hierarchical grouping to optimize an objective function.* Journal of
+   the American Statistical Association 58(301), 236–244.
+   [doi:10.1080/01621459.1963.10500845](https://doi.org/10.1080/01621459.1963.10500845)
+3. D. Müllner (2011). *Modern hierarchical, agglomerative clustering algorithms.* arXiv:1109.2378.
+   [arxiv.org/abs/1109.2378](https://arxiv.org/abs/1109.2378)
 
-| Documents | Distance Matrix | Time (approx) |
-|-----------|-----------------|---------------|
-| 1,000 | 4 MB | < 1s |
-| 10,000 | 400 MB | ~10s |
-| 100,000 | 40 GB | ~20min |
+## See also
 
-## Linkage Matrix Format
-
-Compatible with scipy's linkage format:
-
-```
-Row i: [cluster_a, cluster_b, distance, size]
-
-cluster_a: First cluster merged (index < n = leaf, >= n = previous merge)
-cluster_b: Second cluster merged
-distance: Distance at merge
-size: Total documents in merged cluster
-
-Example for n=5 documents:
-Row 0: [0, 1, 0.05, 2]  → Merge docs 0,1 at distance 0.05
-Row 1: [3, 4, 0.10, 2]  → Merge docs 3,4 at distance 0.10
-Row 2: [5, 2, 0.20, 3]  → Merge cluster 5 (row 0) with doc 2
-Row 3: [6, 7, 0.50, 5]  → Merge clusters 6,7 (rows 1,2)
-```
-
-## Best Practices
-
-### 1. Choose Linkage by Use Case
-
-```rust
-// Compact, similar-sized topics
-let clustering = HierarchicalClustering::new(LinkageMethod::Ward);
-
-// Tight, well-separated topics
-let clustering = HierarchicalClustering::new(LinkageMethod::Complete);
-
-// Balanced approach
-let clustering = HierarchicalClustering::new(LinkageMethod::Average);
-```
-
-### 2. Pre-normalize Embeddings
-
-```rust
-// Ensure embeddings are unit normalized
-let normalized: Vec<Vec<f32>> = embeddings
-    .iter()
-    .map(|e| normalize(e))
-    .collect();
-```
-
-### 3. Use Dendrogram for Topic Count Selection
-
-```rust
-// Visualize merge distances
-let dendrogram = model.dendrogram();
-for (i, merge) in dendrogram.iter().enumerate() {
-    println!("Merge {}: distance = {:.4}", i, merge.distance);
-}
-
-// Look for "elbow" in distances
-```
-
-### 4. Consider Memory for Large Datasets
-
-```rust
-// For > 50k documents, consider:
-// 1. Sampling for initial clustering
-// 2. Approximate nearest neighbors
-// 3. Incremental clustering
-```
-
-## See Also
-
-- [Overview](overview.md) - Topic module introduction
-- [Dendrogram](dendrogram.md) - Hierarchy navigation
-- [c-TF-IDF](ctfidf.md) - Keyword extraction
+- [Topic Overview](overview.md) — the end-to-end pipeline
+- [Dendrogram](dendrogram.md) — the merge tree this stage produces, and how to cut it
+- [c-TF-IDF](ctfidf.md) — labeling the clusters with keywords
