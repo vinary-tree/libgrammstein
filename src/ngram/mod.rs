@@ -45,6 +45,7 @@ pub mod metadata_filtering_zipper;
 mod model;
 pub mod smoothing;
 pub mod store;
+mod tempdir;
 mod trainer;
 pub mod u64_view;
 pub mod vocabulary;

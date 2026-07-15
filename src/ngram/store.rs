@@ -26,6 +26,7 @@ use libdictenstein::persistent_artrie::PersistentARTrie;
 use libdictenstein::Dictionary;
 
 use super::entry::NgramEntry;
+use super::tempdir::VocabTempDir;
 use super::vocabulary::{
     decode_ngram_key_bytes, encode_indices_to_key_bytes, encode_ngram_key_bytes,
     encode_ngram_key_existing_bytes, SharedVocabARTrie,
@@ -192,16 +193,49 @@ pub struct TermIdStore<B> {
     backend: B,
     vocab: SharedVocabARTrie,
     max_order: usize,
+
+    /// Owner of an *ephemeral* vocabulary's backing temp directory, if this store
+    /// was built for one (portable load into a temp dir, or `Ephemeral` training).
+    /// Persistent, caller-named vocabularies leave this `None` so their
+    /// directories are never removed.
+    ///
+    /// Declared **after** `vocab` on purpose: Rust drops fields in declaration
+    /// order, so the vocabulary trie (which memory-maps this directory and writes
+    /// a final checkpoint into it on drop) runs *before* [`VocabTempDir::drop`]
+    /// unlinks the now-idle directory. The `Arc` lets store clones (this type is
+    /// `Clone`, and clones alias the same vocabulary `Arc`) share a single owner,
+    /// so the directory is removed only when the last clone drops.
+    ///
+    /// Named with a leading underscore because it is held purely for its `Drop`
+    /// side-effect (directory removal) and never read — matching the crate's
+    /// existing held-guard convention (e.g. `_dir: TempDir`).
+    _vocab_tempdir: Option<Arc<VocabTempDir>>,
 }
 
 impl<B> TermIdStore<B> {
     /// Wrap `backend` (a fresh or existing byte trie) with `vocab` for a model of `max_order`.
+    ///
+    /// The store starts with no ephemeral-directory owner; callers that built
+    /// `vocab` in a temp directory bind its lifetime with
+    /// [`attach_vocab_tempdir`](Self::attach_vocab_tempdir).
     pub fn new(backend: B, vocab: SharedVocabARTrie, max_order: usize) -> Self {
         Self {
             backend,
             vocab,
             max_order,
+            _vocab_tempdir: None,
         }
+    }
+
+    /// Bind an ephemeral vocabulary directory's lifetime to this store, so the
+    /// directory is removed when the store (and all its clones) drop.
+    ///
+    /// Only the ephemeral constructors call this — `rebuild_vocabulary` (portable
+    /// load) and `create_ephemeral_vocabulary` (`Ephemeral` training). Persistent,
+    /// caller-named vocabularies must never be attached: their directories are
+    /// owned by the caller and must outlive the store.
+    pub(crate) fn attach_vocab_tempdir(&mut self, guard: VocabTempDir) {
+        self._vocab_tempdir = Some(Arc::new(guard));
     }
 
     /// The vocabulary (word ↔ term-id bijection).

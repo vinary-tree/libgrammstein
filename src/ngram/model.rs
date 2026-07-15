@@ -17,6 +17,8 @@ use super::entry::NgramEntrySnapshot;
 #[cfg(feature = "serde-extras")]
 use super::store::{MutableByteMappedDictionary, TermIdStore};
 #[cfg(feature = "serde-extras")]
+use super::tempdir::{create_guarded_temp_vocab_dir, VocabTempDir};
+#[cfg(feature = "serde-extras")]
 use super::vocabulary::{create_vocabulary, encode_ngram_key_bytes, SharedVocabARTrie};
 
 #[cfg(feature = "serde-extras")]
@@ -488,7 +490,39 @@ where
     where
         F: FnOnce() -> B,
     {
-        let vocab = rebuild_vocabulary(&portable)?;
+        let (vocab, guard) = rebuild_vocabulary(&portable)?;
+        // If `from_portable_with_vocabulary` errors (e.g. fingerprint mismatch on
+        // the supplied vocab), `guard` drops here and unlinks the temp directory.
+        let mut model = Self::from_portable_with_vocabulary(portable, backend_factory(), vocab)?;
+        // Success: hand the temp-directory owner to the store so the directory
+        // lives exactly as long as the vocabulary it backs.
+        model.store.attach_vocab_tempdir(guard);
+        Ok(model)
+    }
+
+    /// Reconstruct a byte-native term-id model from a portable struct,
+    /// materializing the rebuilt vocabulary at a **caller-supplied**,
+    /// caller-owned `vocab_path` instead of a fresh temporary directory.
+    ///
+    /// This is the placement-controlling counterpart to
+    /// [`from_portable`](Self::from_portable): it replays the embedded
+    /// [`PortableVocabulary`] into a vocabulary created at `vocab_path` (whose
+    /// parent directory is created if missing) and verifies the fingerprint,
+    /// exactly as `from_portable` does — but attaches **no** cleanup guard,
+    /// because the vocabulary is persistent and owned by the caller. The caller is
+    /// responsible for the directory's lifecycle (e.g. a managed, wiped working
+    /// directory), so nothing under `std::env::temp_dir()` is created and nothing
+    /// is auto-removed.
+    pub fn from_portable_at<F, Q>(
+        portable: PortableNgramModel,
+        backend_factory: F,
+        vocab_path: Q,
+    ) -> crate::Result<Self>
+    where
+        F: FnOnce() -> B,
+        Q: AsRef<Path>,
+    {
+        let vocab = rebuild_vocabulary_at(&portable, vocab_path.as_ref())?;
         Self::from_portable_with_vocabulary(portable, backend_factory(), vocab)
     }
 
@@ -554,26 +588,24 @@ where
     }
 }
 
-/// Rebuild a [`SharedVocabARTrie`] from a portable model, verifying the
-/// fingerprint for term-id encodings.
+/// Replay a portable model's embedded [`PortableVocabulary`] into an
+/// already-created vocabulary, verifying the fingerprint for term-id encodings.
 ///
 /// For [`KeyEncoding::TermIdBytes`] / [`KeyEncoding::Latin1Varint`] the embedded
-/// [`PortableVocabulary`] is replayed word-by-word (assigning term-ids
-/// `1, 2, …`, matching the original 1-based ordering) so the keys' term-ids stay
-/// valid, and the stamped [`PortableNgramModel::vocab_fingerprint`] is checked
-/// against the reconstructed vocabulary. For [`KeyEncoding::LegacyPipe`] an empty
-/// vocabulary is returned (populated lazily during transcode).
+/// words are inserted in term-id order (assigning term-ids `1, 2, …`, matching
+/// the original 1-based ordering) so the keys' term-ids stay valid, and the
+/// stamped [`PortableNgramModel::vocab_fingerprint`] is checked against the
+/// reconstructed vocabulary. For [`KeyEncoding::LegacyPipe`] this is a no-op (the
+/// vocabulary is populated lazily during transcode).
+///
+/// Shared by the temp-directory materializer ([`rebuild_vocabulary`]) and the
+/// caller-path materializer ([`rebuild_vocabulary_at`]); it is agnostic to where
+/// `vocab` was created.
 #[cfg(feature = "serde-extras")]
-fn rebuild_vocabulary(portable: &PortableNgramModel) -> crate::Result<SharedVocabARTrie> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "libgrammstein-vocab-{}-{}",
-        std::process::id(),
-        next_vocab_seq()
-    ));
-    std::fs::create_dir_all(&temp_dir)?;
-    let vocab = create_vocabulary(&temp_dir.join("vocabulary"))
-        .map_err(|e| crate::Error::Model(format!("vocabulary rebuild failed: {e}")))?;
-
+fn replay_portable_vocabulary(
+    vocab: &SharedVocabARTrie,
+    portable: &PortableNgramModel,
+) -> crate::Result<()> {
     if matches!(
         portable.key_encoding,
         KeyEncoding::TermIdBytes | KeyEncoding::Latin1Varint
@@ -585,9 +617,9 @@ fn rebuild_vocabulary(portable: &PortableNgramModel) -> crate::Result<SharedVoca
         })?;
 
         {
-            let guard = vocab.as_ref();
+            let vocab_ref = vocab.as_ref();
             for word in &portable_vocab.words {
-                guard
+                vocab_ref
                     .insert(word)
                     .map_err(|e| crate::Error::Model(format!("vocabulary rebuild failed: {e}")))?;
             }
@@ -604,15 +636,49 @@ fn rebuild_vocabulary(portable: &PortableNgramModel) -> crate::Result<SharedVoca
         }
     }
 
-    Ok(vocab)
+    Ok(())
 }
 
-/// Monotonic counter disambiguating concurrent temp-vocabulary directories.
+/// Rebuild a [`SharedVocabARTrie`] from a portable model in a fresh temporary
+/// directory, returning it together with the [`VocabTempDir`] guard that removes
+/// the directory when the owning store (and all its clones) drop.
+///
+/// The guard is armed *before* the vocabulary is created, so every early-return
+/// error path — a failed vocabulary creation, a missing embedded vocabulary, or a
+/// fingerprint mismatch inside [`replay_portable_vocabulary`] — unlinks the temp
+/// directory as the local `guard` drops. On success the guard is handed back to
+/// be co-owned by the model's store (see [`from_portable`](NgramModel::from_portable)).
 #[cfg(feature = "serde-extras")]
-fn next_vocab_seq() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    SEQ.fetch_add(1, Ordering::Relaxed)
+fn rebuild_vocabulary(
+    portable: &PortableNgramModel,
+) -> crate::Result<(SharedVocabARTrie, VocabTempDir)> {
+    let (dir, guard) = create_guarded_temp_vocab_dir("vocab")?;
+    let vocab = create_vocabulary(&dir.join("vocabulary"))
+        .map_err(|e| crate::Error::Model(format!("vocabulary rebuild failed: {e}")))?;
+    replay_portable_vocabulary(&vocab, portable)?;
+    Ok((vocab, guard))
+}
+
+/// Rebuild a [`SharedVocabARTrie`] from a portable model at a caller-supplied,
+/// caller-owned `vocab_path` — no temporary directory and no cleanup guard.
+///
+/// The parent directory of `vocab_path` is created if missing. Backs
+/// [`NgramModel::from_portable_at`]; the returned vocabulary is persistent and its
+/// directory is the caller's to manage.
+#[cfg(feature = "serde-extras")]
+fn rebuild_vocabulary_at(
+    portable: &PortableNgramModel,
+    vocab_path: &Path,
+) -> crate::Result<SharedVocabARTrie> {
+    if let Some(parent) = vocab_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let vocab = create_vocabulary(vocab_path)
+        .map_err(|e| crate::Error::Model(format!("vocabulary rebuild failed: {e}")))?;
+    replay_portable_vocabulary(&vocab, portable)?;
+    Ok(vocab)
 }
 
 /// Serialize a portable model to `path` with bincode.

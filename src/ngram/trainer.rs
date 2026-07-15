@@ -16,6 +16,7 @@
 use super::model::NgramModel;
 use super::smoothing::KneserNeySmoothing;
 use super::store::{MutableByteMappedDictionary, MutableNgramStore, TermIdStore};
+use super::tempdir::{create_guarded_temp_vocab_dir, VocabTempDir};
 use super::vocabulary::{create_vocabulary, open_or_create_vocabulary, SharedVocabARTrie};
 use crate::corpus::{CorpusReader, PrefetchConfig, PrefetchingReader, Tokenizer};
 use crate::Result;
@@ -116,23 +117,19 @@ impl TrainingConfig {
     }
 }
 
-/// Create an ephemeral vocabulary in a unique temporary directory.
+/// Create an ephemeral vocabulary in a unique temporary directory, returning it
+/// together with the [`VocabTempDir`] guard that removes the directory.
 ///
-/// The returned vocabulary is self-contained (its state lives in the process
-/// overlay and inside the trained model's `Arc`); the backing directory is not
-/// removed on drop.
-fn create_ephemeral_vocabulary() -> SharedVocabARTrie {
-    use std::sync::atomic::AtomicU64 as SeqCounter;
-    static SEQ: SeqCounter = SeqCounter::new(0);
-
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "libgrammstein-train-vocab-{}-{}",
-        std::process::id(),
-        seq
-    ));
-    std::fs::create_dir_all(&dir).expect("failed to create ephemeral vocabulary directory");
-    create_vocabulary(&dir.join("vocabulary")).expect("failed to create ephemeral vocabulary")
+/// The vocabulary's live state resides inside the trained model's `Arc`; the
+/// backing directory is owned by the returned guard, which
+/// [`NgramTrainer::new`] attaches to the store so the directory is unlinked once
+/// the model (and all its clones) drop.
+fn create_ephemeral_vocabulary() -> (SharedVocabARTrie, VocabTempDir) {
+    let (dir, guard) = create_guarded_temp_vocab_dir("train-vocab")
+        .expect("failed to create ephemeral vocabulary directory");
+    let vocab =
+        create_vocabulary(&dir.join("vocabulary")).expect("failed to create ephemeral vocabulary");
+    (vocab, guard)
 }
 
 /// N-gram trainer with parallel corpus processing over a byte-native store.
@@ -211,16 +208,27 @@ where
     pub fn new(backend: B, config: TrainingConfig) -> Self {
         let order = config.order;
 
-        let vocabulary = match &config.vocabulary_mode {
-            VocabularyMode::Ephemeral => create_ephemeral_vocabulary(),
-            VocabularyMode::Create(path) => {
-                open_or_create_vocabulary(path).expect("Failed to create vocabulary")
+        // Only the `Ephemeral` arm owns a throwaway directory that must be cleaned
+        // up; `Create`/`Shared` vocabularies are caller-managed and carry no guard.
+        let (vocabulary, guard) = match &config.vocabulary_mode {
+            VocabularyMode::Ephemeral => {
+                let (vocab, guard) = create_ephemeral_vocabulary();
+                (vocab, Some(guard))
             }
-            VocabularyMode::Shared(vocab) => vocab.clone(),
+            VocabularyMode::Create(path) => (
+                open_or_create_vocabulary(path).expect("Failed to create vocabulary"),
+                None,
+            ),
+            VocabularyMode::Shared(vocab) => (vocab.clone(), None),
         };
 
+        let mut store = TermIdStore::new(backend, vocabulary, order);
+        if let Some(guard) = guard {
+            store.attach_vocab_tempdir(guard);
+        }
+
         Self {
-            store: TermIdStore::new(backend, vocabulary, order),
+            store,
             config,
             stats: TrainingStats::default(),
             tokenizer: Tokenizer::new(),

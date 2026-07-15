@@ -577,6 +577,56 @@ where
             cache,
         })
     }
+
+    /// Load model from a portable binary file, materializing the rebuilt n-gram
+    /// vocabulary at a **caller-supplied** `vocab_path` instead of a fresh
+    /// temporary directory (see
+    /// [`NgramModel::from_portable_at`](crate::ngram::NgramModel::from_portable_at)).
+    ///
+    /// The vocabulary is persistent and caller-owned: nothing is created under
+    /// `std::env::temp_dir()` and nothing is auto-removed, so a long-lived
+    /// consumer can co-locate the vocabulary with the model under a managed,
+    /// wiped working directory. Contrast [`load_portable`](Self::load_portable),
+    /// which rebuilds the vocabulary in a temporary directory owned (and cleaned
+    /// up on drop) by the returned model.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use libdictenstein::dynamic_dawg::DynamicDawg;
+    /// let model: HybridLanguageModel<TermIdStore<DynamicDawg<NgramEntry>>> =
+    ///     HybridLanguageModel::load_portable_at(
+    ///         "hybrid_model.bin",
+    ///         DynamicDawg::new,
+    ///         "workdir/live/vocabulary",
+    ///     )?;
+    /// ```
+    pub fn load_portable_at<P, F, Q>(
+        path: P,
+        backend_factory: F,
+        vocab_path: Q,
+    ) -> crate::Result<Self>
+    where
+        P: AsRef<Path>,
+        F: FnOnce() -> B,
+        Q: AsRef<Path>,
+    {
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        let portable: PortableHybridModel = bincode::deserialize_from(reader)?;
+
+        // Reconstruct the N-gram model against a caller-owned vocabulary directory.
+        let ngram = NgramModel::from_portable_at(portable.ngram, backend_factory, vocab_path)?;
+
+        let cache = ScoreCache::new(portable.config.cache_size.max(1));
+
+        Ok(Self {
+            ngram,
+            embedding: portable.embedding,
+            config: portable.config,
+            cache,
+        })
+    }
 }
 
 #[cfg(test)]
