@@ -239,7 +239,7 @@ impl TreeminerD {
         min_support: usize,
         total_trees: usize,
     ) -> (Vec<SubtreePattern>, usize, usize) {
-        let mut candidates: HashMap<String, (Vec<PatternNode>, HashSet<u64>)> = HashMap::new();
+        let mut candidates: HashMap<Vec<u8>, (Vec<PatternNode>, HashSet<u64>)> = HashMap::new();
         let mut generated = 0;
         let mut pruned = 0;
 
@@ -299,7 +299,7 @@ impl TreeminerD {
         min_support: usize,
         total_trees: usize,
     ) -> (Vec<SubtreePattern>, usize, usize) {
-        let candidates: DashMap<String, (Vec<PatternNode>, HashSet<u64>)> = DashMap::new();
+        let candidates: DashMap<Vec<u8>, (Vec<PatternNode>, HashSet<u64>)> = DashMap::new();
         let generated = AtomicU64::new(0);
 
         patterns.par_iter().for_each(|pattern| {

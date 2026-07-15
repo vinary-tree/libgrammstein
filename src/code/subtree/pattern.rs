@@ -269,34 +269,104 @@ impl std::hash::Hash for SubtreePattern {
 }
 
 /// Encoding utilities for pattern matching.
+///
+/// A pattern is encoded as a **self-delimiting byte key**: each node writes its
+/// `depth` and its label's byte-length as LEB128 varints, followed by the raw
+/// label bytes. Because the label length is written explicitly, the encoding is
+/// *injective for any label content* — including AST node kinds that are literal
+/// punctuation such as `"|"`, `"||"`, or `":"` (tree-sitter names anonymous nodes
+/// by their literal text).
+///
+/// A delimiter-joined encoding (`"depth:label"` joined by `'|'`) is **not**
+/// injective: a label that itself contains `'|'` collapses distinct patterns onto
+/// one key — e.g. the single node `("a|1:b", 0)` and the two nodes `("a", 0)`,
+/// `("b", 1)` both render `"0:a|1:b"` — silently merging their support counts.
+/// No delimiter is used here, so that collision class cannot occur.
 pub mod encoding {
     use super::*;
 
-    /// Encode a pattern as a canonical string for hashing/comparison.
-    pub fn encode_pattern(nodes: &[PatternNode]) -> String {
-        let mut parts = Vec::with_capacity(nodes.len() * 2);
-        for node in nodes {
-            parts.push(format!("{}:{}", node.depth, node.label));
+    /// Append `value` to `buf` as an unsigned LEB128 varint.
+    fn write_varint(buf: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                buf.push(byte);
+                return;
+            }
+            buf.push(byte | 0x80);
         }
-        parts.join("|")
     }
 
-    /// Decode a pattern string back to nodes.
-    pub fn decode_pattern(encoded: &str) -> Vec<PatternNode> {
-        encoded
-            .split('|')
-            .filter_map(|part| {
-                let mut split = part.splitn(2, ':');
-                let depth = split.next()?.parse().ok()?;
-                let label = split.next()?;
-                Some(PatternNode::new(label, depth))
-            })
-            .collect()
+    /// Read an unsigned LEB128 varint from `bytes` at `*pos`, advancing `*pos`
+    /// past it. Returns `None` on a truncated or overlong (> 64-bit) varint.
+    fn read_varint(bytes: &[u8], pos: &mut usize) -> Option<u64> {
+        let mut result: u64 = 0;
+        let mut shift = 0u32;
+        loop {
+            let byte = *bytes.get(*pos)?;
+            *pos += 1;
+            result |= ((byte & 0x7f) as u64) << shift;
+            if byte & 0x80 == 0 {
+                return Some(result);
+            }
+            shift += 7;
+            if shift >= 64 {
+                return None;
+            }
+        }
     }
 
-    /// Compute a hash for a pattern.
+    /// Encode a pattern as a canonical, injective byte key for hashing/comparison.
+    ///
+    /// Layout, per node: `varint(depth) · varint(label_len) · label_bytes`. The
+    /// explicit length makes the stream self-delimiting, so it round-trips and
+    /// never collides regardless of label content.
+    pub fn encode_pattern(nodes: &[PatternNode]) -> Vec<u8> {
+        // Preallocate: label bytes + up to a few varint bytes per numeric field.
+        let label_bytes: usize = nodes.iter().map(|n| n.label.len()).sum();
+        let mut buf = Vec::with_capacity(label_bytes + nodes.len() * 4);
+        for node in nodes {
+            write_varint(&mut buf, node.depth as u64);
+            write_varint(&mut buf, node.label.len() as u64);
+            buf.extend_from_slice(node.label.as_bytes());
+        }
+        buf
+    }
+
+    /// Decode a pattern byte key back to nodes — the inverse of [`encode_pattern`].
+    ///
+    /// Returns the nodes decoded so far and stops if `encoded` is malformed
+    /// (truncated varint, length past the end of input, or non-UTF-8 label bytes),
+    /// so a corrupt key never panics.
+    pub fn decode_pattern(encoded: &[u8]) -> Vec<PatternNode> {
+        let mut nodes = Vec::new();
+        let mut pos = 0;
+        while pos < encoded.len() {
+            let Some(depth) = read_varint(encoded, &mut pos) else {
+                break;
+            };
+            let Some(len) = read_varint(encoded, &mut pos) else {
+                break;
+            };
+            let Some(end) = pos.checked_add(len as usize) else {
+                break;
+            };
+            let Some(label_bytes) = encoded.get(pos..end) else {
+                break;
+            };
+            let Ok(label) = std::str::from_utf8(label_bytes) else {
+                break;
+            };
+            pos = end;
+            nodes.push(PatternNode::new(label, depth as usize));
+        }
+        nodes
+    }
+
+    /// Compute a hash for a pattern from its injective byte encoding.
     pub fn pattern_hash(nodes: &[PatternNode]) -> u64 {
-        crate::util::hash::safe_hash(encode_pattern(nodes).as_bytes())
+        crate::util::hash::safe_hash(&encode_pattern(nodes))
     }
 }
 
@@ -348,10 +418,44 @@ mod tests {
         ];
 
         let encoded = encoding::encode_pattern(&nodes);
-        assert_eq!(encoded, "0:A|1:B|1:C");
+        // Self-delimiting layout: varint(depth) · varint(label_len) · label bytes.
+        assert_eq!(
+            encoded,
+            vec![0x00, 0x01, b'A', 0x01, 0x01, b'B', 0x01, 0x01, b'C']
+        );
 
         let decoded = encoding::decode_pattern(&encoded);
         assert_eq!(decoded, nodes);
+    }
+
+    /// AST node kinds may be literal punctuation (`"|"`, `"||"`, `":"`), so the
+    /// encoding must round-trip such labels and, crucially, must not collide
+    /// distinct patterns — the exact failure of the former `"depth:label"`+`'|'`
+    /// scheme.
+    #[test]
+    fn test_pattern_encoding_injective_for_delimiter_labels() {
+        // Labels containing the former delimiters round-trip exactly.
+        for label in ["|", "||", ":", "0:A|1:B", "a|1:b"] {
+            let nodes = vec![PatternNode::new(label, 3)];
+            let round_tripped = encoding::decode_pattern(&encoding::encode_pattern(&nodes));
+            assert_eq!(round_tripped, nodes, "label {label:?} must round-trip");
+        }
+
+        // The classic collision: one node labelled "a|1:b" versus two nodes
+        // "a"(depth 0) and "b"(depth 1). Under the old scheme both encoded to
+        // "0:a|1:b"; the length-prefixed encoding keeps them distinct.
+        let one = vec![PatternNode::new("a|1:b", 0)];
+        let two = vec![PatternNode::new("a", 0), PatternNode::new("b", 1)];
+        assert_ne!(
+            encoding::encode_pattern(&one),
+            encoding::encode_pattern(&two),
+            "distinct patterns must not share an encoding"
+        );
+        assert_ne!(
+            encoding::pattern_hash(&one),
+            encoding::pattern_hash(&two),
+            "distinct patterns must not share a hash"
+        );
     }
 
     #[test]
