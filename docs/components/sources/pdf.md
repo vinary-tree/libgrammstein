@@ -288,7 +288,7 @@ The equation heuristic counts delimiter occurrences on the pre-post-processed La
 ```
 
 A display block delimited by a doubled dollar,
-`$\texttt{\$\$} \ldots \texttt{\$\$}$`, contains **two** occurrences of that delimiter, so
+$`\texttt{\$\$} \ldots \texttt{\$\$}`$, contains **two** occurrences of that delimiter, so
 every such equation is counted **twice**; a
 $`\texttt{\textbackslash[} \ldots \texttt{\textbackslash]}`$ block, having only its opener
 counted, contributes **once**. Read `equation_count` as a rough math-volume signal, not a
@@ -348,7 +348,7 @@ order-dependent passes, each gated by its own flag, then optionally validates.
 |---|---|---|---|
 | ① | `normalize_whitespace` | `normalize_whitespace` | collapse space/tab runs; cap consecutive newlines at 2; drop CR; trim |
 | ② | `fix_ocr_errors` | `fix_ocr_errors` | 26 literal substitutions for OCR confusions |
-| ③ | `normalize_math_delimiters` | `normalize_math_delimiters` | rewrite `$\texttt{\$\$} \ldots \texttt{\$\$}$` into $`\texttt{\textbackslash[} \ldots \texttt{\textbackslash]}`$, pad with newlines |
+| ③ | `normalize_math_delimiters` | `normalize_math_delimiters` | rewrite $`\texttt{\$\$} \ldots \texttt{\$\$}`$ into $`\texttt{\textbackslash[} \ldots \texttt{\textbackslash]}`$, pad with newlines |
 | ④ | `fix_brace_matching` | `fix_brace_matching` | stack-balance `{}`, `[]`, `()` |
 | ⑤ | `remove_artifacts` | `remove_artifacts` | strip U+FFFD, NUL, BOM, ZWSP/ZWNJ/ZWJ, word-joiner; collapse `..` and `....` |
 | ⑥ | `wrap_lines` | `max_line_length > 0` | word-wrap prose lines only |

@@ -532,7 +532,7 @@ Target: `src/ngram/vocabulary.rs` (`encode_varint`/`decode_varint`) and
 `src/ngram/u64_view.rs` (`U64NgramView`).
 
 Proves that the LEB128 varint term-id codec is a self-delimiting bijection, so
-the `u64`-unit view the word-level corrector `T_gram` walks over the n-gram store
+the `u64`-unit view the word-level corrector $`T_{\text{gram}}`$ walks over the n-gram store
 enumerates exactly the stored term-id sequences — no id dropped, duplicated, or
 invented:
 
@@ -554,16 +554,17 @@ namespace-disjointness invariant, not needed for the codec bijection.
 Target: `src/integration/grammar_corrector.rs` (the beam decode).
 
 Proves that the cascade's minimum-cost decode is the noisy-channel MAXIMUM A
-POSTERIORI correction. With `cost(w) = c_channel(w) + λ·(−ln P(w))` and
-`score(w) = exp(−c_channel(w))·P(w)^λ`:
+POSTERIORI correction. With
+$`\text{cost}(w) = c_{\text{channel}}(w) + \lambda \cdot (-\ln P(w))`$ and
+$`\text{score}(w) = \exp(-c_{\text{channel}}(w)) \cdot P(w)^{\lambda}`$:
 
-- `neg_ln_reflect` — `−ln` is strictly antitone on the positives.
-- `cost_is_neg_log_score` — `cost(w) = −ln(score(w))` (the log-semiring bridge).
+- `neg_ln_reflect` — $`-\ln`$ is strictly antitone on the positives.
+- `cost_is_neg_log_score` — $`\text{cost}(w) = -\ln(\text{score}(w))`$ (the log-semiring bridge).
 - `min_cost_maximizes_score` — the least-cost hypothesis has the greatest score
-  (so argmin cost = argmax score over any candidate set).
-- `map_score_identity` / `min_cost_is_map` — with `c_channel = −ln P(x|w)` and
-  `λ = 1` the score is the joint `P(x|w)·P(w)`, which — the evidence `P(x)` being
-  constant in `w` — is proportional to the posterior `P(w|x)`; hence the min-cost
+  (so $`\operatorname*{argmin} \text{cost} = \operatorname*{argmax} \text{score}`$ over any candidate set).
+- `map_score_identity` / `min_cost_is_map` — with $`c_{\text{channel}} = -\ln P(x \mid w)`$ and
+  $`\lambda = 1`$ the score is the joint $`P(x \mid w) \cdot P(w)`$, which — the evidence $`P(x)`$ being
+  constant in $`w`$ — is proportional to the posterior $`P(w \mid x)`$; hence the min-cost
   decode is the Bayes-optimal (MAP) correction (Kernighan, Church & Gale 1990).
 
 ## Source Alignment

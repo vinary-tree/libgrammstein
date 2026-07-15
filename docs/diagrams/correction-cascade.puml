@@ -21,31 +21,31 @@ skinparam rectangle {
 }
 skinparam ArrowColor #37474F
 skinparam ArrowFontColor #37474F
-title T_lex ∘ T_gram cascade — two Levenshtein automata over a term-id alphabet, decoded by a history-indexed beam
+title <latex>T_{\text{lex}} \circ T_{\text{gram}}</latex> cascade — two Levenshtein automata over a term-id alphabet, decoded by a history-indexed beam
 
-rectangle "**observed x**\n\"teh quick fox\"   (tokens x₁ … xₙ)" as x #455A64
+rectangle "**observed** <latex>x</latex>\n\"teh quick fox\"   (tokens <latex>x_1 \ldots x_n</latex>)" as x #455A64
 
-rectangle "**T_lex**  ·  channel, character level\nfuzzy lexicon:  characters ⟶ vocabulary **term-ids**\nquery_with_distance  /  articulatory PhoneticTransducerChar\n(term, id, cost),   cost = edit + phonetic   (phonetic ≤ 0 = sound-alike discount)" as tlex #1565C0
+rectangle "<latex>T_{\text{lex}}</latex>  ·  channel, character level\nfuzzy lexicon:  characters ⟶ vocabulary **term-ids**\nquery_with_distance  /  articulatory PhoneticTransducerChar\n(term, id, cost),   <latex>\text{cost} = \text{edit} + \text{phonetic}</latex>   (<latex>\text{phonetic} \le 0</latex> = sound-alike discount)" as tlex #1565C0
 
-rectangle "**T_gram**  ·  channel, word level\nu64 Levenshtein over the n-gram **count store**\nquery_units_values ⟶ grammar_neighbors\n(ids, distance, frequency)" as tgram #1E88E5
+rectangle "<latex>T_{\text{gram}}</latex>  ·  channel, word level\nu64 Levenshtein over the n-gram **count store**\nquery_units_values ⟶ grammar_neighbors\n(ids, distance, frequency)" as tgram #1E88E5
 
 rectangle "**U64NgramView**\nUnit = u64 view · collapses one LEB128 varint\nper step over a byte carrier (u8 trie / char DAWG)" as view #00838F
 
-rectangle "**source model** · stupid backoff (Brants et al. 2007)\nS(w│h) = f(h·w)/f(h)   else   α·S(w│h′)   (drop oldest history word)\nbase S(w) = f(w)/N,  floor 1/(N+1),  α = 0.4\n**RAW counts — not Kneser-Ney**" as sb #2E7D32
+rectangle "**source model** · stupid backoff (Brants et al. 2007)\n<latex>S(w \mid h) = f(h \cdot w)/f(h)</latex>   else   <latex>\alpha \cdot S(w \mid h')</latex>   (drop oldest history word)\nbase <latex>S(w) = f(w)/N</latex>,  floor <latex>1/(N+1)</latex>,  <latex>\alpha = 0.4</latex>\n**RAW counts — not Kneser-Ney**" as sb #2E7D32
 
-rectangle "**cascade**   T = T_lex ∘ T_gram\nMAP decode in the log semiring:\nŵ = argmin_w   c_lex(x│w) + c_gram(x│w) + λ·(−log S(w))" as casc #6A1B9A
+rectangle "**cascade**   <latex>T = T_{\text{lex}} \circ T_{\text{gram}}</latex>\nMAP decode in the log semiring:\n<latex>\hat{w} = \operatorname*{argmin}_w\; c_{\text{lex}}(x \mid w) + c_{\text{gram}}(x \mid w) + \lambda \cdot (-\log S(w))</latex>" as casc #6A1B9A
 
-rectangle "**history-indexed beam**  (stack decoder)\nleft→right; per token xᵢ, from each hypothesis (emitted words, history h, cost g):\n • **substitute / keep** — every T_lex candidate w  :  + c_lex + λ·(−log S(w│h))\n • **delete** — drop xᵢ (removes an extraneous word)  :  + deletion_penalty\n • **insert** — bridged continuation v of h, with h·v·c stored (adds a missing word)  :  + insertion_penalty + λ·(−log S(v│h))\n⟨s⟩ seeds the history · ⟨/s⟩ scored at the end · prune to beam_width · return k_best" as beam #37474F
+rectangle "**history-indexed beam**  (stack decoder)\nleft→right; per token <latex>x_i</latex>, from each hypothesis (emitted words, history <latex>h</latex>, cost <latex>g</latex>):\n • **substitute / keep** — every <latex>T_{\text{lex}}</latex> candidate <latex>w</latex>  :  <latex>+\, c_{\text{lex}} + \lambda \cdot (-\log S(w \mid h))</latex>\n • **delete** — drop <latex>x_i</latex> (removes an extraneous word)  :  <latex>+\, \text{deletion\_penalty}</latex>\n • **insert** — bridged continuation <latex>v</latex> of <latex>h</latex>, with <latex>h \cdot v \cdot c</latex> stored (adds a missing word)  :  <latex>+\, \text{insertion\_penalty} + \lambda \cdot (-\log S(v \mid h))</latex>\n<latex>\langle s\rangle</latex> seeds the history · <latex>\langle/s\rangle</latex> scored at the end · prune to beam_width · return k_best" as beam #37474F
 
-rectangle "**ŵ**  ·  \"the quick brown fox\"\nup to k_best hypotheses, lowest cost first" as out #455A64
+rectangle "<latex>\hat{w}</latex>  ·  \"the quick brown fox\"\nup to k_best hypotheses, lowest cost first" as out #455A64
 
 x --> tlex : characters
-tlex --> casc : ∘  (term-ids)\nc_lex
+tlex --> casc : <latex>\circ</latex>  (term-ids)\n<latex>c_{\text{lex}}</latex>
 view --> tgram : edges = term-ids
-tgram --> casc : c_gram
-view --> sb : f(·) counts
-sb --> casc : λ·(−log S)
-casc --> beam : argmin (search)
+tgram --> casc : <latex>c_{\text{gram}}</latex>
+view --> sb : <latex>f(\cdot)</latex> counts
+sb --> casc : <latex>\lambda \cdot (-\log S)</latex>
+casc --> beam : <latex>\operatorname*{argmin}</latex> (search)
 beam --> out
 
 note right of beam
@@ -58,8 +58,8 @@ end note
 
 legend bottom
   |= stage |= role |= engine |
-  | T_lex | channel · spelling + phonetics | liblevenshtein Transducer / PhoneticTransducerChar over the vocabulary |
-  | T_gram | channel · word insert / delete / substitute | liblevenshtein u64 Transducer over U64NgramView |
+  | <latex>T_{\text{lex}}</latex> | channel · spelling + phonetics | liblevenshtein Transducer / PhoneticTransducerChar over the vocabulary |
+  | <latex>T_{\text{gram}}</latex> | channel · word insert / delete / substitute | liblevenshtein u64 Transducer over U64NgramView |
   | source | prior · fluency | stupid backoff over the raw n-gram counts |
 endlegend
 @enduml

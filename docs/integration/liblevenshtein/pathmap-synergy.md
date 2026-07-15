@@ -131,7 +131,7 @@ impl IterableDictionary for libdictenstein::pathmap::PathMapDictionary<NgramEntr
 
 **The trade-off, stated honestly.** Against `DynamicDawgChar` you gain cheap snapshots and subtrie
 algebra; you give up `serde`. Against `DoubleArrayTrieChar` you gain mutability; you give up the
-≈ 8 bytes/node compactness. Lookup remains $`O(m)`$ in all three — see
+$`\approx 8`$ bytes/node compactness. Lookup remains $`O(m)`$ in all three — see
 [Backend Selection](backend-selection.md).
 
 ### 3.1 It is queryable by the automaton

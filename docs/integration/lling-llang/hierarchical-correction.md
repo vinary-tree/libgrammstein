@@ -37,9 +37,11 @@ grammar filter and the embedding fusion. Both are additive and opt-in behind the
 > Markdown: inline math is a backtick span wrapped in dollar signs, and display
 > math is a fenced block whose info-string is `math`. Bare dollar delimiters are
 > never used — GitHub's CommonMark pass strips backslash escapes before MathJax
-> parses them. Two constructs render as literal monospace and therefore keep
-> Unicode operators: **PlantUML diagram labels** (SVG cannot typeset MathJax) and
-> the **literate-pseudocode fences** below (they are code, not prose).
+> parses them. **PlantUML diagram labels** typeset their mathematics with
+> `<latex>` — the bundled JLaTeXMath renders vector math into the SVG. Two
+> constructs still render as literal text and therefore keep Unicode/plain
+> operators: the **literate-pseudocode fences** below (they are code, not prose)
+> and image **alt-text** (a plain-text fallback).
 
 ---
 
@@ -115,7 +117,7 @@ four solid nodes are wired into the pipeline, duallity is the ecosystem adapter.
   `compose` operator (`lling_llang::composition::compose`). lling-llang also offers
   a `PhoneticRescoreLayer`, but libgrammstein does **not** wire it in: the
   principled realization of phonetics is *fusion* into candidate generation (the
-  cascade's `T_lex`, §6.3), not a downstream rescore of already-filtered candidates.
+  cascade's $`T_{\text{lex}}`$, §6.3), not a downstream rescore of already-filtered candidates.
 - **duallity** — the ecosystem's *WFST adapter*: `LevenshteinWfst` wraps a
   liblevenshtein automaton as an lling-llang FST so it can be `compose`-d. It is
   **not** a libgrammstein dependency, and `compose` itself is lling-llang's, not
@@ -165,13 +167,13 @@ into one joint score. *(Rendered from `docs/diagrams/correction-dimensions.puml`
 | # | Dimension | Question | Engine · type |
 |---|-----------|----------|---------------|
 | 1 | **Orthographic** | "what real word is this a typo of?" | liblevenshtein automaton $`\cap`$ dictionary → `LevenshteinCorrectionLayer` |
-| 2 | **Phonetic** | "what real word does this *sound* like?" | fused into `T_lex` — liblevenshtein articulatory automaton (`PhoneticTransducerChar`, feature `phonetic-correction`): edit **and** phonetic cost in one query (§6.3) |
+| 2 | **Phonetic** | "what real word does this *sound* like?" | fused into $`T_{\text{lex}}`$ — liblevenshtein articulatory automaton (`PhoneticTransducerChar`, feature `phonetic-correction`): edit **and** phonetic cost in one query (§6.3) |
 | 3 | **Syntactic** | "is this token sequence grammatical?" | lling-llang `CfgFilterLayer` (Earley-over-lattice) |
 | 4 | **Contextual** | "which word fits its neighbors?" | libgrammstein n-gram, **Modified Kneser-Ney** → `LanguageModelLayer` |
 | 5 | **Semantic** | "which candidate means the right thing / handles OOV?" | libgrammstein `SubwordEmbedding`, fused in `HybridLanguageModel` |
 
 > **Realization note (Dimension 2).** Phonetics is realized the principled way —
-> *fused* with Dimension 1 inside the cascade's `T_lex` (§6.3), where a single query
+> *fused* with Dimension 1 inside the cascade's $`T_{\text{lex}}`$ (§6.3), where a single query
 > scores each candidate by edit **and** articulatory cost, so a sound-alike competes
 > directly with an orthographic neighbor. lling-llang ships a `PhoneticRescoreLayer`
 > and libgrammstein a standalone `PhoneticEmbedding` utility, but neither is wired
@@ -279,7 +281,7 @@ programming over a product automaton.
 5. **`viterbi` / `nbest`.** The joint-optimal correction is the shortest path.
 
 The lattice pipeline carries **no** phonetic stage: Dimension 2 is realized *fused*
-into candidate generation by the cascade corrector's `T_lex` (§6.3) — the principled
+into candidate generation by the cascade corrector's $`T_{\text{lex}}`$ (§6.3) — the principled
 alternative to a downstream sound-alike rescore, which would only re-rank the
 candidates the edit automaton already surfaced.
 
@@ -405,7 +407,7 @@ source `P`.
 
 ![The T_lex ∘ T_gram cascade: an observed sentence x has each token mapped by T_lex (a character-level Levenshtein/articulatory automaton over the vocabulary) to candidate term-ids with an edit-plus-phonetic cost; T_gram is a word-level u64 Levenshtein automaton over the n-gram count store, viewed through U64NgramView; the source model is stupid backoff over the raw counts; the composition T = T_lex ∘ T_gram is decoded by a left-to-right, history-indexed beam that per token expands substitutions, deletions, and bridged insertions, models the sentence boundaries, prunes to the beam width, and returns the k-best hypotheses as the corrected sentence.](../../diagrams/correction-cascade.svg)
 
-**Figure 5.** The `T_lex ∘ T_gram` cascade and its history-indexed beam decoder —
+**Figure 5.** The $`T_{\text{lex}} \circ T_{\text{gram}}`$ cascade and its history-indexed beam decoder —
 the term-id analogue of the lattice pipeline of Figure 4. *(Rendered from
 `docs/diagrams/correction-cascade.puml`.)*
 
@@ -442,14 +444,14 @@ Both automata operate on **term-ids**, not characters or strings. The vocabulary
 with `FIRST_VALID_INDEX = 1` (index $`0`$ is reserved so a term-id's varint never
 collides with the `\x00` metadata-key prefix). The n-gram **count store** keys each
 window as the concatenated **LEB128 varints** of its term-ids (`encode_varint`), so
-one stored key *is* one term-id sequence. Because `T_lex` emits the very ids the
+one stored key *is* one term-id sequence. Because $`T_{\text{lex}}`$ emits the very ids the
 store is keyed by, the two stages share one alphabet with no translation layer — a
 `LexCandidate`'s `id` is exactly `vocabulary.get_index(term)` (a property checked by
 `lex_values_are_vocabulary_indices` in the proptest suite).
 
-### 6.3 `T_lex` — characters to term-ids
+### 6.3 $`T_{\text{lex}}`$ — characters to term-ids
 
-`T_lex` is the **fuzzy lexicon**: for one observed token it returns ranked
+$`T_{\text{lex}}`$ is the **fuzzy lexicon**: for one observed token it returns ranked
 in-vocabulary `LexCandidate { term, id, cost }` values. It has two interchangeable
 realizations, selected by `use_phonetics` (which defaults to on iff the
 `phonetic-correction` feature is compiled):
@@ -468,7 +470,7 @@ realizations, selected by `use_phonetics` (which defaults to on iff the
   edit; [Damerau 1964](https://doi.org/10.1145/363958.363994)), simulated on the fly
   and intersected with the trie ([Schulz & Mihov 2002](https://doi.org/10.1007/s10032-002-0082-8)).
 
-Phonetics is therefore **fused into `T_lex`**, not applied as a downstream rescore
+Phonetics is therefore **fused into $`T_{\text{lex}}`$**, not applied as a downstream rescore
 layer — the sound-alike discount competes with orthographic distance inside the
 single candidate cost. This fusion is the principled choice, not a convenience: a
 downstream rescore would only re-rank the candidates the edit automaton already
@@ -481,10 +483,10 @@ than thrashing over a dense short-string neighborhood, and a token with no
 in-vocabulary neighbor falls back to *itself* with `id = 0` at `oov_penalty` (default
 $`6.0`$), so the decode lattice always stays connected.
 
-### 6.4 `T_gram` — term-id sequences to known n-grams
+### 6.4 $`T_{\text{gram}}`$ — term-id sequences to known n-grams
 
-`T_gram` is the **fuzzy grammar**: the *same* Levenshtein engine, one level up.
-Where `T_lex` corrects the characters of a word, `T_gram` corrects the words of a
+$`T_{\text{gram}}`$ is the **fuzzy grammar**: the *same* Levenshtein engine, one level up.
+Where $`T_{\text{lex}}`$ corrects the characters of a word, $`T_{\text{gram}}`$ corrects the words of a
 sentence once each word is a term-id. `grammar_neighbors(ids, k)` runs one
 `Transducer::query_units_values(ids, k)` pass and returns every stored n-gram within
 word-edit distance $`k`$ as `GrammarNeighbor { ids, distance, frequency }`.
@@ -550,7 +552,7 @@ decoder for the equation in §6.1. Each partial hypothesis carries its emitted w
 the parallel term-ids (its scoring / successor history), and its accumulated cost.
 Per input token the beam expands three moves, mirroring the three error classes:
 
-- **substitution / keep** — emit each `T_lex` candidate $`w`$ of $`x_i`$ (the exact
+- **substitution / keep** — emit each $`T_{\text{lex}}`$ candidate $`w`$ of $`x_i`$ (the exact
   match is one, at cost $`0`$), paying $`c_{\text{lex}} + \lambda \cdot(-\log S(w \mid h))`$;
 - **deletion** — drop $`x_i`$ for a fixed `deletion_penalty` (default $`3.0`$),
   removing an *extraneous* word;
@@ -641,12 +643,12 @@ that resolves it:
 
 | Error class | Example | Handled by |
 |---|---|---|
-| substitution | `teh → the` | `T_lex` (edit) |
-| transposition | `quikc → quick` | `T_lex` (Damerau) |
-| phonetic | `fone → phone` | `T_lex` (articulatory discount) |
-| missing word | `the quick fox → the quick brown fox` | `T_gram` insertion (successor oracle) |
-| extraneous word | `the the quick brown fox → the quick brown fox` | `T_gram` deletion |
-| real-word (context) | `form the list → from the list` | `T_lex` candidate + n-gram rescore |
+| substitution | `teh → the` | $`T_{\text{lex}}`$ (edit) |
+| transposition | `quikc → quick` | $`T_{\text{lex}}`$ (Damerau) |
+| phonetic | `fone → phone` | $`T_{\text{lex}}`$ (articulatory discount) |
+| missing word | `the quick fox → the quick brown fox` | $`T_{\text{gram}}`$ insertion (successor oracle) |
+| extraneous word | `the the quick brown fox → the quick brown fox` | $`T_{\text{gram}}`$ deletion |
+| real-word (context) | `form the list → from the list` | $`T_{\text{lex}}`$ candidate + n-gram rescore |
 
 The first five rows are demonstrated end to end by the runnable example
 ([`examples/grammar_correct.rs`](../../../examples/grammar_correct.rs)), whose
@@ -680,7 +682,7 @@ T_lex ∘ T_gram grammar corrector
 
 The sixth row — a **real-word** error, where the mistyped token is itself a valid
 word — is the case pure spelling correction cannot see: `form` is in the vocabulary,
-so it survives as a zero-cost `T_lex` candidate, but `from` is also a candidate (one
+so it survives as a zero-cost $`T_{\text{lex}}`$ candidate, but `from` is also a candidate (one
 Damerau edit away), and the source model makes `from the list` cheaper than
 `form the list` by more than that one edit. This is the same mechanism the lattice
 corrector uses for `to → two`; here it falls out of the candidate set plus the
@@ -694,13 +696,13 @@ but distinct problems.
 | | `HierarchicalCorrector` (lattice, §5) | `GrammarCorrector` (cascade, §6) |
 |---|---|---|
 | Representation | string-level linear lattice | shared term-id alphabet, two composed automata |
-| Spelling / phonetic | `LevenshteinCorrectionLayer` (orthographic edit only) | `T_lex` (edit **and** articulatory phonetics, fused) |
-| Word insert / delete | not attempted (per-slot substitution only) | `T_gram` + beam insertion / deletion |
+| Spelling / phonetic | `LevenshteinCorrectionLayer` (orthographic edit only) | $`T_{\text{lex}}`$ (edit **and** articulatory phonetics, fused) |
+| Word insert / delete | not attempted (per-slot substitution only) | $`T_{\text{gram}}`$ + beam insertion / deletion |
 | Source model | MKN n-gram $`\oplus`$ subword embedding | stupid backoff over the raw counts |
 | Grammar filter | optional `CfgFilterLayer` (Earley) | not on this path |
 | Decoder | `viterbi` / `nbest` over the lattice | history-indexed beam (stack decoder) |
 | Uses lling-llang lattice / layers | yes | no — drives liblevenshtein directly |
-| Extra feature for phonetics | — | `phonetic-correction` for the articulatory `T_lex` |
+| Extra feature for phonetics | — | `phonetic-correction` for the articulatory $`T_{\text{lex}}`$ |
 
 Reach for the **lattice** corrector when the correction is per-token spelling with a
 rich fluency prior (MKN plus embeddings) or when a grammar filter applies; reach for

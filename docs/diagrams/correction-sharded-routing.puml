@@ -28,7 +28,7 @@ skinparam ArrowColor #37474F
 skinparam ArrowFontColor #37474F
 title ShardedView — n-gram lookup (route ⟶ open read-only ⟶ view)  +  empty-history successor fan-out,  feeding the shared GrammarCore beam
 
-rectangle "**observed n-gram**\n[w₀, w₁, …]   ·   first-token w₀,  order = key_len" as ng #455A64
+rectangle "**observed n-gram**\n<latex>[w_0, w_1, \ldots]</latex>   ·   first-token <latex>w_0</latex>,  order = key_len" as ng #455A64
 
 rectangle "**compute_shard_key_from_token(w₀, order, granularity)**\nhash(w₀) mod num_shards   —or—   prefix(w₀, order)\nthe SAME pure fn the importer's route_tokens used to STORE  ⟹  co-location" as route #6A1B9A
 
@@ -36,7 +36,7 @@ rectangle "**ShardCoordinator::get_shard_readonly(key)**\nresident-or-open  ·  
 
 rectangle "**U64NgramView**  over one shard trie\nSharedARTrie<u64> · trie_arc() clone · lock-free &self reads\nUnit = u64: collapses one LEB128 varint (term-id) per step" as view #00838F
 
-rectangle "**shared GrammarCore beam**   (the identical decoder)\ncount · successor oracle · grammar_neighbors  ⟵ read from THIS shard\nŵ = argmin_w  c_lex + c_gram + λ·(−log S)" as beam #1565C0
+rectangle "**shared GrammarCore beam**   (the identical decoder)\ncount · successor oracle · grammar_neighbors  ⟵ read from THIS shard\n<latex>\hat{w} = \operatorname*{argmin}_w\; c_{\text{lex}} + c_{\text{gram}} + \lambda \cdot (-\log S)</latex>" as beam #1565C0
 
 rectangle "**Ok(None)** — absent first-token\nno shard file  ⟹  **count 0 / no n-gram evidence**" as none #90A4AE
 
@@ -48,7 +48,7 @@ view  --> beam  : u64 n-gram view
 none  --> beam  : no evidence
 
 ' ── M5: empty-history successor oracle — first-position insertion at PARITY ──
-rectangle "**successors(ε)**  —  EMPTY history\nboundary-less sentence start  ·  bos_id = None\nfirst-position insertion needs every stored first-token (unigram)" as succ #6A1B9A
+rectangle "**successors**(<latex>\varepsilon</latex>)  —  EMPTY history\nboundary-less sentence start  ·  bos_id = None\nfirst-position insertion needs every stored first-token (unigram)" as succ #6A1B9A
 
 rectangle "**single store**\nwhole_view().root().edges()" as sroot #00838F
 rectangle "**sharded**  all_shards_root_successors\ndiscover_shard_files + get_shard_readonly\nfan out over EVERY shard root  ·  de-dup" as xroot #00838F
@@ -58,13 +58,13 @@ rectangle "**same unigram set — PARITY**\n⟶ bridge filter ⟶ insertion arm 
 succ   --> sroot  : SingleView (default)
 succ   --> xroot  : ShardedView (override)
 sroot  --> parity : root edge ids
-xroot  --> parity : root edge ids   (≡ single)
+xroot  --> parity : root edge ids   (<latex>\equiv</latex> single)
 parity --> beam   : bridged successors
 
 note right of open #E3F2FD
   Adaptive-granularity caveat: route by the PRODUCED length —
-  |h|+1 for the successor oracle, not the history length —
-  exactly as route_tokens(tokens) used order = |tokens| at storage time.
+  <latex>|h|+1</latex> for the successor oracle, not the history length —
+  exactly as route_tokens(tokens) used order = <latex>|\text{tokens}|</latex> at storage time.
   whole_view() = None: unigrams span every shard, so there is no
   single whole-store view — it now backs only the degenerate empty-sequence
   grammar_neighbors query; first-position insertion is served at parity by the

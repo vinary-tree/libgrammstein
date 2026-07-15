@@ -163,7 +163,7 @@ it**. If it wins, the embedding is not earning its place and you should fix it (
 | Situation | Start at |
 |---|---|
 | both experts trained on the same, large corpus | $`\alpha \approx 0.8`$ |
-| the two experts are on different scales (`log-linear`) | `$\alpha \approx 0.6$–$0.8$` |
+| the two experts are on different scales (`log-linear`) | $`\alpha \approx 0.6`$–$`0.8`$ |
 | large, high-quality n-gram corpus | `ngram-fallback` (no $`\alpha`$) |
 | high OOV rate, mixed vocabulary | `dynamic`, $`\alpha = 0.9`$ (giving $`\alpha_0 = 0.45`$, $`\alpha_{\max} = 0.9`$) |
 

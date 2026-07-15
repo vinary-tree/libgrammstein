@@ -187,7 +187,7 @@ For source of $`n`$ bytes producing $`V`$ graph nodes and $`E`$ edges:
 ## Integration with lling-llang
 
 Under the `lling-llang-integration` feature, a trained `WeightedCFG` exports to a **WFST** through
-the `PcfgWfstExport` trait, so a grammar can be composed into an lling-llang lexical∘grammar∘
+the `PcfgWfstExport` trait, so a grammar can be composed into an lling-llang lexical $`\circ`$ grammar $`\circ`$
 semantic transducer cascade. See [WFST Export](wfst-export.md) and the ecosystem
 [integration docs](../../integration/lling-llang/overview.md).
 

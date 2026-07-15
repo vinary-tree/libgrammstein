@@ -423,7 +423,7 @@ model.prewarm_contexts(&[
 
 ## Next Steps
 
-- [Hierarchical Correction](hierarchical-correction.md): the end-to-end design — noisy channel, dimensions, WFST composition (§5 lattice corrector), and the `T_lex ∘ T_gram` term-id cascade (§6 `GrammarCorrector`)
+- [Hierarchical Correction](hierarchical-correction.md): the end-to-end design — noisy channel, dimensions, WFST composition (§5 lattice corrector), and the $`T_{\text{lex}} \circ T_{\text{gram}}`$ term-id cascade (§6 `GrammarCorrector`)
 - [Dimensions](dimensions.md): each approximate-matching dimension, its weight, the hybrid fusion, and the term-id cascade's word-level edit axis
 - [Dictionary Backend](dictionary-backend.md): why the Levenshtein automaton runs directly over the persistent vocabulary trie (no DoubleArrayTrie export)
 - [Pipeline Assembly](pipeline-assembly.md): the concrete `HierarchicalCorrector` and `GrammarCorrector` APIs

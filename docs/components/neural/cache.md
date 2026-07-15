@@ -46,7 +46,7 @@ an overlapping candidate set — benefit far more than a single cold pass over a
 Hit rate is monotone non-decreasing in capacity for LRU (it has the *stack property* of Mattson
 et al. [[1]](#references)), so raising `cache_size` can never make the hit rate worse — only
 the memory bill. The memory is honest and easy: $`N`$ entries $`\times`$ (768 floats + a
-`u64` key + `Arc` overhead) $`\approx N \times 3.1`$ KB, i.e. **≈ 31 MB at the default
+`u64` key + `Arc` overhead) $`\approx N \times 3.1`$ KB, i.e. **$`\approx 31`$ MB at the default
 $`N = 10\,000`$**.
 
 ## 3. `EmbeddingCache`: lock-free payload, mutex-guarded recency
@@ -205,7 +205,7 @@ caller attends over the full history for the current step, while the *stored* ca
 > **Trap 2 — the defaults do not describe ModernBERT-base.** `CacheConfig::default()` has
 > `num_layers: 12`. ModernBERT-base has **22** layers. (`num_heads: 12` and `head_dim: 64` *are*
 > right — they multiply to the 768 hidden size.) Sizing a cache from the defaults under-counts
-> $`(\mathrm{C3})`$ by $`1 - 12/22 \approx 45\%`$; the true figure at $`T = 8192`$ is ≈ 1.11 GB.
+> $`(\mathrm{C3})`$ by $`1 - 12/22 \approx 45\%`$; the true figure at $`T = 8192`$ is $`\approx 1.11`$ GB.
 
 ```rust
 pub struct CacheConfig {

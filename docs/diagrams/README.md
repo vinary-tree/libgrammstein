@@ -29,9 +29,12 @@ plantuml -tsvg docs/diagrams/correction-component-map.puml
   says what the diagram draws, a `' Render:` line with its exact command, and a
   `' Source of truth for Figure N in <doc> §M` provenance back-reference. That
   header — not this index — is the authority for a diagram's exact figure number.
-- **Unicode in labels.** Diagram labels use Unicode glyphs (`⊕`, `⊗`, `ℙ`, `∘`,
-  `ε`) because SVG cannot typeset MathJax — the one place the docs' "LaTeX for math
-  prose" rule is deliberately inverted (see the Notation note in
+- **Math in labels uses PlantUML `<latex>`.** Mathematical formulae in diagram
+  labels are typeset with PlantUML `<latex>…</latex>` — the bundled JLaTeXMath
+  renders vector math straight into the SVG — honouring the docs' "LaTeX for math
+  prose" rule (e.g. the `arch-*` and `correction-*` diagrams). Non-mathematical
+  Unicode (box-drawing, flow arrows, bullet separators) stays as glyphs (see the
+  Notation note in
   [`../integration/lling-llang/hierarchical-correction.md`](../integration/lling-llang/hierarchical-correction.md)).
 
 ## Index
@@ -315,7 +318,7 @@ record (the `grammar-corrector-*` and `correction-sharded-routing` diagrams).
 | `correction-dimensions` | The $`N`$ heterogeneous matching dimensions, each with its own metric and engine, fused into one joint score by a semiring |
 | `correction-wfst-composition` | Why the joint search is *literally* N-dimensional: composition ⇒ a product automaton over state tuples ⇒ an $`n`$-D DP grid |
 | `correction-pipeline` | Correction as a lattice that is expanded, pruned, reweighted, then collapsed |
-| `correction-cascade` | The `T_lex ∘ T_gram` cascade — two Levenshtein automata over a term-id alphabet, decoded by a history-indexed beam |
+| `correction-cascade` | The $`T_{\text{lex}} \circ T_{\text{gram}}`$ cascade — two Levenshtein automata over a term-id alphabet, decoded by a history-indexed beam |
 | `correction-sharded-routing` | One n-gram lookup under sharding: route `(first-token, order)` by the importer's own pure function, open that one shard read-only, view it as `u64` n-grams — anchored vs. fanout neighbors |
 | `grammar-corrector-seam` | `GrammarCore<P: NgramViewSource>` holds the whole beam decoder; `SingleView` / `ShardedView` are the two sources, and both public correctors are thin newtypes over the identical path |
 | `grammar-corrector-colocation` | Co-location: the importer's store router and the query's view router are the *same* pure function of `(first_token, order)`, so the shard that stores a key answers it |

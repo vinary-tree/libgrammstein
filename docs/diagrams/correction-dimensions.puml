@@ -16,18 +16,18 @@ skinparam rectangle {
 }
 skinparam ArrowColor #37474F
 skinparam ArrowFontColor #37474F
-title N-dimensional approximate matching — heterogeneous axes fused by a semiring
+title <latex>N</latex>-dimensional approximate matching — heterogeneous axes fused by a semiring
 
-rectangle "**noisy channel**\nŵ = argmax ℙ(x│w)·ℙ(w)" as nc #455A64
+rectangle "**noisy channel**\n<latex>\hat{w} = \operatorname*{argmax}\, \mathbb{P}(x \mid w) \cdot \mathbb{P}(w)</latex>" as nc #455A64
 
 rectangle "**DIM 1 · Orthographic**\nedit distance (a metric)\nliblevenshtein automaton" as d1 #1565C0
-rectangle "**DIM 2 · Phonetic**\narticulatory sound-alike\nliblevenshtein — fused with DIM 1 in T_lex" as d2 #1E88E5
+rectangle "**DIM 2 · Phonetic**\narticulatory sound-alike\nliblevenshtein — fused with DIM 1 in <latex>T_{\text{lex}}</latex>" as d2 #1E88E5
 rectangle "**DIM 3 · Syntactic**\nCFG membership (constraint)\nlling-llang CfgFilter" as d3 #6A1B9A
-rectangle "**DIM 4 · Contextual**\n−log ℙ(w│ctx) (likelihood)\nlibgrammstein MKN n-gram" as d4 #2E7D32
-rectangle "**DIM 5 · Semantic**\ncos-similarity → pseudo-ℙ\nlibgrammstein embeddings" as d5 #388E3C
+rectangle "**DIM 4 · Contextual**\n<latex>-\log \mathbb{P}(w \mid \text{ctx})</latex> (likelihood)\nlibgrammstein MKN n-gram" as d4 #2E7D32
+rectangle "**DIM 5 · Semantic**\ncos-similarity → pseudo-<latex>\mathbb{P}</latex>\nlibgrammstein embeddings" as d5 #388E3C
 
-rectangle "**Semiring**  (K, ⊕, ⊗, 0̄, 1̄)\n⊗ combines factors along a path\n⊕ selects among competing paths\nTropical: (min, +)   Log: (logsumexp, +)" as sr #00838F
-rectangle "**joint score**\nbest correction = shortest / max-ℙ path" as js #455A64
+rectangle "**Semiring**  <latex>(K, \oplus, \otimes, \bar{0}, \bar{1})</latex>\n<latex>\otimes</latex> combines factors along a path\n<latex>\oplus</latex> selects among competing paths\nTropical: <latex>(\min, +)</latex>   Log: <latex>(\operatorname{logsumexp}, +)</latex>" as sr #00838F
+rectangle "**joint score**\nbest correction = shortest / max-<latex>\mathbb{P}</latex> path" as js #455A64
 
 nc --> d1 : channel
 nc --> d2 : channel

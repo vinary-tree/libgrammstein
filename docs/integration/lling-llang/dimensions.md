@@ -48,7 +48,7 @@ path and $`\oplus`$ selects among competing paths.
 - **Weight:** an articulatory cost $`\le 0`$ (a sound-alike *discount*), **fused
   into** the orthographic edit cost so a homophone competes directly with an
   orthographic neighbor — not applied as a separate rescore.
-- **Realization:** the shipped path is the cascade's `T_lex` (feature
+- **Realization:** the shipped path is the cascade's $`T_{\text{lex}}`$ (feature
   `phonetic-correction`), scoring each candidate by edit **and** articulatory cost
   in one query (see [hierarchical-correction.md](./hierarchical-correction.md) §6.3).
   lling-llang offers a `PhoneticRescoreLayer` and libgrammstein a standalone
@@ -127,7 +127,7 @@ concerns as a **cascade over a shared term-id alphabet** — and in doing so pro
 a concern the lattice leaves implicit into a first-class dimension. Its pipeline is
 literally **characters $`\rightarrow`$ term-ids $`\rightarrow`$ n-gram windows**:
 
-1. **`T_lex` (characters $`\rightarrow`$ term-ids)** folds Dimensions 1 and 2 into one
+1. **$`T_{\text{lex}}`$ (characters $`\rightarrow`$ term-ids)** folds Dimensions 1 and 2 into one
    stage. A Levenshtein / articulatory automaton maps a token's *characters* to
    candidate vocabulary **term-ids**, scoring each with
    $`\text{cost} = \text{edit\_distance} + \text{phonetic\_cost}`$: the sound-alike
@@ -135,7 +135,7 @@ literally **characters $`\rightarrow`$ term-ids $`\rightarrow`$ n-gram windows**
    orthographic cost rather than applied as a separate rescore. Same Damerau–Levenshtein
    metric as Dimension 1, over the character alphabet.
 
-2. **`T_gram` (term-ids $`\rightarrow`$ n-gram windows) — the new axis.** Treating each
+2. **$`T_{\text{gram}}`$ (term-ids $`\rightarrow`$ n-gram windows) — the new axis.** Treating each
    term-id as a single alphabet symbol, a *word-level* Levenshtein automaton edits
    whole *sequences* of term-ids against the stored n-grams. Its metric is
    Damerau–Levenshtein over **words** — insertion, deletion, and substitution of
@@ -151,14 +151,14 @@ literally **characters $`\rightarrow`$ term-ids $`\rightarrow`$ n-gram windows**
 
 | Axis | Alphabet | Metric / field | Stage |
 |---|---|---|---|
-| Dimensions 1–2 (folded) | characters | Damerau edit $`+`$ phonetic discount | `T_lex` |
-| **word-level edit (new)** | **term-ids** | **Damerau edit over words** | `T_gram` |
+| Dimensions 1–2 (folded) | characters | Damerau edit $`+`$ phonetic discount | $`T_{\text{lex}}`$ |
+| **word-level edit (new)** | **term-ids** | **Damerau edit over words** | $`T_{\text{gram}}`$ |
 | Dimension 4 (counts only) | n-gram windows | $`-\log S`$ (stupid backoff) | source model |
 
-The term-ids `T_lex` emits are exactly the vocabulary indices the n-gram store is
+The term-ids $`T_{\text{lex}}`$ emits are exactly the vocabulary indices the n-gram store is
 keyed by, so the two stages share one coherent alphabet with no translation layer.
 Because both stages are Damerau–Levenshtein automata differing *only* in their
-alphabet — characters for `T_lex`, term-ids for `T_gram` — the cascade is approximate
+alphabet — characters for $`T_{\text{lex}}`$, term-ids for $`T_{\text{gram}}`$ — the cascade is approximate
 matching at two granularities of one engine, closed by a single source-model
 rescore. Its joint objective is the minimum-cost decode of §6.1 in
 [hierarchical-correction.md](./hierarchical-correction.md) — the term-id analogue of

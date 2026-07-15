@@ -29,7 +29,7 @@ endlegend
 rectangle "**GrammarCorrector<D>**\nsingle store — verbatim public API" as gc #455A64
 rectangle "**ShardedGrammarCorrector**\nsharded corpus\n+ grammar_neighbors_fanout" as sgc #455A64
 
-rectangle "**GrammarCore<P: NgramViewSource>**\nT_lex · stupid-backoff · layered beam\nresolves a view PER lookup" as core #1565C0
+rectangle "**GrammarCore<P: NgramViewSource>**\n<latex>T_{\text{lex}}</latex> · stupid-backoff · layered beam\nresolves a view PER lookup" as core #1565C0
 
 rectangle "**trait NgramViewSource**\nview_for(first_id, key_len) → Option<View>\nwhole_view() → Option<View>" as trait #6A1B9A
 rectangle "**SingleView<D>**\nignores routing;\nreturns the one whole-store view" as single #6A1B9A

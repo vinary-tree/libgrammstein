@@ -192,7 +192,7 @@ n-gram trie through a `dictionary_factory` closure).
 | Scenario | Strategy | Weight |
 |---|---|---|
 | General purpose, both models reliable | `Linear` | $`\alpha \approx 0.8`$ |
-| Components on different score scales | `LogLinear` | `$\alpha \approx 0.6$–$0.8$` |
+| Components on different score scales | `LogLinear` | $`\alpha \approx 0.6`$–$`0.8`$ |
 | Large, high-quality n-gram corpus | `NgramWithEmbeddingFallback` | — |
 | High OOV rate / mixed vocabulary | `Dynamic` | $`\alpha_0 = 0.7,\ \alpha_{\max} = 0.95`$ |
 

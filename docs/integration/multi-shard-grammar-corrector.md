@@ -1,6 +1,6 @@
 # Multi-shard grammar corrector
 
-This document is the design record for running the `T_lex ∘ T_gram` grammar corrector
+This document is the design record for running the $`T_{\text{lex}} \circ T_{\text{gram}}`$ grammar corrector
 (`src/integration/grammar_corrector.rs`) over the **sharded** Google-Books n-gram
 corpus. It captures the one-seam refactor, the blocker and four must-fixes a design
 review surfaced (plus a fifth completeness gap found in a later pass), and how each is
@@ -14,8 +14,8 @@ the façade's API surface in
 ## 1. Motivation
 
 The single-store [`GrammarCorrector<D>`](grammar_corrector.rs) decodes a sentence by a
-layered noisy-channel beam over a term-id alphabet: `T_lex` corrects a token's
-*characters* to vocabulary term-ids, `T_gram` corrects a sentence's *words* against the
+layered noisy-channel beam over a term-id alphabet: $`T_{\text{lex}}`$ corrects a token's
+*characters* to vocabulary term-ids, $`T_{\text{gram}}`$ corrects a sentence's *words* against the
 known n-grams (via the carrier-generic [`U64NgramView`](../../src/ngram/u64_view.rs)),
 and a *stupid-backoff* source score (Brants et al., 2007) ranks hypotheses. See
 [`grammar_corrector.rs`](../../src/integration/grammar_corrector.rs) for the model.
@@ -106,9 +106,9 @@ same inputs — so the shard that *stores* an exact key is the shard that *answe
 
 > **The Adaptive caveat.** Under `Adaptive` granularity, order-1 and order-≥2 n-grams
 > split across shards. The successor oracle must therefore fetch the view for the
-> **produced** length `` $`\lvert h\rvert + 1`$ `` (the length of `` $`h\cdot v`$ ``), then
-> walk to the `` $`\lvert h\rvert`$ ``-depth node and read its edges — *not* the view for
-> `` $`\lvert h\rvert`$ ``. Fetching at the history length would land the history node in
+> **produced** length $`\lvert h\rvert + 1`$ (the length of $`h\cdot v`$), then
+> walk to the $`\lvert h\rvert`$-depth node and read its edges — *not* the view for
+> $`\lvert h\rvert`$. Fetching at the history length would land the history node in
 > the wrong (unigram-vs-bigram) shard. The bridge check likewise routes by its own
 > produced length.
 
@@ -157,7 +157,7 @@ transducer's synchronization contract.
 \texttt{U64NgramView<SharedARTrie<u64>>} : \texttt{MappedDictionary<Value=u64>} + \texttt{Clone}
 ```
 
-with node `` $`\texttt{Unit}=\texttt{u64}`$ ``, `` $`\texttt{Value}=\texttt{u64}`$ `` — the
+with node $`\texttt{Unit}=\texttt{u64}`$, $`\texttt{Value}=\texttt{u64}`$ — the
 byte overlay node already projects `Unit = u8` (a `VarintByteUnit`) and `Value = u64`, so
 no new node machinery is needed (that is M1).
 
@@ -229,9 +229,9 @@ None` **and** the open-only `view_for`.
 
 ## 8. M3 — residency
 
-An n-gram order `` $`\le 5`$ `` means one `correct()` score touches at most ~5 distinct
+An n-gram order $`\le 5`$ means one `correct()` score touches at most ~5 distinct
 first-token shards. Under the default `CpuProportional` granularity
-`` $`\text{num\_shards} = \max(2C, 8)`$ `` which is `` $`\le`$ `` the historical default cap
+$`\text{num\_shards} = \max(2C, 8)`$ which is $`\le`$ the historical default cap
 of 32, so hash routing does not thrash; prefix granularities (676 shards) with a small cap
 would. Query mode sidesteps the question entirely: `max_open_shards = 0` keeps every
 touched shard resident and never evicts, so residency is all-resident by construction. The
@@ -252,15 +252,16 @@ first-token-edit neighbors. Rather than pretend otherwise, the sharded corrector
 two surfaces:
 
 - **`grammar_neighbors` (anchored)** — walks the single shard of the query's own
-  `(first-token, length)`. It returns exactly `` $`\{\,s \in \text{stored} : d(s,q) \le k
-  \wedge \operatorname{shard}(s) = \operatorname{shard}(q)\,\}`$ ``. This is *precisely*
+  `(first-token, length)`. It returns exactly
+  $`\{\,s \in \text{stored} : d(s,q) \le k \wedge \operatorname{shard}(s) = \operatorname{shard}(q)\,\}`$.
+  This is *precisely*
   what the decoder relies on — the successor oracle consults co-located continuations for a
   **non-empty** history (its common case); at an empty history it fans out over every shard
   instead (§9.2) — so it is the honest default and imposes no cost on the hot path.
 - **`grammar_neighbors_fanout` (opt-in)** — walks **every** shard
   (`discover_shard_files`), runs the word-level Levenshtein query against each, and merges
   by term-id sequence (min distance, max frequency). It restores the full single-store
-  soundness + completeness contract `` $`\{\,s \in \text{stored} : d(s,q) \le k\,\}`$ ``,
+  soundness + completeness contract $`\{\,s \in \text{stored} : d(s,q) \le k\,\}`$,
   including first-token-edit neighbors. It is a batch / offline operation.
 
 `d(\cdot,\cdot)` is standard word-level Levenshtein distance (unit-cost insert / delete /
@@ -297,8 +298,8 @@ root edge ids, and de-duplicates (a first-token can root several length classes 
 degenerate empty-sequence `grammar_neighbors` query.
 
 **Completeness (set equality).** The fan-out returns *exactly* the unigram set the single
-store enumerates from its whole view. Writing `` $`\varepsilon`$ `` for the empty history
-and `` $`\operatorname{RootEdges}(\cdot)`$ `` for the set of term-ids on a trie root's
+store enumerates from its whole view. Writing $`\varepsilon`$ for the empty history
+and $`\operatorname{RootEdges}(\cdot)`$ for the set of term-ids on a trie root's
 out-edges:
 
 ```math
@@ -318,30 +319,30 @@ de-dup only collapses a first-token id reached through several length-class shar
 a **parity** property, verified *directly at the view level* — not merely through decoder
 output — by `sharded_successors_match_single_store_empty_and_nonempty_history`
 (`tests/sharded_grammar_corrector_proptest.rs`), which asserts
-`` $`\texttt{successors}_{\text{sharded}}(\varepsilon) = \texttt{successors}_{\text{single}}(\varepsilon)`$ ``
+$`\texttt{successors}_{\text{sharded}}(\varepsilon) = \texttt{successors}_{\text{single}}(\varepsilon)`$
 (and agreement on a non-empty history) under both a length-invariant (`TwoChar`) and a
 length-sensitive (`Adaptive`) granularity. It fails without the fix: `whole_view() = None`
 gives an empty sharded successor set.
 
 **Cost — no new asymptotic price.** First-position insertion is *already*
-`` $`O(\lvert V\rvert)`$ `` on the single store: at an empty history it enumerates all
-`` $`\lvert V\rvert`$ `` unigrams and bridge-checks each. The sharded fan-out visits each
-shard's root once, so it is the same `` $`O(\lvert V\rvert)`$ `` total edge walk plus an
-`` $`O(n_{\text{shards}})`$ `` shard-open overhead. It fires **at most once per
+$`O(\lvert V\rvert)`$ on the single store: at an empty history it enumerates all
+$`\lvert V\rvert`$ unigrams and bridge-checks each. The sharded fan-out visits each
+shard's root once, so it is the same $`O(\lvert V\rvert)`$ total edge walk plus an
+$`O(n_{\text{shards}})`$ shard-open overhead. It fires **at most once per
 `correct()`** — only when the history is empty, i.e. only for a boundary-less corpus — so it
 adds no new order of cost to the decode. It is *parity*, not a performance gate.
 
-**Honest future work.** The `` $`O(\lvert V\rvert)`$ `` first-position enumeration is
+**Honest future work.** The $`O(\lvert V\rvert)`$ first-position enumeration is
 intrinsic to *both* backends, not an artifact of sharding: neither store carries a
 **reverse (predecessor) index**. The genuinely efficient direction — for the single store
 and the sharded store alike — is to build one, turning "which words can precede this
-context" into an `` $`O(\lvert\text{predecessors}\rvert)`$ `` lookup instead of an
-`` $`O(\lvert V\rvert)`$ `` scan plus bridge filter. That is a future enhancement of the
+context" into an $`O(\lvert\text{predecessors}\rvert)`$ lookup instead of an
+$`O(\lvert V\rvert)`$ scan plus bridge filter. That is a future enhancement of the
 model, not a defect in this fix, which only restores single-store parity.
 
 ## 10. Corpus total `N`
 
-The stupid-backoff normalizer `` $`N=\sum_v f(v)`$ `` (the sum of unigram counts) is
+The stupid-backoff normalizer $`N=\sum_v f(v)`$ (the sum of unigram counts) is
 **injected at construction** (`ShardedGrammarCorrector::new(…, total_count, …)`). No
 persisted corpus-token total exists — the per-shard `ngrams_processed` and the
 `CoordinatorStats` are occurrence counters, not `N` — and unigrams span every shard, so
@@ -359,7 +360,7 @@ already accumulates the token total, supplies it.
 The sharded suite (`tests/sharded_grammar_corrector_proptest.rs`) pins:
 
 - **`fanout_neighbors_are_sound_and_complete`** — `grammar_neighbors_fanout(q, k)` equals
-  the brute-force `` $`\{\,s : d(s,q)\le k\,\}`$ `` over a random multi-shard corpus.
+  the brute-force $`\{\,s : d(s,q)\le k\,\}`$ over a random multi-shard corpus.
 - **`anchored_neighbors_are_the_same_shard_subset`** — `grammar_neighbors(q, k)` equals
   the same-shard subset of that set.
 - **`sharded_correct_matches_single_store`** — `correct()` is identical to a single-store

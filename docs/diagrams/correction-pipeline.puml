@@ -22,7 +22,7 @@ title Correction pipeline — expand → reweight → collapse
 rectangle "**Input**\n\"I saw teh quikc brown fox to the stroe\"" as in #455A64
 rectangle "**0. Tokenize → input lattice**\none original edge per token slot" as tok #455A64
 
-rectangle "**1. LevenshteinCorrectionLayer**  (DIM 1)\nautomaton ∩ Google-Books vocab\nteh→{the·1, ten·1, tea·2}  stroe→{store·1, stroke·2}\nweight = edit distance (Tropical)" as spell #1565C0
+rectangle "**1. LevenshteinCorrectionLayer**  (DIM 1)\nautomaton <latex>\cap</latex> Google-Books vocab\nteh→{the·1, ten·1, tea·2}  stroe→{store·1, stroke·2}\nweight = edit distance (Tropical)" as spell #1565C0
 
 ' The phonetic dimension (DIM 2) is NOT a downstream stage: the shipped
 ' HierarchicalCorrector does orthographic edit only. Its principled realization
@@ -31,9 +31,9 @@ rectangle "**1. LevenshteinCorrectionLayer**  (DIM 1)\nautomaton ∩ Google-Book
 ' candidates edit distance already pre-filtered.
 rectangle "**2. CfgFilterLayer**  (DIM 3)\nEarley parse over the lattice —\ndrop / penalise ungrammatical paths\n(active only when a grammar is supplied)" as cfg #6A1B9A
 
-rectangle "**3. LanguageModelLayer**  (DIM 4+5)\nw' = (1−λ)·w + λ·(−log ℙ(word | context))\nMKN n-gram ⊕ subword embedding" as lm #2E7D32
+rectangle "**3. LanguageModelLayer**  (DIM 4+5)\n<latex>w' = (1-\lambda) \cdot w + \lambda \cdot (-\log \mathbb{P}(\text{word} \mid \text{context}))</latex>\nMKN n-gram <latex>\oplus</latex> subword embedding" as lm #2E7D32
 
-rectangle "**4. viterbi / nbest**\nshortest-path argmax over the semiring" as dec #37474F
+rectangle "**4. viterbi / nbest**\nshortest-path <latex>\operatorname*{argmax}</latex> over the semiring" as dec #37474F
 rectangle "**Output**\n\"I saw the quick brown fox two the store\"" as out #455A64
 
 in --> tok

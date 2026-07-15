@@ -151,7 +151,7 @@ correction reference. *(Rendered from `docs/diagrams/correction-pipeline.puml`.)
 ## The `GrammarCorrector` — the term-id cascade façade
 
 A second, independent corrector in the same module realizes the noisy channel as a
-`T_lex ∘ T_gram` **cascade over a term-id alphabet** rather than a lattice (the theory
+$`T_{\text{lex}} \circ T_{\text{gram}}`$ **cascade over a term-id alphabet** rather than a lattice (the theory
 is in [hierarchical-correction.md](./hierarchical-correction.md) §6). It lives in
 [`src/integration/grammar_corrector.rs`](../../../src/integration/grammar_corrector.rs)
 and shares nothing with the lattice corrector at run time — no `Lattice`, no
@@ -259,7 +259,7 @@ The complete error taxonomy and the model (stupid backoff, the beam decode) are 
 
 ## The `ShardedGrammarCorrector` — the sharded cascade façade
 
-The same `T_lex ∘ T_gram` cascade, scored against the **sharded** Google-Books n-gram
+The same $`T_{\text{lex}} \circ T_{\text{gram}}`$ cascade, scored against the **sharded** Google-Books n-gram
 corpus instead of a single in-memory store. It is a thin delegating newtype over the
 *identical* `GrammarCore` beam decoder that backs `GrammarCorrector` (above), differing
 only in its n-gram **view source**: an `NgramViewSource` that routes each lookup to the one
@@ -324,7 +324,7 @@ and reconstructed in [multi-shard-grammar-corrector.md](../multi-shard-grammar-c
   --all-targets` is clean (0 warnings); the corrector unit + end-to-end tests
   pass (5/5); the full library suite is unchanged (540 passed).
 - The `GrammarCorrector` is gated by the same `lling-llang-integration` feature; its
-  articulatory `T_lex` path additionally requires `phonetic-correction`. It uses
+  articulatory $`T_{\text{lex}}`$ path additionally requires `phonetic-correction`. It uses
   neither lling-llang types nor `google-books` — its count store is any
   `VarintByteUnit` dictionary. Its behavior is covered by the inline tests in
   [`src/integration/grammar_corrector.rs`](../../../src/integration/grammar_corrector.rs)
