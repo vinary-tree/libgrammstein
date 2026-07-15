@@ -79,7 +79,7 @@ let index = RagIndex::with_exact_backend(config);
 The index and the backend are two maps over ids, and the index is the **authority on existence**:
 
 ```math
-\mathcal{I} \;=\; \operatorname{dom} \mu
+\mathcal{I} \;=\; \mathrm{dom}\,\mu
 \qquad\text{is the set of documents that exist} \tag{I1}
 ```
 

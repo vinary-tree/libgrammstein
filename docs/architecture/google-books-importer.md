@@ -176,7 +176,7 @@ See [Memory Optimization §6](memory-optimization.md#6--bounding-the-parse-path-
 The importer wants one count per n-gram, not one per $`(\text{n-gram}, \text{year})`$ row:
 
 ```math
-c(g) \;=\; \sum_{y \in Y} \operatorname{match\_count}(g, y) \tag{G1}
+c(g) \;=\; \sum_{y \in Y} \mathrm{match\_count}(g, y) \tag{G1}
 ```
 
 where $`Y`$ is the configured year filter (all years by default; `--year-range` narrows it, which
@@ -197,9 +197,9 @@ Each token is mapped to a vocabulary index and the index is LEB128-encoded; the 
 concatenation of its tokens' varints:
 
 ```math
-\operatorname{key}(w_1 \cdots w_k) \;=\;
-\operatorname{leb128}\bigl(\iota(w_1)\bigr) \;\Vert\; \cdots \;\Vert\;
-\operatorname{leb128}\bigl(\iota(w_k)\bigr) \tag{G2}
+\mathrm{key}(w_1 \cdots w_k) \;=\;
+\mathrm{leb128}\bigl(\iota(w_1)\bigr) \;\Vert\; \cdots \;\Vert\;
+\mathrm{leb128}\bigl(\iota(w_k)\bigr) \tag{G2}
 ```
 
 LEB128 is self-terminating, so no delimiter byte is needed — which matters here more than
@@ -224,10 +224,10 @@ first token always lands in the same shard regardless of order. Two families of 
 exist:
 
 ```math
-\operatorname{shard}(g) =
+\mathrm{shard}(g) =
 \begin{cases}
 h(w_1) \bmod S & \textbf{hash-based} \;(\texttt{CpuProportional}) \\[4pt]
-\operatorname{prefix}_p(w_1) & \textbf{prefix-based} \;(\texttt{FirstChar},\ \texttt{TwoChar},\ \texttt{Adaptive},\ \texttt{Custom})
+\mathrm{prefix}_p(w_1) & \textbf{prefix-based} \;(\texttt{FirstChar},\ \texttt{TwoChar},\ \texttt{Adaptive},\ \texttt{Custom})
 \end{cases} \tag{G3}
 ```
 
@@ -297,9 +297,9 @@ Re-importing a prefix would be a disaster under increment semantics — every al
 count would double. So the transactional inserts **assign** rather than increment:
 
 ```math
-\operatorname{set}(k, v) \circ \operatorname{set}(k, v) = \operatorname{set}(k, v)
+\mathrm{set}(k, v) \circ \mathrm{set}(k, v) = \mathrm{set}(k, v)
 \qquad\text{whereas}\qquad
-\operatorname{inc}(k, v) \circ \operatorname{inc}(k, v) = \operatorname{inc}(k, 2v) \tag{G4}
+\mathrm{inc}(k, v) \circ \mathrm{inc}(k, v) = \mathrm{inc}(k, 2v) \tag{G4}
 ```
 
 This works precisely *because* each prefix file is complete and self-contained: the file contains
@@ -657,7 +657,7 @@ impossibility.
 | Year aggregation | $`O(R)`$ time, $`O(1)`$ space | one n-gram buffered — the file is sorted |
 | Encode key | $`O(k)`$ | $`k`$ = n-gram order, ≤5 |
 | Route | $`O(1)`$ hash, or $`O(p)`$ prefix | $`p`$ ≤ 2 |
-| Overlay write | $`O(\lvert \operatorname{key} \rvert)`$ amortized | a CAS; no lock |
+| Overlay write | $`O(\lvert \mathrm{key} \rvert)`$ amortized | a CAS; no lock |
 | Checkpoint | $`O(\text{dirty nodes})`$ | slot-level dirty tracking skips clean arenas |
 | Eviction tail | $`O(\min(\text{excess},\ 200\,000))`$ per shard per pass | capped for latency |
 | MKN aggregation | $`O(N)`$, parallel over $`S`$ shards | $`N`$ = distinct n-grams |

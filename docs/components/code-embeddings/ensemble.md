@@ -204,12 +204,12 @@ on:
 
 Model member $`i`$'s cosine for a given pair as a noisy estimate of the truth $`s^{*}`$:
 $`s_i = s^{*} + \varepsilon_i`$, with $`\mathbb{E}[\varepsilon_i] = 0`$,
-$`\operatorname{Var}(\varepsilon_i) = \sigma^{2}`$, and pairwise correlation
-$`\operatorname{Corr}(\varepsilon_i, \varepsilon_j) = \rho`$ for $`i \neq j`$. By $`(\mathrm{E4})`$
+$`\mathrm{Var}(\varepsilon_i) = \sigma^{2}`$, and pairwise correlation
+$`\mathrm{Corr}(\varepsilon_i, \varepsilon_j) = \rho`$ for $`i \neq j`$. By $`(\mathrm{E4})`$
 the ensemble score is the mean $`\bar{s} = \frac{1}{N}\sum_i s_i`$, whose variance is
 
 ```math
-\operatorname{Var}(\bar{s})
+\mathrm{Var}(\bar{s})
 = \frac{\sigma^{2}}{N^{2}} \Bigl( N + N(N-1)\rho \Bigr)
 = \frac{\sigma^{2}}{N}\bigl(1 + (N-1)\rho\bigr)
 \;\xrightarrow[N \to \infty]{}\; \rho \, \sigma^{2} \tag{E7}

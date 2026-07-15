@@ -253,7 +253,7 @@ two surfaces:
 
 - **`grammar_neighbors` (anchored)** — walks the single shard of the query's own
   `(first-token, length)`. It returns exactly
-  $`\{\,s \in \text{stored} : d(s,q) \le k \wedge \operatorname{shard}(s) = \operatorname{shard}(q)\,\}`$.
+  $`\{\,s \in \text{stored} : d(s,q) \le k \wedge \mathrm{shard}(s) = \mathrm{shard}(q)\,\}`$.
   This is *precisely*
   what the decoder relies on — the successor oracle consults co-located continuations for a
   **non-empty** history (its common case); at an empty history it fans out over every shard
@@ -299,15 +299,15 @@ degenerate empty-sequence `grammar_neighbors` query.
 
 **Completeness (set equality).** The fan-out returns *exactly* the unigram set the single
 store enumerates from its whole view. Writing $`\varepsilon`$ for the empty history
-and $`\operatorname{RootEdges}(\cdot)`$ for the set of term-ids on a trie root's
+and $`\mathrm{RootEdges}(\cdot)`$ for the set of term-ids on a trie root's
 out-edges:
 
 ```math
 \texttt{successors}_{\text{sharded}}(\varepsilon)
 \;=\;
-\bigcup_{s \,\in\, \text{shards}} \operatorname{RootEdges}(s)
+\bigcup_{s \,\in\, \text{shards}} \mathrm{RootEdges}(s)
 \;=\;
-\operatorname{RootEdges}(\text{whole store})
+\mathrm{RootEdges}(\text{whole store})
 \;=\;
 \texttt{successors}_{\text{single}}(\varepsilon) .
 ```

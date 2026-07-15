@@ -79,7 +79,7 @@ $`\lvert g \rvert > 1`$, and $`\beta = 1`$ otherwise. A merged group additionall
 Finally, `finalize_corrections` applies the floor, the order, and the cut:
 
 ```math
-\text{output} \;=\; \operatorname{top-}K \bigl\{\, g \;:\; \hat{c}(g) \geq \theta \,\bigr\}
+\text{output} \;=\; \text{top-}K \bigl\{\, g \;:\; \hat{c}(g) \geq \theta \,\bigr\}
 \quad \text{sorted by } \hat{c} \text{ descending} \tag{E3}
 ```
 

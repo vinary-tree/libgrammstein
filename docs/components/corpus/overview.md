@@ -302,7 +302,7 @@ libgrammstein approximates the permutations with $`m`$ seeded hash functions and
 \qquad
 \mathbb{E}\bigl[\hat{J}\bigr] = J,
 \qquad
-\operatorname{Var}\bigl[\hat{J}\bigr] = \frac{J(1-J)}{m}
+\mathrm{Var}\bigl[\hat{J}\bigr] = \frac{J(1-J)}{m}
 \tag{D4}
 ```
 

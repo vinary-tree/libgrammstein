@@ -115,11 +115,11 @@ for metric spaces — and still get a cosine ranking back. See [Backend](backend
 
 ### Retrieval as an argmax
 
-With $`(\mathrm{R2})`$ in hand, retrieval is one line. Writing $`\operatorname{top-\textit{k}}`$ for
+With $`(\mathrm{R2})`$ in hand, retrieval is one line. Writing $`\text{top-}\textit{k}`$ for
 the operator returning the $`k`$ highest-scoring documents:
 
 ```math
-\mathrm{Retrieve}(q, k) \;=\; \operatorname*{top-\textit{k}}_{D \,\in\, \mathcal{D}}\
+\mathrm{Retrieve}(q, k) \;=\; \underset{D \,\in\, \mathcal{D}}{\text{top-}\textit{k}}\
 \bigl\langle\, \widehat{E(q)},\ \widehat{E(D)} \,\bigr\rangle \tag{R4}
 ```
 

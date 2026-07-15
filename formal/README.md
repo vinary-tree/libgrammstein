@@ -561,7 +561,7 @@ $`\text{score}(w) = \exp(-c_{\text{channel}}(w)) \cdot P(w)^{\lambda}`$:
 - `neg_ln_reflect` — $`-\ln`$ is strictly antitone on the positives.
 - `cost_is_neg_log_score` — $`\text{cost}(w) = -\ln(\text{score}(w))`$ (the log-semiring bridge).
 - `min_cost_maximizes_score` — the least-cost hypothesis has the greatest score
-  (so $`\operatorname*{argmin} \text{cost} = \operatorname*{argmax} \text{score}`$ over any candidate set).
+  (so $`\arg\min \text{cost} = \arg\max \text{score}`$ over any candidate set).
 - `map_score_identity` / `min_cost_is_map` — with $`c_{\text{channel}} = -\ln P(x \mid w)`$ and
   $`\lambda = 1`$ the score is the joint $`P(x \mid w) \cdot P(w)`$, which — the evidence $`P(x)`$ being
   constant in $`w`$ — is proportional to the posterior $`P(w \mid x)`$; hence the min-cost

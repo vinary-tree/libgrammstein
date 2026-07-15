@@ -158,7 +158,7 @@ function cached_retrieve(q):                          ▸ EquationRetriever::ret
 **8-bit quantization** of it:
 
 ```math
-Q(x)_j \;=\; \operatorname{trunc}\Bigl( \bigl[\, 127\,x_j \,\bigr]_{-128}^{\,127} \Bigr)
+Q(x)_j \;=\; \mathrm{trunc}\Bigl( \bigl[\, 127\,x_j \,\bigr]_{-128}^{\,127} \Bigr)
 \;\in\; \{-128, \dots, 127\}
 \tag{Q4}
 ```
@@ -181,7 +181,7 @@ exact and small.
 ```
 
 *Proof.* On $`[-1, 1]`$ we have $`127 x_j \in [-127, 127]`$, so the clamp in $`(\mathrm{Q4})`$ is
-inert and $`Q(x)_j = \operatorname{trunc}(127 x_j)`$. Truncation toward zero maps a real $`u`$ to the
+inert and $`Q(x)_j = \mathrm{trunc}(127 x_j)`$. Truncation toward zero maps a real $`u`$ to the
 integer $`m`$ with $`u \in [m, m+1)`$ when $`m \geq 0`$ and $`u \in (m-1, m]`$ when $`m < 0`$; in
 either case the preimage of $`m`$ is an interval of length $`1`$. If $`Q(x)_j = Q(y)_j = m`$ then
 $`127 x_j`$ and $`127 y_j`$ lie in that same unit interval, so $`\lvert 127x_j - 127y_j \rvert < 1`$,

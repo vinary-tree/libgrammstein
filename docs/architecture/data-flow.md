@@ -141,10 +141,10 @@ the vocabulary, the index is encoded as an LEB128 varint, and the n-gram key is 
 **concatenation of its words' varints**:
 
 ```math
-\operatorname{key}(w_1\,w_2 \cdots w_k) \;=\;
-\operatorname{leb128}\bigl(\iota(w_1)\bigr) \;\Vert\;
-\operatorname{leb128}\bigl(\iota(w_2)\bigr) \;\Vert\; \cdots \;\Vert\;
-\operatorname{leb128}\bigl(\iota(w_k)\bigr) \tag{D2}
+\mathrm{key}(w_1\,w_2 \cdots w_k) \;=\;
+\mathrm{leb128}\bigl(\iota(w_1)\bigr) \;\Vert\;
+\mathrm{leb128}\bigl(\iota(w_2)\bigr) \;\Vert\; \cdots \;\Vert\;
+\mathrm{leb128}\bigl(\iota(w_k)\bigr) \tag{D2}
 ```
 
 where $`\Vert`$ is byte concatenation and $`\iota : \text{word} \to \mathbb{N}`$ is the
@@ -156,7 +156,7 @@ Three properties fall out of $`(\mathrm{D2})`$, and each of them matters:
 |---|---|
 | **No delimiter is needed.** LEB128 is self-terminating: the high bit of each byte says "another byte follows". | The obvious alternative — `"the\|quick\|brown"` — corrupts silently the moment a token contains the delimiter. The corpus decides what tokens look like; the encoding must not have opinions. |
 | **Frequent words are short.** Indices are assigned in first-seen order, and Zipf's law [[4]](#references) puts the commonest words first. Indices $`0 \ldots 127`$ occupy one byte. | The hottest keys are also the shortest, so the hottest trie traversals are also the shallowest. |
-| **The key is a prefix-closed byte string.** $`\operatorname{key}(h)`$ is a byte-prefix of $`\operatorname{key}(h\,w)`$. | Backoff is a *prefix truncation*, not a re-encode — see §3.2. |
+| **The key is a prefix-closed byte string.** $`\mathrm{key}(h)`$ is a byte-prefix of $`\mathrm{key}(h\,w)`$. | Backoff is a *prefix truncation*, not a re-encode — see §3.2. |
 
 Index $`0`$ is reserved: a varint of $`0`$ is the byte `\x00`, which is also the prefix that marks
 internal metadata keys. Word indices therefore start at $`1`$.
@@ -287,7 +287,7 @@ stating explicitly what would break without its two invariants:
 | Invariant | What breaks if it is violated |
 |---|---|
 | **Canonicity** — one n-gram, one key, for every reader and every backend | Backoff manufactures the key of a context it may never have inserted explicitly. If two encoders disagree, the lookup misses and the model silently backs off further than it should — inflating perplexity with no error and no crash. |
-| **Prefix-closure** — $`\operatorname{key}(h)`$ is a byte-prefix of $`\operatorname{key}(h\,w)`$ | The backoff chain would have to re-encode a shorter history at every level: $`n`$ vocabulary lookups and $`n`$ allocations per query instead of zero. |
+| **Prefix-closure** — $`\mathrm{key}(h)`$ is a byte-prefix of $`\mathrm{key}(h\,w)`$ | The backoff chain would have to re-encode a shorter history at every level: $`n`$ vocabulary lookups and $`n`$ allocations per query instead of zero. |
 
 ## 5 · Streaming and backpressure
 
@@ -355,7 +355,7 @@ serialized identity. The portable format therefore stores
 | Tokenize | $`O(\lvert s \rvert)`$ | sentence |
 | Extract n-grams | $`O(n \cdot \lvert s \rvert)`$ | sentence — see $`(\mathrm{D1})`$ |
 | Encode key | $`O(k)`$ | n-gram of order $`k`$ |
-| Trie insert | $`O(\lvert \operatorname{key} \rvert)`$ | n-gram |
+| Trie insert | $`O(\lvert \mathrm{key} \rvert)`$ | n-gram |
 | Fit discounts | $`O(N)`$ | one pass over the $`N`$ distinct n-grams |
 | **Training, total** | $`O(C \cdot n)`$ | corpus of $`C`$ tokens |
 | Cache probe | $`O(1)`$ | query |

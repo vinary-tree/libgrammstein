@@ -150,7 +150,7 @@ Score the OOV word's subword-composed vector against the context vector:
 \texttt{estimate}(w, h) =
 \begin{cases}
 -\log \lvert V_e \rvert & \lvert h \rvert = 0 \\[4pt]
-\operatorname{clamp}\bigl(\cos(v_w, v_h) - 1,\ -20,\ -10^{-6}\bigr) & \text{otherwise}
+\mathrm{clamp}\bigl(\cos(v_w, v_h) - 1,\ -20,\ -10^{-6}\bigr) & \text{otherwise}
 \end{cases} \tag{O4}
 ```
 
@@ -187,7 +187,7 @@ how similar each is to $`w`$:
 \texttt{estimate}(w, h) =
 \begin{cases}
 -\log \lvert V_e \rvert & \text{no neighbours, or every } \sigma_i \le 0 \\[4pt]
-\operatorname{clamp}\bigl(\bar{s} - 1,\ -20,\ -10^{-6}\bigr) & \text{otherwise}
+\mathrm{clamp}\bigl(\bar{s} - 1,\ -20,\ -10^{-6}\bigr) & \text{otherwise}
 \end{cases} \tag{O7}
 ```
 

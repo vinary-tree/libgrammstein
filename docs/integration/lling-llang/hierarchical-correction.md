@@ -829,7 +829,7 @@ which already accumulates it, passes it in.
 
 §6.4's `grammar_neighbors` is sound and complete over *one* store. Under sharding a
 **first-token edit** (correcting $`w_0`$ itself) lands in a *different* shard — hash-modulo
-routing ($`\operatorname{hash}(w_0) \bmod n_{\text{shards}}`$, for $`n_{\text{shards}}`$ the
+routing ($`\mathrm{hash}(w_0) \bmod n_{\text{shards}}`$, for $`n_{\text{shards}}`$ the
 shard count) destroys prefix locality — so the anchored `grammar_neighbors`, which walks
 only the query's own first-token shard, structurally cannot see it
 (`sharded_grammar_corrector.rs:359-366`). That is precisely the set the decoder relies on
@@ -841,10 +841,10 @@ the minimum distance and maximum frequency — restoring the single-store soundn
 completeness contract (`sharded_grammar_corrector.rs:376-386,158-202`). Writing $`\text{stored}`$
 for the corpus of stored n-gram term-id sequences, $`q`$ for the query sequence, $`k`$ for
 the word-edit radius, $`d`$ for word-level Damerau–Levenshtein distance, and
-$`\operatorname{shard}(\cdot)`$ for the routing function, the two neighbor sets are:
+$`\mathrm{shard}(\cdot)`$ for the routing function, the two neighbor sets are:
 
 ```math
-\underbrace{\{\, s \in \text{stored} : d(s, q) \le k \,\wedge\, \operatorname{shard}(s) = \operatorname{shard}(q) \,\}}_{\text{anchored (same shard) — the default}}
+\underbrace{\{\, s \in \text{stored} : d(s, q) \le k \,\wedge\, \mathrm{shard}(s) = \mathrm{shard}(q) \,\}}_{\text{anchored (same shard) — the default}}
 \qquad
 \underbrace{\{\, s \in \text{stored} : d(s, q) \le k \,\}}_{\text{fanout (all shards, merged)}}
 ```
@@ -868,12 +868,12 @@ third seam method, `successors(history)` (`grammar_corrector.rs:306-318`, called
 read-only **all-shards root fan-out** (open every shard, union its root edge ids, de-dup)
 that returns *exactly* the single store's whole-view root set
 (`sharded_grammar_corrector.rs:268-285,217-238`). Writing $`\varepsilon`$ for the empty
-history and $`\operatorname{RootEdges}(\cdot)`$ for a trie root's out-edge term-ids:
+history and $`\mathrm{RootEdges}(\cdot)`$ for a trie root's out-edge term-ids:
 
 ```math
 \texttt{successors}_{\text{sharded}}(\varepsilon)
 \;=\;
-\bigcup_{s \,\in\, \text{shards}} \operatorname{RootEdges}(s)
+\bigcup_{s \,\in\, \text{shards}} \mathrm{RootEdges}(s)
 \;=\;
 \texttt{successors}_{\text{single}}(\varepsilon),
 ```

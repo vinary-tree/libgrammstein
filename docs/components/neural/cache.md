@@ -178,7 +178,7 @@ foundation for a future autoregressive head, not as a knob you can turn today.
 If you *do* build on them, know the growth law and the two traps.
 
 ```math
-M_{\text{kv}} \;=\; 2 \cdot B \cdot L \cdot A \cdot T \cdot d_h \cdot \operatorname{sizeof}(\text{dtype}) \tag{C3}
+M_{\text{kv}} \;=\; 2 \cdot B \cdot L \cdot A \cdot T \cdot d_h \cdot \mathrm{sizeof}(\text{dtype}) \tag{C3}
 ```
 
 (the $`2`$ is keys **and** values). At the `CacheConfig` defaults —

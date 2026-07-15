@@ -21,11 +21,11 @@ Every symbol is defined before use. Symbols shared with the importer doc keep th
 | $`k`$ | the **order** of $`g`$: its token count, $`1 \leq k \leq 5`$ |
 | $`w_1`$ | the **first token** — the value routing is computed from |
 | $`\iota(w)`$ | the integer index (term-id) the vocabulary assigns to word $`w`$ |
-| $`\operatorname{leb128}(\cdot)`$ | Little-Endian Base-128 varint encoding (self-terminating) |
+| $`\mathrm{leb128}(\cdot)`$ | Little-Endian Base-128 varint encoding (self-terminating) |
 | $`\Vert`$ | byte-string concatenation |
 | $`h(\cdot)`$ | the routing hash (`std::collections::hash_map::DefaultHasher`) |
 | $`S`$ | number of shards |
-| $`\operatorname{prefix}_p(w)`$ | the lowercase, alphabetic-only, $`p`$-character prefix of $`w`$ |
+| $`\mathrm{prefix}_p(w)`$ | the lowercase, alphabetic-only, $`p`$-character prefix of $`w`$ |
 
 ## The data flow
 
@@ -78,9 +78,9 @@ The stored key is the concatenation of each token's varint-encoded term-id (equa
 importer doc):
 
 ```math
-\operatorname{key}(w_1 \cdots w_k) \;=\;
-\operatorname{leb128}\bigl(\iota(w_1)\bigr) \;\Vert\; \cdots \;\Vert\;
-\operatorname{leb128}\bigl(\iota(w_k)\bigr)
+\mathrm{key}(w_1 \cdots w_k) \;=\;
+\mathrm{leb128}\bigl(\iota(w_1)\bigr) \;\Vert\; \cdots \;\Vert\;
+\mathrm{leb128}\bigl(\iota(w_k)\bigr)
 ```
 
 LEB128 is self-terminating, so the boundaries between tokens are recoverable **without** any
@@ -93,10 +93,10 @@ disjoint from the `\x00`-prefixed metadata keys that share the trie.
 An n-gram is routed by its **first token** $`w_1`$ (equation (G3) of the importer doc):
 
 ```math
-\operatorname{shard}(g) =
+\mathrm{shard}(g) =
 \begin{cases}
 h(w_1) \bmod S & \textbf{hash-based} \;(\texttt{CpuProportional},\ \text{the default}) \\[4pt]
-\operatorname{prefix}_p(w_1) & \textbf{prefix-based} \;(\texttt{FirstChar},\ \texttt{TwoChar},\ \texttt{Adaptive},\ \texttt{Custom})
+\mathrm{prefix}_p(w_1) & \textbf{prefix-based} \;(\texttt{FirstChar},\ \texttt{TwoChar},\ \texttt{Adaptive},\ \texttt{Custom})
 \end{cases}
 ```
 

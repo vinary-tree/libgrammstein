@@ -73,19 +73,19 @@ The centroid, and each sentence's relevance to it:
 \qquad
 \mathbf{c} = \frac{\bar{\mathbf{v}}}{\lVert \bar{\mathbf{v}} \rVert_2},
 \qquad
-\operatorname{rel}(s_i) = \cos(\mathbf{v}_i, \mathbf{c}) \tag{S1}
+\mathrm{rel}(s_i) = \cos(\mathbf{v}_i, \mathbf{c}) \tag{S1}
 ```
 
 Carbonell & Goldstein's MMR [[1]](#references) then selects greedily, trading relevance against
 redundancy:
 
 ```math
-\operatorname{MMR}(s_i) \;=\; \lambda \cdot \operatorname{rel}(s_i)
+\mathrm{MMR}(s_i) \;=\; \lambda \cdot \mathrm{rel}(s_i)
 \;-\; (1 - \lambda) \cdot \max_{s_j \in S} \cos(\mathbf{v}_i, \mathbf{v}_j) \tag{S2}
 ```
 
 ```math
-s^{\ast} \;=\; \operatorname*{arg\,max}_{s_i \in R \setminus S} \operatorname{MMR}(s_i),
+s^{\ast} \;=\; \arg\max_{s_i \in R \setminus S} \mathrm{MMR}(s_i),
 \qquad S \leftarrow S \cup \{ s^{\ast} \} \quad\text{until}\quad \lvert S \rvert = m \tag{S3}
 ```
 
@@ -108,7 +108,7 @@ The trade-off knob is inverted in the config: the field is a *diversity* thresho
 
 **The first pick is special.** With $`S = \varnothing`$ the maximum in $`(\mathrm{S2})`$ is over
 an empty set. The implementation sidesteps this by seeding $`S`$ with the most relevant sentence,
-$`\operatorname*{arg\,max}_i \operatorname{rel}(s_i)`$, *before* the loop begins — so every
+$`\arg\max_i \mathrm{rel}(s_i)`$, *before* the loop begins — so every
 subsequent evaluation of $`(\mathrm{S2})`$ has a non-empty $`S`$ and is well-defined.
 
 ### Ordering the output

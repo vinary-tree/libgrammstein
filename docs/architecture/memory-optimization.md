@@ -243,9 +243,9 @@ the in-flight buffer to a few hundred megabytes regardless of how large the pref
 incrementing one. Assignment is **idempotent**, so replaying it is harmless:
 
 ```math
-\operatorname{set}(k, v) \circ \operatorname{set}(k, v) \;=\; \operatorname{set}(k, v)
+\mathrm{set}(k, v) \circ \mathrm{set}(k, v) \;=\; \mathrm{set}(k, v)
 \qquad\text{whereas}\qquad
-\operatorname{inc}(k, v) \circ \operatorname{inc}(k, v) \;=\; \operatorname{inc}(k, 2v) \tag{M7}
+\mathrm{inc}(k, v) \circ \mathrm{inc}(k, v) \;=\; \mathrm{inc}(k, 2v) \tag{M7}
 ```
 
 $`(\mathrm{M7})`$ is what makes crash recovery trivial. Committed chunks are durable in the WAL;

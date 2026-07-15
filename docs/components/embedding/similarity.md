@@ -53,7 +53,7 @@ returns $`0`$ rather than dividing by zero.
 then scores it against each **raw** row of $`E_{\mathrm{word}}`$:
 
 ```math
-\mathrm{most\_similar}(q, k) = \operatorname*{top\text{-}k}_{\,i \,:\, \mathrm{word}(i) \neq q}\ \cos\!\bigl(v_q,\ E_{\mathrm{word}}[i]\bigr) \tag{C2}
+\mathrm{most\_similar}(q, k) = \underset{i \,:\, \mathrm{word}(i) \neq q}{\text{top-}k}\ \cos\!\bigl(v_q,\ E_{\mathrm{word}}[i]\bigr) \tag{C2}
 ```
 
 > **Note the asymmetry.** The query is subword-**enriched**, but the candidates are the **raw**
@@ -73,7 +73,7 @@ three inputs:
 
 ```math
 r = v_b - v_a + v_c, \qquad
-\mathrm{analogy}(a,b,c,k) = \operatorname*{top\text{-}k}_{\,w \notin \{a,b,c\}}\ \cos(v_w, r) \tag{C3}
+\mathrm{analogy}(a,b,c,k) = \underset{w \notin \{a,b,c\}}{\text{top-}k}\ \cos(v_w, r) \tag{C3}
 ```
 
 > **Argument order matters.** The **first** argument $`a`$ is *subtracted*. To solve the canonical

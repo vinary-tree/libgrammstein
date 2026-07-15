@@ -112,14 +112,14 @@ latency.
 With auto-tuning on, `compute_buffer_batches` evaluates
 
 ```math
-B \;=\; \operatorname{clamp}\!\left(
+B \;=\; \mathrm{clamp}\!\left(
   \left\lfloor \frac{\rho \, M}{S \cdot \hat{b}} \right\rfloor,\; 2,\; 32
 \right),
 \qquad \hat{b} = 100 \text{ bytes}
 \tag{S2}
 ```
 
-and with auto-tuning off it simply takes $`B = \operatorname{clamp}(\texttt{buffer\_batches}, 2, 64)`$.
+and with auto-tuning off it simply takes $`B = \mathrm{clamp}(\texttt{buffer\_batches}, 2, 64)`$.
 The two clamps differ on purpose: an explicit setting is trusted further (up to 64) than a derived
 one (up to 32).
 

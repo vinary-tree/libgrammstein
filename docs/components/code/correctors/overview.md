@@ -122,7 +122,7 @@ For a token $`t`$, each source contributes a candidate set and the ensemble rank
 ```math
 \mathcal{X}(t) \;=\; \bigcup_{s \in \mathcal{S}} \mathcal{X}_s(t),
 \qquad
-\text{output} \;=\; \operatorname{top-}K \bigl\{\, x \in \mathcal{X}(t) \;:\; \hat{c}(x) \geq \theta \,\bigr\} \tag{C3}
+\text{output} \;=\; \text{top-}K \bigl\{\, x \in \mathcal{X}(t) \;:\; \hat{c}(x) \geq \theta \,\bigr\} \tag{C3}
 ```
 
 ordered by descending aggregated confidence $`\hat{c}`$, where $`\theta`$ is `min_confidence` and

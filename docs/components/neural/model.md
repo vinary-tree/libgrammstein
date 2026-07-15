@@ -91,12 +91,12 @@ let mlm_decoder = Linear::new(decoder_weights, Some(decoder_bias));
 The head is the composition
 
 ```math
-\mathbf{z}_t \;=\; \mathbf{E}\,\operatorname{LayerNorm}\!\bigl(\operatorname{GELU}(\mathbf{W}_{\text{dense}}\,\mathbf{h}_t)\bigr) \;+\; \mathbf{b}_{\text{dec}} \tag{N2}
+\mathbf{z}_t \;=\; \mathbf{E}\,\mathrm{LayerNorm}\!\bigl(\mathrm{GELU}(\mathbf{W}_{\text{dense}}\,\mathbf{h}_t)\bigr) \;+\; \mathbf{b}_{\text{dec}} \tag{N2}
 ```
 
 where the decoder matrix **is** the transposed input-embedding matrix $`\mathbf{E}`$ — *weight
 tying* [[6]](#references), which is why `vb.get` fetches `model.embeddings.tok_embeddings.weight`
-rather than a separate decoder tensor. $`\operatorname{GELU}`$ here is the exact
+rather than a separate decoder tensor. $`\mathrm{GELU}`$ here is the exact
 error-function form (`gelu_erf`), matching candle's `ModernBertHead`.
 
 > **Weight tying is a claim about the checkpoint, not an assumption.** ModernBERT-base ships
@@ -271,7 +271,7 @@ mask and must not be fed a padded batch.
 Parameters dominate a short-sequence forward pass:
 
 ```math
-M_{\text{params}} = P \cdot \operatorname{sizeof}(\text{dtype}),
+M_{\text{params}} = P \cdot \mathrm{sizeof}(\text{dtype}),
 \qquad P = 149 \times 10^{6}
 \;\Longrightarrow\;
 M_{\text{params}} \approx 596\ \text{MB (F32)},\quad 298\ \text{MB (BF16)} \tag{N4}
