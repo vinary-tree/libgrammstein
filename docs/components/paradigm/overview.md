@@ -87,7 +87,9 @@ for the confidence of the match at position $`i`$, $`\mu_p`$ for the paradigm's 
 $`n`$ for the token count. Then the score reported for paradigm $`p`$ is
 
 ```math
-\hat{S}_p \;=\; \min\Bigl(1,\ \frac{100}{\max(n,\, 1)} \sum_{\pi \in \Pi_p} \sum_{i \in M_\pi} w_\pi \cdot \mathrm{conf}(\pi, i) \cdot \mu_p \Bigr) \tag{P1}
+\begin{array}{lr}
+\displaystyle \hat{S}_p \;=\; \min\Bigl(1,\ \frac{100}{\max(n,\, 1)} \sum_{\pi \in \Pi_p} \sum_{i \in M_\pi} w_\pi \cdot \mathrm{conf}(\pi, i) \cdot \mu_p \Bigr) & \text{(P1)}
+\end{array}
 ```
 
 Every symbol is defined again, from first principles, in [Detection §2](detection.md#2-notation),

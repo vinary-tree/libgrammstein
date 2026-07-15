@@ -165,7 +165,9 @@ Four components earn a full treatment. The rest are mapped in the [Capability Ma
 word $`w`$ given a history $`h`$. The naïve **Maximum-Likelihood Estimate (MLE)**
 
 ```math
-\mathbb{P}_{\mathrm{MLE}}(w \mid h) = \frac{c(h\,w)}{c(h)} \tag{M1}
+\begin{array}{lr}
+\displaystyle \mathbb{P}_{\mathrm{MLE}}(w \mid h) = \frac{c(h\,w)}{c(h)} & \text{(M1)}
+\end{array}
 ```
 
 assigns **zero** probability to any n-gram never seen in training, which makes
@@ -179,10 +181,12 @@ shorter context, recursively. The discounts are estimated from the corpus's coun
 $`n_i`$ is the number of n-grams occurring exactly $`i`$ times:
 
 ```math
-Y = \frac{n_1}{n_1 + 2 n_2}, \quad
+\begin{array}{lr}
+\displaystyle Y = \frac{n_1}{n_1 + 2 n_2}, \quad
 D_1 = 1 - 2Y\tfrac{n_2}{n_1}, \quad
 D_2 = 2 - 3Y\tfrac{n_3}{n_2}, \quad
-D_{3+} = 3 - 4Y\tfrac{n_4}{n_3} \tag{M2}
+D_{3+} = 3 - 4Y\tfrac{n_4}{n_3} & \text{(M2)}
+\end{array}
 ```
 
 (typically $`D_1 \approx 0.6`$, $`D_2 \approx 0.8`$, $`D_{3+} \approx 0.9`$; the crate's fixed
@@ -190,21 +194,27 @@ fallback discounts, used when count statistics are unavailable, are $`0.75 / 0.8
 highest-order estimate discounts then backs off with weight $`\gamma(h)`$:
 
 ```math
-\mathbb{P}_{\mathrm{MKN}}(w \mid h) = \frac{[\,c(h\,w) - D(c(h\,w))\,]^{+}}{c(h)} + \gamma(h)\,\mathbb{P}_{\mathrm{MKN}}(w \mid h') \tag{M3}
+\begin{array}{lr}
+\displaystyle \mathbb{P}_{\mathrm{MKN}}(w \mid h) = \frac{[\,c(h\,w) - D(c(h\,w))\,]^{+}}{c(h)} + \gamma(h)\,\mathbb{P}_{\mathrm{MKN}}(w \mid h') & \text{(M3)}
+\end{array}
 ```
 
 where $`D(c) = D_1`$ if $`c=1`$, $`D_2`$ if $`c=2`$, $`D_{3+}`$ if $`c \geq 3`$, and $`h'`$ is
 $`h`$ without its oldest word, and the backoff weight is
 
 ```math
-\gamma(h) = \frac{D_1 N_1(h) + D_2 N_2(h) + D_{3+} N_{3+}(h)}{c(h)} \tag{M4}
+\begin{array}{lr}
+\displaystyle \gamma(h) = \frac{D_1 N_1(h) + D_2 N_2(h) + D_{3+} N_{3+}(h)}{c(h)} & \text{(M4)}
+\end{array}
 ```
 
 Lower orders use **continuation counts** $`N_{1+}`$ — *how many distinct contexts a word
 completes* — instead of raw counts, bottoming out at a uniform base:
 
 ```math
-N_{1+}(\bullet\, h\, w) = \bigl\lvert \{\, v : c(v\,h\,w) > 0 \,\} \bigr\rvert \tag{M5}
+\begin{array}{lr}
+\displaystyle N_{1+}(\bullet\, h\, w) = \bigl\lvert \{\, v : c(v\,h\,w) > 0 \,\} \bigr\rvert & \text{(M5)}
+\end{array}
 ```
 
 ```math
@@ -254,12 +264,14 @@ $`\mathbb{P}_e \propto \cos(v_w, v_h)/\tau`$ (cosine similarity of the word vect
 vector, temperature-scaled). Four strategies are available:
 
 ```math
-\begin{aligned}
+\begin{array}{lr}
+\displaystyle \begin{aligned}
 \textbf{Linear:}     &\quad \mathbb{P} = \alpha\,\mathbb{P}_n + (1-\alpha)\,\mathbb{P}_e \\
 \textbf{Log-Linear:} &\quad \mathbb{P} = \exp\!\bigl(\alpha \log \mathbb{P}_n + (1-\alpha) \log \mathbb{P}_e\bigr) \\
 \textbf{Fallback:}   &\quad \mathbb{P} = \mathbb{P}_n \ \text{if}\ w \in V_{\text{ngram}}\ \text{else}\ \mathbb{P}_e \\
 \textbf{Dynamic:}    &\quad \mathbb{P} = \alpha(h)\,\mathbb{P}_n + (1-\alpha(h))\,\mathbb{P}_e, \quad \alpha(h) = \min(\alpha_0 + \kappa \lvert h \rvert,\ \alpha_{\max})
-\end{aligned} \tag{M6}
+\end{aligned} & \text{(M6)}
+\end{array}
 ```
 
 ![Hybrid scoring flow](docs/diagrams/hybrid-scoring.svg)
@@ -335,7 +347,9 @@ to nearest-neighbor search in embedding space: rank documents by **cosine simila
 query vector. For unit-normalized vectors this is just a dot product:
 
 ```math
-\cos(a, b) = \frac{a \cdot b}{\lVert a \rVert\,\lVert b \rVert} = \hat{a} \cdot \hat{b} \tag{M7}
+\begin{array}{lr}
+\displaystyle \cos(a, b) = \frac{a \cdot b}{\lVert a \rVert\,\lVert b \rVert} = \hat{a} \cdot \hat{b} & \text{(M7)}
+\end{array}
 ```
 
 libgrammstein offers two backends with a clean accuracy/latency trade-off *(features: `rag`,
@@ -408,7 +422,9 @@ cluster → describe*. *(feature: `rag`)*
    per-*cluster* rather than per-document, so the top-scoring terms are the cluster's keywords:
 
 ```math
-\text{c-TF-IDF}(t, c) = \mathrm{tf}(t, c)\cdot \log\!\left(1 + \frac{A}{f(t)}\right) \tag{M8}
+\begin{array}{lr}
+\displaystyle \text{c-TF-IDF}(t, c) = \mathrm{tf}(t, c)\cdot \log\!\left(1 + \frac{A}{f(t)}\right) & \text{(M8)}
+\end{array}
 ```
 
 where $`\mathrm{tf}(t, c)`$ is the frequency of term $`t`$ in cluster $`c`$, $`A`$ is the average

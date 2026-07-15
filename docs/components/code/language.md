@@ -37,7 +37,9 @@ Formally, an implementation supplies a classification function that reads **both
 and its node kind:
 
 ```math
-\kappa : \Sigma^{*} \times K_{\mathrm{ts}} \;\longrightarrow\; T \tag{L1}
+\begin{array}{lr}
+\displaystyle \kappa : \Sigma^{*} \times K_{\mathrm{ts}} \;\longrightarrow\; T & \text{(L1)}
+\end{array}
 ```
 
 Both arguments are needed. The node kind alone is ambiguous across grammars (tree-sitter-python
@@ -77,11 +79,15 @@ token sits inside an error region.*
 Two predicates on `TokenType` carry the whole design, and both are exact:
 
 ```math
-T_{\mathrm{corr}} \;=\; T \setminus \{\,\texttt{Comment},\; \texttt{Whitespace}\,\} \tag{L2}
+\begin{array}{lr}
+\displaystyle T_{\mathrm{corr}} \;=\; T \setminus \{\,\texttt{Comment},\; \texttt{Whitespace}\,\} & \text{(L2)}
+\end{array}
 ```
 
 ```math
-T_{\mathrm{fix}} \;=\; \{\,\texttt{Keyword},\; \texttt{Operator},\; \texttt{Punctuation},\; \texttt{BooleanLiteral}\,\} \tag{L3}
+\begin{array}{lr}
+\displaystyle T_{\mathrm{fix}} \;=\; \{\,\texttt{Keyword},\; \texttt{Operator},\; \texttt{Punctuation},\; \texttt{BooleanLiteral}\,\} & \text{(L3)}
+\end{array}
 ```
 
 - **`is_correctable()`** — $`(\mathrm{L2})`$. Comments and whitespace are excluded because editing

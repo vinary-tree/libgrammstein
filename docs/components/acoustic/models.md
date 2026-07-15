@@ -123,7 +123,9 @@ Every model ends the same way: it produces logits $`\mathbf{z} \in \mathbb{R}^U`
 applies a **log-softmax** so the output is a proper log distribution over units:
 
 ```math
-\log\mathrm{softmax}(\mathbf{z})_u = z_u - \log \sum_{u'=0}^{U-1} e^{z_{u'}} \tag{M1}
+\begin{array}{lr}
+\displaystyle \log\mathrm{softmax}(\mathbf{z})_u = z_u - \log \sum_{u'=0}^{U-1} e^{z_{u'}} & \text{(M1)}
+\end{array}
 ```
 
 so that $`\sum_u \exp\bigl(\log \mathbb{P}(u \mid \text{frame})\bigr) = 1`$.
@@ -133,11 +135,13 @@ so that $`\sum_u \exp\bigl(\log \mathbb{P}(u \mid \text{frame})\bigr) = 1`$.
 The baseline is a two-layer perceptron applied to each frame independently — no temporal context:
 
 ```math
-\mathbf{h} = \mathrm{ReLU}\bigl(W_{\mathrm{in}}\mathbf{x} + \mathbf{b}_{\mathrm{in}}\bigr),
+\begin{array}{lr}
+\displaystyle \mathbf{h} = \mathrm{ReLU}\bigl(W_{\mathrm{in}}\mathbf{x} + \mathbf{b}_{\mathrm{in}}\bigr),
 \qquad
 \mathbf{z} = W_{\mathrm{out}}\mathbf{h} + \mathbf{b}_{\mathrm{out}},
 \qquad
-\log \mathbb{P}(\cdot \mid \mathbf{x}) = \log\mathrm{softmax}(\mathbf{z}) \tag{M2}
+\log \mathbb{P}(\cdot \mid \mathbf{x}) = \log\mathrm{softmax}(\mathbf{z}) & \text{(M2)}
+\end{array}
 ```
 
 with $`W_{\mathrm{in}} \in \mathbb{R}^{H \times F}`$ and
@@ -151,9 +155,11 @@ informed by the whole utterance. The input is projected to $`H`$ dimensions and 
 **positional encoding** is added so the otherwise order-agnostic attention knows frame order:
 
 ```math
-\mathrm{PE}[p, 2i] = \sin\!\left(\frac{p}{10000^{\,2i/H}}\right),
+\begin{array}{lr}
+\displaystyle \mathrm{PE}[p, 2i] = \sin\!\left(\frac{p}{10000^{\,2i/H}}\right),
 \qquad
-\mathrm{PE}[p, 2i+1] = \cos\!\left(\frac{p}{10000^{\,2i/H}}\right) \tag{M3}
+\mathrm{PE}[p, 2i+1] = \cos\!\left(\frac{p}{10000^{\,2i/H}}\right) & \text{(M3)}
+\end{array}
 ```
 
 Each of the `num_layers` encoder blocks is a **post-norm** pair of residual sublayers: multi-head
@@ -161,8 +167,10 @@ self-attention then a position-wise feed-forward network. Scaled dot-product att
 frame weight every other frame [[1]](#references):
 
 ```math
-\mathrm{Attn}(Q, K, V) = \mathrm{softmax}\!\left(\frac{Q K^{\top}}{\sqrt{d_k}}\right) V,
-\qquad d_k = \frac{H}{\text{num\_heads}} \tag{M4}
+\begin{array}{lr}
+\displaystyle \mathrm{Attn}(Q, K, V) = \mathrm{softmax}\!\left(\frac{Q K^{\top}}{\sqrt{d_k}}\right) V,
+\qquad d_k = \frac{H}{\text{num\_heads}} & \text{(M4)}
+\end{array}
 ```
 
 with $`Q = \mathbf{x}W_Q`$, $`K = \mathbf{x}W_K`$, $`V = \mathbf{x}W_V`$ reshaped into
@@ -170,19 +178,23 @@ with $`Q = \mathbf{x}W_Q`$, $`K = \mathbf{x}W_K`$, $`V = \mathbf{x}W_V`$ reshape
 nonlinearity:
 
 ```math
-\mathrm{FFN}(\mathbf{x}) = W_2\,\mathrm{GELU}\bigl(W_1 \mathbf{x} + \mathbf{b}_1\bigr) + \mathbf{b}_2 \tag{M5}
+\begin{array}{lr}
+\displaystyle \mathrm{FFN}(\mathbf{x}) = W_2\,\mathrm{GELU}\bigl(W_1 \mathbf{x} + \mathbf{b}_1\bigr) + \mathbf{b}_2 & \text{(M5)}
+\end{array}
 ```
 
 and each sublayer is wrapped in a residual connection and Layer Normalization
 ($`\mu, \sigma^2`$ over the hidden axis, $`\epsilon = 10^{-5}`$):
 
 ```math
-\mathrm{LN}(\mathbf{x}) = \frac{\mathbf{x} - \mu}{\sqrt{\sigma^2 + \epsilon}} \odot \gamma + \beta,
+\begin{array}{lr}
+\displaystyle \mathrm{LN}(\mathbf{x}) = \frac{\mathbf{x} - \mu}{\sqrt{\sigma^2 + \epsilon}} \odot \gamma + \beta,
 \qquad
 \begin{aligned}
 \mathbf{x}' &= \mathrm{LN}_1\bigl(\mathbf{x} + \mathrm{Attn}(\mathbf{x})\bigr) \\
 \mathbf{x}'' &= \mathrm{LN}_2\bigl(\mathbf{x}' + \mathrm{FFN}(\mathbf{x}')\bigr)
-\end{aligned} \tag{M6}
+\end{aligned} & \text{(M6)}
+\end{array}
 ```
 
 A final projection to $`U`$ units and $`(\mathrm{M1})`$ give the per-frame log posteriors.
@@ -193,7 +205,9 @@ The mock returns a uniform log distribution for every frame — a fixed emission
 decoders and pipelines with no neural dependency:
 
 ```math
-\log \mathbb{P}(u \mid \text{frame}) = -\log U \tag{M7}
+\begin{array}{lr}
+\displaystyle \log \mathbb{P}(u \mid \text{frame}) = -\log U & \text{(M7)}
+\end{array}
 ```
 
 ![Neural acoustic model architecture: input projection, the Linear ReLU path and the Transformer encoder stack (positional encoding, multi-head self-attention, add and norm, feed-forward, add and norm), output projection, and log-softmax](../../diagrams/acoustic-model-architecture.svg)

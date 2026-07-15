@@ -65,8 +65,9 @@ not optional).
 A convex combination in **probability** space [[1]](#references):
 
 ```math
-\mathbb{P}_\lambda(w \mid h) \;=\; (1 - \lambda)\,\mathbb{P}_g(w \mid h) \;+\; \lambda\,\mathbb{P}_d(w \mid h)
-\tag{D1}
+\begin{array}{lr}
+\displaystyle \mathbb{P}_\lambda(w \mid h) \;=\; (1 - \lambda)\,\mathbb{P}_g(w \mid h) \;+\; \lambda\,\mathbb{P}_d(w \mid h) & \text{(D1)}
+\end{array}
 ```
 
 $`\lambda = 0`$ is the general model, $`\lambda = 1`$ is the domain model. Because both experts are
@@ -79,9 +80,10 @@ $`\lambda`$. This is the rule to reach for first, and the only one whose weight 
 A convex combination in **log** space:
 
 ```math
-\log \tilde{\mathbb{P}}_\lambda(w \mid h) \;=\; (1 - \lambda)\log \mathbb{P}_g(w \mid h)
-                                        \;+\; \lambda \log \mathbb{P}_d(w \mid h)
-\tag{D2}
+\begin{array}{lr}
+\displaystyle \log \tilde{\mathbb{P}}_\lambda(w \mid h) \;=\; (1 - \lambda)\log \mathbb{P}_g(w \mid h)
+                                        \;+\; \lambda \log \mathbb{P}_d(w \mid h) & \text{(D2)}
+\end{array}
 ```
 
 This is a geometric mean: a low probability from *either* expert strongly suppresses the product
@@ -99,12 +101,13 @@ This is a geometric mean: a low probability from *either* expert strongly suppre
 A hard switch on domain-vocabulary membership:
 
 ```math
-\mathbb{P}(w \mid h) \;=\;
+\begin{array}{lr}
+\displaystyle \mathbb{P}(w \mid h) \;=\;
 \begin{cases}
 \mathbb{P}_d(w \mid h) & \text{if } w \in V_d \\
 \mathbb{P}_g(w \mid h) & \text{otherwise}
-\end{cases}
-\tag{D3}
+\end{cases} & \text{(D3)}
+\end{array}
 ```
 
 Cheap (no second query for in-domain words) and effective when the domain corpus covers its own
@@ -118,11 +121,12 @@ Let the data decide how "in-domain" the current context is, and lean on the doma
 proportionally:
 
 ```math
-\lambda(h) \;=\; \min\Bigl(\lambda_{\max},\;
+\begin{array}{lr}
+\displaystyle \lambda(h) \;=\; \min\Bigl(\lambda_{\max},\;
    \frac{1}{\lvert h \rvert}\sum_{v \in h} \mathbb{1}\bigl[v \in V_d \setminus V_g\bigr]\Bigr),
 \qquad
-\mathbb{P}(w \mid h) \;=\; \bigl(1 - \lambda(h)\bigr)\mathbb{P}_g + \lambda(h)\,\mathbb{P}_d
-\tag{D4}
+\mathbb{P}(w \mid h) \;=\; \bigl(1 - \lambda(h)\bigr)\mathbb{P}_g + \lambda(h)\,\mathbb{P}_d & \text{(D4)}
+\end{array}
 ```
 
 where $`\mathbb{1}[\cdot]`$ is the indicator function (1 if the condition holds, else 0), and
@@ -146,11 +150,12 @@ log-likelihood, since $`\mathrm{PP}(\lambda) = \exp(-\mathrm{LL}(\lambda)/N)`$ a
 is strictly decreasing:
 
 ```math
-\lambda^{*} \;=\; \arg\min_{\lambda \in [0,1]} \mathrm{PP}(\lambda)
+\begin{array}{lr}
+\displaystyle \lambda^{*} \;=\; \arg\min_{\lambda \in [0,1]} \mathrm{PP}(\lambda)
             \;=\; \arg\max_{\lambda \in [0,1]} \mathrm{LL}(\lambda),
 \qquad
-\mathrm{LL}(\lambda) = \sum_{i=1}^{N} \log\bigl((1-\lambda)\,p_i + \lambda\,q_i\bigr)
-\tag{D5}
+\mathrm{LL}(\lambda) = \sum_{i=1}^{N} \log\bigl((1-\lambda)\,p_i + \lambda\,q_i\bigr) & \text{(D5)}
+\end{array}
 ```
 
 The $`p_i`$ and $`q_i`$ **do not depend on $`\lambda`$**. Compute them once — one pass of each
@@ -241,10 +246,11 @@ $`z_i \in \{g, d\}`$ saying which expert generated token $`i`$. The E-step compu
 ("responsibility") that the *domain* expert did, and the M-step sets $`\lambda`$ to its mean:
 
 ```math
-r_i(\lambda) \;=\; \frac{\lambda\,q_i}{(1-\lambda)\,p_i + \lambda\,q_i},
+\begin{array}{lr}
+\displaystyle r_i(\lambda) \;=\; \frac{\lambda\,q_i}{(1-\lambda)\,p_i + \lambda\,q_i},
 \qquad
-\lambda' \;=\; \frac{1}{N}\sum_{i=1}^{N} r_i(\lambda)
-\tag{D6}
+\lambda' \;=\; \frac{1}{N}\sum_{i=1}^{N} r_i(\lambda) & \text{(D6)}
+\end{array}
 ```
 
 Each iteration is guaranteed not to decrease $`\mathrm{LL}`$ [[3]](#references); combined with

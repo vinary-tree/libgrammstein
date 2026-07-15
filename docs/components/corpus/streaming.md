@@ -82,8 +82,9 @@ borrows the document, and that borrow cannot escape the closure, so the sentence
 are materialised before being flattened. Peak residency is therefore
 
 ```math
-\text{resident} \;\approx\; \underbrace{\lvert d \rvert}_{\text{one document}} \;+\; \underbrace{\sum_{s \in d} \lvert s \rvert}_{\text{its sentences}} \;\approx\; 2\,\lvert d \rvert
-\tag{S1}
+\begin{array}{lr}
+\displaystyle \text{resident} \;\approx\; \underbrace{\lvert d \rvert}_{\text{one document}} \;+\; \underbrace{\sum_{s \in d} \lvert s \rvert}_{\text{its sentences}} \;\approx\; 2\,\lvert d \rvert & \text{(S1)}
+\end{array}
 ```
 
 for the largest document $`d`$ — a bounded, predictable cost, but not "one sentence at a time".
@@ -112,11 +113,12 @@ latency.
 With auto-tuning on, `compute_buffer_batches` evaluates
 
 ```math
-B \;=\; \mathrm{clamp}\!\left(
+\begin{array}{lr}
+\displaystyle B \;=\; \mathrm{clamp}\!\left(
   \left\lfloor \frac{\rho \, M}{S \cdot \hat{b}} \right\rfloor,\; 2,\; 32
 \right),
-\qquad \hat{b} = 100 \text{ bytes}
-\tag{S2}
+\qquad \hat{b} = 100 \text{ bytes} & \text{(S2)}
+\end{array}
 ```
 
 and with auto-tuning off it simply takes $`B = \mathrm{clamp}(\texttt{buffer\_batches}, 2, 64)`$.
@@ -138,8 +140,9 @@ The channel holds at most $`B`$ batches. In the worst instant the producer is al
 has filled but not yet sent, and the consumer is holding the batch it is working on, so
 
 ```math
-\text{sentences resident} \;\leq\; (B + 2)\, S
-\tag{S3}
+\begin{array}{lr}
+\displaystyle \text{sentences resident} \;\leq\; (B + 2)\, S & \text{(S3)}
+\end{array}
 ```
 
 At the defaults that is $`34 \times 10\,000 = 340\,000`$ sentences — about 34 MB under the $`\hat{b}`$
@@ -152,8 +155,9 @@ $`\min(\lambda_p, \lambda_c)`$ no matter how deep the queue is; depth only buys 
 Little's law [[1]](#references) makes the relation precise: for a stable queue,
 
 ```math
-L \;=\; \lambda\, W
-\tag{S4}
+\begin{array}{lr}
+\displaystyle L \;=\; \lambda\, W & \text{(S4)}
+\end{array}
 ```
 
 so at the throughput $`\lambda = \min(\lambda_p, \lambda_c)`$, a queue that averages $`L`$ batches
@@ -207,8 +211,9 @@ stop flag; joining it would block forever. Draining the channel frees a slot, th
 the loop head re-checks the flag, and the thread exits. Hence the fixed order:
 
 ```math
-\texttt{store(stop)} \;\prec\; \texttt{drain} \;\prec\; \texttt{join}
-\tag{S5}
+\begin{array}{lr}
+\displaystyle \texttt{store(stop)} \;\prec\; \texttt{drain} \;\prec\; \texttt{join} & \text{(S5)}
+\end{array}
 ```
 
 `Drop` performs this sequence automatically for both `PrefetchingReader` and

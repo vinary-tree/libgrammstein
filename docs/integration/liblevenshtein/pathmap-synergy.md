@@ -72,12 +72,13 @@ landing at depth $`d`$ therefore allocates $`O(d)`$ new nodes and shares the rem
 $`\lvert T \rvert - O(d)`$:
 
 ```math
-\lvert T_{\text{new}} \rvert_{\text{fresh nodes}} = O(d) \le O(m),
+\begin{array}{lr}
+\displaystyle \lvert T_{\text{new}} \rvert_{\text{fresh nodes}} = O(d) \le O(m),
 \qquad
 \text{cost}(v \text{ versions}) = O\bigl(\lvert T \rvert + v \cdot m\bigr)
 \;\;\ll\;\;
-O(v \cdot \lvert T \rvert)
-\tag{P1}
+O(v \cdot \lvert T \rvert) & \text{(P1)}
+\end{array}
 ```
 
 The right-hand comparison in $`(\mathrm{P1})`$ is the whole argument: naïvely, $`v`$ snapshots of an
@@ -247,9 +248,10 @@ pub struct VerificationResult {
 The compression ratio is a *reported measurement*, not a promised constant:
 
 ```math
-\text{compression ratio}
-= \frac{\text{size}(\text{ARTrie on disk})}{\text{size}(\text{PathMap on disk})}
-\tag{P2}
+\begin{array}{lr}
+\displaystyle \text{compression ratio}
+= \frac{\text{size}(\text{ARTrie on disk})}{\text{size}(\text{PathMap on disk})} & \text{(P2)}
+\end{array}
 ```
 
 Verification is a genuine round-trip, not a checksum: `PathMapTranslator::verify` re-opens the source
@@ -275,8 +277,9 @@ lookup faults in only the pages along its own root-to-leaf path, so steady-state
 the *working set* — the n-grams your traffic actually touches — rather than the model:
 
 ```math
-\text{RSS} \;\approx\; \text{pages touched} \;\ll\; \text{size}(\text{model})
-\tag{P3}
+\begin{array}{lr}
+\displaystyle \text{RSS} \;\approx\; \text{pages touched} \;\ll\; \text{size}(\text{model}) & \text{(P3)}
+\end{array}
 ```
 
 For a Google-Books-scale model this is the difference between a process that starts in milliseconds

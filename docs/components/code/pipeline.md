@@ -99,15 +99,19 @@ It maintains a **bounded min-heap** on confidence — a `BinaryHeap` whose `Ord`
 top-$`k`$ selection:
 
 ```math
-\mathrm{top}_k(\mathcal{C}) \;=\; \text{the } \min(k,\, \lvert \mathcal{C}_\theta \rvert) \text{ highest-confidence elements of } \mathcal{C}_\theta,
+\begin{array}{lr}
+\displaystyle \mathrm{top}_k(\mathcal{C}) \;=\; \text{the } \min(k,\, \lvert \mathcal{C}_\theta \rvert) \text{ highest-confidence elements of } \mathcal{C}_\theta,
 \qquad
-\mathcal{C}_\theta \;=\; \{\, c \in \mathcal{C} \;:\; \gamma(c) \ge \theta \,\} \tag{P1}
+\mathcal{C}_\theta \;=\; \{\, c \in \mathcal{C} \;:\; \gamma(c) \ge \theta \,\} & \text{(P1)}
+\end{array}
 ```
 
 computed in
 
 ```math
-O\!\bigl(m \log k\bigr) \text{ time and } \Theta(k) \text{ space} \tag{P2}
+\begin{array}{lr}
+\displaystyle O\!\bigl(m \log k\bigr) \text{ time and } \Theta(k) \text{ space} & \text{(P2)}
+\end{array}
 ```
 
 against the $`O(m \log m)`$ time and $`\Theta(m)`$ space of sort-then-truncate. Each arriving

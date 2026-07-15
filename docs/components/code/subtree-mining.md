@@ -39,9 +39,11 @@ used in association-rule mining, and it is what makes the measure comparable acr
 different sizes:
 
 ```math
-\mathrm{supp}(P) \;=\; \bigl\lvert \{\, i \in \{1, \dots, m\} \;:\; P \sqsubseteq T_i \,\} \bigr\rvert,
+\begin{array}{lr}
+\displaystyle \mathrm{supp}(P) \;=\; \bigl\lvert \{\, i \in \{1, \dots, m\} \;:\; P \sqsubseteq T_i \,\} \bigr\rvert,
 \qquad
-\mathrm{supp\_ratio}(P) \;=\; \frac{\mathrm{supp}(P)}{m} \tag{T1}
+\mathrm{supp\_ratio}(P) \;=\; \frac{\mathrm{supp}(P)}{m} & \text{(T1)}
+\end{array}
 ```
 
 A pattern is **frequent** when its support clears a threshold derived from `min_support`. The
@@ -49,7 +51,9 @@ A pattern is **frequent** when its support clears a threshold derived from `min_
 or $`m`$ may be:
 
 ```math
-\sigma_{\min} \;=\; \max\bigl(\lceil \sigma \cdot m \rceil,\; 1\bigr) \tag{T2}
+\begin{array}{lr}
+\displaystyle \sigma_{\min} \;=\; \max\bigl(\lceil \sigma \cdot m \rceil,\; 1\bigr) & \text{(T2)}
+\end{array}
 ```
 
 This is `MiningResult::min_support_count`. Everything hinges on one property — **anti-monotonicity**
@@ -57,7 +61,9 @@ This is `MiningResult::min_support_count`. Everything hinges on one property —
 to find, never harder.
 
 ```math
-P' \sqsubseteq P \;\;\Longrightarrow\;\; \mathrm{supp}(P') \;\ge\; \mathrm{supp}(P) \tag{T3}
+\begin{array}{lr}
+\displaystyle P' \sqsubseteq P \;\;\Longrightarrow\;\; \mathrm{supp}(P') \;\ge\; \mathrm{supp}(P) & \text{(T3)}
+\end{array}
 ```
 
 Contrapositively: **if a pattern is infrequent, every extension of it is infrequent too.** That is
@@ -130,7 +136,9 @@ Two structural choices deserve emphasis:
   `depth:label` fields joined by `|`:
 
   ```math
-  \mathrm{enc}(P) \;=\; d_1 \!:\! \ell_1 \;\vert\; d_2 \!:\! \ell_2 \;\vert\; \cdots \;\vert\; d_k \!:\! \ell_k \tag{T4}
+\begin{array}{lr}
+\displaystyle   \mathrm{enc}(P) \;=\; d_1 \!:\! \ell_1 \;\vert\; d_2 \!:\! \ell_2 \;\vert\; \cdots \;\vert\; d_k \!:\! \ell_k & \text{(T4)}
+\end{array}
   ```
 
   For example `0:function_definition|1:parameters|1:block`. Because pre-order plus relative depth

@@ -44,6 +44,12 @@ underscore and a bare C<_> is an error. GitHub loads C<textmacros>. A local prev
 I<more permissive than the publishing target> and will silently green-light source that GitHub
 rejects — measure the renderer, do not infer it.
 
+=item B<tagged-math-block> — C<\tag{X}> makes MathJax emit a B<labelled table> (C<mlabeledtr>) whose
+width depends on a container it cannot measure, so GitHub stacks the equation B<vertically>. Rewritten
+as C<\begin{array}{lr} \displaystyle … & \text{(X)} \end{array}>, which is an ordinary row. The
+C<\displaystyle> is load-bearing: C<array> switches to text style and would silently shrink every
+display fraction (measured: 5.47ex → 3.61ex).
+
 =item B<inverted-math-delimiters> — GitHub-flavored Markdown inline math is a backtick span wrapped in
 dollars, C<$`x`$>. The inverted C<`$x$`> is an ordinary code span and renders as literal text.
 
@@ -161,6 +167,43 @@ sub md-map-math(Str $text, &fn --> Str) {
 sub md-map-lines(Str $text, &fn --> Str) {
     my $body = md-lines($text).map({ .[2] == Prose ?? fn(.[1]) !! .[1] }).join("\n");
     $text.ends-with("\n") ?? $body ~ "\n" !! $body;
+}
+
+#| Every ```math block as (first-body-line-number, body-as-one-string).
+#|
+#| Some rules are about the block as a WHOLE rather than about a line: a display equation is one
+#| expression that happens to be typed across several source lines (TeX ignores the newlines), so a
+#| per-line traversal cannot see it. md-map-math / md-map-lines remain correct for the span-level and
+#| delimiter-level rules; this is the third shape.
+sub math-blocks(Str $text) {
+    my $in = False;
+    my @body;
+    my $start = 0;
+    gather for $text.lines.kv -> $i, $line {
+        if !$in && $line ~~ / ^ \h* '```math' \h* $ / { $in = True; @body = (); $start = $i + 2; next }
+        if $in && $line ~~ / ^ \h* '```' \h* $ /      { $in = False; take ($start, @body.join("\n")); next }
+        @body.push($line) if $in;
+    }
+}
+
+#| Rebuild a document with &fn applied to the body of every ```math block, fences left intact.
+sub md-map-math-blocks(Str $text, &fn --> Str) {
+    my $in = False;
+    my @body;
+    my @out;
+    for $text.lines -> $line {
+        if !$in && $line ~~ / ^ \h* '```math' \h* $ / { $in = True; @body = (); @out.push($line); next }
+        if $in && $line ~~ / ^ \h* '```' \h* $ / {
+            $in = False;
+            @out.push(|fn(@body.join("\n")).lines);
+            @out.push($line);
+            next;
+        }
+        $in ?? @body.push($line) !! @out.push($line);
+    }
+    @out.push(|@body) if $in;                       # unterminated fence: emit verbatim, never eat it
+    my $joined = @out.join("\n");
+    $text.ends-with("\n") ?? $joined ~ "\n" !! $joined;
 }
 
 #| Text-mode font macros. Inside these, `\_` renders a literal backslash under MathJax.
@@ -447,7 +490,44 @@ my $rule-render = Rule.new(
     },
 );
 
-my @ALL-RULES = $rule-activity, $rule-underscore, $rule-inverted, $rule-blocked, $rule-abutting, $rule-render;
+#| `X \tag{M1}` -> an array row: the label becomes an ordinary right-hand cell.
+#|
+#| `\displaystyle` is REQUIRED, not decoration: `\begin{array}` switches to TEXT style, which silently
+#| shrinks display fractions (measured: height 5.47ex -> 3.61ex). With it, the height matches the
+#| untagged baseline exactly.
+#|
+#| Two facts from surveying all 462 tagged blocks make this a single uniform rewrite: `\tag` is the
+#| last token in every one of them, and none has a top-level `\\` (so no `gathered` wrapper is ever
+#| needed — a bare `\\` would otherwise start a new array ROW and scramble the layout).
+my regex trailing-tag { '\tag' \h* '{' $<label>=[ <-[}]>* ] '}' \s* $ }
+
+sub fix-tagged-block(Str $body --> Str) {
+    return $body unless $body ~~ &trailing-tag;
+    my $label = ~$/<label>;
+    my $math  = $body.subst(&trailing-tag, '').trim-trailing;
+    "\\begin\{array\}\{lr\}\n\\displaystyle $math & \\text\{($label)\}\n\\end\{array\}";
+}
+
+my $rule-tagged = Rule.new(
+    name        => 'tagged-math-block',
+    applies     => 'md',
+    description => '`\tag{X}` in a ```math block. MathJax renders it as a labelled table whose width depends on a container it does not have, so GitHub stacks the equation VERTICALLY. Use `\begin{array}{lr} \displaystyle … & \text{(X)} \end{array}`.',
+    detect      => sub (Str $file, Str $text) {
+        my @v;
+        for math-blocks($text) -> ($lno, $body) {
+            next unless $body ~~ / '\tag' \h* '{' $<label>=[ <-[}]>* ] '}' /;
+            @v.push: Violation.new(
+                :$file, line => $lno, kind => 'tagged-math-block',
+                excerpt => "\\tag\{{$<label>}\} — renders vertically on GitHub",
+            );
+        }
+        @v;
+    },
+    fix         => -> Str $text { md-map-math-blocks($text, &fix-tagged-block) },
+);
+
+my @ALL-RULES = $rule-activity, $rule-underscore, $rule-inverted, $rule-blocked, $rule-abutting,
+                $rule-tagged, $rule-render;
 
 # ── Driver ───────────────────────────────────────────────────────────────────
 

@@ -175,10 +175,11 @@ warm model server; today, budget for it.
 lossily decoded as UTF-8:
 
 ```math
-P(d) = \max\bigl(\#\{\text{occurrences of ``/Type /Page''}\},\; 1\bigr),
+\begin{array}{lr}
+\displaystyle P(d) = \max\bigl(\#\{\text{occurrences of ``/Type /Page''}\},\; 1\bigr),
 \qquad
-M(d) = \sum_{m \in \mathcal{M}} \#\{\text{occurrences of } m\}
-\tag{P1}
+M(d) = \sum_{m \in \mathcal{M}} \#\{\text{occurrences of } m\} & \text{(P1)}
+\end{array}
 ```
 
 where $`\mathcal{M}`$ is a fixed list of **26 markers** — the word `equation` plus 25 TeX
@@ -186,8 +187,9 @@ macros (`\frac`, `\sum`, `\int`, `\alpha`, …, `\mathbb`, `\mathcal`). Math den
 $`M`$ against an assumed 100 markers-per-page saturation point:
 
 ```math
-\mu(d) = \min\!\left(\frac{M(d)}{100 \cdot P(d)},\; 1\right)
-\tag{P2}
+\begin{array}{lr}
+\displaystyle \mu(d) = \min\!\left(\frac{M(d)}{100 \cdot P(d)},\; 1\right) & \text{(P2)}
+\end{array}
 ```
 
 > **Honest assessment.** $`(\mathrm{P1})`$ and $`(\mathrm{P2})`$ are heuristics over a
@@ -221,14 +223,15 @@ any of `arxiv`, `paper`, `manuscript`, `preprint`, `journal`, `conference`, `pro
 With both backends installed, `auto_select` applies the first rule that matches:
 
 ```math
-\mathrm{backend}(d) =
+\begin{array}{lr}
+\displaystyle \mathrm{backend}(d) =
 \begin{cases}
 \textbf{Nougat} & \text{if } \mu(d) > \tau_\mu \\
 \textbf{Marker} & \text{else if } P(d) > \tau_P \\
 \textbf{Nougat} & \text{else if } A(d) \wedge \mu(d) > 0.1 \\
 \textbf{Marker} & \text{otherwise}
-\end{cases}
-\tag{P3}
+\end{cases} & \text{(P3)}
+\end{array}
 ```
 
 Ahead of the cascade sit two overrides: an explicit `default_backend ≠ Auto` short-circuits
@@ -281,10 +284,11 @@ with convenience methods `page_count()`, `equation_count()` (summed over pages),
 The equation heuristic counts delimiter occurrences on the pre-post-processed LaTeX:
 
 ```math
-\texttt{equation\_count} =
+\begin{array}{lr}
+\displaystyle \texttt{equation\_count} =
 \#\{\texttt{\textbackslash begin\{equation\}}\} + \#\{\texttt{\textbackslash[}\} + \#\{\texttt{\$\$}\}
-\;\;(+\; \#\{\texttt{\textbackslash begin\{align\}}\} \text{ for Nougat})
-\tag{P4}
+\;\;(+\; \#\{\texttt{\textbackslash begin\{align\}}\} \text{ for Nougat}) & \text{(P4)}
+\end{array}
 ```
 
 A display block delimited by a doubled dollar,

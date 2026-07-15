@@ -40,7 +40,9 @@ An n-gram model estimates $`\mathbb{P}(w \mid h)`$, the probability of the next 
 history. The naïve **Maximum-Likelihood Estimate** simply divides counts:
 
 ```math
-\mathbb{P}_{\mathrm{MLE}}(w \mid h) = \frac{c(h\,w)}{c(h)} \tag{M1}
+\begin{array}{lr}
+\displaystyle \mathbb{P}_{\mathrm{MLE}}(w \mid h) = \frac{c(h\,w)}{c(h)} & \text{(M1)}
+\end{array}
 ```
 
 $`(\mathrm{M1})`$ assigns **zero** probability to any n-gram never seen in training. Because a
@@ -64,22 +66,26 @@ count, and so uses **three** discounts — one for singletons, one for count-2 n
 for the rest:
 
 ```math
-D(c) = \begin{cases}
+\begin{array}{lr}
+\displaystyle D(c) = \begin{cases}
 0 & c = 0 \\
 D_1 & c = 1 \\
 D_2 & c = 2 \\
 D_{3+} & c \geq 3
-\end{cases} \tag{M2a}
+\end{cases} & \text{(M2a)}
+\end{array}
 ```
 
 The discounts are estimated from the corpus's *count-of-counts* — $`n_i`$ is the number of
 n-grams occurring exactly $`i`$ times:
 
 ```math
-Y = \frac{n_1}{n_1 + 2\,n_2}, \qquad
+\begin{array}{lr}
+\displaystyle Y = \frac{n_1}{n_1 + 2\,n_2}, \qquad
 D_1 = 1 - 2Y\frac{n_2}{n_1}, \qquad
 D_2 = 2 - 3Y\frac{n_3}{n_2}, \qquad
-D_{3+} = 3 - 4Y\frac{n_4}{n_3} \tag{M2b}
+D_{3+} = 3 - 4Y\frac{n_4}{n_3} & \text{(M2b)}
+\end{array}
 ```
 
 libgrammstein clamps each discount to its natural range ($`D_1 \in [0,1]`$, $`D_2 \in [0,2]`$,
@@ -93,9 +99,11 @@ At the highest order, MKN interpolates a discounted higher-order estimate with a
 lower-order term:
 
 ```math
-\mathbb{P}_{\mathrm{MKN}}(w \mid h) =
+\begin{array}{lr}
+\displaystyle \mathbb{P}_{\mathrm{MKN}}(w \mid h) =
 \frac{\bigl[\,c(h\,w) - D(c(h\,w))\,\bigr]^{+}}{c(h)}
-\;+\; \gamma(h)\,\mathbb{P}_{\mathrm{MKN}}(w \mid h') \tag{M3}
+\;+\; \gamma(h)\,\mathbb{P}_{\mathrm{MKN}}(w \mid h') & \text{(M3)}
+\end{array}
 ```
 
 The backoff weight $`\gamma(h)`$ is chosen to be exactly the mass removed by discounting, which
@@ -104,7 +112,9 @@ at every order. In canonical MKN it aggregates the three discounts over the coun
 words following $`h`$:
 
 ```math
-\gamma(h) = \frac{D_1\,N_1(h) + D_2\,N_2(h) + D_{3+}\,N_{3+}(h)}{c(h)} \tag{M4}
+\begin{array}{lr}
+\displaystyle \gamma(h) = \frac{D_1\,N_1(h) + D_2\,N_2(h) + D_{3+}\,N_{3+}(h)}{c(h)} & \text{(M4)}
+\end{array}
 ```
 
 where $`N_i(h)`$ is the number of distinct words that follow $`h`$ exactly $`i`$ times.
@@ -116,8 +126,10 @@ distinct contexts a word completes* — which measure a word's *versatility* rat
 frequency:
 
 ```math
-\mathbb{P}_{\mathrm{cont}}(w) = \frac{N_{1+}(\bullet, w)}{N_{1+}(\bullet, \bullet)},
-\qquad N_{1+}(\bullet, w) = \bigl\lvert \{\, v : c(v\,w) > 0 \,\} \bigr\rvert \tag{M5}
+\begin{array}{lr}
+\displaystyle \mathbb{P}_{\mathrm{cont}}(w) = \frac{N_{1+}(\bullet, w)}{N_{1+}(\bullet, \bullet)},
+\qquad N_{1+}(\bullet, w) = \bigl\lvert \{\, v : c(v\,w) > 0 \,\} \bigr\rvert & \text{(M5)}
+\end{array}
 ```
 
 This is the **"San Francisco" intuition**: the word *Francisco* is frequent, but it follows
@@ -214,7 +226,9 @@ The shipped code does **not** evaluate the three-count $`\gamma(h)`$ of $`(\math
 Instead it uses the *single-discount* interpolation weight
 
 ```math
-\lambda(h) = \frac{D \cdot N_{1+}(h, \bullet)}{c(h)} \tag{M4$'$}
+\begin{array}{lr}
+\displaystyle \lambda(h) = \frac{D \cdot N_{1+}(h, \bullet)}{c(h)} & \text{(M4$'$)}
+\end{array}
 ```
 
 where $`N_{1+}(h, \bullet)`$ is `unique_continuations` and $`D`$ is the per-count discount of

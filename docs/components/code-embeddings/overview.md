@@ -76,9 +76,11 @@ spots.
 An embedder is a deterministic map from a (snippet, language) pair to a fixed-width vector:
 
 ```math
-f_{\theta} : \Sigma^{*} \times \mathcal{L} \longrightarrow \mathbb{R}^{d},
+\begin{array}{lr}
+\displaystyle f_{\theta} : \Sigma^{*} \times \mathcal{L} \longrightarrow \mathbb{R}^{d},
 \qquad
-v = f_{\theta}(c, \ell) \tag{CE1}
+v = f_{\theta}(c, \ell) & \text{(CE1)}
+\end{array}
 ```
 
 $`\theta`$ is frozen: nothing in this module trains or fine-tunes. The map factors into four
@@ -95,17 +97,21 @@ Every shipped embedder sets `normalize: true` by default, projecting the pooled 
 unit sphere (`normalize_embedding`, which is a no-op when $`\lVert v \rVert_2 = 0`$):
 
 ```math
-\hat{v} \;=\; \frac{v}{\lVert v \rVert_2}
+\begin{array}{lr}
+\displaystyle \hat{v} \;=\; \frac{v}{\lVert v \rVert_2}
 \qquad\text{so that}\qquad
-\lVert \hat{v} \rVert_2 = 1 \tag{CE2}
+\lVert \hat{v} \rVert_2 = 1 & \text{(CE2)}
+\end{array}
 ```
 
 Similarity is then measured by the **cosine** — the inner product of the two directions, which
 discards magnitude and keeps only orientation (`cosine_similarity`):
 
 ```math
-\cos(a, b) \;=\; \frac{\langle a, b \rangle}{\lVert a \rVert_2 \, \lVert b \rVert_2}
-\;\in\; [-1, 1] \tag{CE3}
+\begin{array}{lr}
+\displaystyle \cos(a, b) \;=\; \frac{\langle a, b \rangle}{\lVert a \rVert_2 \, \lVert b \rVert_2}
+\;\in\; [-1, 1] & \text{(CE3)}
+\end{array}
 ```
 
 The shipped function returns $`0`$ when either argument has zero norm, so it is total. Note the
@@ -116,10 +122,12 @@ Normalizing first is not merely cosmetic. For unit vectors the cosine and the Eu
 are **order-equivalent**, because
 
 ```math
-\lVert \hat{a} - \hat{b} \rVert_2^{2}
+\begin{array}{lr}
+\displaystyle \lVert \hat{a} - \hat{b} \rVert_2^{2}
 = \langle \hat{a} - \hat{b},\, \hat{a} - \hat{b} \rangle
 = \lVert \hat{a} \rVert_2^{2} + \lVert \hat{b} \rVert_2^{2} - 2\,\langle \hat{a}, \hat{b} \rangle
-= 2 \bigl(1 - \cos(\hat{a}, \hat{b})\bigr) \tag{CE4}
+= 2 \bigl(1 - \cos(\hat{a}, \hat{b})\bigr) & \text{(CE4)}
+\end{array}
 ```
 
 Since $`t \mapsto 2(1 - t)`$ is strictly decreasing, ranking by descending cosine and ranking by
@@ -137,14 +145,18 @@ agree on how.
 BERT-family sentence objectives train to summarize the whole input [[8]](#references):
 
 ```math
-v^{\mathrm{CLS}} \;=\; H_0 \tag{CE5}
+\begin{array}{lr}
+\displaystyle v^{\mathrm{CLS}} \;=\; H_0 & \text{(CE5)}
+\end{array}
 ```
 
 **Mean pooling** averages every row, which is more robust when the model was never given a
 sentence-level objective [[7]](#references):
 
 ```math
-v^{\mathrm{mean}} \;=\; \frac{1}{L} \sum_{i=0}^{L-1} H_i \tag{CE6}
+\begin{array}{lr}
+\displaystyle v^{\mathrm{mean}} \;=\; \frac{1}{L} \sum_{i=0}^{L-1} H_i & \text{(CE6)}
+\end{array}
 ```
 
 | Model | Pooling in libgrammstein | Where |
@@ -372,7 +384,9 @@ per `ort`'s own setup.
 A forward pass through an $`n`$-layer transformer over $`L`$ tokens of width $`d`$ costs
 
 ```math
-\Theta\bigl(n \cdot (L^{2} d + L d^{2})\bigr) \tag{CE7}
+\begin{array}{lr}
+\displaystyle \Theta\bigl(n \cdot (L^{2} d + L d^{2})\bigr) & \text{(CE7)}
+\end{array}
 ```
 
 — the $`L^{2}d`$ term is self-attention, the $`Ld^{2}`$ term the feed-forward blocks. Two

@@ -49,9 +49,11 @@ The architecture that intent points at is the spectral graph convolution of Kipf
 symmetrically normalized adjacency:
 
 ```math
-H^{(l+1)} \;=\; \sigma\!\left( \hat{A}\, H^{(l)} W^{(l)} \right),
+\begin{array}{lr}
+\displaystyle H^{(l+1)} \;=\; \sigma\!\left( \hat{A}\, H^{(l)} W^{(l)} \right),
 \qquad
-\hat{A} \;=\; \tilde{D}^{-\frac{1}{2}}\,\tilde{A}\,\tilde{D}^{-\frac{1}{2}} \tag{S0}
+\hat{A} \;=\; \tilde{D}^{-\frac{1}{2}}\,\tilde{A}\,\tilde{D}^{-\frac{1}{2}} & \text{(S0)}
+\end{array}
 ```
 
 Everything needed to *feed* $`(\mathrm{S0})`$ exists and is tested: `GnnSemanticScorer::extract_features`
@@ -77,7 +79,9 @@ calling, because they share no machinery at all.
 **absent** from `known_variables`, and then simply ranks the registered names by string similarity:
 
 ```math
-c \;=\; 0.7 \cdot \mathrm{sim}(q, n), \qquad \text{kept only if } \mathrm{sim}(q,n) > 0.5 \tag{S3}
+\begin{array}{lr}
+\displaystyle c \;=\; 0.7 \cdot \mathrm{sim}(q, n), \qquad \text{kept only if } \mathrm{sim}(q,n) > 0.5 & \text{(S3)}
+\end{array}
 ```
 
 No graph is consulted; no node is scored. It is a second lexical corrector with a different
@@ -152,8 +156,10 @@ The corrector converts Levenshtein distance into a bounded similarity by dividin
 string:
 
 ```math
-\mathrm{sim}(a,b) \;=\; 1 \;-\; \frac{d_L(a,b)}{\max\bigl(\lvert a \rvert,\ \lvert b \rvert\bigr)}
-\;\in\; [0, 1] \tag{S1}
+\begin{array}{lr}
+\displaystyle \mathrm{sim}(a,b) \;=\; 1 \;-\; \frac{d_L(a,b)}{\max\bigl(\lvert a \rvert,\ \lvert b \rvert\bigr)}
+\;\in\; [0, 1] & \text{(S1)}
+\end{array}
 ```
 
 with $`\mathrm{sim}(a,a) = 1`$ and $`\mathrm{sim} = 0`$ if either operand is empty. The range
@@ -169,9 +175,11 @@ $`1 - 2/7 \approx 0.71`$, while `foo` versus `bar` scores $`0`$.
 `use_count` $`k_n`$:
 
 ```math
-u(n) \;=\; \frac{\max\bigl(\ln k_n,\ 0\bigr)}{10},
+\begin{array}{lr}
+\displaystyle u(n) \;=\; \frac{\max\bigl(\ln k_n,\ 0\bigr)}{10},
 \qquad
-s(q, n) \;=\; 0.7 \cdot \mathrm{sim}(q, n) \;+\; 0.3 \cdot u(n) \tag{S2}
+s(q, n) \;=\; 0.7 \cdot \mathrm{sim}(q, n) \;+\; 0.3 \cdot u(n) & \text{(S2)}
+\end{array}
 ```
 
 Candidates with $`s > 0.3`$ are kept, deduplicated against the graph-derived candidates, sorted

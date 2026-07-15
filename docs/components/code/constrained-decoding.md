@@ -54,21 +54,27 @@ A single pass builds each chart column by repeatedly applying three rules until 
 **scanning** is what moves the parser to the next column (`advance`).
 
 ```math
-\textbf{Predict:}\quad
+\begin{array}{lr}
+\displaystyle \textbf{Predict:}\quad
 \frac{(A \to \alpha \bullet B\beta,\, j) \in \mathcal{C}_i \qquad B \to \gamma \in R}
-     {(B \to \bullet\gamma,\, i) \in \mathcal{C}_i} \tag{E1}
+     {(B \to \bullet\gamma,\, i) \in \mathcal{C}_i} & \text{(E1)}
+\end{array}
 ```
 
 ```math
-\textbf{Scan:}\quad
+\begin{array}{lr}
+\displaystyle \textbf{Scan:}\quad
 \frac{(A \to \alpha \bullet a\beta,\, j) \in \mathcal{C}_i \qquad \text{input}_i = a}
-     {(A \to \alpha a \bullet \beta,\, j) \in \mathcal{C}_{i+1}} \tag{E2}
+     {(A \to \alpha a \bullet \beta,\, j) \in \mathcal{C}_{i+1}} & \text{(E2)}
+\end{array}
 ```
 
 ```math
-\textbf{Complete:}\quad
+\begin{array}{lr}
+\displaystyle \textbf{Complete:}\quad
 \frac{(B \to \gamma \bullet,\, j) \in \mathcal{C}_i \qquad (A \to \alpha \bullet B\beta,\, k) \in \mathcal{C}_j}
-     {(A \to \alpha B \bullet \beta,\, k) \in \mathcal{C}_i} \tag{E3}
+     {(A \to \alpha B \bullet \beta,\, k) \in \mathcal{C}_i} & \text{(E3)}
+\end{array}
 ```
 
 An input is accepted when some item $`(S \to \gamma \bullet,\, 0)`$ for the start symbol $`S`$, begun
@@ -79,7 +85,9 @@ at position $`0`$, is complete in the current column — exactly `GrammarConstra
 The **admissible set** is every terminal sitting immediately after a dot in the current column:
 
 ```math
-\mathcal{A}_i = \bigl\{\, a \in \Sigma :\ (A \to \alpha \bullet a\beta,\, j) \in \mathcal{C}_i \,\bigr\} \tag{E4}
+\begin{array}{lr}
+\displaystyle \mathcal{A}_i = \bigl\{\, a \in \Sigma :\ (A \to \alpha \bullet a\beta,\, j) \in \mathcal{C}_i \,\bigr\} & \text{(E4)}
+\end{array}
 ```
 
 `GrammarConstraint::valid_tokens` computes $`(\mathrm{E4})`$; `DecodingVocabulary::create_mask` turns it
@@ -87,11 +95,13 @@ into a `TokenMask`, and `TokenMask::apply_to_logits` rewrites the generator's lo
 tokens can never be sampled:
 
 ```math
-\text{logit}'_v =
+\begin{array}{lr}
+\displaystyle \text{logit}'_v =
 \begin{cases}
 \text{logit}_v & v \in \mathcal{A}_i \\
 -\infty & v \notin \mathcal{A}_i
-\end{cases} \tag{E5}
+\end{cases} & \text{(E5)}
+\end{array}
 ```
 
 After the softmax, every $`-\infty`$ logit maps to probability $`0`$, so the renormalized distribution

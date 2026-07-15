@@ -43,13 +43,17 @@ embedding goes to the backend, and everything else is projected into a `Document
 document is the tuple
 
 ```math
-D \;=\; \bigl(\, \mathrm{id},\ \mathrm{uri},\ \mathrm{title},\ \mathrm{synopsis},\ \mathrm{language},\ v_D,\ \mathrm{metadata},\ \mathrm{topics} \,\bigr) \tag{D1}
+\begin{array}{lr}
+\displaystyle D \;=\; \bigl(\, \mathrm{id},\ \mathrm{uri},\ \mathrm{title},\ \mathrm{synopsis},\ \mathrm{language},\ v_D,\ \mathrm{metadata},\ \mathrm{topics} \,\bigr) & \text{(D1)}
+\end{array}
 ```
 
 and the stored projection simply deletes the vector coordinate:
 
 ```math
-\pi(D) \;=\; D \setminus \{\, v_D \,\} \tag{D2}
+\begin{array}{lr}
+\displaystyle \pi(D) \;=\; D \setminus \{\, v_D \,\} & \text{(D2)}
+\end{array}
 ```
 
 $`(\mathrm{D2})`$ is the whole reason `metadata.json` stays small and human-readable while the
@@ -115,8 +119,10 @@ the document yet **not redundant** with each other. Representativeness is measur
 centroid of the document's sentence embeddings,
 
 ```math
-c \;=\; \frac{1}{\lvert R \rvert} \sum_{s \in R} v_s
-\qquad\text{(the mean sentence vector)} \tag{D3}
+\begin{array}{lr}
+\displaystyle c \;=\; \frac{1}{\lvert R \rvert} \sum_{s \in R} v_s
+\qquad\text{(the mean sentence vector)} & \text{(D3)}
+\end{array}
 ```
 
 and the selection greedily maximizes the **Maximal Marginal Relevance** objective of Carbonell &
@@ -124,8 +130,10 @@ Goldstein [[1]](#references), which subtracts a penalty for similarity to what h
 chosen:
 
 ```math
-\mathrm{MMR}(s) \;=\; \lambda \cdot \underbrace{\cos(v_s,\, c)}_{\text{relevance}}
-\;-\; (1 - \lambda) \cdot \underbrace{\max_{s' \in S} \cos(v_s,\, v_{s'})}_{\text{redundancy}} \tag{D4}
+\begin{array}{lr}
+\displaystyle \mathrm{MMR}(s) \;=\; \lambda \cdot \underbrace{\cos(v_s,\, c)}_{\text{relevance}}
+\;-\; (1 - \lambda) \cdot \underbrace{\max_{s' \in S} \cos(v_s,\, v_{s'})}_{\text{redundancy}} & \text{(D4)}
+\end{array}
 ```
 
 The first sentence chosen is simply the most central one ($`S = \varnothing`$, so the penalty is
@@ -133,7 +141,9 @@ vacuous); each subsequent sentence maximizes $`(\mathrm{D4})`$ over the candidat
 libgrammstein derives $`\lambda`$ from the summarizer's `diversity_threshold` (default $`0.3`$):
 
 ```math
-\lambda \;=\; 1 - \texttt{diversity\_threshold} \;=\; 0.7 \tag{D5}
+\begin{array}{lr}
+\displaystyle \lambda \;=\; 1 - \texttt{diversity\_threshold} \;=\; 0.7 & \text{(D5)}
+\end{array}
 ```
 
 so the default weighting is $`70\%`$ relevance against $`30\%`$ diversity. Raising

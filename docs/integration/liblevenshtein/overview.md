@@ -58,9 +58,11 @@ A language model can rank *"the quick brown fox"* above *"teh quikc brwon fox"* 
 first proposes `the` as an alternative to `teh`. That proposal step is a **neighborhood query**:
 
 ```math
-\mathcal{N}_k(W) = \bigl\{\, s \in \Sigma^{*} \;:\; d(W, s) \le k \,\bigr\},
+\begin{array}{lr}
+\displaystyle \mathcal{N}_k(W) = \bigl\{\, s \in \Sigma^{*} \;:\; d(W, s) \le k \,\bigr\},
 \qquad
-\text{answer} \;=\; D \cap \mathcal{N}_k(W) \tag{L1}
+\text{answer} \;=\; D \cap \mathcal{N}_k(W) & \text{(L1)}
+\end{array}
 ```
 
 The naïve implementation computes $`d(W, s)`$ for **every** $`s \in D`$ and keeps the close ones.
@@ -80,7 +82,8 @@ For $`W = w_1 \dots w_m`$ and $`s = s_1 \dots s_\ell`$, let $`d_{i,j}`$ be the d
 prefixes $`w_1 \dots w_i`$ and $`s_1 \dots s_j`$. Levenshtein's recurrence [[3]](#references) is:
 
 ```math
-d_{i,j} =
+\begin{array}{lr}
+\displaystyle d_{i,j} =
 \begin{cases}
 j & i = 0 \\
 i & j = 0 \\
@@ -91,8 +94,8 @@ d_{i,\,j-1} + 1 & \text{(insert } s_j \text{)} \\
 d_{i-1,\,j-1} + [\, w_i \neq s_j \,] & \text{(substitute; a match costs nothing)}
 \end{cases}
 & \text{otherwise}
-\end{cases}
-\tag{L2}
+\end{cases} & \text{(L2)}
+\end{array}
 ```
 
 with $`d(W, s) = d_{m,\ell}`$. libgrammstein does **not** default to $`(\mathrm{L2})`$ as written:
@@ -100,9 +103,10 @@ it selects `Algorithm::Transposition`, which adds Damerau's fourth operation [[4
 an **adjacent transposition** costs one edit rather than two substitutions:
 
 ```math
-d_{i,j} \;\leftarrow\; \min\bigl(\, d_{i,j},\;\; d_{i-2,\,j-2} + 1 \,\bigr)
-\qquad \text{when } w_i = s_{j-1} \;\wedge\; w_{i-1} = s_j
-\tag{L3}
+\begin{array}{lr}
+\displaystyle d_{i,j} \;\leftarrow\; \min\bigl(\, d_{i,j},\;\; d_{i-2,\,j-2} + 1 \,\bigr)
+\qquad \text{when } w_i = s_{j-1} \;\wedge\; w_{i-1} = s_j & \text{(L3)}
+\end{array}
 ```
 
 This matters more than it looks. Transposition is among the most common human typo classes, and
@@ -141,16 +145,20 @@ the query $`W`$ and paid $`e`$ errors doing so."* A **state** $`S`$ is a set of 
 machine tracks every alignment still alive at once. The initial state commits to nothing:
 
 ```math
-S_0 = \bigl\{\, \langle 0, 0 \rangle \,\bigr\} \tag{L4}
+\begin{array}{lr}
+\displaystyle S_0 = \bigl\{\, \langle 0, 0 \rangle \,\bigr\} & \text{(L4)}
+\end{array}
 ```
 
 States are kept small by **subsumption**. A position strictly better than another in both
 coordinates at once makes the other redundant:
 
 ```math
-\langle i, e \rangle \sqsubseteq \langle i', e' \rangle
+\begin{array}{lr}
+\displaystyle \langle i, e \rangle \sqsubseteq \langle i', e' \rangle
 \iff
-e < e' \;\wedge\; \lvert i - i' \rvert \le e' - e \tag{L5}
+e < e' \;\wedge\; \lvert i - i' \rvert \le e' - e & \text{(L5)}
+\end{array}
 ```
 
 If $`\langle i, e \rangle \sqsubseteq \langle i', e' \rangle`$, then every continuation that
@@ -167,16 +175,20 @@ further away is unreachable on the remaining error budget. The **characteristic 
 exactly that window, and nothing else:
 
 ```math
-\chi(x, W, i, k) \;=\;
+\begin{array}{lr}
+\displaystyle \chi(x, W, i, k) \;=\;
 \bigl(\, [\, w_{i+1} = x \,],\; [\, w_{i+2} = x \,],\; \dots,\; [\, w_{i+2k+1} = x \,] \,\bigr)
-\;\in\; \{0, 1\}^{2k+1} \tag{L6}
+\;\in\; \{0, 1\}^{2k+1} & \text{(L6)}
+\end{array}
 ```
 
 Schulz & Mihov's decisive observation [[1]](#references) is that the transition depends **only** on
 $`\chi`$ — never on the concrete symbols of $`W`$:
 
 ```math
-S' = \delta(S, \chi) \tag{L7}
+\begin{array}{lr}
+\displaystyle S' = \delta(S, \chi) & \text{(L7)}
+\end{array}
 ```
 
 Two consequences follow, and together they are the entire reason this design is fast:
@@ -197,12 +209,13 @@ from $`S_0`$. The automaton accepts $`s`$ exactly when some surviving position h
 of $`W`$ within budget:
 
 ```math
-s \in \mathcal{N}_k(W)
+\begin{array}{lr}
+\displaystyle s \in \mathcal{N}_k(W)
 \iff
 \exists\, \langle i, e \rangle \in \hat\delta(S_0, s)
 \;\;\text{with}\;\;
-i = m \;\wedge\; e \le k
-\tag{L8}
+i = m \;\wedge\; e \le k & \text{(L8)}
+\end{array}
 ```
 
 and the least such $`e`$ **is** the edit distance $`d(W, s)`$. This is why a `Candidate` can carry

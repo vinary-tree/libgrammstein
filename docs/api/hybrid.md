@@ -123,7 +123,9 @@ pub enum InterpolationStrategy {
 **`Linear`** — a convex combination of the *probabilities*; predictable, and the default:
 
 ```math
-\mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n(w \mid h) + (1 - \alpha)\,\mathbb{P}_e(w \mid h) \tag{H1}
+\begin{array}{lr}
+\displaystyle \mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n(w \mid h) + (1 - \alpha)\,\mathbb{P}_e(w \mid h) & \text{(H1)}
+\end{array}
 ```
 
 **`LogLinear`** — a convex combination in *log space* (a geometric mean / product-of-experts).
@@ -131,24 +133,30 @@ Use it when the two experts live on different scales: a low probability from *ei
 suppresses the product.
 
 ```math
-\log \mathbb{P}(w \mid h) = \alpha \log \mathbb{P}_n(w \mid h) + (1 - \alpha) \log \mathbb{P}_e(w \mid h) \tag{H2}
+\begin{array}{lr}
+\displaystyle \log \mathbb{P}(w \mid h) = \alpha \log \mathbb{P}_n(w \mid h) + (1 - \alpha) \log \mathbb{P}_e(w \mid h) & \text{(H2)}
+\end{array}
 ```
 
 **`NgramWithEmbeddingFallback`** — a hard switch, tested by `count(&[w]) > 0`. No interpolation
 overhead for known words:
 
 ```math
-\mathbb{P}(w \mid h) = \begin{cases}
+\begin{array}{lr}
+\displaystyle \mathbb{P}(w \mid h) = \begin{cases}
 \mathbb{P}_n(w \mid h) & \text{if } c(w) > 0 \\
 \mathbb{P}_e(w \mid h) & \text{otherwise}
-\end{cases} \tag{H3}
+\end{cases} & \text{(H3)}
+\end{array}
 ```
 
 **`Dynamic`** — linear interpolation whose weight *grows with the available context*, trusting
 the n-gram more as the history lengthens:
 
 ```math
-\alpha(h) = \min\bigl(\alpha_0 + \kappa \cdot \lvert h \rvert,\ \alpha_{\max}\bigr) \tag{H4}
+\begin{array}{lr}
+\displaystyle \alpha(h) = \min\bigl(\alpha_0 + \kappa \cdot \lvert h \rvert,\ \alpha_{\max}\bigr) & \text{(H4)}
+\end{array}
 ```
 
 with `base_alpha` = $`\alpha_0`$, `alpha_per_context` = $`\kappa`$, `max_alpha` = $`\alpha_{\max}`$.
@@ -209,8 +217,10 @@ For a non-empty context the model averages the context words' subword vectors in
 takes the cosine to the candidate's vector $`v_w`$, scales by $`\tau`$, and works in log space:
 
 ```math
-\log \mathbb{P}_e(w \mid h) \;\approx\; \frac{\cos(v_w, v_h)}{\tau} - 1,
-\qquad \text{floored at } \log \varepsilon \tag{H5}
+\begin{array}{lr}
+\displaystyle \log \mathbb{P}_e(w \mid h) \;\approx\; \frac{\cos(v_w, v_h)}{\tau} - 1,
+\qquad \text{floored at } \log \varepsilon & \text{(H5)}
+\end{array}
 ```
 
 For an **empty** context it falls back to the uniform $`-\log \lvert V_e \rvert`$ over the

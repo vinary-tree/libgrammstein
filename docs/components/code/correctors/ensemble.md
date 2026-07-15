@@ -47,7 +47,9 @@ then considered **the same edit** — and hence candidates for merging — exact
 the replacement text and the byte span:
 
 ```math
-k(x) \;=\; \bigl(\, r(x),\; b_0(x),\; b_1(x) \,\bigr) \tag{E1}
+\begin{array}{lr}
+\displaystyle k(x) \;=\; \bigl(\, r(x),\; b_0(x),\; b_1(x) \,\bigr) & \text{(E1)}
+\end{array}
 ```
 
 Notice what is *absent* from $`(\mathrm{E1})`$: the `CorrectionKind` and the `CorrectionSource`. A
@@ -60,12 +62,13 @@ user or does not — and it is what makes cross-source agreement detectable at a
 For a group $`g`$ of corrections sharing a key, `merge_corrections` computes:
 
 ```math
-\hat{c}(g) \;=\;
+\begin{array}{lr}
+\displaystyle \hat{c}(g) \;=\;
 \begin{cases}
 c_1 \, w_1 & \lvert g \rvert = 1 \\[8pt]
 \min\!\left( \beta \cdot \dfrac{\displaystyle\sum_{i \in g} c_i \, w_i}{\displaystyle\sum_{i \in g} w_i},\;\; 1 \right) & \lvert g \rvert > 1
-\end{cases}
-\tag{E2}
+\end{cases} & \text{(E2)}
+\end{array}
 ```
 
 where $`\beta = \texttt{agreement\_boost\_factor}`$ when `agreement_boost` is enabled and
@@ -79,8 +82,10 @@ $`\lvert g \rvert > 1`$, and $`\beta = 1`$ otherwise. A merged group additionall
 Finally, `finalize_corrections` applies the floor, the order, and the cut:
 
 ```math
-\text{output} \;=\; \text{top-}K \bigl\{\, g \;:\; \hat{c}(g) \geq \theta \,\bigr\}
-\quad \text{sorted by } \hat{c} \text{ descending} \tag{E3}
+\begin{array}{lr}
+\displaystyle \text{output} \;=\; \text{top-}K \bigl\{\, g \;:\; \hat{c}(g) \geq \theta \,\bigr\}
+\quad \text{sorted by } \hat{c} \text{ descending} & \text{(E3)}
+\end{array}
 ```
 
 Setting `deduplicate = false` bypasses grouping entirely: every correction is weighted by
@@ -99,7 +104,9 @@ weighted mean is *scale-invariant* in its weights. In particular, if every membe
 the same confidence $`c`$, then for **any** weights whatsoever:
 
 ```math
-\frac{\sum_{i \in g} c \, w_i}{\sum_{i \in g} w_i} \;=\; c \cdot \frac{\sum_i w_i}{\sum_i w_i} \;=\; c \tag{E4}
+\begin{array}{lr}
+\displaystyle \frac{\sum_{i \in g} c \, w_i}{\sum_{i \in g} w_i} \;=\; c \cdot \frac{\sum_i w_i}{\sum_i w_i} \;=\; c & \text{(E4)}
+\end{array}
 ```
 
 The weights cancel. So the very same correction, with the very same confidence $`c`$, is worth
@@ -107,7 +114,9 @@ $`c \, w_s`$ when it stands alone and $`\beta c`$ when corroborated. The **effec
 gain** is therefore not $`\beta`$ but
 
 ```math
-\gamma_s \;=\; \frac{\hat{c}_{\text{corroborated}}}{\hat{c}_{\text{solo}}} \;=\; \frac{\beta \, c}{c \, w_s} \;=\; \frac{\beta}{w_s} \tag{E5}
+\begin{array}{lr}
+\displaystyle \gamma_s \;=\; \frac{\hat{c}_{\text{corroborated}}}{\hat{c}_{\text{solo}}} \;=\; \frac{\beta \, c}{c \, w_s} \;=\; \frac{\beta}{w_s} & \text{(E5)}
+\end{array}
 ```
 
 | Source | $`w_s`$ | $`\gamma_s = \beta / w_s`$ |
@@ -127,7 +136,9 @@ A solo correction from source $`s`$ reaches the output if and only if
 $`\hat{c} = c \, w_s \geq \theta`$, that is:
 
 ```math
-c \;\geq\; \frac{\theta}{w_s} \tag{E6}
+\begin{array}{lr}
+\displaystyle c \;\geq\; \frac{\theta}{w_s} & \text{(E6)}
+\end{array}
 ```
 
 Evaluate the right-hand side with the shipped defaults ($`\theta = 0.3`$):

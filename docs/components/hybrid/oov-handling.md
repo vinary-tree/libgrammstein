@@ -68,8 +68,10 @@ The MKN recursion shortens the history one word at a time and therefore always t
 unigram base case, whose unseen branch returns the **uniform floor**:
 
 ```math
-\mathbb{P}_n(w \mid h) \;\xrightarrow[\text{backoff}]{}\; \mathbb{P}_n(w) = \frac{1}{\lvert V \rvert} > 0
-\qquad\text{whenever } c(w) = 0 \tag{O1}
+\begin{array}{lr}
+\displaystyle \mathbb{P}_n(w \mid h) \;\xrightarrow[\text{backoff}]{}\; \mathbb{P}_n(w) = \frac{1}{\lvert V \rvert} > 0
+\qquad\text{whenever } c(w) = 0 & \text{(O1)}
+\end{array}
 ```
 
 This is `NgramModel::oov_log_prob()` $`= -\log \lvert V \rvert`$. It requires no OOV detection at
@@ -88,11 +90,13 @@ n-grams**, *every* string — seen or unseen — has a vector, and *fastly* land
 turns that geometry into a score:
 
 ```math
-\log \mathbb{P}_e(w \mid h) =
+\begin{array}{lr}
+\displaystyle \log \mathbb{P}_e(w \mid h) =
 \begin{cases}
 -\log \lvert V_e \rvert & \lvert h \rvert = 0 \\[4pt]
 \max\!\left(\dfrac{\cos(v_w, v_h)}{\tau} - 1,\ \log \varepsilon\right) & \text{otherwise}
-\end{cases} \tag{O2}
+\end{cases} & \text{(O2)}
+\end{array}
 ```
 
 ### Layer 3 — the strategy decides how much to trust each
@@ -101,11 +105,13 @@ The four `InterpolationStrategy` variants ([Interpolation](interpolation.md)) al
 $`(\mathrm{O1})`$ and $`(\mathrm{O2})`$; one of them treats OOV as an explicit switch:
 
 ```math
-\texttt{NgramWithEmbeddingFallback}:\quad
+\begin{array}{lr}
+\displaystyle \texttt{NgramWithEmbeddingFallback}:\quad
 \log \mathbb{P}(w \mid h) = \begin{cases}
 \max\bigl(\log \mathbb{P}_n(w \mid h),\ -50\bigr) & c(w) > 0 \\[2pt]
 \max\bigl(\log \mathbb{P}_e(w \mid h),\ -50\bigr) & c(w) = 0
-\end{cases} \tag{O3}
+\end{cases} & \text{(O3)}
+\end{array}
 ```
 
 Note the test is $`c(w) > 0`$ — the **n-gram** unigram count, queried through `ngram.count(&[word])`.
@@ -147,11 +153,13 @@ pub enum OovStrategy {
 Score the OOV word's subword-composed vector against the context vector:
 
 ```math
-\texttt{estimate}(w, h) =
+\begin{array}{lr}
+\displaystyle \texttt{estimate}(w, h) =
 \begin{cases}
 -\log \lvert V_e \rvert & \lvert h \rvert = 0 \\[4pt]
 \mathrm{clamp}\bigl(\cos(v_w, v_h) - 1,\ -20,\ -10^{-6}\bigr) & \text{otherwise}
-\end{cases} \tag{O4}
+\end{cases} & \text{(O4)}
+\end{array}
 ```
 
 This is $`(\mathrm{O2})`$ with $`\tau`$ fixed at $`1`$ and a different clamp. **The two agree
@@ -161,7 +169,9 @@ hybrid's built-in embedding branch compute the same number by different code.
 #### `Uniform`
 
 ```math
-\texttt{estimate}(w, h) = -\log \lvert V_e \rvert \tag{O5}
+\begin{array}{lr}
+\displaystyle \texttt{estimate}(w, h) = -\log \lvert V_e \rvert & \text{(O5)}
+\end{array}
 ```
 
 The embedding analogue of $`(\mathrm{O1})`$: every OOV word gets the same score. Cheap, safe,
@@ -179,16 +189,20 @@ $`w`$'s **$`k`$ nearest in-vocabulary neighbours** fit it, and average their con
 how similar each is to $`w`$:
 
 ```math
-\bar{s} = \frac{\displaystyle\sum_{i=1}^{k} \sigma_i \cdot \cos(v_{w_i}, v_h)}{\displaystyle\sum_{i=1}^{k} \sigma_i},
-\qquad \sigma_i = \cos(v_w, v_{w_i}),\quad \text{summing only over } \sigma_i > 0 \tag{O6}
+\begin{array}{lr}
+\displaystyle \bar{s} = \frac{\displaystyle\sum_{i=1}^{k} \sigma_i \cdot \cos(v_{w_i}, v_h)}{\displaystyle\sum_{i=1}^{k} \sigma_i},
+\qquad \sigma_i = \cos(v_w, v_{w_i}),\quad \text{summing only over } \sigma_i > 0 & \text{(O6)}
+\end{array}
 ```
 
 ```math
-\texttt{estimate}(w, h) =
+\begin{array}{lr}
+\displaystyle \texttt{estimate}(w, h) =
 \begin{cases}
 -\log \lvert V_e \rvert & \text{no neighbours, or every } \sigma_i \le 0 \\[4pt]
 \mathrm{clamp}\bigl(\bar{s} - 1,\ -20,\ -10^{-6}\bigr) & \text{otherwise}
-\end{cases} \tag{O7}
+\end{cases} & \text{(O7)}
+\end{array}
 ```
 
 The intuition: an OOV word is *priced by proxy*. If *fastly*'s neighbours are *quickly*, *rapidly*,
@@ -259,9 +273,11 @@ Be clear-eyed about what $`(\mathrm{O2})`$ and $`(\mathrm{O4})`$ return. Since
 $`\cos \in [-1, 1]`$, at the default $`\tau = 1`$:
 
 ```math
-\cos(v_w, v_h) - 1 \;\in\; [-2,\ 0]
+\begin{array}{lr}
+\displaystyle \cos(v_w, v_h) - 1 \;\in\; [-2,\ 0]
 \qquad\Longrightarrow\qquad
-\mathbb{P}_e \in [e^{-2},\ 1] \approx [0.135,\ 1] \tag{O8}
+\mathbb{P}_e \in [e^{-2},\ 1] \approx [0.135,\ 1] & \text{(O8)}
+\end{array}
 ```
 
 Two consequences follow immediately, and neither is a bug:

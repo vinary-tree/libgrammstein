@@ -59,14 +59,18 @@ The probability of a sequence factorizes by the chain rule into a product of nex
 probabilities:
 
 ```math
-\mathbb{P}(w_1, \dots, w_T) = \prod_{t=1}^{T} \mathbb{P}(w_t \mid w_1, \dots, w_{t-1}) \tag{G1}
+\begin{array}{lr}
+\displaystyle \mathbb{P}(w_1, \dots, w_T) = \prod_{t=1}^{T} \mathbb{P}(w_t \mid w_1, \dots, w_{t-1}) & \text{(G1)}
+\end{array}
 ```
 
 An order-$`n`$ model truncates each history to the previous $`n - 1`$ tokens, so the generator
 only ever conditions on a bounded window:
 
 ```math
-\mathbb{P}(w_t \mid w_1, \dots, w_{t-1}) \approx \mathbb{P}(w_t \mid w_{t-n+1}, \dots, w_{t-1}) \tag{G2}
+\begin{array}{lr}
+\displaystyle \mathbb{P}(w_t \mid w_1, \dots, w_{t-1}) \approx \mathbb{P}(w_t \mid w_{t-n+1}, \dots, w_{t-1}) & \text{(G2)}
+\end{array}
 ```
 
 The window width is $`n - 1`$, computed as `order.saturating_sub(1)` so a degenerate `order == 0`
@@ -95,7 +99,9 @@ $`O(\lvert V \rvert)`$ as in a neural softmax — which is what makes n-gram gen
 The simplest strategy always takes the most probable token (`best_token`):
 
 ```math
-w^\star = \arg\max_{w \in V} \log \mathbb{P}(w \mid h) \tag{G3}
+\begin{array}{lr}
+\displaystyle w^\star = \arg\max_{w \in V} \log \mathbb{P}(w \mid h) & \text{(G3)}
+\end{array}
 ```
 
 Greedy decoding is deterministic and high-precision but low-diversity; it tends to loop on common
@@ -107,8 +113,10 @@ Temperature reshapes the distribution before sampling by dividing the log probab
 $`\tau`$ and renormalizing (a softmax over the candidate set):
 
 ```math
-\mathbb{P}_\tau(w \mid h) = \frac{\exp(\ell_w / \tau)}{\sum_{v \in V} \exp(\ell_v / \tau)},
-\qquad \ell_w = \log \mathbb{P}(w \mid h) \tag{G4}
+\begin{array}{lr}
+\displaystyle \mathbb{P}_\tau(w \mid h) = \frac{\exp(\ell_w / \tau)}{\sum_{v \in V} \exp(\ell_v / \tau)},
+\qquad \ell_w = \log \mathbb{P}(w \mid h) & \text{(G4)}
+\end{array}
 ```
 
 $`\tau < 1`$ sharpens the distribution (more deterministic), $`\tau > 1`$ flattens it (more
@@ -123,7 +131,9 @@ Top-k keeps only the $`k`$ highest-probability candidates and samples among them
 that removes the unbounded tail [[2]](#references). Formally it retains
 
 ```math
-V_k = \{\text{the } k \text{ tokens of largest } \mathbb{P}(w \mid h)\} \tag{G5}
+\begin{array}{lr}
+\displaystyle V_k = \{\text{the } k \text{ tokens of largest } \mathbb{P}(w \mid h)\} & \text{(G5)}
+\end{array}
 ```
 
 ### Nucleus (top-p) sampling
@@ -132,8 +142,10 @@ Nucleus sampling adapts the candidate-set size to the model's confidence: it kee
 set of highest-probability tokens whose cumulative mass reaches $`p`$ [[1]](#references):
 
 ```math
-V_p = \arg\min_{V' \subseteq V} \lvert V' \rvert
-\quad \text{subject to} \quad \sum_{w \in V'} \mathbb{P}(w \mid h) \ge p \tag{G6}
+\begin{array}{lr}
+\displaystyle V_p = \arg\min_{V' \subseteq V} \lvert V' \rvert
+\quad \text{subject to} \quad \sum_{w \in V'} \mathbb{P}(w \mid h) \ge p & \text{(G6)}
+\end{array}
 ```
 
 When the model is confident (one token dominates) the nucleus is tiny; when it is uncertain the
@@ -146,8 +158,10 @@ After filtering, the surviving set $`V'`$ is renormalized to a proper distributi
 is drawn from it:
 
 ```math
-\tilde{\mathbb{P}}(w) = \frac{\mathbb{P}(w \mid h)}{\sum_{v \in V'} \mathbb{P}(v \mid h)},
-\qquad w \sim \mathrm{Categorical}\bigl(\tilde{\mathbb{P}}\bigr) \tag{G7}
+\begin{array}{lr}
+\displaystyle \tilde{\mathbb{P}}(w) = \frac{\mathbb{P}(w \mid h)}{\sum_{v \in V'} \mathbb{P}(v \mid h)},
+\qquad w \sim \mathrm{Categorical}\bigl(\tilde{\mathbb{P}}\bigr) & \text{(G7)}
+\end{array}
 ```
 
 The draw uses a `WeightedIndex` distribution; if the surviving mass is non-positive the generator

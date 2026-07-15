@@ -197,8 +197,9 @@ The contract for a task closure `F: FnMut() -> bool + Send + 'static` follows di
 So `tasks_executed` counts **attempts**, and the three counters satisfy
 
 ```math
-\texttt{tasks\_executed} \;=\; \underbrace{\bigl(\texttt{tasks\_executed} - \texttt{tasks\_failed} - \texttt{tasks\_panicked}\bigr)}_{\text{successes}} \;+\; \texttt{tasks\_failed} \;+\; \texttt{tasks\_panicked}
-\tag{C1}
+\begin{array}{lr}
+\displaystyle \texttt{tasks\_executed} \;=\; \underbrace{\bigl(\texttt{tasks\_executed} - \texttt{tasks\_failed} - \texttt{tasks\_panicked}\bigr)}_{\text{successes}} \;+\; \texttt{tasks\_failed} \;+\; \texttt{tasks\_panicked} & \text{(C1)}
+\end{array}
 ```
 
 which `test_stats_snapshot` pins down: five tasks returning `true` and three returning `false`
@@ -216,13 +217,14 @@ one.
 `do_sleep` runs on entry to `Sleeping` and sleeps
 
 ```math
-s \;=\;
+\begin{array}{lr}
+\displaystyle s \;=\;
 \begin{cases}
 \min\bigl(t_{\text{head}} - t_{\text{now}},\; p\bigr) & \text{if } Q \neq \varnothing \;\wedge\; t_{\text{head}} > t_{\text{now}} \\
 0 & \text{if } Q \neq \varnothing \;\wedge\; t_{\text{head}} \leq t_{\text{now}} \\
 p & \text{if } Q = \varnothing
-\end{cases}
-\tag{C2}
+\end{cases} & \text{(C2)}
+\end{array}
 ```
 
 Three bounds follow directly from $`(\mathrm{C2})`$:

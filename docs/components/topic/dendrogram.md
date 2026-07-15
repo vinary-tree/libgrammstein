@@ -102,7 +102,9 @@ $`\delta_1 \le \delta_2 \le \dots \le \delta_m`$ be the *distinct* internal-node
 method sets
 
 ```math
-\tau = \frac{\delta_{m-k} + \delta_{m-k+1}}{2} \tag{D1}
+\begin{array}{lr}
+\displaystyle \tau = \frac{\delta_{m-k} + \delta_{m-k+1}}{2} & \text{(D1)}
+\end{array}
 ```
 
 then calls `cut_at_distance` with the threshold $`\tau`$. The degenerate cases are handled

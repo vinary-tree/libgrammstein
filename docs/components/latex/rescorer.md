@@ -54,18 +54,20 @@ directly. Salazar et al. [[1]](#references) define instead the **pseudo-log-like
 position in turn, ask the model for the probability of the token that was really there, and sum:
 
 ```math
-\mathrm{PLL}(s) \;=\; \sum_{i=1}^{n} \log \mathbb{P}_{\mathrm{MLM}}\bigl(x_i \;\bigm|\; x_{\setminus i}\bigr)
-\tag{R1}
+\begin{array}{lr}
+\displaystyle \mathrm{PLL}(s) \;=\; \sum_{i=1}^{n} \log \mathbb{P}_{\mathrm{MLM}}\bigl(x_i \;\bigm|\; x_{\setminus i}\bigr) & \text{(R1)}
+\end{array}
 ```
 
 Exponentiating the negated mean gives the **pseudo-perplexity**, the quantity
 `ModernBertRescorer::score_sentence` returns:
 
 ```math
-\mathrm{PPL}(s)
+\begin{array}{lr}
+\displaystyle \mathrm{PPL}(s)
 \;=\; \exp\Bigl(-\tfrac{1}{n}\,\mathrm{PLL}(s)\Bigr)
-\;=\; \exp\Bigl(-\tfrac{1}{n}\sum_{i=1}^{n} \log \mathbb{P}_{\mathrm{MLM}}\bigl(x_i \mid x_{\setminus i}\bigr)\Bigr)
-\tag{R2}
+\;=\; \exp\Bigl(-\tfrac{1}{n}\sum_{i=1}^{n} \log \mathbb{P}_{\mathrm{MLM}}\bigl(x_i \mid x_{\setminus i}\bigr)\Bigr) & \text{(R2)}
+\end{array}
 ```
 
 Each of the $`n`$ terms costs one forward pass: the masked sequence goes through the encoder, the
@@ -81,17 +83,19 @@ Perplexity is unbounded above and *lower*-is-better; every other component in th
 bounded in $`[0,1]`$ and *higher*-is-better. `perplexity_to_score` reconciles them:
 
 ```math
-\eta \;=\; \frac{1}{1 + \ln \mathrm{PPL}(s)}
-\tag{R3}
+\begin{array}{lr}
+\displaystyle \eta \;=\; \frac{1}{1 + \ln \mathrm{PPL}(s)} & \text{(R3)}
+\end{array}
 ```
 
 This map is not arbitrary. Substituting $`(\mathrm{R2})`$ reveals what it really measures:
 
 ```math
-\ln \mathrm{PPL}(s) \;=\; -\tfrac{1}{n}\,\mathrm{PLL}(s) \;=\; H(s),
+\begin{array}{lr}
+\displaystyle \ln \mathrm{PPL}(s) \;=\; -\tfrac{1}{n}\,\mathrm{PLL}(s) \;=\; H(s),
 \qquad\text{hence}\qquad
-\eta \;=\; \frac{1}{1 + H(s)}
-\tag{R4}
+\eta \;=\; \frac{1}{1 + H(s)} & \text{(R4)}
+\end{array}
 ```
 
 $`H(s)`$ is the model's **mean per-token cross-entropy in nats** — the average number of nats of
@@ -150,13 +154,14 @@ fused number.*
 ### The combination
 
 ```math
-\mathrm{score}(T) \;=\;
+\begin{array}{lr}
+\displaystyle \mathrm{score}(T) \;=\;
 \frac{\sum_{j \in \mathcal{P}} w_j\, s_j}{\sum_{j \in \mathcal{P}} w_j},
 \qquad
 \mathcal{P} \subseteq \{\eta,\ \nu,\ \varepsilon\},
 \qquad
-\mathrm{score}(T) \;=\; 0 \ \text{ if } \ \mathcal{P} = \varnothing
-\tag{R5}
+\mathrm{score}(T) \;=\; 0 \ \text{ if } \ \mathcal{P} = \varnothing & \text{(R5)}
+\end{array}
 ```
 
 Renormalizing over the *present* components is the whole trick. A missing component does not drag
@@ -180,9 +185,10 @@ With an embedder attached and at least two commands present, $`\varepsilon`$ mea
 centroid:
 
 ```math
-\varepsilon \;=\; \frac{1}{\lvert C \cap V \rvert}
-\sum_{c \,\in\, C \cap V} \cos\bigl(\hat{v}(C),\ v_c\bigr)
-\tag{R6}
+\begin{array}{lr}
+\displaystyle \varepsilon \;=\; \frac{1}{\lvert C \cap V \rvert}
+\sum_{c \,\in\, C \cap V} \cos\bigl(\hat{v}(C),\ v_c\bigr) & \text{(R6)}
+\end{array}
 ```
 
 where $`C`$ is the sequence of command names in $`T`$, $`V`$ the embedder's vocabulary, $`v_c`$ the
@@ -197,9 +203,10 @@ the stream, or no command in the vocabulary — and the fallback is the crudest 
 module, the fraction of tokens that lexed into *something*:
 
 ```math
-\mathrm{validity}(T) \;=\;
-\frac{\#\{\, t \in T \;:\; t \text{ is not } \mathtt{Unknown} \,\}}{\max(N,\ 1)}
-\tag{R7}
+\begin{array}{lr}
+\displaystyle \mathrm{validity}(T) \;=\;
+\frac{\#\{\, t \in T \;:\; t \text{ is not } \mathtt{Unknown} \,\}}{\max(N,\ 1)} & \text{(R7)}
+\end{array}
 ```
 
 ### The structural heuristic
@@ -219,10 +226,11 @@ over the token stream. Let $`g(T)`$ accumulate
 and let $`b_\circ`$ and $`m_\circ`$ be the residual brace and math depths at end of input. Then
 
 ```math
-h(T) \;=\; \tfrac{1}{2}\left(
+\begin{array}{lr}
+\displaystyle h(T) \;=\; \tfrac{1}{2}\left(
 \left[\frac{g(T) \;-\; 0.30\,\lvert b_\circ \rvert \;-\; 0.30\,\lvert m_\circ \rvert}{N}\right]_{-1}^{\,1}
-\;+\; 1 \right)
-\tag{R8}
+\;+\; 1 \right) & \text{(R8)}
+\end{array}
 ```
 
 with $`h(T) = 0`$ for an empty stream. The trailing affine map $`z \mapsto (z+1)/2`$ carries the
@@ -315,8 +323,9 @@ pub struct RescoreCandidate {
 results by the **sum** of the prior and the rescore:
 
 ```math
-\mathrm{rank}(\mathrm{cand}) \;=\; \mathrm{prior}(\mathrm{cand}) \;+\; \mathrm{score}(T_{\mathrm{cand}})
-\tag{R9}
+\begin{array}{lr}
+\displaystyle \mathrm{rank}(\mathrm{cand}) \;=\; \mathrm{prior}(\mathrm{cand}) \;+\; \mathrm{score}(T_{\mathrm{cand}}) & \text{(R9)}
+\end{array}
 ```
 
 Because $`(\mathrm{R9})`$ is a *sum* and not an interpolation, the two terms must live on

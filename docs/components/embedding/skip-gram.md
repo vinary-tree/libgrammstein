@@ -42,7 +42,9 @@ similar vectors — exactly the geometry [Similarity](similarity.md) later explo
 The exact skip-gram likelihood uses a softmax over the *entire* vocabulary:
 
 ```math
-\mathbb{P}(c \mid w) = \frac{\exp(v_c^{\top} v_w)}{\sum_{w' \in V} \exp(v_{w'}^{\top} v_w)} \tag{S1}
+\begin{array}{lr}
+\displaystyle \mathbb{P}(c \mid w) = \frac{\exp(v_c^{\top} v_w)}{\sum_{w' \in V} \exp(v_{w'}^{\top} v_w)} & \text{(S1)}
+\end{array}
 ```
 
 The denominator of $`(\mathrm{S1})`$ costs $`O(\lvert V \rvert)`$ per example — hopeless for a
@@ -56,8 +58,10 @@ Instead of normalizing over all words, NS trains a logistic classifier to separa
 context word from $`k`$ random *noise* words. Per $`(w, c)`$ pair, the objective maximized is:
 
 ```math
-J(w, c) = \log \sigma\!\bigl(v_c^{\top} v_w\bigr)
-\;+\; \sum_{i=1}^{k} \mathbb{E}_{\,n_i \sim P_n}\!\left[\log \sigma\!\bigl(-\,v_{n_i}^{\top} v_w\bigr)\right] \tag{S2}
+\begin{array}{lr}
+\displaystyle J(w, c) = \log \sigma\!\bigl(v_c^{\top} v_w\bigr)
+\;+\; \sum_{i=1}^{k} \mathbb{E}_{\,n_i \sim P_n}\!\left[\log \sigma\!\bigl(-\,v_{n_i}^{\top} v_w\bigr)\right] & \text{(S2)}
+\end{array}
 ```
 
 The first term pushes $`v_c`$ toward $`v_w`$; each noise term pushes $`v_{n_i}`$ away. Because
@@ -72,7 +76,9 @@ the empirically superior choice from word2vec, which lifts rare words without ov
 them:
 
 ```math
-P_n(w) = \frac{f(w)^{3/4}}{\sum_{w'} f(w')^{3/4}} \tag{S3}
+\begin{array}{lr}
+\displaystyle P_n(w) = \frac{f(w)^{3/4}}{\sum_{w'} f(w')^{3/4}} & \text{(S3)}
+\end{array}
 ```
 
 The sampler that draws the negatives excludes the current positive context word.
@@ -83,8 +89,10 @@ Before a center word is used, it is randomly **kept** with a probability that sh
 frequent words (so *the*, *of*, *and* do not dominate training):
 
 ```math
-P_{\mathrm{keep}}(w) = \left(\sqrt{\frac{z(w)}{t}} + 1\right)\frac{t}{z(w)},
-\qquad z(w) = \frac{f(w)}{\text{total tokens}} \tag{S4}
+\begin{array}{lr}
+\displaystyle P_{\mathrm{keep}}(w) = \left(\sqrt{\frac{z(w)}{t}} + 1\right)\frac{t}{z(w)},
+\qquad z(w) = \frac{f(w)}{\text{total tokens}} & \text{(S4)}
+\end{array}
 ```
 
 For a rare word $`P_{\mathrm{keep}}`$ exceeds $`1`$ (always kept); for a very common word it falls
@@ -96,7 +104,9 @@ The rate decays **linearly per epoch** from the initial $`\eta_0`$ (`learning_ra
 $`0.05`$) — there is no separate minimum floor:
 
 ```math
-\eta_e = \eta_0 \left(1 - \frac{e}{E}\right), \qquad e = 0, 1, \dots, E-1 \tag{S5}
+\begin{array}{lr}
+\displaystyle \eta_e = \eta_0 \left(1 - \frac{e}{E}\right), \qquad e = 0, 1, \dots, E-1 & \text{(S5)}
+\end{array}
 ```
 
 so $`\eta_0`$ at the first epoch down to $`\eta_0/E`$ at the last. The **window size** is itself
@@ -111,7 +121,9 @@ both roles, plus the `subword_embeddings` table for the center word's n-grams. C
 center's **input vector** is the FastText-style average
 
 ```math
-v_w = \tfrac{1}{2}\bigl(E_{\mathrm{word}}[w] + v_{\mathrm{sub}}(w)\bigr) \tag{S6}
+\begin{array}{lr}
+\displaystyle v_w = \tfrac{1}{2}\bigl(E_{\mathrm{word}}[w] + v_{\mathrm{sub}}(w)\bigr) & \text{(S6)}
+\end{array}
 ```
 
 while the scored context/negative vectors $`v_c, v_{n_i}`$ are **raw rows** of that same

@@ -120,8 +120,10 @@ location observable between the two. Therefore every execution is a total order
 $`\sigma`$ on the $`r`$ operations, and the final value is
 
 ```math
-c_{\text{final}} \;=\; \Bigl( \cdots \bigl( (0 \oplus \delta_{\sigma(1)}) \oplus \delta_{\sigma(2)} \bigr) \cdots \Bigr) \oplus \delta_{\sigma(r)}
-\;=\; \sum_{i=1}^{r} \delta_i \tag{T1}
+\begin{array}{lr}
+\displaystyle c_{\text{final}} \;=\; \Bigl( \cdots \bigl( (0 \oplus \delta_{\sigma(1)}) \oplus \delta_{\sigma(2)} \bigr) \cdots \Bigr) \oplus \delta_{\sigma(r)}
+\;=\; \sum_{i=1}^{r} \delta_i & \text{(T1)}
+\end{array}
 ```
 
 The last equality holds because $`(\mathbb{N}, +, 0)`$ is an **associative and commutative**
@@ -308,7 +310,9 @@ for the full list of imported contracts.
 Training scales with the parallelizable fraction $`p`$ under Amdahl's law [[1]](#references):
 
 ```math
-S(P) \;=\; \frac{T_1}{T_P} \;=\; \frac{1}{(1 - p) + \dfrac{p}{P}} \tag{T2}
+\begin{array}{lr}
+\displaystyle S(P) \;=\; \frac{T_1}{T_P} \;=\; \frac{1}{(1 - p) + \dfrac{p}{P}} & \text{(T2)}
+\end{array}
 ```
 
 For n-gram training, the serial residue $`1 - p`$ is small — it comprises the producer thread's

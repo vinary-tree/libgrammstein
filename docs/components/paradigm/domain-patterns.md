@@ -301,7 +301,9 @@ catalog alongside and consult it when interpreting a match's `pattern_name`.
 `detect_rholang_patterns` and `detect_metta_patterns` try every pattern at every position:
 
 ```math
-\Theta\Bigl(n \cdot \sum_{p \in \mathrm{catalog}} \lvert \mathrm{variants}(p) \rvert \cdot \bar{\ell}\Bigr) \tag{X1}
+\begin{array}{lr}
+\displaystyle \Theta\Bigl(n \cdot \sum_{p \in \mathrm{catalog}} \lvert \mathrm{variants}(p) \rvert \cdot \bar{\ell}\Bigr) & \text{(X1)}
+\end{array}
 ```
 
 with $`n`$ the token count and $`\bar{\ell}`$ the mean variant length. For the shipped catalogs the

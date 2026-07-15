@@ -57,7 +57,9 @@ them is **dynamic time warping** [[5]](#references), which finds the cheapest mo
 between the two frame sequences by filling a $`T_1 \times T_2`$ cost table:
 
 ```math
-\mathrm{DTW}(i, j) = \delta(x_i, y_j) + \min\bigl\{\mathrm{DTW}(i-1, j),\ \mathrm{DTW}(i, j-1),\ \mathrm{DTW}(i-1, j-1)\bigr\} \tag{A1}
+\begin{array}{lr}
+\displaystyle \mathrm{DTW}(i, j) = \delta(x_i, y_j) + \min\bigl\{\mathrm{DTW}(i-1, j),\ \mathrm{DTW}(i, j-1),\ \mathrm{DTW}(i-1, j-1)\bigr\} & \text{(A1)}
+\end{array}
 ```
 
 $`(\mathrm{A1})`$ is accurate and it is a dead end. One comparison costs $`O(T_1 T_2)`$, so searching
@@ -68,8 +70,10 @@ here only as the baseline that acoustic word embeddings exist to escape.
 An AWE replaces the alignment with a *learned projection*: embed once, compare with a dot product.
 
 ```math
-\mathbb{R}^{T \times F} \;\xrightarrow{\ \text{encode}\ }\; \mathbb{R}^{D}, \qquad
-\text{compare in } O(D) \text{ instead of } O(T_1 T_2) \tag{A2}
+\begin{array}{lr}
+\displaystyle \mathbb{R}^{T \times F} \;\xrightarrow{\ \text{encode}\ }\; \mathbb{R}^{D}, \qquad
+\text{compare in } O(D) \text{ instead of } O(T_1 T_2) & \text{(A2)}
+\end{array}
 ```
 
 | | DTW | AWE |
@@ -94,7 +98,9 @@ A first-order high-pass filter that boosts the high frequencies attenuated by th
 production (roughly $`-6`$ dB/octave from the glottal source and lip radiation):
 
 ```math
-x'[t] = x[t] - \alpha\,x[t-1], \qquad \alpha = 0.97 \tag{A3}
+\begin{array}{lr}
+\displaystyle x'[t] = x[t] - \alpha\,x[t-1], \qquad \alpha = 0.97 & \text{(A3)}
+\end{array}
 ```
 
 ### Framing and windowing
@@ -105,7 +111,9 @@ $`10`$ ms. At the $`16`$ kHz default that is `frame_size = 400` samples advancin
 `frame_shift = 160`, so the number of frames is
 
 ```math
-T = \left\lfloor \frac{\lvert x \rvert - \texttt{frame\_size}}{\texttt{frame\_shift}} \right\rfloor + 1 \tag{A4}
+\begin{array}{lr}
+\displaystyle T = \left\lfloor \frac{\lvert x \rvert - \texttt{frame\_size}}{\texttt{frame\_shift}} \right\rfloor + 1 & \text{(A4)}
+\end{array}
 ```
 
 Each frame is multiplied by a window (Hann by default) to taper its edges to zero, which suppresses
@@ -118,9 +126,11 @@ perception is roughly logarithmic — we resolve 100 Hz of detail far better at 
 so the spectrum is warped onto the **mel scale** [[2]](#references):
 
 ```math
-\mathrm{mel}(f) = 2595 \cdot \log_{10}\!\left(1 + \frac{f}{700}\right),
+\begin{array}{lr}
+\displaystyle \mathrm{mel}(f) = 2595 \cdot \log_{10}\!\left(1 + \frac{f}{700}\right),
 \qquad
-\mathrm{mel}^{-1}(m) = 700\left(10^{\,m/2595} - 1\right) \tag{A5}
+\mathrm{mel}^{-1}(m) = 700\left(10^{\,m/2595} - 1\right) & \text{(A5)}
+\end{array}
 ```
 
 $`M`$ triangular filters are spaced **equally in mel space** (hence tightly at low frequencies and
@@ -128,8 +138,10 @@ widely at high ones) between `low_freq` and `high_freq`, and each filter integra
 it. A small $`\varepsilon = 10^{-10}`$ guards the logarithm that follows:
 
 ```math
-E_m = \sum_{k} H_m[k]\, S[k], \qquad
-\tilde{E}_m = \log\bigl(E_m + \varepsilon\bigr), \qquad m = 1 \dots M \tag{A6}
+\begin{array}{lr}
+\displaystyle E_m = \sum_{k} H_m[k]\, S[k], \qquad
+\tilde{E}_m = \log\bigl(E_m + \varepsilon\bigr), \qquad m = 1 \dots M & \text{(A6)}
+\end{array}
 ```
 
 $`\tilde{E}`$ — the **log-mel filterbank** — is the $`40`$-dimensional feature vector modern neural
@@ -141,8 +153,10 @@ Adjacent mel channels are strongly correlated. A **DCT-II** decorrelates them an
 into the first few coefficients, of which $`K = 13`$ are kept:
 
 ```math
-c_k = \sqrt{\frac{2}{M}} \sum_{m=1}^{M} \tilde{E}_m \cos\!\left(\frac{\pi k \left(m - \tfrac{1}{2}\right)}{M}\right),
-\qquad k = 1 \dots K-1 \tag{A7}
+\begin{array}{lr}
+\displaystyle c_k = \sqrt{\frac{2}{M}} \sum_{m=1}^{M} \tilde{E}_m \cos\!\left(\frac{\pi k \left(m - \tfrac{1}{2}\right)}{M}\right),
+\qquad k = 1 \dots K-1 & \text{(A7)}
+\end{array}
 ```
 
 with the orthonormal $`k = 0`$ term scaled by $`\sqrt{1/M}`$ instead. This is `extract_mfcc`.
@@ -154,7 +168,9 @@ delta-delta (acceleration) features are appended by regression over a $`\pm W`$-
 (`delta_window`, default $`2`$):
 
 ```math
-d_t = \frac{\displaystyle\sum_{\eta=1}^{W} \eta\,\bigl(c_{t+\eta} - c_{t-\eta}\bigr)}{2\displaystyle\sum_{\eta=1}^{W} \eta^{2}} \tag{A8}
+\begin{array}{lr}
+\displaystyle d_t = \frac{\displaystyle\sum_{\eta=1}^{W} \eta\,\bigl(c_{t+\eta} - c_{t-\eta}\bigr)}{2\displaystyle\sum_{\eta=1}^{W} \eta^{2}} & \text{(A8)}
+\end{array}
 ```
 
 Each enabled tier multiplies the feature dimension: `feature_dim()` returns $`M`$, $`2M`$, or $`3M`$.
@@ -184,7 +200,9 @@ Presets: `FeatureConfig::default()` / `wideband()` (16 kHz), `telephony()` (8 kH
 ### Encode
 
 ```math
-Z = \mathrm{encode\_frames}(X) \in \mathbb{R}^{T \times H}, \qquad X \in \mathbb{R}^{T \times F} \tag{A9}
+\begin{array}{lr}
+\displaystyle Z = \mathrm{encode\_frames}(X) \in \mathbb{R}^{T \times H}, \qquad X \in \mathbb{R}^{T \times F} & \text{(A9)}
+\end{array}
 ```
 
 The encoder is the [`AcousticEncoder`](../../../src/embedding/acoustic.rs) trait — three methods
@@ -193,7 +211,9 @@ dropped in behind it. The shipped implementation is [`LinearEncoder`](../../../s
 a single Xavier-initialized affine map applied per frame:
 
 ```math
-z_t = x_t W + b, \qquad W \in \mathbb{R}^{F \times H},\ b \in \mathbb{R}^{H} \tag{A10}
+\begin{array}{lr}
+\displaystyle z_t = x_t W + b, \qquad W \in \mathbb{R}^{F \times H},\ b \in \mathbb{R}^{H} & \text{(A10)}
+\end{array}
 ```
 
 `LinearEncoder` is a **baseline**, not a trained model: it is randomly initialized and there is no
@@ -205,11 +225,13 @@ serve as a control; a real system supplies a trained encoder through the trait.
 Pooling is the step that actually discharges the variable length — it collapses $`T`$ rows into one:
 
 ```math
-\text{Mean: } v = \frac{1}{T}\sum_{t=1}^{T} z_t
+\begin{array}{lr}
+\displaystyle \text{Mean: } v = \frac{1}{T}\sum_{t=1}^{T} z_t
 \qquad
 \text{Max: } v_j = \max_{1 \le t \le T} z_{t,j}
 \qquad
-\text{Last: } v = z_T \tag{A11}
+\text{Last: } v = z_T & \text{(A11)}
+\end{array}
 ```
 
 | Strategy | Behavior | Notes |
@@ -240,11 +262,15 @@ embeddings**, which is what makes cross-modal retrieval possible — spoken *"he
 *"hello"* become comparable by cosine:
 
 ```math
-v' = v P, \qquad P \in \mathbb{R}^{H \times D_{\text{text}}} \quad\text{(if \texttt{text\_projection\_dim} is set)} \tag{A12}
+\begin{array}{lr}
+\displaystyle v' = v P, \qquad P \in \mathbb{R}^{H \times D_{\text{text}}} \quad\text{(if \texttt{text\_projection\_dim} is set)} & \text{(A12)}
+\end{array}
 ```
 
 ```math
-\hat{v} = \frac{v'}{\lVert v' \rVert}, \qquad \text{if } \lVert v' \rVert > 10^{-8} \quad\text{(if \texttt{normalize})} \tag{A13}
+\begin{array}{lr}
+\displaystyle \hat{v} = \frac{v'}{\lVert v' \rVert}, \qquad \text{if } \lVert v' \rVert > 10^{-8} \quad\text{(if \texttt{normalize})} & \text{(A13)}
+\end{array}
 ```
 
 L2 normalization (`normalize`, default `true`) puts every embedding on the unit sphere, where cosine
@@ -257,7 +283,9 @@ $`\mathbf{0} \in \mathbb{R}^{D}`$.
 Embed the query audio, then scan the index and rank by cosine:
 
 ```math
-\mathrm{sim}(q, w_i) = \cos\bigl(\hat{v}_q,\ \hat{v}_{w_i}\bigr) = \frac{\hat{v}_q \cdot \hat{v}_{w_i}}{\lVert \hat{v}_q \rVert\, \lVert \hat{v}_{w_i} \rVert} \tag{A14}
+\begin{array}{lr}
+\displaystyle \mathrm{sim}(q, w_i) = \cos\bigl(\hat{v}_q,\ \hat{v}_{w_i}\bigr) = \frac{\hat{v}_q \cdot \hat{v}_{w_i}}{\lVert \hat{v}_q \rVert\, \lVert \hat{v}_{w_i} \rVert} & \text{(A14)}
+\end{array}
 ```
 
 returning the top $`k`$. The index is a flat `Vec<(String, Array1<f32>)>` plus a `HashMap` cache, so

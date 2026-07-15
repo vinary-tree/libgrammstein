@@ -92,8 +92,10 @@ robust than either alone [[3]](#references). The default is a convex combination
 probabilities:
 
 ```math
-\mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n(w \mid h) + (1 - \alpha)\,\mathbb{P}_e(w \mid h),
-\qquad \alpha = 0.8 \tag{A1}
+\begin{array}{lr}
+\displaystyle \mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n(w \mid h) + (1 - \alpha)\,\mathbb{P}_e(w \mid h),
+\qquad \alpha = 0.8 & \text{(A1)}
+\end{array}
 ```
 
 Three further strategies — log-linear (a product of experts), a hard OOV fallback, and a

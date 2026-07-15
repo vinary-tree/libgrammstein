@@ -83,7 +83,9 @@ Storing a row per distinct subword is unbounded, so each subword is hashed to on
 buckets with 64-bit **FNV-1a**, and buckets share their embedding rows:
 
 ```math
-h(g) = \mathrm{FNV\text{-}1a}(g) \bmod B \tag{E1}
+\begin{array}{lr}
+\displaystyle h(g) = \mathrm{FNV\text{-}1a}(g) \bmod B & \text{(E1)}
+\end{array}
 ```
 
 Collisions are tolerated: with $`B = 2 \times 10^{6}`$ they are rare, and the skip-gram objective
@@ -95,18 +97,22 @@ memory cost.
 The **subword vector** is the *mean* of the bucket rows of the word's n-grams:
 
 ```math
-v_{\mathrm{sub}}(w) = \frac{1}{\lvert G(w) \rvert} \sum_{g \in G(w)} E_{\mathrm{sub}}\bigl[h(g)\bigr] \tag{E2}
+\begin{array}{lr}
+\displaystyle v_{\mathrm{sub}}(w) = \frac{1}{\lvert G(w) \rvert} \sum_{g \in G(w)} E_{\mathrm{sub}}\bigl[h(g)\bigr] & \text{(E2)}
+\end{array}
 ```
 
 The final **word vector** averages the word row with the subword vector for a known word, and
 falls back to the subword vector alone for an OOV word — so *every* string yields a vector:
 
 ```math
-\mathrm{word\_vector}(w) =
+\begin{array}{lr}
+\displaystyle \mathrm{word\_vector}(w) =
 \begin{cases}
 \tfrac{1}{2}\bigl(v_{\mathrm{word}}(w) + v_{\mathrm{sub}}(w)\bigr) & w \in V \\[2pt]
 v_{\mathrm{sub}}(w) & w \notin V
-\end{cases} \tag{E3}
+\end{cases} & \text{(E3)}
+\end{array}
 ```
 
 > **Two honest departures from canonical FastText.** Canonical FastText [[2]](#references)
@@ -122,7 +128,9 @@ A **sentence vector** is simply the mean of its word vectors (used as the contex
 hybrid model — see [Hybrid Interpolation](../hybrid/interpolation.md)):
 
 ```math
-\mathrm{sentence\_vector}(w_1 \dots w_m) = \frac{1}{m} \sum_{i=1}^{m} \mathrm{word\_vector}(w_i) \tag{E4}
+\begin{array}{lr}
+\displaystyle \mathrm{sentence\_vector}(w_1 \dots w_m) = \frac{1}{m} \sum_{i=1}^{m} \mathrm{word\_vector}(w_i) & \text{(E4)}
+\end{array}
 ```
 
 ![Subword composition of a word vector](../../diagrams/embedding-subword.svg)
@@ -216,9 +224,11 @@ With the defaults $`d = 100`$, $`B = 2 \times 10^{6}`$, and $`\lvert V \rvert = 
 (and $`4`$ bytes per `f32`):
 
 ```math
-\underbrace{2{\times}10^{5} \cdot 100 \cdot 4}_{E_{\mathrm{word}} \approx 80\ \text{MB}}
+\begin{array}{lr}
+\displaystyle \underbrace{2{\times}10^{5} \cdot 100 \cdot 4}_{E_{\mathrm{word}} \approx 80\ \text{MB}}
 \;+\;
-\underbrace{2{\times}10^{6} \cdot 100 \cdot 4}_{E_{\mathrm{sub}} \approx 800\ \text{MB}} \tag{E5}
+\underbrace{2{\times}10^{6} \cdot 100 \cdot 4}_{E_{\mathrm{sub}} \approx 800\ \text{MB}} & \text{(E5)}
+\end{array}
 ```
 
 The subword table dominates; shrinking $`B`$ trades memory for a higher subword collision rate.

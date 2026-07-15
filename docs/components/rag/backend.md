@@ -72,9 +72,11 @@ Three details of this signature do real work:
 Both backends enforce one invariant on entry, in `normalize_embedding`:
 
 ```math
-\hat{v} \;=\; \frac{v}{\lVert v \rVert_2}
+\begin{array}{lr}
+\displaystyle \hat{v} \;=\; \frac{v}{\lVert v \rVert_2}
 \qquad\text{so that}\qquad
-\lVert \hat{v} \rVert_2 = 1 \tag{B1}
+\lVert \hat{v} \rVert_2 = 1 & \text{(B1)}
+\end{array}
 ```
 
 with a guard: if $`\lVert v \rVert_2 = 0`$ the vector is stored unchanged (dividing by zero would
@@ -85,7 +87,9 @@ $`(\mathrm{B1})`$ is what makes cosine similarity cheap. By the unit-vector iden
 $`(\mathrm{R2})`$ of the [Overview](overview.md#the-unit-vector-identity-that-makes-it-fast),
 
 ```math
-\cos(\hat{u}, \hat{v}) \;=\; \langle \hat{u}, \hat{v} \rangle \tag{B2}
+\begin{array}{lr}
+\displaystyle \cos(\hat{u}, \hat{v}) \;=\; \langle \hat{u}, \hat{v} \rangle & \text{(B2)}
+\end{array}
 ```
 
 so a similarity is a dot product and nothing more. The module still exports the general helpers —
@@ -105,9 +109,11 @@ Stack the $`n`$ stored unit vectors as the rows of $`E \in \mathbb{R}^{n \times 
 once:
 
 ```math
-s \;=\; E\,\hat{v}_q \;\in\; \mathbb{R}^{n},
+\begin{array}{lr}
+\displaystyle s \;=\; E\,\hat{v}_q \;\in\; \mathbb{R}^{n},
 \qquad
-s_i \;=\; \bigl\langle \hat{v}_{D_i},\ \hat{v}_q \bigr\rangle \;=\; \cos(v_{D_i},\, v_q) \tag{B3}
+s_i \;=\; \bigl\langle \hat{v}_{D_i},\ \hat{v}_q \bigr\rangle \;=\; \cos(v_{D_i},\, v_q) & \text{(B3)}
+\end{array}
 ```
 
 This is a single BLAS `sgemv` (`self.embeddings.dot(&query)`), which is cache-friendly, vectorized,
@@ -123,13 +129,15 @@ $`k`$-th largest element, so the first $`k`$ entries are the top $`k`$ in *some*
 are then sorted.
 
 ```math
-\underbrace{\Theta(nd)}_{\text{scoring } (\mathrm{B3})}
+\begin{array}{lr}
+\displaystyle \underbrace{\Theta(nd)}_{\text{scoring } (\mathrm{B3})}
 \;+\;
 \underbrace{O(n)}_{\text{selection, expected}}
 \;+\;
 \underbrace{O(k \log k)}_{\text{final sort}}
 \;=\;
-\Theta(nd) \quad\text{for } k \ll n \tag{B4}
+\Theta(nd) \quad\text{for } k \ll n & \text{(B4)}
+\end{array}
 ```
 
 Linear-time selection is the classical result of Blum, Floyd, Pratt, Rivest & Tarjan
@@ -172,12 +180,14 @@ neighbor** search [[2]](#references) accepts a small probability of missing a tr
 exchange for a sublinear query, and it is measured by **recall**:
 
 ```math
-\mathrm{recall@}k \;=\; \frac{\lvert A \cap G \rvert}{k}
+\begin{array}{lr}
+\displaystyle \mathrm{recall@}k \;=\; \frac{\lvert A \cap G \rvert}{k}
 \qquad
 \begin{aligned}
 G &= \text{the true top-}k\ \text{set} \\
 A &= \text{the returned set},\ \lvert A \rvert = k
-\end{aligned} \tag{B5}
+\end{aligned} & \text{(B5)}
+\end{array}
 ```
 
 Recall is not fixed by the algorithm; it is *bought* with search effort — the `ef_search` knob
@@ -195,9 +205,11 @@ be traversed greedily to a target in a logarithmic number of hops.
 A point entering the index is assigned a top level $`\ell`$ drawn from a geometric distribution,
 
 ```math
-\ell \;=\; \bigl\lfloor -\ln(\mathrm{Uniform}(0,1)) \cdot m_L \bigr\rfloor,
+\begin{array}{lr}
+\displaystyle \ell \;=\; \bigl\lfloor -\ln(\mathrm{Uniform}(0,1)) \cdot m_L \bigr\rfloor,
 \qquad
-m_L \;=\; \frac{1}{\ln M} \tag{B6}
+m_L \;=\; \frac{1}{\ln M} & \text{(B6)}
+\end{array}
 ```
 
 so that the expected number of layers is $`\Theta(\log n)`$ and each layer holds a geometrically
@@ -212,13 +224,15 @@ layer $`0`$ it widens into a best-first beam search of width $`\mathrm{ef}`$, an
 those candidates are returned. The expected cost is
 
 ```math
-\underbrace{\Theta(\log n)}_{\text{layers}}
+\begin{array}{lr}
+\displaystyle \underbrace{\Theta(\log n)}_{\text{layers}}
 \;\times\;
 \underbrace{\Theta(\mathrm{ef})}_{\text{beam per layer}}
 \;\times\;
 \underbrace{\Theta(d)}_{\text{one distance}}
 \;=\;
-\Theta\bigl(d \cdot \mathrm{ef} \cdot \log n\bigr) \tag{B7}
+\Theta\bigl(d \cdot \mathrm{ef} \cdot \log n\bigr) & \text{(B7)}
+\end{array}
 ```
 
 against $`\Theta(nd)`$ for exact search: logarithmic, not linear, in the corpus size. That is the
@@ -230,9 +244,11 @@ whole point.
 `DistDot`, defined on unit vectors as
 
 ```math
-\mathrm{DistDot}(\hat{u}, \hat{v}) \;=\; 1 - \langle \hat{u}, \hat{v} \rangle
+\begin{array}{lr}
+\displaystyle \mathrm{DistDot}(\hat{u}, \hat{v}) \;=\; 1 - \langle \hat{u}, \hat{v} \rangle
 \qquad\Longrightarrow\qquad
-\mathrm{sim} \;=\; 1 - \mathrm{DistDot} \tag{B8}
+\mathrm{sim} \;=\; 1 - \mathrm{DistDot} & \text{(B8)}
+\end{array}
 ```
 
 which is exactly the inversion the backend performs on every returned neighbor
@@ -303,8 +319,10 @@ points only by their insertion ordinal, so `pending_points[i].1` is how the back
 performs $`B = \lceil n / 10^{4} \rceil`$ **full** builds, whose total work is
 
 ```math
-\sum_{i=1}^{B} \Theta\bigl(10^{4}\, i \cdot \log(10^{4} i)\bigr)
-\;=\; \Theta\bigl(B^{2} \cdot 10^{4} \log n\bigr) \tag{B9}
+\begin{array}{lr}
+\displaystyle \sum_{i=1}^{B} \Theta\bigl(10^{4}\, i \cdot \log(10^{4} i)\bigr)
+\;=\; \Theta\bigl(B^{2} \cdot 10^{4} \log n\bigr) & \text{(B9)}
+\end{array}
 ```
 
 — quadratic in the number of blocks. At $`n = 10^{6}`$ that is $`100`$ rebuilds and roughly

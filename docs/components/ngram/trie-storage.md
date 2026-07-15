@@ -72,7 +72,9 @@ A shared **vocabulary** assigns each distinct word a monotonically increasing `u
 insertion, and returns that same index forever after (the insert is idempotent):
 
 ```math
-\iota : V \to \{1, 2, 3, \dots\}, \qquad \iota(w) = \iota(w') \iff w = w' \tag{T1}
+\begin{array}{lr}
+\displaystyle \iota : V \to \{1, 2, 3, \dots\}, \qquad \iota(w) = \iota(w') \iff w = w' & \text{(T1)}
+\end{array}
 ```
 
 The vocabulary is a [`PersistentVocabARTrie`](../../../src/ngram/vocabulary.rs) — an adaptive radix
@@ -88,7 +90,9 @@ Each index is encoded as an **LEB128 varint** [[4]](#references): seven payload 
 the high bit set on every byte but the last.
 
 ```math
-b(i) = \max\left(\left\lceil \frac{\lfloor \log_2 i \rfloor + 1}{7} \right\rceil,\ 1\right) \tag{T2}
+\begin{array}{lr}
+\displaystyle b(i) = \max\left(\left\lceil \frac{\lfloor \log_2 i \rfloor + 1}{7} \right\rceil,\ 1\right) & \text{(T2)}
+\end{array}
 ```
 
 | Index range | Bytes | Example |
@@ -111,8 +115,10 @@ exactly the function words (*the*, *of*, *and*, …) that dominate any corpus. T
 is therefore far below the worst case:
 
 ```math
-m = \sum_{j=1}^{n} b\bigl(\iota(w_j)\bigr) \;\approx\; n \cdot \bar{b},
-\qquad \bar{b} \approx 1\text{–}2 \text{ bytes for typical text} \tag{T3}
+\begin{array}{lr}
+\displaystyle m = \sum_{j=1}^{n} b\bigl(\iota(w_j)\bigr) \;\approx\; n \cdot \bar{b},
+\qquad \bar{b} \approx 1\text{–}2 \text{ bytes for typical text} & \text{(T3)}
+\end{array}
 ```
 
 A 5-gram key is thus roughly $`5`$–$`8`$ bytes, against the $`\approx 30`$ bytes the same 5-gram
@@ -125,7 +131,9 @@ The dictionary backends are keyed by `char`, not by `u8`. Each varint byte is th
 the codepoint of the same numeric value:
 
 ```math
-\text{byte } \mathrm{0xNN} \;\longmapsto\; \text{char } \mathrm{U{+}00NN}, \qquad 0 \le \mathrm{NN} \le 255 \tag{T4}
+\begin{array}{lr}
+\displaystyle \text{byte } \mathrm{0xNN} \;\longmapsto\; \text{char } \mathrm{U{+}00NN}, \qquad 0 \le \mathrm{NN} \le 255 & \text{(T4)}
+\end{array}
 ```
 
 This is the Latin-1 (ISO-8859-1) block, which is a byte-for-byte identity map onto the first $`256`$
@@ -157,7 +165,9 @@ silently never read. Starting the index space at $`1`$ makes the two prefixes di
 construction:
 
 ```math
-\forall\, w \in V : \iota(w) \ge 1 \;\Longrightarrow\; \text{first byte of key} \ne \mathrm{0x00} \tag{T5}
+\begin{array}{lr}
+\displaystyle \forall\, w \in V : \iota(w) \ge 1 \;\Longrightarrow\; \text{first byte of key} \ne \mathrm{0x00} & \text{(T5)}
+\end{array}
 ```
 
 [`MetadataFilteringZipper`](../../../src/ngram/metadata_filtering_zipper.rs) enforces the other half
@@ -173,7 +183,9 @@ A trie [[1]](#references)[[2]](#references) resolves a key by walking one node p
 lookup is linear in the **key length** — not in the number of stored n-grams:
 
 ```math
-T_{\text{lookup}}(m) = O(m), \qquad m = \sum_{j=1}^{n} b\bigl(\iota(w_j)\bigr) \tag{T6}
+\begin{array}{lr}
+\displaystyle T_{\text{lookup}}(m) = O(m), \qquad m = \sum_{j=1}^{n} b\bigl(\iota(w_j)\bigr) & \text{(T6)}
+\end{array}
 ```
 
 This is the property that makes the whole design work. $`m`$ is a small constant in practice (a

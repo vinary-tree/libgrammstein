@@ -46,14 +46,18 @@ The support function is **anti-monotone**: enlarging a pattern can never increas
 trees that contain it, because any tree containing $`P'`$ must also contain each of its subpatterns.
 
 ```math
-P \subseteq P' \;\Longrightarrow\; \mathrm{sup}(P) \;\ge\; \mathrm{sup}(P') \tag{D1}
+\begin{array}{lr}
+\displaystyle P \subseteq P' \;\Longrightarrow\; \mathrm{sup}(P) \;\ge\; \mathrm{sup}(P') & \text{(D1)}
+\end{array}
 ```
 
 Contrapositively — and this is the form that does the work — **an infrequent pattern can never
 become frequent by growing it**:
 
 ```math
-\mathrm{sup}(P) < \theta \;\Longrightarrow\; \mathrm{sup}(P') < \theta \quad \text{for every } P' \supseteq P \tag{D2}
+\begin{array}{lr}
+\displaystyle \mathrm{sup}(P) < \theta \;\Longrightarrow\; \mathrm{sup}(P') < \theta \quad \text{for every } P' \supseteq P & \text{(D2)}
+\end{array}
 ```
 
 $`(\mathrm{D2})`$ is the *Apriori* principle [[3]](#references), and it licenses the entire
@@ -69,7 +73,9 @@ pre-order sequence of `(depth, label)` pairs, and its **canonical encoding** is 
 serialized ([`encode_pattern`](../../../src/code/subtree/pattern.rs)):
 
 ```math
-\mathrm{enc}(P) = \bigl\langle\, d_1{:}\ell_1 \,\bigr\rangle \,\vert\, \bigl\langle\, d_2{:}\ell_2 \,\bigr\rangle \,\vert\, \dots \,\vert\, \bigl\langle\, d_k{:}\ell_k \,\bigr\rangle \tag{D3}
+\begin{array}{lr}
+\displaystyle \mathrm{enc}(P) = \bigl\langle\, d_1{:}\ell_1 \,\bigr\rangle \,\vert\, \bigl\langle\, d_2{:}\ell_2 \,\bigr\rangle \,\vert\, \dots \,\vert\, \bigl\langle\, d_k{:}\ell_k \,\bigr\rangle & \text{(D3)}
+\end{array}
 ```
 
 For the pattern *A* with children *B* (itself parenting *D*) and *C*, that is the string
@@ -92,7 +98,9 @@ through irrelevant intermediate nodes — `function` above `return` remains a ma
 The paper's efficiency comes from a **vertical** representation. Give every node the interval
 
 ```math
-\mathrm{scope}(x) = \bigl[\,\mathrm{pos}(x),\ \max_{y \in \mathrm{sub}(x)} \mathrm{pos}(y)\,\bigr] \tag{D4}
+\begin{array}{lr}
+\displaystyle \mathrm{scope}(x) = \bigl[\,\mathrm{pos}(x),\ \max_{y \in \mathrm{sub}(x)} \mathrm{pos}(y)\,\bigr] & \text{(D4)}
+\end{array}
 ```
 
 i.e. the span of pre-order positions covered by $`x`$'s subtree. Scopes turn structural questions
@@ -100,9 +108,11 @@ into interval arithmetic. For two nodes $`x`$ and $`y`$ with scopes $`s_x = [l_x
 $`s_y = [l_y, u_y]`$:
 
 ```math
-\underbrace{s_y \subset s_x}_{y \text{ is a descendant of } x}
+\begin{array}{lr}
+\displaystyle \underbrace{s_y \subset s_x}_{y \text{ is a descendant of } x}
 \qquad\text{versus}\qquad
-\underbrace{u_x < l_y}_{y \text{ follows } x \text{ as a sibling/cousin}} \tag{D5}
+\underbrace{u_x < l_y}_{y \text{ follows } x \text{ as a sibling/cousin}} & \text{(D5)}
+\end{array}
 ```
 
 Patterns sharing a common $`(k-1)`$-node prefix form an **equivalence class**, and Zaki generates the
@@ -303,7 +313,9 @@ candidate start, and each start scans forward), and each match contributes at mo
 sites. Summing over the frontier and over levels:
 
 ```math
-T_{\text{mine}} \;=\; O\!\left(\sum_{k=1}^{W} \lvert L_k \rvert \cdot o \cdot \bar{n}^{2} \cdot W \right) \tag{D6}
+\begin{array}{lr}
+\displaystyle T_{\text{mine}} \;=\; O\!\left(\sum_{k=1}^{W} \lvert L_k \rvert \cdot o \cdot \bar{n}^{2} \cdot W \right) & \text{(D6)}
+\end{array}
 ```
 
 The dangerous factor is $`\lvert L_k \rvert`$, which is worst-case **exponential** in $`\bar{n}`$ —

@@ -40,9 +40,10 @@ A trie consumes one unit of the query per level, so a lookup terminates after at
 transitions no matter how large the dictionary grows:
 
 ```math
-T_{\text{lookup}}(m, n) \;=\; O(m)
-\qquad\text{— independent of } n
-\tag{B1}
+\begin{array}{lr}
+\displaystyle T_{\text{lookup}}(m, n) \;=\; O(m)
+\qquad\text{— independent of } n & \text{(B1)}
+\end{array}
 ```
 
 This is *the* defining property of trie-shaped indexes and it holds for **every** backend below.
@@ -54,9 +55,10 @@ the asymptotics of a correction.
 What *does* differ:
 
 ```math
-\text{choose } D \;\text{ by }\;
-\bigl(\, \text{durability},\;\; \text{mutability},\;\; T_{\text{build}},\;\; \text{bytes/node} \,\bigr)
-\tag{B2}
+\begin{array}{lr}
+\displaystyle \text{choose } D \;\text{ by }\;
+\bigl(\, \text{durability},\;\; \text{mutability},\;\; T_{\text{build}},\;\; \text{bytes/node} \,\bigr) & \text{(B2)}
+\end{array}
 ```
 
 ## 2. The backends

@@ -139,12 +139,14 @@ The budget is divided across the shards that are resident *at the same time*, so
 resident set approximates the global budget regardless of granularity:
 
 ```math
-S = \begin{cases}
+\begin{array}{lr}
+\displaystyle S = \begin{cases}
 K & \text{hash-based granularity, or } M = 0 \\
 \min(M,\ K) & \text{otherwise}
 \end{cases}
 \qquad
-b_s = \max\!\left(\left\lfloor \frac{B}{S} \right\rfloor,\ 64\ \mathrm{MiB}\right) \tag{G1}
+b_s = \max\!\left(\left\lfloor \frac{B}{S} \right\rfloor,\ 64\ \mathrm{MiB}\right) & \text{(G1)}
+\end{array}
 ```
 
 The $`64\ \mathrm{MiB}`$ floor stops the division from producing a budget so small that the shard

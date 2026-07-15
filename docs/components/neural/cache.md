@@ -24,18 +24,22 @@ currently constructs.
 ## 2. Why the embedding cache pays
 
 ```math
-H \;=\; \frac{h}{h + m} \;\in\; [0, 1],
+\begin{array}{lr}
+\displaystyle H \;=\; \frac{h}{h + m} \;\in\; [0, 1],
 \qquad
-\bar{C} \;=\; H \cdot C_{\text{hit}} \;+\; (1 - H)\, C_{\text{miss}} \tag{C1}
+\bar{C} \;=\; H \cdot C_{\text{hit}} \;+\; (1 - H)\, C_{\text{miss}} & \text{(C1)}
+\end{array}
 ```
 
 The speed-up over an uncached embedder is $`C_{\text{miss}} / \bar{C}`$, and because
 $`C_{\text{hit}} \lll C_{\text{miss}}`$ it collapses to the classic hyperbola:
 
 ```math
-\text{speed-up} \;=\; \frac{C_{\text{miss}}}{H\,C_{\text{hit}} + (1 - H)\,C_{\text{miss}}}
+\begin{array}{lr}
+\displaystyle \text{speed-up} \;=\; \frac{C_{\text{miss}}}{H\,C_{\text{hit}} + (1 - H)\,C_{\text{miss}}}
 \;\xrightarrow[\;C_{\text{hit}} \to 0\;]{}\;
-\frac{1}{1 - H} \tag{C2}
+\frac{1}{1 - H} & \text{(C2)}
+\end{array}
 ```
 
 $`(\mathrm{C2})`$ is worth internalizing: at $`H = 0.5`$ the cache buys $`2\times`$; at
@@ -178,15 +182,19 @@ foundation for a future autoregressive head, not as a knob you can turn today.
 If you *do* build on them, know the growth law and the two traps.
 
 ```math
-M_{\text{kv}} \;=\; 2 \cdot B \cdot L \cdot A \cdot T \cdot d_h \cdot \mathrm{sizeof}(\text{dtype}) \tag{C3}
+\begin{array}{lr}
+\displaystyle M_{\text{kv}} \;=\; 2 \cdot B \cdot L \cdot A \cdot T \cdot d_h \cdot \mathrm{sizeof}(\text{dtype}) & \text{(C3)}
+\end{array}
 ```
 
 (the $`2`$ is keys **and** values). At the `CacheConfig` defaults —
 $`L = 12`$, $`A = 12`$, $`d_h = 64`$, F32 — with $`B = 1`$ and $`T = 8192`$:
 
 ```math
-M_{\text{kv}} \;=\; 2 \cdot 1 \cdot 12 \cdot 12 \cdot 8192 \cdot 64 \cdot 4\ \text{B}
-\;\approx\; 604\ \text{MB} \tag{C4}
+\begin{array}{lr}
+\displaystyle M_{\text{kv}} \;=\; 2 \cdot 1 \cdot 12 \cdot 12 \cdot 8192 \cdot 64 \cdot 4\ \text{B}
+\;\approx\; 604\ \text{MB} & \text{(C4)}
+\end{array}
 ```
 
 A `SlidingWindowCache` of width $`W`$ replaces $`T`$ with $`\min(T, W)`$ in $`(\mathrm{C3})`$,

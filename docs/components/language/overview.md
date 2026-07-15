@@ -92,14 +92,15 @@ libgrammstein therefore never trusts a bare detection — it demands
 $`c(t) \geq \theta`$ and otherwise fails loudly:
 
 ```math
-\mathrm{detect}(t, \theta) =
+\begin{array}{lr}
+\displaystyle \mathrm{detect}(t, \theta) =
 \begin{cases}
 \texttt{Err(InsufficientText)} & \text{if } \texttt{whatlang::detect}(t) = \texttt{None} \\
 \texttt{Err(LowConfidence)}    & \text{if } c(t) < \theta \\
 \texttt{Err(UnsupportedLanguage)} & \text{if } \ell \notin \mathcal{L}_{\mathrm{lg}} \\
 \texttt{Ok(LanguageTag)}       & \text{otherwise}
-\end{cases}
-\tag{L1}
+\end{cases} & \text{(L1)}
+\end{array}
 ```
 
 ![Language detection: whatlang to LanguageTag, with the three failure modes](../../diagrams/lang-detection.svg)
@@ -172,8 +173,9 @@ $`\lvert \mathcal{L}_{\mathrm{wl}} \rvert = 69`$ languages; the `match` maps
 $`\lvert \mathcal{L}_{\mathrm{lg}} \rvert = 58`$ of them. So
 
 ```math
-\lvert \mathcal{L}_{\mathrm{wl}} \setminus \mathcal{L}_{\mathrm{lg}} \rvert = 69 - 58 = 11
-\tag{L2}
+\begin{array}{lr}
+\displaystyle \lvert \mathcal{L}_{\mathrm{wl}} \setminus \mathcal{L}_{\mathrm{lg}} \rvert = 69 - 58 = 11 & \text{(L2)}
+\end{array}
 ```
 
 languages are detected perfectly well by `whatlang` and then **rejected** by libgrammstein.
@@ -232,11 +234,12 @@ Two methods give the type its utility:
   $`\pi`$ for the primary subtag and $`\sigma, \rho`$ for script and region:
 
 ```math
-\mathrm{matches}(a, b) \iff
+\begin{array}{lr}
+\displaystyle \mathrm{matches}(a, b) \iff
 \pi_a = \pi_b \;\wedge\;
 \bigl(\sigma_b = \bot \vee \sigma_a = \sigma_b\bigr) \;\wedge\;
-\bigl(\rho_b = \bot \vee \rho_a = \rho_b\bigr)
-\tag{L3}
+\bigl(\rho_b = \bot \vee \rho_a = \rho_b\bigr) & \text{(L3)}
+\end{array}
 ```
 
 - **`to_path(&self) -> String`** — the on-disk layout rule. A bare tag maps to one directory
@@ -305,9 +308,10 @@ because the mean word length is close to $`2`$ characters.
 The filter is exactly:
 
 ```math
-\mathrm{keep}(g) \iff \neg\,\mathrm{is\_whitespace}(g_0) \;\wedge\;
-\bigl(\texttt{include\_punctuation} \vee \neg\,\mathrm{is\_ascii\_punctuation}(g_0)\bigr)
-\tag{L4}
+\begin{array}{lr}
+\displaystyle \mathrm{keep}(g) \iff \neg\,\mathrm{is\_whitespace}(g_0) \;\wedge\;
+\bigl(\texttt{include\_punctuation} \vee \neg\,\mathrm{is\_ascii\_punctuation}(g_0)\bigr) & \text{(L4)}
+\end{array}
 ```
 
 where $`g_0`$ is the first `char` of the grapheme cluster $`g`$. Note it is

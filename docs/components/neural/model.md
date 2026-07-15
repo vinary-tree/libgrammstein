@@ -57,9 +57,11 @@ candle's rule, driven by the checkpoint's `global_attn_every_n_layers = 3`). Wit
 that is 8 global and 14 local layers. The cost of one forward pass is therefore
 
 ```math
-C_{\text{fwd}}(T) \;=\; \underbrace{\Theta\!\left(L \cdot T \cdot H^{2}\right)}_{\text{projections + MLP}}
+\begin{array}{lr}
+\displaystyle C_{\text{fwd}}(T) \;=\; \underbrace{\Theta\!\left(L \cdot T \cdot H^{2}\right)}_{\text{projections + MLP}}
 \;+\; \underbrace{\Theta\!\left(\lceil L/3 \rceil \cdot T^{2} \cdot H\right)}_{\text{global attention}}
-\;+\; \underbrace{\Theta\!\left(\lfloor 2L/3 \rfloor \cdot T \cdot w \cdot H\right)}_{\text{local attention}} \tag{N1}
+\;+\; \underbrace{\Theta\!\left(\lfloor 2L/3 \rfloor \cdot T \cdot w \cdot H\right)}_{\text{local attention}} & \text{(N1)}
+\end{array}
 ```
 
 The middle term is the only quadratic one, and it is paid by $`\lceil 22/3 \rceil = 8`$ layers
@@ -91,7 +93,9 @@ let mlm_decoder = Linear::new(decoder_weights, Some(decoder_bias));
 The head is the composition
 
 ```math
-\mathbf{z}_t \;=\; \mathbf{E}\,\mathrm{LayerNorm}\!\bigl(\mathrm{GELU}(\mathbf{W}_{\text{dense}}\,\mathbf{h}_t)\bigr) \;+\; \mathbf{b}_{\text{dec}} \tag{N2}
+\begin{array}{lr}
+\displaystyle \mathbf{z}_t \;=\; \mathbf{E}\,\mathrm{LayerNorm}\!\bigl(\mathrm{GELU}(\mathbf{W}_{\text{dense}}\,\mathbf{h}_t)\bigr) \;+\; \mathbf{b}_{\text{dec}} & \text{(N2)}
+\end{array}
 ```
 
 where the decoder matrix **is** the transposed input-embedding matrix $`\mathbf{E}`$ — *weight
@@ -232,9 +236,11 @@ let batch: Vec<Vec<f32>> = model.embed_batch(&["a", "b"])?;           // CLS, pa
 ```
 
 ```math
-\mathbf{e}_{\text{CLS}} = \mathbf{h}_0,
+\begin{array}{lr}
+\displaystyle \mathbf{e}_{\text{CLS}} = \mathbf{h}_0,
 \qquad
-\mathbf{e}_{\text{mean}} = \frac{1}{T}\sum_{t=0}^{T-1} \mathbf{h}_t \tag{N3}
+\mathbf{e}_{\text{mean}} = \frac{1}{T}\sum_{t=0}^{T-1} \mathbf{h}_t & \text{(N3)}
+\end{array}
 ```
 
 `embed_batch` pads to the longest sequence in the batch and builds the matching $`0/1`$
@@ -271,10 +277,12 @@ mask and must not be fed a padded batch.
 Parameters dominate a short-sequence forward pass:
 
 ```math
-M_{\text{params}} = P \cdot \mathrm{sizeof}(\text{dtype}),
+\begin{array}{lr}
+\displaystyle M_{\text{params}} = P \cdot \mathrm{sizeof}(\text{dtype}),
 \qquad P = 149 \times 10^{6}
 \;\Longrightarrow\;
-M_{\text{params}} \approx 596\ \text{MB (F32)},\quad 298\ \text{MB (BF16)} \tag{N4}
+M_{\text{params}} \approx 596\ \text{MB (F32)},\quad 298\ \text{MB (BF16)} & \text{(N4)}
+\end{array}
 ```
 
 Activations add $`\Theta(B \cdot T \cdot H)`$ per layer, plus the attention scores — which is
@@ -283,9 +291,11 @@ a time and drops its scores immediately, so the transient peak is a **single** g
 score matrix:
 
 ```math
-M_{\text{attn}}^{\text{peak}} = \Theta\!\left(B \cdot A \cdot T^{2}\right),
+\begin{array}{lr}
+\displaystyle M_{\text{attn}}^{\text{peak}} = \Theta\!\left(B \cdot A \cdot T^{2}\right),
 \qquad
-M_{\text{attn}}^{\text{local}} = \Theta\!\left(B \cdot A \cdot T \cdot w\right) \tag{N5}
+M_{\text{attn}}^{\text{local}} = \Theta\!\left(B \cdot A \cdot T \cdot w\right) & \text{(N5)}
+\end{array}
 ```
 
 At $`T = 8192`$, $`B = 1`$, F32, one global layer's scores are

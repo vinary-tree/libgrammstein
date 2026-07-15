@@ -66,7 +66,9 @@ Normalization is a **context-sensitive rewrite system**, the classical SPE-style
 [[1]](#references). Each rule is a 4-tuple
 
 ```math
-r = (\pi,\ \rho,\ C,\ \omega), \qquad\text{written}\qquad \pi \to \rho \;/\; C \tag{P1}
+\begin{array}{lr}
+\displaystyle r = (\pi,\ \rho,\ C,\ \omega), \qquad\text{written}\qquad \pi \to \rho \;/\; C & \text{(P1)}
+\end{array}
 ```
 
 where $`\pi \in \Sigma^{*}`$ is the **pattern** to match, $`\rho \in \Sigma^{*}`$ the
@@ -91,7 +93,9 @@ rules, 12 vowel-digraph rules, 3 phonetic rules, and 2 test rules, **62** in tot
 Applying $`\mathcal{R}`$ to a word yields the **phonetic normal form**:
 
 ```math
-\mathcal{N} : \Sigma^{*} \to \Sigma^{*}, \qquad \mathcal{N}(w) = \text{the result of applying } \mathcal{R} \text{ to } w \text{ in descending weight order} \tag{P2}
+\begin{array}{lr}
+\displaystyle \mathcal{N} : \Sigma^{*} \to \Sigma^{*}, \qquad \mathcal{N}(w) = \text{the result of applying } \mathcal{R} \text{ to } w \text{ in descending weight order} & \text{(P2)}
+\end{array}
 ```
 
 libgrammstein does not implement $`\mathcal{N}`$ by repeated whole-string passes. It drives
@@ -118,11 +122,13 @@ the strongest possible evidence — a genuine homophone — and short-circuit to
 normalized strings are compared **through the same subword embedding**:
 
 ```math
-s_{p}(w_1, w_2) =
+\begin{array}{lr}
+\displaystyle s_{p}(w_1, w_2) =
 \begin{cases}
 1 & \mathcal{N}(w_1) = \mathcal{N}(w_2) \\[4pt]
 \cos\bigl(\mathrm{vec}(\mathcal{N}(w_1)),\ \mathrm{vec}(\mathcal{N}(w_2))\bigr) & \text{otherwise}
-\end{cases} \tag{P3}
+\end{cases} & \text{(P3)}
+\end{array}
 ```
 
 > **There is no second vector table.** This is the design's central economy. The normalized forms are
@@ -141,8 +147,10 @@ s_{p}(w_1, w_2) =
 The exposed `similarity` is a convex combination of the orthographic and phonetic signals:
 
 ```math
-\mathrm{sim}(w_1, w_2) = (1 - \lambda)\, s_{o}(w_1, w_2) \;+\; \lambda\, s_{p}(w_1, w_2),
-\qquad \lambda \in [0, 1] \tag{P4}
+\begin{array}{lr}
+\displaystyle \mathrm{sim}(w_1, w_2) = (1 - \lambda)\, s_{o}(w_1, w_2) \;+\; \lambda\, s_{p}(w_1, w_2),
+\qquad \lambda \in [0, 1] & \text{(P4)}
+\end{array}
 ```
 
 with $`\lambda = 0`$ recovering pure orthography, $`\lambda = 1`$ pure phonology, and the shipped
@@ -153,7 +161,9 @@ $`1`$ immediately, and $`\lambda = 0`$ skips the normalization work entirely.
 Since both $`s_o`$ and $`s_p`$ lie in $`[-1, 1]`$ and $`(\mathrm{P4})`$ is convex, the blend does too:
 
 ```math
-\mathrm{sim}(w_1, w_2) \in [-1, 1] \tag{P5}
+\begin{array}{lr}
+\displaystyle \mathrm{sim}(w_1, w_2) \in [-1, 1] & \text{(P5)}
+\end{array}
 ```
 
 ![Figure 1 — combined orthographic and phonetic similarity](../../diagrams/embedding-phonetic.svg)

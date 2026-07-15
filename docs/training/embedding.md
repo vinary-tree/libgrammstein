@@ -40,27 +40,33 @@ logistic regressions [[2]](#references) — one saying "this context is real", $
 sampled words are not":
 
 ```math
-J(c, o) = -\log \sigma\!\left(v_c^{\top} v_o\right)
+\begin{array}{lr}
+\displaystyle J(c, o) = -\log \sigma\!\left(v_c^{\top} v_o\right)
           \;-\; \sum_{k=1}^{K} \log \sigma\!\left(-\,v_c^{\top} v_{n_k}\right),
-\qquad n_k \sim P_n \tag{S1}
+\qquad n_k \sim P_n & \text{(S1)}
+\end{array}
 ```
 
 The gradient of $`(\mathrm{S1})`$ gives exactly the updates the code performs, with learning rate
 $`\eta`$:
 
 ```math
-v_o \;\mathrel{+}=\; \eta\,\bigl(1 - \sigma(v_c^{\top} v_o)\bigr)\, v_c,
+\begin{array}{lr}
+\displaystyle v_o \;\mathrel{+}=\; \eta\,\bigl(1 - \sigma(v_c^{\top} v_o)\bigr)\, v_c,
 \qquad
-v_{n_k} \;\mathrel{-}=\; \eta\,\sigma(v_c^{\top} v_{n_k})\, v_c \tag{S2}
+v_{n_k} \;\mathrel{-}=\; \eta\,\sigma(v_c^{\top} v_{n_k})\, v_c & \text{(S2)}
+\end{array}
 ```
 
 ```math
-g \;=\; \eta\,\Bigl[\bigl(1 - \sigma(v_c^{\top} v_o)\bigr) v_o
+\begin{array}{lr}
+\displaystyle g \;=\; \eta\,\Bigl[\bigl(1 - \sigma(v_c^{\top} v_o)\bigr) v_o
         \;-\; \sum_{k=1}^{K} \sigma(v_c^{\top} v_{n_k})\, v_{n_k}\Bigr],
 \qquad
 v_c \;\mathrel{+}=\; g,
 \qquad
-v_g \;\mathrel{+}=\; \frac{g}{\lvert G_c \rvert}\ \ \forall\, g \in G_c \tag{S3}
+v_g \;\mathrel{+}=\; \frac{g}{\lvert G_c \rvert}\ \ \forall\, g \in G_c & \text{(S3)}
+\end{array}
 ```
 
 $`(\mathrm{S3})`$ is the subword step: the centre word's gradient is shared equally among its
@@ -75,7 +81,9 @@ $`3/4`$ power — a compromise that samples rare words more often than their fre
 frequent words less [[2]](#references):
 
 ```math
-P_n(w) = \frac{c(w)^{3/4}}{\sum_{w'} c(w')^{3/4}} \tag{S4}
+\begin{array}{lr}
+\displaystyle P_n(w) = \frac{c(w)^{3/4}}{\sum_{w'} c(w')^{3/4}} & \text{(S4)}
+\end{array}
 ```
 
 This is realised as a pre-filled table of $`10^{7}`$ slots, so drawing a negative is one random
@@ -85,7 +93,9 @@ index — $`O(1)`$, no rejection loop. The true context word is excluded from it
 no information. Each occurrence of $`w`$ is *kept* with probability
 
 ```math
-P_{\text{keep}}(w) = \left(\sqrt{\frac{f(w)}{t}} + 1\right)\cdot\frac{t}{f(w)}, \qquad t = 10^{-4} \tag{S5}
+\begin{array}{lr}
+\displaystyle P_{\text{keep}}(w) = \left(\sqrt{\frac{f(w)}{t}} + 1\right)\cdot\frac{t}{f(w)}, \qquad t = 10^{-4} & \text{(S5)}
+\end{array}
 ```
 
 so a word at exactly the threshold is always kept, and a word 100 times more frequent is kept about
@@ -119,7 +129,9 @@ $`(\mathrm{S4})`$.
 **Epochs.** The learning rate decays linearly across epochs,
 
 ```math
-\eta_e = \eta_0 \left(1 - \frac{e}{E}\right), \qquad e = 0, \dots, E-1 \tag{S6}
+\begin{array}{lr}
+\displaystyle \eta_e = \eta_0 \left(1 - \frac{e}{E}\right), \qquad e = 0, \dots, E-1 & \text{(S6)}
+\end{array}
 ```
 
 so the last epoch runs at $`\eta_0 / E`$ and the schedule anneals to zero — the standard SGD
@@ -187,13 +199,15 @@ let model = EmbeddingTrainerBuilder::new()
 At **query** time (`SubwordEmbedding::word_vector`) the vector of a word is:
 
 ```math
-v(w) =
+\begin{array}{lr}
+\displaystyle v(w) =
 \begin{cases}
 \dfrac{1}{2}\left(v_{\text{word}}(w) + \dfrac{1}{\lvert G_w \rvert}\displaystyle\sum_{g \in G_w} v_g\right)
   & w \in V \quad \text{(known word)} \\[2ex]
 \dfrac{1}{\lvert G_w \rvert}\displaystyle\sum_{g \in G_w} v_g
   & w \notin V \quad \text{(OOV — subwords only)}
-\end{cases} \tag{S7}
+\end{cases} & \text{(S7)}
+\end{array}
 ```
 
 The OOV branch is the whole point: *unbelievability* was never in the corpus, but *unbeliev*,
@@ -214,7 +228,9 @@ per-model cache.
 Both matrices are dense `f32`:
 
 ```math
-\text{bytes} \;=\; \bigl(\lvert V \rvert + B\bigr) \cdot d \cdot 4 \tag{S8}
+\begin{array}{lr}
+\displaystyle \text{bytes} \;=\; \bigl(\lvert V \rvert + B\bigr) \cdot d \cdot 4 & \text{(S8)}
+\end{array}
 ```
 
 The **bucket matrix dominates**, because $`B = 2 \times 10^{6}`$ by default and is independent of

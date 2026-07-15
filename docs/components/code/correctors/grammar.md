@@ -48,7 +48,9 @@ A PCFG assigns every derivation the product of the probabilities of the rules th
 [[3]](#references):
 
 ```math
-\mathbb{P}(\tau) \;=\; \prod_{(A \to \alpha) \,\in\, \tau} \mathbb{P}(A \to \alpha) \tag{G1}
+\begin{array}{lr}
+\displaystyle \mathbb{P}(\tau) \;=\; \prod_{(A \to \alpha) \,\in\, \tau} \mathbb{P}(A \to \alpha) & \text{(G1)}
+\end{array}
 ```
 
 Correction, therefore, has a clean formulation: among all token strings reachable from the observed
@@ -67,7 +69,9 @@ column $`\mathcal{C}_i`$ holds every item alive after $`i`$ tokens. The terminal
 come next are the ones sitting immediately after a dot [[1]](#references):
 
 ```math
-\mathcal{A}_i \;=\; \bigl\{\, a \in \Sigma \;:\; (A \to \alpha \bullet a\beta,\ j) \in \mathcal{C}_i \,\bigr\} \tag{G2}
+\begin{array}{lr}
+\displaystyle \mathcal{A}_i \;=\; \bigl\{\, a \in \Sigma \;:\; (A \to \alpha \bullet a\beta,\ j) \in \mathcal{C}_i \,\bigr\} & \text{(G2)}
+\end{array}
 ```
 
 `GrammarConstraint::valid_tokens` computes $`(\mathrm{G2})`$; `GrammarCorrector::valid_next_tokens`
@@ -85,8 +89,10 @@ To rank the members of $`\mathcal{A}`$, the corrector needs a score per terminal
 *not* a conditional probability:
 
 ```math
-\hat{P}(a) \;=\; \max \bigl\{\, \mathbb{P}(A \to \alpha) \;:\; (A \to \alpha) \in R,\ a \text{ occurs in } \alpha \,\bigr\},
-\qquad \max \emptyset = 0 \tag{G3}
+\begin{array}{lr}
+\displaystyle \hat{P}(a) \;=\; \max \bigl\{\, \mathbb{P}(A \to \alpha) \;:\; (A \to \alpha) \in R,\ a \text{ occurs in } \alpha \,\bigr\},
+\qquad \max \emptyset = 0 & \text{(G3)}
+\end{array}
 ```
 
 Read that carefully. $`\hat{P}(a)`$ is the largest probability of **any** rule whose right-hand side
@@ -102,9 +108,11 @@ A replacement must also be *plausible as a typo*, so it is gated on orthographic
 corrector uses the **Jaccard index over character bigrams**:
 
 ```math
-\mathrm{sim}(a,b) \;=\; \frac{\lvert B_a \cap B_b \rvert}{\lvert B_a \cup B_b \rvert},
+\begin{array}{lr}
+\displaystyle \mathrm{sim}(a,b) \;=\; \frac{\lvert B_a \cap B_b \rvert}{\lvert B_a \cup B_b \rvert},
 \qquad
-B_s \;=\; \bigl\{\, (s_i, s_{i+1}) \;:\; 1 \leq i < \lvert s \rvert \,\bigr\} \tag{G4}
+B_s \;=\; \bigl\{\, (s_i, s_{i+1}) \;:\; 1 \leq i < \lvert s \rvert \,\bigr\} & \text{(G4)}
+\end{array}
 ```
 
 with two special cases wired in: $`\mathrm{sim}(a,a) = 1`$, and if either string is a single
@@ -120,15 +128,16 @@ Let $`\beta_0 = \texttt{base\_confidence}`$ (default $`0.8`$). For an observed t
 byte span $`[b_0, b_1)`$ and an admissible set $`\mathcal{A}`$:
 
 ```math
-\begin{aligned}
+\begin{array}{lr}
+\displaystyle \begin{aligned}
 \textbf{Replace: } & o \mapsto a \quad (a \in \mathcal{A},\ \mathrm{sim}(o,a) \geq 0.3), &
 c_{\text{rep}}(a) &= \beta_0 \cdot \mathrm{sim}(o, a) \cdot \Bigl( \tfrac{1}{2} + \tfrac{1}{2}\hat{P}(a) \Bigr) \\[4pt]
 \textbf{Delete: } & o \mapsto \varepsilon \quad \text{over } [b_0, b_1), &
 c_{\text{del}} &= 0.7 \, \beta_0 \;=\; 0.56 \\[4pt]
 \textbf{Insert: } & \varepsilon \mapsto a \quad \text{at } [b_0, b_0), &
 c_{\text{ins}}(a) &= \beta_0 \cdot \hat{P}(a)
-\end{aligned}
-\tag{G5}
+\end{aligned} & \text{(G5)}
+\end{array}
 ```
 
 The replacement's $`\bigl(\tfrac{1}{2} + \tfrac{1}{2}\hat{P}\bigr)`$ factor is a **shrinkage** term:

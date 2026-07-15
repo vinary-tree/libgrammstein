@@ -69,24 +69,30 @@ from what is already chosen (orange).*
 The centroid, and each sentence's relevance to it:
 
 ```math
-\bar{\mathbf{v}} = \frac{1}{n}\sum_{i=1}^{n} \mathbf{v}_i,
+\begin{array}{lr}
+\displaystyle \bar{\mathbf{v}} = \frac{1}{n}\sum_{i=1}^{n} \mathbf{v}_i,
 \qquad
 \mathbf{c} = \frac{\bar{\mathbf{v}}}{\lVert \bar{\mathbf{v}} \rVert_2},
 \qquad
-\mathrm{rel}(s_i) = \cos(\mathbf{v}_i, \mathbf{c}) \tag{S1}
+\mathrm{rel}(s_i) = \cos(\mathbf{v}_i, \mathbf{c}) & \text{(S1)}
+\end{array}
 ```
 
 Carbonell & Goldstein's MMR [[1]](#references) then selects greedily, trading relevance against
 redundancy:
 
 ```math
-\mathrm{MMR}(s_i) \;=\; \lambda \cdot \mathrm{rel}(s_i)
-\;-\; (1 - \lambda) \cdot \max_{s_j \in S} \cos(\mathbf{v}_i, \mathbf{v}_j) \tag{S2}
+\begin{array}{lr}
+\displaystyle \mathrm{MMR}(s_i) \;=\; \lambda \cdot \mathrm{rel}(s_i)
+\;-\; (1 - \lambda) \cdot \max_{s_j \in S} \cos(\mathbf{v}_i, \mathbf{v}_j) & \text{(S2)}
+\end{array}
 ```
 
 ```math
-s^{\ast} \;=\; \arg\max_{s_i \in R \setminus S} \mathrm{MMR}(s_i),
-\qquad S \leftarrow S \cup \{ s^{\ast} \} \quad\text{until}\quad \lvert S \rvert = m \tag{S3}
+\begin{array}{lr}
+\displaystyle s^{\ast} \;=\; \arg\max_{s_i \in R \setminus S} \mathrm{MMR}(s_i),
+\qquad S \leftarrow S \cup \{ s^{\ast} \} \quad\text{until}\quad \lvert S \rvert = m & \text{(S3)}
+\end{array}
 ```
 
 The original formulation scores relevance against a **query**; with no query to speak of, the
@@ -96,7 +102,9 @@ document centroid $`\mathbf{c}`$ takes its place — the standard reduction of M
 The trade-off knob is inverted in the config: the field is a *diversity* threshold, so
 
 ```math
-\lambda \;=\; 1 - \delta, \qquad \delta = \texttt{diversity\_threshold} \tag{S4}
+\begin{array}{lr}
+\displaystyle \lambda \;=\; 1 - \delta, \qquad \delta = \texttt{diversity\_threshold} & \text{(S4)}
+\end{array}
 ```
 
 | `diversity_threshold` $`\delta`$ | $`\lambda`$ | Behavior |

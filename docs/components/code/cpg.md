@@ -53,8 +53,10 @@ possible transfer of control, distinguishing a designated entry node and a set o
 definition of variable $`x`$. The CPG is their union:
 
 ```math
-G = (V,\; E,\; \mu), \qquad
-E = E_{\mathrm{AST}} \cup E_{\mathrm{CFG}} \cup E_{\mathrm{DFG}} \cup E_{\mathrm{call}} \cup E_{\mathrm{type}} \tag{C1}
+\begin{array}{lr}
+\displaystyle G = (V,\; E,\; \mu), \qquad
+E = E_{\mathrm{AST}} \cup E_{\mathrm{CFG}} \cup E_{\mathrm{DFG}} \cup E_{\mathrm{call}} \cup E_{\mathrm{type}} & \text{(C1)}
+\end{array}
 ```
 
 with an edge-labeling $`\mu : E \to \mathcal{L}`$ and a node-labeling $`\nu : V \to K`$ into the
@@ -63,7 +65,9 @@ kinds — a parent–child pair is linked by `AstChild`, and if the child is a v
 `DfgFlow` — $`G`$ is a **directed multigraph**, not a simple digraph:
 
 ```math
-\exists\, u, v \in V,\; \ell_1 \neq \ell_2 \in \mathcal{L} : (u, v, \ell_1) \in E \;\wedge\; (u, v, \ell_2) \in E \tag{C2}
+\begin{array}{lr}
+\displaystyle \exists\, u, v \in V,\; \ell_1 \neq \ell_2 \in \mathcal{L} : (u, v, \ell_1) \in E \;\wedge\; (u, v, \ell_2) \in E & \text{(C2)}
+\end{array}
 ```
 
 This is realized directly by petgraph's `DiGraph`, which permits parallel edges.

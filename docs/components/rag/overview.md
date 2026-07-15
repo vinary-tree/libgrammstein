@@ -70,8 +70,10 @@ Relevance is modelled as *directional agreement*. The **cosine similarity** of t
 vectors is the cosine of the angle $`\theta`$ between them:
 
 ```math
-\cos(u, v) \;=\; \frac{\langle u, v \rangle}{\lVert u \rVert_2 \, \lVert v \rVert_2}
-\;=\; \cos \theta \;\in\; [-1, 1] \tag{R1}
+\begin{array}{lr}
+\displaystyle \cos(u, v) \;=\; \frac{\langle u, v \rangle}{\lVert u \rVert_2 \, \lVert v \rVert_2}
+\;=\; \cos \theta \;\in\; [-1, 1] & \text{(R1)}
+\end{array}
 ```
 
 It is $`1`$ when the vectors are parallel (same meaning), $`0`$ when orthogonal (unrelated), and
@@ -90,9 +92,11 @@ $`(\mathrm{R1})`$ is then identically $`1`$, and cosine similarity collapses int
 product:
 
 ```math
-\lVert \hat{u} \rVert_2 = \lVert \hat{v} \rVert_2 = 1
+\begin{array}{lr}
+\displaystyle \lVert \hat{u} \rVert_2 = \lVert \hat{v} \rVert_2 = 1
 \quad\Longrightarrow\quad
-\cos(\hat{u}, \hat{v}) \;=\; \frac{\langle \hat{u}, \hat{v} \rangle}{1 \cdot 1} \;=\; \langle \hat{u}, \hat{v} \rangle \tag{R2}
+\cos(\hat{u}, \hat{v}) \;=\; \frac{\langle \hat{u}, \hat{v} \rangle}{1 \cdot 1} \;=\; \langle \hat{u}, \hat{v} \rangle & \text{(R2)}
+\end{array}
 ```
 
 $`(\mathrm{R2})`$ is the load-bearing identity of the whole module. Every backend stores unit
@@ -103,9 +107,11 @@ The same identity ties cosine to Euclidean geometry on the unit sphere. Expandin
 distance between two unit vectors:
 
 ```math
-\lVert \hat{u} - \hat{v} \rVert_2^{2}
+\begin{array}{lr}
+\displaystyle \lVert \hat{u} - \hat{v} \rVert_2^{2}
 = \langle \hat{u}, \hat{u} \rangle - 2\,\langle \hat{u}, \hat{v} \rangle + \langle \hat{v}, \hat{v} \rangle
-= 2 - 2\,\langle \hat{u}, \hat{v} \rangle \tag{R3}
+= 2 - 2\,\langle \hat{u}, \hat{v} \rangle & \text{(R3)}
+\end{array}
 ```
 
 Because $`(\mathrm{R3})`$ is a strictly decreasing function of $`\langle \hat{u}, \hat{v} \rangle`$,
@@ -119,8 +125,10 @@ With $`(\mathrm{R2})`$ in hand, retrieval is one line. Writing $`\text{top-}\tex
 the operator returning the $`k`$ highest-scoring documents:
 
 ```math
-\mathrm{Retrieve}(q, k) \;=\; \underset{D \,\in\, \mathcal{D}}{\text{top-}\textit{k}}\
-\bigl\langle\, \widehat{E(q)},\ \widehat{E(D)} \,\bigr\rangle \tag{R4}
+\begin{array}{lr}
+\displaystyle \mathrm{Retrieve}(q, k) \;=\; \underset{D \,\in\, \mathcal{D}}{\text{top-}\textit{k}}\
+\bigl\langle\, \widehat{E(q)},\ \widehat{E(D)} \,\bigr\rangle & \text{(R4)}
+\end{array}
 ```
 
 Everything else in this module — the document model, the backends, the index, the retriever, the

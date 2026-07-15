@@ -30,15 +30,19 @@ since Salton [[1]](#references), now with the coordinates produced by a transfor
 by term counts. The similarity is the cosine:
 
 ```math
-\cos(\mathbf{a}, \mathbf{b}) \;=\; \frac{\mathbf{a} \cdot \mathbf{b}}{\lVert \mathbf{a} \rVert_2 \, \lVert \mathbf{b} \rVert_2} \;\in\; [-1, 1] \tag{E1}
+\begin{array}{lr}
+\displaystyle \cos(\mathbf{a}, \mathbf{b}) \;=\; \frac{\mathbf{a} \cdot \mathbf{b}}{\lVert \mathbf{a} \rVert_2 \, \lVert \mathbf{b} \rVert_2} \;\in\; [-1, 1] & \text{(E1)}
+\end{array}
 ```
 
 and normalizing once, up front, makes it free at query time:
 
 ```math
-\hat{\mathbf{e}} = \frac{\mathbf{e}}{\lVert \mathbf{e} \rVert_2}
+\begin{array}{lr}
+\displaystyle \hat{\mathbf{e}} = \frac{\mathbf{e}}{\lVert \mathbf{e} \rVert_2}
 \quad\Longrightarrow\quad
-\cos(\hat{\mathbf{a}}, \hat{\mathbf{b}}) = \hat{\mathbf{a}} \cdot \hat{\mathbf{b}} \tag{E2}
+\cos(\hat{\mathbf{a}}, \hat{\mathbf{b}}) = \hat{\mathbf{a}} \cdot \hat{\mathbf{b}} & \text{(E2)}
+\end{array}
 ```
 
 That identity is why `normalize` defaults to `true`: a retrieval index can then rank by a plain
@@ -52,9 +56,11 @@ zero.)
 The encoder emits $`T`$ hidden states; pooling collapses them.
 
 ```math
-\mathbf{e}_{\mathrm{Cls}} = \mathbf{h}_0,
+\begin{array}{lr}
+\displaystyle \mathbf{e}_{\mathrm{Cls}} = \mathbf{h}_0,
 \qquad
-\mathbf{e}_{\mathrm{Mean}} = \frac{1}{T}\sum_{t=0}^{T-1} \mathbf{h}_t \tag{E3}
+\mathbf{e}_{\mathrm{Mean}} = \frac{1}{T}\sum_{t=0}^{T-1} \mathbf{h}_t & \text{(E3)}
+\end{array}
 ```
 
 | `PoolingStrategy` | Behavior | Notes |
@@ -125,9 +131,11 @@ corpus, `Cls` is not merely the default — it is the fast path.
 Work saved by the cache, for a batch with hit rate $`H_{\text{rate}}`$:
 
 ```math
-C_{\text{batch}} \;=\; \bigl(1 - H_{\text{rate}}\bigr) \cdot N \cdot C_{\text{fwd}}
+\begin{array}{lr}
+\displaystyle C_{\text{batch}} \;=\; \bigl(1 - H_{\text{rate}}\bigr) \cdot N \cdot C_{\text{fwd}}
 \;+\; N \cdot C_{\text{probe}},
-\qquad C_{\text{probe}} \lll C_{\text{fwd}} \tag{E4}
+\qquad C_{\text{probe}} \lll C_{\text{fwd}} & \text{(E4)}
+\end{array}
 ```
 
 ## 6. Documents, queries, and truncation
@@ -143,7 +151,9 @@ pub fn embed_query(&self, query: &str) -> Result<Vec<f32>>;
 `embed_document` truncates with a **character** heuristic — roughly four characters per token:
 
 ```math
-\text{max\_chars} \;=\; 4 \cdot \texttt{max\_seq\_len} \;=\; 32\,768 \ \text{(default)} \tag{E5}
+\begin{array}{lr}
+\displaystyle \text{max\_chars} \;=\; 4 \cdot \texttt{max\_seq\_len} \;=\; 32\,768 \ \text{(default)} & \text{(E5)}
+\end{array}
 ```
 
 and then backs off to the last whitespace so a word is not cut in half.

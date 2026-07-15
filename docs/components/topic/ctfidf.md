@@ -52,9 +52,11 @@ For a surviving term $`t`$ in topic $`c`$, libgrammstein
 ([`CtfIdf::compute_ctfidf`](../../../src/topic/ctfidf.rs)) computes
 
 ```math
-\mathrm{ctfidf}(t, c) = \underbrace{\frac{\mathrm{tf}^{\star}(t, c)}{W_c}}_{\text{normalized TF}}
+\begin{array}{lr}
+\displaystyle \mathrm{ctfidf}(t, c) = \underbrace{\frac{\mathrm{tf}^{\star}(t, c)}{W_c}}_{\text{normalized TF}}
 \;\cdot\;
-\underbrace{\ln\!\left(1 + \frac{A}{\mathrm{df}(t)}\right)}_{\text{IDF}} \tag{T1}
+\underbrace{\ln\!\left(1 + \frac{A}{\mathrm{df}(t)}\right)}_{\text{IDF}} & \text{(T1)}
+\end{array}
 ```
 
 The **term-frequency** factor is normalized by the topic's total token count $`W_c`$ so that
@@ -63,10 +65,12 @@ that damps very frequent terms (a word occurring 100 times should not outweigh o
 times by a full factor of ten):
 
 ```math
-\mathrm{tf}^{\star}(t, c) = \begin{cases}
+\begin{array}{lr}
+\displaystyle \mathrm{tf}^{\star}(t, c) = \begin{cases}
 1 + \ln f(t, c) & \text{if } \texttt{sublinear\_tf} \text{ (the default)} \\
 f(t, c) & \text{otherwise}
-\end{cases} \tag{T2}
+\end{cases} & \text{(T2)}
+\end{array}
 ```
 
 The **inverse-frequency** factor $`\ln(1 + A / \mathrm{df}(t))`$ is BERTopic's c-TF-IDF IDF
@@ -90,7 +94,9 @@ byte length lies in $`[\texttt{min\_term\_length}, \texttt{max\_term\_length}]`$
 [`filter_by_df`](../../../src/topic/ctfidf.rs) keeps term $`t`$ iff
 
 ```math
-\texttt{min\_df} \;\le\; \mathrm{df}(t) \;\le\; \bigl\lfloor \texttt{max\_df\_ratio} \cdot T \bigr\rfloor \tag{T3}
+\begin{array}{lr}
+\displaystyle \texttt{min\_df} \;\le\; \mathrm{df}(t) \;\le\; \bigl\lfloor \texttt{max\_df\_ratio} \cdot T \bigr\rfloor & \text{(T3)}
+\end{array}
 ```
 
 The lower bound $`\texttt{min\_df}`$ removes typos and one-off noise; the upper bound removes

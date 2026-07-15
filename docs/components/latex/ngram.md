@@ -103,7 +103,8 @@ $`\theta_{\mathrm{cmd}} = \theta_{\mathrm{math}} = 2`$ (`ModeDetector::with_thre
 them). Then:
 
 ```math
-\mathrm{seq}(T) = \begin{cases}
+\begin{array}{lr}
+\displaystyle \mathrm{seq}(T) = \begin{cases}
 \mathrm{Math}    & \text{if } \rho_{\mathrm{math}} \geq \theta_{\mathrm{math}}
                     \ \lor\ c_{\mathrm{math}} > \lfloor N/2 \rfloor
                     \ \lor\ \exists\, t \in T:\ t.\mathtt{in\_math} \\
@@ -111,7 +112,8 @@ them). Then:
                     \ \lor\ c_{\mathrm{cmd}} > \lfloor N/2 \rfloor \\
 \mathrm{Text}    & \text{else if } c_{\mathrm{txt}} > \lfloor N/2 \rfloor \\
 \mathrm{Mixed}   & \text{otherwise}
-\end{cases} \tag{N1}
+\end{cases} & \text{(N1)}
+\end{array}
 ```
 
 An empty stream is `Mixed`. The third disjunct of the `Math` branch makes mathematics
@@ -143,9 +145,11 @@ log-probabilities of its tokens' spellings, with each history clipped **both** b
 order $`k`$ **and** by the region's left edge $`i`$:
 
 ```math
-\Lambda_r \;=\; \sum_{p=i}^{j-1}
+\begin{array}{lr}
+\displaystyle \Lambda_r \;=\; \sum_{p=i}^{j-1}
 \log \mathbb{P}_{m(r)}\Bigl(\sigma(t_p) \;\Bigm|\;
-\sigma(t_{\max(i,\; p-k+1)}), \dots, \sigma(t_{p-1})\Bigr) \tag{N2}
+\sigma(t_{\max(i,\; p-k+1)}), \dots, \sigma(t_{p-1})\Bigr) & \text{(N2)}
+\end{array}
 ```
 
 The $`\max(i, \cdot)`$ is not incidental — it is the semantic price of mode separation.
@@ -159,9 +163,10 @@ forgetting the handful of tokens that preceded the switch.
 The stream score is a weighted ratio, rescaled by the token count:
 
 ```math
-S(T) \;=\; \frac{\displaystyle\sum_{r \in R} w_{m(r)}\,\Lambda_r}
-                {\displaystyle\sum_{r \in R} w_{m(r)}\,n_r}\;\cdot\; N
-\tag{N3}
+\begin{array}{lr}
+\displaystyle S(T) \;=\; \frac{\displaystyle\sum_{r \in R} w_{m(r)}\,\Lambda_r}
+                {\displaystyle\sum_{r \in R} w_{m(r)}\,n_r}\;\cdot\; N & \text{(N3)}
+\end{array}
 ```
 
 with the guards $`S(T) = 0`$ when $`T`$ is empty, and $`S(T) = \sum_r w_{m(r)} \Lambda_r`$ in the
@@ -172,12 +177,13 @@ $`(\mathrm{N3})`$ is easier to read after one substitution. Multiplying and divi
 $`r`$ by its length turns the ratio into a **mixture of per-token mean log-probabilities**:
 
 ```math
-S(T) \;=\; N \sum_{r \in R} \pi_r \, \lambda_r,
+\begin{array}{lr}
+\displaystyle S(T) \;=\; N \sum_{r \in R} \pi_r \, \lambda_r,
 \qquad
 \pi_r \;=\; \frac{w_{m(r)}\,n_r}{\sum_{s \in R} w_{m(s)}\,n_s},
 \qquad
-\lambda_r \;=\; \frac{\Lambda_r}{n_r}
-\tag{N4}
+\lambda_r \;=\; \frac{\Lambda_r}{n_r} & \text{(N4)}
+\end{array}
 ```
 
 Because $`w_m > 0`$ and $`n_r \geq 1`$, the coefficients $`\pi_r`$ are non-negative and sum to
@@ -189,11 +195,12 @@ sentence log-probability, which keeps $`S(T)`$ comparable across candidates of e
 ### Corollary: the weights only re-balance *heterogeneous* streams
 
 ```math
-\mu(t_p) = m \quad \text{for all } p
+\begin{array}{lr}
+\displaystyle \mu(t_p) = m \quad \text{for all } p
 \qquad\Longrightarrow\qquad
 S(T) \;=\; \sum_{r \in R} \Lambda_r
-\quad\text{independently of } w_m
-\tag{N5}
+\quad\text{independently of } w_m & \text{(N5)}
+\end{array}
 ```
 
 *Proof.* If every region carries the same mode $`m`$, then $`w_{m(r)} = w_m`$ is constant and
@@ -215,8 +222,10 @@ Setting `NgramConfig::mode_separation = false` bypasses all of the above and con
 combined model:
 
 ```math
-S_{\mathrm{joint}}(T) \;=\; \log \mathbb{P}_{\mathrm{comb}}
-\bigl(\sigma(t_1), \dots, \sigma(t_N)\bigr) \tag{N6}
+\begin{array}{lr}
+\displaystyle S_{\mathrm{joint}}(T) \;=\; \log \mathbb{P}_{\mathrm{comb}}
+\bigl(\sigma(t_1), \dots, \sigma(t_N)\bigr) & \text{(N6)}
+\end{array}
 ```
 
 Here the history *does* run the length of the stream (clipped only by $`k`$), so this path trades
@@ -268,10 +277,12 @@ is this next token?* — and returns $`\log \mathbb{P}_m(\sigma(t) \mid \sigma(\
 The subtlety is **which** $`m`$:
 
 ```math
-m \;=\; \begin{cases}
+\begin{array}{lr}
+\displaystyle m \;=\; \begin{cases}
 \mu(t) & \text{if the context is empty} \\
 \mathrm{seq}(\text{context}) & \text{otherwise}
-\end{cases} \tag{N7}
+\end{cases} & \text{(N7)}
+\end{array}
 ```
 
 The model is chosen by the **context's** dominant mode $`(\mathrm{N1})`$, not by the candidate

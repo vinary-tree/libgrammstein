@@ -55,9 +55,10 @@ a tight correction loop. It computes three normalized components, each in $`[0,1
 fuses them as a weight-normalized mean:
 
 ```math
-\mathrm{score} = \frac{\sum_{j} n_j\, w_j}{\sum_{j} w_j}
-\qquad\text{with components } j \in \{\text{structural},\ \text{fluency},\ \text{coherence}\}
-\tag{L1}
+\begin{array}{lr}
+\displaystyle \mathrm{score} = \frac{\sum_{j} n_j\, w_j}{\sum_{j} w_j}
+\qquad\text{with components } j \in \{\text{structural},\ \text{fluency},\ \text{coherence}\} & \text{(L1)}
+\end{array}
 ```
 
 where $`n_j \in [0,1]`$ is component $`j`$'s normalized score and $`w_j`$ its

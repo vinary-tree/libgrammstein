@@ -123,10 +123,11 @@ pub struct Document {
 `Tokenizer` is a pair of regexes, not a linguistic model:
 
 ```math
-\text{sentence boundary} = \mathtt{[.!?]{+}\backslash s{+}},
+\begin{array}{lr}
+\displaystyle \text{sentence boundary} = \mathtt{[.!?]{+}\backslash s{+}},
 \qquad
-\text{word boundary} = \mathtt{[\backslash s\backslash p\{P\}]{+}}
-\tag{T1}
+\text{word boundary} = \mathtt{[\backslash s\backslash p\{P\}]{+}} & \text{(T1)}
+\end{array}
 ```
 
 `sentences()` **splits on** the boundary, so terminal punctuation is *consumed*: the document
@@ -156,28 +157,31 @@ Let $`s`$ have $`n`$ whitespace-separated words $`w_1 \ldots w_n`$.
 **Repetition ratio** — how far the sentence is dominated by its most frequent word:
 
 ```math
-r(s) \;=\; \frac{\max_{w} c(w)}{n} \;\in\; \left[\tfrac{1}{n},\, 1\right]
-\tag{Q1}
+\begin{array}{lr}
+\displaystyle r(s) \;=\; \frac{\max_{w} c(w)}{n} \;\in\; \left[\tfrac{1}{n},\, 1\right] & \text{(Q1)}
+\end{array}
 ```
 
 **Character entropy** — the Shannon entropy [[3]](#references) of the case-folded,
 whitespace-stripped character distribution, in bits:
 
 ```math
-H(s) \;=\; -\sum_{x \in \Sigma} p(x) \log_2 p(x),
+\begin{array}{lr}
+\displaystyle H(s) \;=\; -\sum_{x \in \Sigma} p(x) \log_2 p(x),
 \qquad
-p(x) = \frac{\text{occurrences of } x}{\text{total non-space characters}}
-\tag{Q2}
+p(x) = \frac{\text{occurrences of } x}{\text{total non-space characters}} & \text{(Q2)}
+\end{array}
 ```
 
 **Alphabetic ratio** and **mean word length** — note that $`\alpha`$ divides by *all* characters,
 spaces included:
 
 ```math
-\alpha(s) = \frac{\bigl\lvert \{\, x \in s : x \text{ is alphabetic} \,\} \bigr\rvert}{\lvert s \rvert},
+\begin{array}{lr}
+\displaystyle \alpha(s) = \frac{\bigl\lvert \{\, x \in s : x \text{ is alphabetic} \,\} \bigr\rvert}{\lvert s \rvert},
 \qquad
-\bar{L} = \frac{1}{n}\sum_{i=1}^{n} \lvert w_i \rvert
-\tag{Q3}
+\bar{L} = \frac{1}{n}\sum_{i=1}^{n} \lvert w_i \rvert & \text{(Q3)}
+\end{array}
 ```
 
 ### Three consequences the thresholds inherit
@@ -189,8 +193,9 @@ the shipped presets look the way they do.
 uniform distribution, so $`H(s) \leq \log_2 k`$. Demanding $`H(s) \geq H_{\min}`$ therefore *forces*
 
 ```math
-k \;\geq\; 2^{H_{\min}}
-\tag{Q4}
+\begin{array}{lr}
+\displaystyle k \;\geq\; 2^{H_{\min}} & \text{(Q4)}
+\end{array}
 ```
 
 distinct non-space characters. The default $`H_{\min} = 3.0`$ admits nothing with fewer than eight
@@ -209,12 +214,13 @@ sentence of $`n`$ words with mean length $`\bar{L}`$. It has $`n\bar{L}`$ alphab
 $`n-1`$ spaces, so
 
 ```math
-\alpha \;=\; \frac{n\bar{L}}{n\bar{L} + n - 1}
+\begin{array}{lr}
+\displaystyle \alpha \;=\; \frac{n\bar{L}}{n\bar{L} + n - 1}
 \;\xrightarrow[\;n \to \infty\;]{}\;
 \frac{\bar{L}}{\bar{L}+1}
 \quad\Longrightarrow\quad
-\alpha \geq \alpha_{\min} \iff \bar{L} \;\gtrsim\; \frac{\alpha_{\min}}{1 - \alpha_{\min}}
-\tag{Q5}
+\alpha \geq \alpha_{\min} \iff \bar{L} \;\gtrsim\; \frac{\alpha_{\min}}{1 - \alpha_{\min}} & \text{(Q5)}
+\end{array}
 ```
 
 For `strict()`, $`\alpha_{\min} = 0.78`$ implies $`\bar{L} \gtrsim 3.55`$ — *stricter* than that same
@@ -267,8 +273,9 @@ Because only a 64-bit digest is retained, two genuinely different sentences *can
 distinct sentences the expected number of false-duplicate pairs is the birthday count
 
 ```math
-\mathbb{E}[\text{collisions}] \;=\; \binom{N}{2} 2^{-64} \;\approx\; \frac{N^{2}}{2^{65}}
-\tag{D1}
+\begin{array}{lr}
+\displaystyle \mathbb{E}[\text{collisions}] \;=\; \binom{N}{2} 2^{-64} \;\approx\; \frac{N^{2}}{2^{65}} & \text{(D1)}
+\end{array}
 ```
 
 which at $`N = 10^{9}`$ is $`\approx 0.027`$ — roughly a 2.7 % chance of losing *one* sentence across
@@ -281,8 +288,9 @@ the set of character $`g`$-grams ("shingles") of its normalized form [[2]](#refe
 similarity is the **Jaccard index**
 
 ```math
-J(A, B) \;=\; \frac{\lvert A \cap B \rvert}{\lvert A \cup B \rvert} \;\in\; [0, 1]
-\tag{D2}
+\begin{array}{lr}
+\displaystyle J(A, B) \;=\; \frac{\lvert A \cap B \rvert}{\lvert A \cup B \rvert} \;\in\; [0, 1] & \text{(D2)}
+\end{array}
 ```
 
 Evaluating $`(\mathrm{D2})`$ exactly against every retained sentence would mean storing every shingle
@@ -290,20 +298,22 @@ set. Broder's insight [[1]](#references) is that for a uniformly random permutat
 shingle universe,
 
 ```math
-\Pr\bigl[\min \pi(A) = \min \pi(B)\bigr] \;=\; J(A, B)
-\tag{D3}
+\begin{array}{lr}
+\displaystyle \Pr\bigl[\min \pi(A) = \min \pi(B)\bigr] \;=\; J(A, B) & \text{(D3)}
+\end{array}
 ```
 
 so a *signature* of $`m`$ independent minima is a sample of $`m`$ Bernoulli($`J`$) trials.
 libgrammstein approximates the permutations with $`m`$ seeded hash functions and estimates
 
 ```math
-\hat{J}(A,B) = \frac{1}{m} \sum_{i=1}^{m} \mathbf{1}\bigl[\mathrm{sig}_A[i] = \mathrm{sig}_B[i]\bigr],
+\begin{array}{lr}
+\displaystyle \hat{J}(A,B) = \frac{1}{m} \sum_{i=1}^{m} \mathbf{1}\bigl[\mathrm{sig}_A[i] = \mathrm{sig}_B[i]\bigr],
 \qquad
 \mathbb{E}\bigl[\hat{J}\bigr] = J,
 \qquad
-\mathrm{Var}\bigl[\hat{J}\bigr] = \frac{J(1-J)}{m}
-\tag{D4}
+\mathrm{Var}\bigl[\hat{J}\bigr] = \frac{J(1-J)}{m} & \text{(D4)}
+\end{array}
 ```
 
 The standard error is at most $`1/(2\sqrt{m})`$, so the default $`m = 128`$ gives

@@ -64,16 +64,20 @@ Under the context-free independence assumption, the probability of a derivation 
 of the probabilities of the productions it uses [[4]](#references):
 
 ```math
-\mathbb{P}(\tau) \;=\; \prod_{(A \to \alpha)\, \in\, \mathrm{rules}(\tau)} \mathbb{P}(A \to \alpha),
+\begin{array}{lr}
+\displaystyle \mathbb{P}(\tau) \;=\; \prod_{(A \to \alpha)\, \in\, \mathrm{rules}(\tau)} \mathbb{P}(A \to \alpha),
 \qquad \text{subject to} \quad
-\sum_{\alpha \,:\, A \to \alpha} \mathbb{P}(A \to \alpha) \;=\; 1 \quad \forall A \in N \tag{W1}
+\sum_{\alpha \,:\, A \to \alpha} \mathbb{P}(A \to \alpha) \;=\; 1 \quad \forall A \in N & \text{(W1)}
+\end{array}
 ```
 
 Taking logarithms turns the product into a sum — which is exactly the $`\otimes`$ of the semirings
 below, and the reason weights are carried in the log domain:
 
 ```math
-\log \mathbb{P}(\tau) \;=\; \sum_{(A \to \alpha)\, \in\, \mathrm{rules}(\tau)} \log \mathbb{P}(A \to \alpha) \tag{W2}
+\begin{array}{lr}
+\displaystyle \log \mathbb{P}(\tau) \;=\; \sum_{(A \to \alpha)\, \in\, \mathrm{rules}(\tau)} \log \mathbb{P}(A \to \alpha) & \text{(W2)}
+\end{array}
 ```
 
 ### Why an exact WFST is impossible
@@ -84,7 +88,9 @@ recognizes that language. Real programming-language grammars are full of exactly
 nested parentheses, nested blocks, nested expressions. Hence
 
 ```math
-\mathcal{L}_{\mathrm{reg}} \;\subsetneq\; \mathcal{L}_{\mathrm{cf}} \tag{W3}
+\begin{array}{lr}
+\displaystyle \mathcal{L}_{\mathrm{reg}} \;\subsetneq\; \mathcal{L}_{\mathrm{cf}} & \text{(W3)}
+\end{array}
 ```
 
 and any finite-state rendering of a CFG is necessarily an approximation. Approximating CFGs by
@@ -99,7 +105,9 @@ Nederhof [[3]](#references). libgrammstein takes the simplest member of that fam
 and refusing to expand past $`D`$ = `max_depth`:
 
 ```math
-T_{D}(G) \;=\; \text{the transducer obtained by expanding every derivation of } G \text{ to depth} \le D \tag{W4}
+\begin{array}{lr}
+\displaystyle T_{D}(G) \;=\; \text{the transducer obtained by expanding every derivation of } G \text{ to depth} \le D & \text{(W4)}
+\end{array}
 ```
 
 Two consequences follow directly from the construction, and both matter:
@@ -132,7 +140,9 @@ $`\otimes`$ accumulates weight **along** a path, and $`\oplus`$ combines the wei
 alternative paths [[1]](#references). The weight a transducer $`T`$ assigns to a string $`x`$ is
 
 ```math
-\llbracket T \rrbracket(x) \;=\; \bigoplus_{\pi \,\in\, P(x)} \;\; \bigotimes_{e \,\in\, \pi} w[e] \tag{W5}
+\begin{array}{lr}
+\displaystyle \llbracket T \rrbracket(x) \;=\; \bigoplus_{\pi \,\in\, P(x)} \;\; \bigotimes_{e \,\in\, \pi} w[e] & \text{(W5)}
+\end{array}
 ```
 
 Three semirings are available, and the choice determines what $`(\mathrm{W5})`$ *computes*:
@@ -147,11 +157,13 @@ The bridge from a rule probability to a semiring weight is the `FromLogProb` tra
 (`crate::integration::wfst_export`), which every arc weight passes through:
 
 ```math
-\mathrm{from\_log\_prob}(\ln p) \;=\;
+\begin{array}{lr}
+\displaystyle \mathrm{from\_log\_prob}(\ln p) \;=\;
 \begin{cases}
 -\ln p & \text{for } \texttt{LogWeight} \text{ and } \texttt{TropicalWeight} \quad (\text{a } \textbf{cost}: \text{lower is better}) \\[2pt]
 \;\;\;\;p & \text{for } \texttt{ProbabilityWeight} \quad (\text{a probability: higher is better})
-\end{cases} \tag{W6}
+\end{cases} & \text{(W6)}
+\end{array}
 ```
 
 Note the sign flip: `Log` and `Tropical` store **negative** log-probabilities, so that $`\otimes = +`$

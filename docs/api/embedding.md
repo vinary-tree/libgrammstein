@@ -53,11 +53,13 @@ the learned word vector with the mean of its subword vectors; for an **OOV** wor
 subword half exists, so that mean *is* the vector:
 
 ```math
-v_w \;=\;
+\begin{array}{lr}
+\displaystyle v_w \;=\;
 \begin{cases}
 \dfrac{1}{2}\Bigl(u_w \;+\; \dfrac{1}{\lvert G_w \rvert}\displaystyle\sum_{g \in G_w} z_{\mathrm{hash}(g)}\Bigr) & w \in V \\[2ex]
 \dfrac{1}{\lvert G_w \rvert}\displaystyle\sum_{g \in G_w} z_{\mathrm{hash}(g)} & w \notin V
-\end{cases} \tag{E1}
+\end{cases} & \text{(E1)}
+\end{array}
 ```
 
 A word with no extractable subwords (whose marked form is shorter than $`n_{\min}`$) yields the
@@ -136,7 +138,9 @@ impl SubwordEmbedding {
 All similarity methods use **cosine similarity** on the composed vectors of $`(\mathrm{E1})`$:
 
 ```math
-\cos(v_a, v_b) \;=\; \frac{v_a \cdot v_b}{\lVert v_a \rVert \, \lVert v_b \rVert} \;\in\; [-1, 1] \tag{E2}
+\begin{array}{lr}
+\displaystyle \cos(v_a, v_b) \;=\; \frac{v_a \cdot v_b}{\lVert v_a \rVert \, \lVert v_b \rVert} \;\in\; [-1, 1] & \text{(E2)}
+\end{array}
 ```
 
 Zero-norm vectors (an unrepresentable word) yield $`0.0`$ rather than `NaN`.
@@ -302,7 +306,9 @@ Skip-gram with negative sampling [[2]](#references): for a centre word $`w`$ and
 $`c`$ drawn from a window of `window_size` on each side, maximize
 
 ```math
-\log \sigma(v_w \cdot u_c) \;+\; \sum_{j=1}^{k} \mathbb{E}_{c_j \sim P_n}\bigl[\log \sigma(-v_w \cdot u_{c_j})\bigr] \tag{E3}
+\begin{array}{lr}
+\displaystyle \log \sigma(v_w \cdot u_c) \;+\; \sum_{j=1}^{k} \mathbb{E}_{c_j \sim P_n}\bigl[\log \sigma(-v_w \cdot u_{c_j})\bigr] & \text{(E3)}
+\end{array}
 ```
 
 where $`k`$ is `neg_samples`, $`\sigma`$ is the logistic function, and the noise distribution

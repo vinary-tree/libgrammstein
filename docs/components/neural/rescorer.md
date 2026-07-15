@@ -43,18 +43,24 @@ probability, only a faithful *ordering*.
 The definitions:
 
 ```math
-\mathrm{PLL}(W) \;=\; \sum_{t=1}^{T} \log \mathbb{P}_{\mathrm{MLM}}\bigl(w_t \mid W_{\setminus t};\ \theta\bigr) \tag{R1}
+\begin{array}{lr}
+\displaystyle \mathrm{PLL}(W) \;=\; \sum_{t=1}^{T} \log \mathbb{P}_{\mathrm{MLM}}\bigl(w_t \mid W_{\setminus t};\ \theta\bigr) & \text{(R1)}
+\end{array}
 ```
 
 ```math
-\mathrm{PPPL}(W) \;=\; \exp\!\left(-\frac{1}{T}\,\mathrm{PLL}(W)\right) \tag{R2}
+\begin{array}{lr}
+\displaystyle \mathrm{PPPL}(W) \;=\; \exp\!\left(-\frac{1}{T}\,\mathrm{PLL}(W)\right) & \text{(R2)}
+\end{array}
 ```
 
 and the per-position term is a numerically stable log-softmax over the vocabulary axis:
 
 ```math
-\log \mathbb{P}_{\mathrm{MLM}}\bigl(w_t \mid W_{\setminus t}\bigr)
-\;=\; z_{t,\,w_t} \;-\; \log \sum_{v \in \mathcal{V}} \exp\bigl(z_{t,\,v}\bigr) \tag{R3}
+\begin{array}{lr}
+\displaystyle \log \mathbb{P}_{\mathrm{MLM}}\bigl(w_t \mid W_{\setminus t}\bigr)
+\;=\; z_{t,\,w_t} \;-\; \log \sum_{v \in \mathcal{V}} \exp\bigl(z_{t,\,v}\bigr) & \text{(R3)}
+\end{array}
 ```
 
 $`(\mathrm{R2})`$ is a *length-normalized* quantity — the $`1/T`$ — so short and long candidates
@@ -87,11 +93,15 @@ The neural score is squashed into a bounded, *higher-is-better* scale before mix
 $`\mathrm{PPPL} \in [1, \infty)`$ points the wrong way:
 
 ```math
-s_{\text{neural}}(W) \;=\; \frac{1}{1 + \mathrm{PPPL}(W)} \;\in\; (0, 1] \tag{R4}
+\begin{array}{lr}
+\displaystyle s_{\text{neural}}(W) \;=\; \frac{1}{1 + \mathrm{PPPL}(W)} \;\in\; (0, 1] & \text{(R4)}
+\end{array}
 ```
 
 ```math
-s_{\text{final}}(W) \;=\; \alpha \cdot s_{\text{ngram}}(W) \;+\; \beta \cdot s_{\text{neural}}(W) \tag{R5}
+\begin{array}{lr}
+\displaystyle s_{\text{final}}(W) \;=\; \alpha \cdot s_{\text{ngram}}(W) \;+\; \beta \cdot s_{\text{neural}}(W) & \text{(R5)}
+\end{array}
 ```
 
 > **Scale warning — read before choosing $`\alpha`$ and $`\beta`$.** $`(\mathrm{R4})`$ lands in
@@ -142,9 +152,11 @@ Two details worth naming:
 ### Cost
 
 ```math
-C\bigl(\mathrm{PPPL}(W)\bigr) \;=\; T \cdot C_{\text{fwd}}(T)
+\begin{array}{lr}
+\displaystyle C\bigl(\mathrm{PPPL}(W)\bigr) \;=\; T \cdot C_{\text{fwd}}(T)
 \quad\text{and, over a beam of } k \text{ paths,}\quad
-C_{\text{rescore}} \;=\; \Theta\!\left(\textstyle\sum_{i=1}^{k} T_i \cdot C_{\text{fwd}}(T_i)\right) \tag{R6}
+C_{\text{rescore}} \;=\; \Theta\!\left(\textstyle\sum_{i=1}^{k} T_i \cdot C_{\text{fwd}}(T_i)\right) & \text{(R6)}
+\end{array}
 ```
 
 with $`C_{\text{fwd}}`$ from [Model](model.md) $`(\mathrm{N1})`$. This is the dominant fact about
@@ -183,8 +195,10 @@ sentence in half, embed the halves and the whole, and ask how well the whole agr
 parts:
 
 ```math
-s_{\text{coh}}(W) \;=\; \frac{2}{\cos(\mathbf{v}_W, \mathbf{v}_{W_1}) + \cos(\mathbf{v}_W, \mathbf{v}_{W_2}) + \varepsilon},
-\qquad \varepsilon = 10^{-6} \tag{R7}
+\begin{array}{lr}
+\displaystyle s_{\text{coh}}(W) \;=\; \frac{2}{\cos(\mathbf{v}_W, \mathbf{v}_{W_1}) + \cos(\mathbf{v}_W, \mathbf{v}_{W_2}) + \varepsilon},
+\qquad \varepsilon = 10^{-6} & \text{(R7)}
+\end{array}
 ```
 
 where $`W_1, W_2`$ are the first and second halves by whitespace and $`\mathbf{v}`$ is a `[CLS]`

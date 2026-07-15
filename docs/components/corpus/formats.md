@@ -132,14 +132,15 @@ four filters pass.
 An article is emitted exactly when
 
 ```math
-\bigl(\mathrm{ns} \in F\bigr)
+\begin{array}{lr}
+\displaystyle \bigl(\mathrm{ns} \in F\bigr)
 \;\wedge\;
 \neg\bigl(\text{skip\_redirects} \wedge \text{text starts with \#REDIRECT}\bigr)
 \;\wedge\;
 \bigl(\lvert \text{text} \rvert \geq \ell\bigr)
 \;\wedge\;
-\bigl(\lvert \text{normalized} \rvert \geq \ell\bigr)
-\tag{W1}
+\bigl(\lvert \text{normalized} \rvert \geq \ell\bigr) & \text{(W1)}
+\end{array}
 ```
 
 where $`F`$ is `namespace_filter` and $`\ell`$ is `min_text_length`. The length test is applied
@@ -220,8 +221,9 @@ for sentence in reader.sentences() {
 reported `Content-Length` and $`D`$ for the free space on `std::env::temp_dir()`, it downloads iff
 
 ```math
-2C \;\leq\; 0.9\,D
-\tag{W2}
+\begin{array}{lr}
+\displaystyle 2C \;\leq\; 0.9\,D & \text{(W2)}
+\end{array}
 ```
 
 and streams otherwise. The $`2\times`$ margin covers the download plus decompression overhead; the
@@ -254,10 +256,11 @@ the **first** matching marker in each of two lists (four START forms — includi
 ![Carving the book out of a Gutenberg file](../../diagrams/corpus-gutenberg-strip.svg)
 
 ```math
-\text{start} = \text{(end of the START marker's line)} + \text{(run of following whitespace)},
+\begin{array}{lr}
+\displaystyle \text{start} = \text{(end of the START marker's line)} + \text{(run of following whitespace)},
 \qquad
-\text{end} = \bigl\lvert \texttt{text[..pos]}.\mathrm{trim\_end}() \bigr\rvert
-\tag{G1}
+\text{end} = \bigl\lvert \texttt{text[..pos]}.\mathrm{trim\_end}() \bigr\rvert & \text{(G1)}
+\end{array}
 ```
 
 where `pos` is the first END marker searched **from `start` onwards**, so a marker quoted inside the

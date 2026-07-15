@@ -29,7 +29,9 @@ Two properties make tree-sitter the right front-end for correction:
 An abstract syntax tree is a **rooted, ordered, labeled tree**
 
 ```math
-A = (V,\; E,\; r,\; \prec,\; \kappa) \tag{A1}
+\begin{array}{lr}
+\displaystyle A = (V,\; E,\; r,\; \prec,\; \kappa) & \text{(A1)}
+\end{array}
 ```
 
 where $`V`$ is the set of nodes, $`E \subseteq V \times V`$ the parent→child edges, $`r \in V`$

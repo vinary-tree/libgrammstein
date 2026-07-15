@@ -44,7 +44,9 @@ $`\alpha \sqsubseteq_g s`$ — when its items occur in order, each within $`g+1`
 last:
 
 ```math
-\alpha \sqsubseteq_g s \iff \exists\, p_0 < p_1 < \dots < p_{k-1} \ \text{ with } \ s_{p_m} = \alpha_m \ \text{ and } \ 1 \le p_{m+1} - p_m \le g + 1 \tag{A1}
+\begin{array}{lr}
+\displaystyle \alpha \sqsubseteq_g s \iff \exists\, p_0 < p_1 < \dots < p_{k-1} \ \text{ with } \ s_{p_m} = \alpha_m \ \text{ and } \ 1 \le p_{m+1} - p_m \le g + 1 & \text{(A1)}
+\end{array}
 ```
 
 Setting $`g = 0`$ (`allow_gaps = false`, i.e. `ApiPatternConfig::strict`) forces
@@ -55,16 +57,20 @@ intervening calls.
 still has support $`1`$:
 
 ```math
-\mathrm{sup}(\alpha) = \bigl\lvert \{\, j \ :\ \alpha \sqsubseteq_g s_j \,\} \bigr\rvert,
+\begin{array}{lr}
+\displaystyle \mathrm{sup}(\alpha) = \bigl\lvert \{\, j \ :\ \alpha \sqsubseteq_g s_j \,\} \bigr\rvert,
 \qquad
-\mathrm{sup}_{\mathrm{rel}}(\alpha) = \frac{\mathrm{sup}(\alpha)}{\max(N,\ 1)} \tag{A2}
+\mathrm{sup}_{\mathrm{rel}}(\alpha) = \frac{\mathrm{sup}(\alpha)}{\max(N,\ 1)} & \text{(A2)}
+\end{array}
 ```
 
 $`\mathrm{sup}_{\mathrm{rel}}`$ is the `support_ratio` field. The threshold a pattern must clear
 combines the relative and the absolute setting, taking whichever is **stricter**:
 
 ```math
-\xi = \max\Bigl(\bigl\lceil \rho \cdot N \bigr\rceil,\ c_{\min}\Bigr) \tag{A3}
+\begin{array}{lr}
+\displaystyle \xi = \max\Bigl(\bigl\lceil \rho \cdot N \bigr\rceil,\ c_{\min}\Bigr) & \text{(A3)}
+\end{array}
 ```
 
 so $`\rho`$ scales with the corpus while $`c_{\min}`$ refuses to call two coincidences a pattern in
@@ -77,7 +83,9 @@ It does not have to, because support is **anti-monotone** (the *Apriori property
 [[2]](#references)) — extending a pattern can never increase its support:
 
 ```math
-\alpha \sqsubseteq \beta \ \implies\ \mathrm{sup}(\alpha) \ \geq\ \mathrm{sup}(\beta) \tag{A4}
+\begin{array}{lr}
+\displaystyle \alpha \sqsubseteq \beta \ \implies\ \mathrm{sup}(\alpha) \ \geq\ \mathrm{sup}(\beta) & \text{(A4)}
+\end{array}
 ```
 
 *Proof.* Every sequence containing $`\beta`$ contains $`\alpha`$, since a witness chain for
@@ -99,7 +107,9 @@ $`\alpha`$ and carries with it a **projected database** — for each sequence st
 saying *where to resume reading*:
 
 ```math
-\mathcal{D}\vert_\alpha = \bigl\{\, (j,\ p) \ :\ \text{sequence } j \text{ witnesses } \alpha,\ \text{ending at position } p - 1 \,\bigr\} \tag{A5}
+\begin{array}{lr}
+\displaystyle \mathcal{D}\vert_\alpha = \bigl\{\, (j,\ p) \ :\ \text{sequence } j \text{ witnesses } \alpha,\ \text{ending at position } p - 1 \,\bigr\} & \text{(A5)}
+\end{array}
 ```
 
 Only frequent single items can start a pattern (by $`(\mathrm{A4})`$), so the recursion seeds itself
@@ -269,7 +279,9 @@ extra information. A pattern is **closed** when no proper super-pattern has the 
 [[3]](#references):
 
 ```math
-\mathrm{Closed}(\mathcal{F}) = \bigl\{\, \alpha \in \mathcal{F} \ :\ \nexists\, \beta \in \mathcal{F} \ \text{ with } \ \alpha \sqsubset \beta \ \wedge \ \mathrm{sup}(\beta) = \mathrm{sup}(\alpha) \,\bigr\} \tag{A6}
+\begin{array}{lr}
+\displaystyle \mathrm{Closed}(\mathcal{F}) = \bigl\{\, \alpha \in \mathcal{F} \ :\ \nexists\, \beta \in \mathcal{F} \ \text{ with } \ \alpha \sqsubset \beta \ \wedge \ \mathrm{sup}(\beta) = \mathrm{sup}(\alpha) \,\bigr\} & \text{(A6)}
+\end{array}
 ```
 
 Closed patterns are a **lossless** condensation: they preserve the support of every frequent pattern

@@ -51,9 +51,11 @@ One GCN layer propagates features across edges and transforms them, with a **sym
 adjacency so high-degree nodes do not dominate [[2]](#references):
 
 ```math
-H^{(l+1)} = \sigma\!\left( \hat{A}\, H^{(l)} W^{(l)} \right),
+\begin{array}{lr}
+\displaystyle H^{(l+1)} = \sigma\!\left( \hat{A}\, H^{(l)} W^{(l)} \right),
 \qquad
-\hat{A} = \tilde{D}^{-\frac{1}{2}}\,\tilde{A}\,\tilde{D}^{-\frac{1}{2}} \tag{G1}
+\hat{A} = \tilde{D}^{-\frac{1}{2}}\,\tilde{A}\,\tilde{D}^{-\frac{1}{2}} & \text{(G1)}
+\end{array}
 ```
 
 Stacking $`L`$ such layers (the `num_layers` field, default $`3`$) lets information reach every node
@@ -68,8 +70,10 @@ structural block is computed directly from the CPG in `NodeFeatures::from_cpg_no
 normalized into roughly $`[0, 1]`$:
 
 ```math
-\mathbf{x}_v^{\text{struct}} =
-\left[\, \frac{\mathrm{depth}(v)}{20},\ \frac{\mathrm{children}(v)}{10},\ \frac{\mathrm{span}(v)}{1000},\ \frac{\kappa(v)}{8} \,\right] \tag{G2}
+\begin{array}{lr}
+\displaystyle \mathbf{x}_v^{\text{struct}} =
+\left[\, \frac{\mathrm{depth}(v)}{20},\ \frac{\mathrm{children}(v)}{10},\ \frac{\mathrm{span}(v)}{1000},\ \frac{\kappa(v)}{8} \,\right] & \text{(G2)}
+\end{array}
 ```
 
 where $`\mathrm{span}(v)`$ is the node's byte length and $`\kappa(v) \in \{0, \dots, 7\}`$ codes its
@@ -78,7 +82,9 @@ where $`\mathrm{span}(v)`$ is the node's byte length and $`\kappa(v) \in \{0, \d
 (`EdgeFeatures::from_edge_kind`):
 
 ```math
-c(e) \in \{\, \text{AST}=0,\ \text{CFG}=1,\ \text{DFG}=2,\ \text{Call}=3,\ \text{Type}=4 \,\} \tag{G3}
+\begin{array}{lr}
+\displaystyle c(e) \in \{\, \text{AST}=0,\ \text{CFG}=1,\ \text{DFG}=2,\ \text{Call}=3,\ \text{Type}=4 \,\} & \text{(G3)}
+\end{array}
 ```
 
 ### Issue taxonomy
@@ -101,8 +107,10 @@ trained model, and both are deliberately conservative:
    similarity between identifier names:
 
 ```math
-\mathrm{sim}(a, b) = \frac{\lvert B_a \cap B_b \rvert}{\lvert B_a \cup B_b \rvert},
-\qquad B_s = \{\, (s_i, s_{i+1}) \,\} \tag{G4}
+\begin{array}{lr}
+\displaystyle \mathrm{sim}(a, b) = \frac{\lvert B_a \cap B_b \rvert}{\lvert B_a \cup B_b \rvert},
+\qquad B_s = \{\, (s_i, s_{i+1}) \,\} & \text{(G4)}
+\end{array}
 ```
 
 Candidates with $`\mathrm{sim} > 0.3`$ are kept, top 5. `score_node` reads a cached embedding's

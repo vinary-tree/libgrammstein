@@ -30,8 +30,10 @@ libgrammstein compares vectors by **cosine similarity** — the cosine of the an
 which measures *direction* and ignores magnitude:
 
 ```math
-\cos(a, b) = \frac{a \cdot b}{\lVert a \rVert\,\lVert b \rVert}
-= \frac{\sum_i a_i b_i}{\sqrt{\sum_i a_i^2}\,\sqrt{\sum_i b_i^2}} \tag{C1}
+\begin{array}{lr}
+\displaystyle \cos(a, b) = \frac{a \cdot b}{\lVert a \rVert\,\lVert b \rVert}
+= \frac{\sum_i a_i b_i}{\sqrt{\sum_i a_i^2}\,\sqrt{\sum_i b_i^2}} & \text{(C1)}
+\end{array}
 ```
 
 The value lies in $`[-1, 1]`$: $`1`$ means identical direction, $`0`$ orthogonal (unrelated), and
@@ -53,7 +55,9 @@ returns $`0`$ rather than dividing by zero.
 then scores it against each **raw** row of $`E_{\mathrm{word}}`$:
 
 ```math
-\mathrm{most\_similar}(q, k) = \underset{i \,:\, \mathrm{word}(i) \neq q}{\text{top-}k}\ \cos\!\bigl(v_q,\ E_{\mathrm{word}}[i]\bigr) \tag{C2}
+\begin{array}{lr}
+\displaystyle \mathrm{most\_similar}(q, k) = \underset{i \,:\, \mathrm{word}(i) \neq q}{\text{top-}k}\ \cos\!\bigl(v_q,\ E_{\mathrm{word}}[i]\bigr) & \text{(C2)}
+\end{array}
 ```
 
 > **Note the asymmetry.** The query is subword-**enriched**, but the candidates are the **raw**
@@ -72,8 +76,10 @@ Analogies exploit the near-linear structure of the space ("king is to man as que
 three inputs:
 
 ```math
-r = v_b - v_a + v_c, \qquad
-\mathrm{analogy}(a,b,c,k) = \underset{w \notin \{a,b,c\}}{\text{top-}k}\ \cos(v_w, r) \tag{C3}
+\begin{array}{lr}
+\displaystyle r = v_b - v_a + v_c, \qquad
+\mathrm{analogy}(a,b,c,k) = \underset{w \notin \{a,b,c\}}{\text{top-}k}\ \cos(v_w, r) & \text{(C3)}
+\end{array}
 ```
 
 > **Argument order matters.** The **first** argument $`a`$ is *subtracted*. To solve the canonical

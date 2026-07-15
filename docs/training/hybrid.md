@@ -91,20 +91,28 @@ All four are derived in [Hybrid Interpolation](../components/hybrid/interpolatio
 operational summary.
 
 ```math
-\text{Linear:}\quad \mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n + (1-\alpha)\,\mathbb{P}_e \tag{Y1}
+\begin{array}{lr}
+\displaystyle \text{Linear:}\quad \mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n + (1-\alpha)\,\mathbb{P}_e & \text{(Y1)}
+\end{array}
 ```
 
 ```math
-\text{Log-Linear:}\quad \log \mathbb{P}(w \mid h) = \alpha \log \mathbb{P}_n + (1-\alpha) \log \mathbb{P}_e \tag{Y2}
+\begin{array}{lr}
+\displaystyle \text{Log-Linear:}\quad \log \mathbb{P}(w \mid h) = \alpha \log \mathbb{P}_n + (1-\alpha) \log \mathbb{P}_e & \text{(Y2)}
+\end{array}
 ```
 
 ```math
-\text{Fallback:}\quad \mathbb{P}(w \mid h) = \begin{cases} \mathbb{P}_n & w \in V \\ \mathbb{P}_e & \text{otherwise}\end{cases} \tag{Y3}
+\begin{array}{lr}
+\displaystyle \text{Fallback:}\quad \mathbb{P}(w \mid h) = \begin{cases} \mathbb{P}_n & w \in V \\ \mathbb{P}_e & \text{otherwise}\end{cases} & \text{(Y3)}
+\end{array}
 ```
 
 ```math
-\text{Dynamic:}\quad \alpha(h) = \min\bigl(\alpha_0 + \kappa \lvert h \rvert,\ \alpha_{\max}\bigr),
-\qquad \mathbb{P}(w \mid h) = \alpha(h)\,\mathbb{P}_n + (1 - \alpha(h))\,\mathbb{P}_e \tag{Y4}
+\begin{array}{lr}
+\displaystyle \text{Dynamic:}\quad \alpha(h) = \min\bigl(\alpha_0 + \kappa \lvert h \rvert,\ \alpha_{\max}\bigr),
+\qquad \mathbb{P}(w \mid h) = \alpha(h)\,\mathbb{P}_n + (1 - \alpha(h))\,\mathbb{P}_e & \text{(Y4)}
+\end{array}
 ```
 
 | `--strategy` | Combine | Reach for it when |
@@ -197,7 +205,9 @@ grammstein eval compare dev.txt ngram.bin hybrid.bin
 ```
 
 ```math
-\mathrm{PPL} = \exp\!\left(-\frac{1}{N}\sum_{i=1}^{N}\log \mathbb{P}(w_i \mid h_i)\right) \tag{Y5}
+\begin{array}{lr}
+\displaystyle \mathrm{PPL} = \exp\!\left(-\frac{1}{N}\sum_{i=1}^{N}\log \mathbb{P}(w_i \mid h_i)\right) & \text{(Y5)}
+\end{array}
 ```
 
 `HybridLanguageModel::sentence_log_prob` scores each token against the preceding

@@ -125,7 +125,9 @@ it *computes* a mixedness index from the spread of the other four. With
 $`\bar{S} = \tfrac{1}{4}\sum_{p} \hat{S}_p`$:
 
 ```math
-\mathrm{score}(\text{Mixed}) \;=\; 1 - \sqrt{\frac{1}{4} \sum_{p \in \mathcal{P}} \bigl(\hat{S}_p - \bar{S}\bigr)^2} \tag{I1}
+\begin{array}{lr}
+\displaystyle \mathrm{score}(\text{Mixed}) \;=\; 1 - \sqrt{\frac{1}{4} \sum_{p \in \mathcal{P}} \bigl(\hat{S}_p - \bar{S}\bigr)^2} & \text{(I1)}
+\end{array}
 ```
 
 That is $`1`$ minus the population standard deviation of the four scores. Four equal scores give a
@@ -138,7 +140,9 @@ compare against `oop_score`.
 alternative to forcing a single winner:
 
 ```math
-\mathrm{present}(\theta) = \Bigl\langle\, (p,\ \hat{S}_p) \ :\ p \in \mathcal{P},\ \hat{S}_p \geq \theta \,\Bigr\rangle \quad\text{ordered by } \hat{S}_p \text{ descending} \tag{I2}
+\begin{array}{lr}
+\displaystyle \mathrm{present}(\theta) = \Bigl\langle\, (p,\ \hat{S}_p) \ :\ p \in \mathcal{P},\ \hat{S}_p \geq \theta \,\Bigr\rangle \quad\text{ordered by } \hat{S}_p \text{ descending} & \text{(I2)}
+\end{array}
 ```
 
 The natural argument is `config.min_score_threshold` (default $`0.1`$), which the detector itself
@@ -181,7 +185,9 @@ detector's `normalize_scores` flag (which applies the density rescale
 paradigms:
 
 ```math
-\tilde{S}_p \;=\; \frac{\hat{S}_p}{\sum_{q \in \mathcal{P}} \hat{S}_q} \qquad\text{when the denominator is positive} \tag{I3}
+\begin{array}{lr}
+\displaystyle \tilde{S}_p \;=\; \frac{\hat{S}_p}{\sum_{q \in \mathcal{P}} \hat{S}_q} \qquad\text{when the denominator is positive} & \text{(I3)}
+\end{array}
 ```
 
 A zero total is left untouched, so an empty profile stays all-zero rather than becoming `NaN`.
@@ -193,7 +199,9 @@ both scores at $`1.0`$ from one with both at $`0.1`$.
 `merge(other, λ)` folds a second profile in under a convex combination, for $`\lambda \in [0,1]`$:
 
 ```math
-\hat{S}_p \ \leftarrow\ (1 - \lambda)\, \hat{S}_p \;+\; \lambda\, \hat{S}_p^{\,\text{other}} \tag{I4}
+\begin{array}{lr}
+\displaystyle \hat{S}_p \ \leftarrow\ (1 - \lambda)\, \hat{S}_p \;+\; \lambda\, \hat{S}_p^{\,\text{other}} & \text{(I4)}
+\end{array}
 ```
 
 The indicator lists are concatenated and `total_tokens` / `match_count` are summed, so a merged
@@ -209,11 +217,13 @@ $`\hat{S}_{(2)}`$ for the highest and second-highest of the four scores, $`\thet
 floor, and $`\delta = 0.10`$ for the required margin:
 
 ```math
-\mathrm{dom} = \begin{cases}
+\begin{array}{lr}
+\displaystyle \mathrm{dom} = \begin{cases}
 \texttt{None} & \hat{S}_{(1)} < \theta & \text{(too little evidence to call)} \\[3pt]
 \texttt{Some(Mixed)} & \hat{S}_{(1)} - \hat{S}_{(2)} < \delta & \text{(no clear lead)} \\[3pt]
 \texttt{Some}\bigl(\arg\max_p \hat{S}_p\bigr) & \text{otherwise} & \text{(a winner)}
-\end{cases} \tag{I5}
+\end{cases} & \text{(I5)}
+\end{array}
 ```
 
 The rule abstains twice, and that is the point: it returns `None` on a sample too thin to judge, and

@@ -74,22 +74,25 @@ in [The `Arc` that isn't shared](#the-arc-that-isnt-shared).
 ## The key
 
 ```math
-h(c, \ell) \;=\;
+\begin{array}{lr}
+\displaystyle h(c, \ell) \;=\;
 \begin{cases}
 \mathrm{Gx}\bigl(\,\mathsf{Hash}(c) \,\Vert\, \mathsf{Hash}(\ell)\,\bigr)
   & \lvert c \rvert \geq 16 \\[6pt]
 \bigl(\mathrm{FNV}(c) \,\oplus\, \ell\bigr) \cdot \pi \bmod 2^{64}
   & \lvert c \rvert < 16
-\end{cases} \tag{C1}
+\end{cases} & \text{(C1)}
+\end{array}
 ```
 
 where $`\mathrm{FNV}`$ is FNV-1a over the raw bytes of $`c`$,
 
 ```math
-h_0 = \phi, \qquad
+\begin{array}{lr}
+\displaystyle h_0 = \phi, \qquad
 h_{k+1} = \bigl(h_k \oplus c_k\bigr) \cdot \pi \bmod 2^{64}, \qquad
-\mathrm{FNV}(c) = h_{\lvert c \rvert}
-\tag{C1$'$}
+\mathrm{FNV}(c) = h_{\lvert c \rvert} & \text{(C1$'$)}
+\end{array}
 ```
 
 with $`\phi = \texttt{0xcbf29ce484222325}`$ and $`\pi = \texttt{0x100000001b3}`$, and
@@ -127,10 +130,11 @@ $`r = t_{\mathrm{hit}} / t_{\mathrm{miss}}`$. The expected per-query cost and th
 speed-up over an uncached embedder are
 
 ```math
-\mathbb{E}[T] = H\,t_{\mathrm{hit}} + (1 - H)\,t_{\mathrm{miss}},
+\begin{array}{lr}
+\displaystyle \mathbb{E}[T] = H\,t_{\mathrm{hit}} + (1 - H)\,t_{\mathrm{miss}},
 \qquad
-S = \frac{t_{\mathrm{miss}}}{\mathbb{E}[T]} = \frac{1}{(1 - H) + H\,r}
-\tag{C2}
+S = \frac{t_{\mathrm{miss}}}{\mathbb{E}[T]} = \frac{1}{(1 - H) + H\,r} & \text{(C2)}
+\end{array}
 ```
 
 A `DashMap` probe is nanoseconds and a transformer forward pass is milliseconds, so $`r`$ is on
@@ -164,9 +168,10 @@ $`k \leq M`$ this is false, so **no eviction ever occurs**, every key is residen
 first miss, and the misses are exactly the compulsory ones:
 
 ```math
-H \;=\; 1 - \frac{\lvert W \rvert}{Q}
-\qquad\xrightarrow[Q \to \infty]{}\qquad 1
-\tag{C3}
+\begin{array}{lr}
+\displaystyle H \;=\; 1 - \frac{\lvert W \rvert}{Q}
+\qquad\xrightarrow[Q \to \infty]{}\qquad 1 & \text{(C3)}
+\end{array}
 ```
 
 $`(\mathrm{C3})`$ is **exact**, not an approximation. It is also the design target: *make $`M`$
@@ -198,22 +203,24 @@ for which — together with FIFO, whose IRM hit ratio is identical [[1]](#refere
 stationary residency probabilities solve the fixed point
 
 ```math
-q_i \;=\; \frac{p_i\,\theta}{1 + p_i\,\theta},
+\begin{array}{lr}
+\displaystyle q_i \;=\; \frac{p_i\,\theta}{1 + p_i\,\theta},
 \qquad \theta > 0 \ \text{chosen so that} \ \sum_i q_i = M,
 \qquad
-H_{\mathrm{RAND}} = \sum_i p_i\, q_i
-\tag{C4}
+H_{\mathrm{RAND}} = \sum_i p_i\, q_i & \text{(C4)}
+\end{array}
 ```
 
 LRU, by contrast, obeys the Che approximation [[2]](#references) — accurate to within a fraction of
 a percent for Zipf traffic [[3]](#references)[[4]](#references) —
 
 ```math
-q_i \;=\; 1 - e^{-p_i t_C},
+\begin{array}{lr}
+\displaystyle q_i \;=\; 1 - e^{-p_i t_C},
 \qquad t_C \ \text{chosen so that} \ \sum_i q_i = M,
 \qquad
-H_{\mathrm{LRU}} = \sum_i p_i\, q_i
-\tag{C5}
+H_{\mathrm{LRU}} = \sum_i p_i\, q_i & \text{(C5)}
+\end{array}
 ```
 
 The two fixed points differ, and on skewed streams LRU is the stronger policy: it protects the hot
@@ -275,12 +282,13 @@ inserted. The probability that *some* pair among them collides is the birthday b
 [[5]](#references):
 
 ```math
-\Pr[\text{collision}]
+\begin{array}{lr}
+\displaystyle \Pr[\text{collision}]
 \;=\; 1 - \prod_{k=1}^{n-1}\left(1 - \frac{k}{m}\right)
 \;\leq\; 1 - e^{-n(n-1)/(2m)}
 \;\approx\; \frac{n^{2}}{2m}
-\qquad (n \ll \sqrt{m})
-\tag{C6}
+\qquad (n \ll \sqrt{m}) & \text{(C6)}
+\end{array}
 ```
 
 | $`n`$ (distinct keys) | $`\Pr[\text{collision}]`$ |
@@ -295,9 +303,10 @@ colliding keys are resident at overlapping times — and at most $`M`$ are resid
 per-query probability that a fresh key false-hits against the resident set is
 
 ```math
-\Pr[\text{false hit on one query}] \;\approx\; \frac{n}{m}
-\;=\; \frac{10^{4}}{2^{64}} \;\approx\; 5.4 \times 10^{-16}
-\tag{C6$'$}
+\begin{array}{lr}
+\displaystyle \Pr[\text{false hit on one query}] \;\approx\; \frac{n}{m}
+\;=\; \frac{10^{4}}{2^{64}} \;\approx\; 5.4 \times 10^{-16} & \text{(C6$'$)}
+\end{array}
 ```
 
 so a run of $`10^{9}`$ queries expects $`\approx 5.4 \times 10^{-7}`$ false hits. At the default
@@ -310,13 +319,14 @@ snippet, not a 64-bit memo table.
 Each entry costs the vector itself plus a fixed overhead:
 
 ```math
-\mathrm{bytes}(M, d)
+\begin{array}{lr}
+\displaystyle \mathrm{bytes}(M, d)
 \;\approx\; M \cdot \Bigl(
 \underbrace{4d}_{\text{the } f32 \text{ vector}}
 \;+\; \underbrace{16}_{\texttt{Arc}\ \text{refcounts}}
 \;+\; \underbrace{24}_{\texttt{u64}\ \text{key} \,+\, \text{fat pointer}}
-\Bigr) \cdot (1 + \varepsilon)
-\tag{C7}
+\Bigr) \cdot (1 + \varepsilon) & \text{(C7)}
+\end{array}
 ```
 
 Only the $`4d`$ term is exact; $`\varepsilon`$ absorbs hash-table slack (the map is preallocated,

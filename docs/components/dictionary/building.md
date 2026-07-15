@@ -51,10 +51,11 @@ Because the vector is sorted by descending frequency, a word's **index is its ra
 therefore a single hash probe with no comparison, sorting or scanning:
 
 ```math
-r(w) \;=\; \texttt{word\_index}[w],
+\begin{array}{lr}
+\displaystyle r(w) \;=\; \texttt{word\_index}[w],
 \qquad
-r(w) = 0 \iff w \text{ is the most frequent word}
-\tag{B1}
+r(w) = 0 \iff w \text{ is the most frequent word} & \text{(B1)}
+\end{array}
 ```
 
 and `top_n(k)` is a slice — `&entries[..k]` — not a computation. Rank is exactly the $`r`$ of Zipf's
@@ -71,8 +72,9 @@ let best = candidates.iter().filter(|w| dict.contains(w)).min_by_key(|w| dict.ra
 `log_prob` is the maximum-likelihood unigram estimate:
 
 ```math
-\log p(w) \;=\; \ln \frac{f(w)}{N}
-\tag{B2}
+\begin{array}{lr}
+\displaystyle \log p(w) \;=\; \ln \frac{f(w)}{N} & \text{(B2)}
+\end{array}
 ```
 
 ### The distribution is deliberately sub-stochastic
@@ -81,8 +83,9 @@ $`N`$ is the **pre-threshold** token count in both entry points — the words th
 still in the denominator. Therefore
 
 ```math
-\sum_{w \in V} p(w) \;=\; \frac{\sum_{f(w) \geq \theta} f(w)}{N} \;=\; C(\theta) \;\leq\; 1
-\tag{B3}
+\begin{array}{lr}
+\displaystyle \sum_{w \in V} p(w) \;=\; \frac{\sum_{f(w) \geq \theta} f(w)}{N} \;=\; C(\theta) \;\leq\; 1 & \text{(B3)}
+\end{array}
 ```
 
 with equality exactly when $`\theta \leq 1`$. The deficit $`1 - C(\theta)`$ is the **OOV mass**: the
@@ -111,18 +114,20 @@ fn renormalized_log_prob(dict: &SpellingDictionary, word: &str) -> Option<f64> {
 `merge(&other)` sums frequencies word-by-word:
 
 ```math
-f'(w) \;=\; f_A(w) + f_B(w)
-\qquad\text{for all } w \in V_A \cup V_B
-\tag{B4}
+\begin{array}{lr}
+\displaystyle f'(w) \;=\; f_A(w) + f_B(w)
+\qquad\text{for all } w \in V_A \cup V_B & \text{(B4)}
+\end{array}
 ```
 
 and then sets `total_tokens` to the sum of the **merged, retained** frequencies:
 
 ```math
-N' \;=\; \sum_{w \in V_A \cup V_B} f'(w)
+\begin{array}{lr}
+\displaystyle N' \;=\; \sum_{w \in V_A \cup V_B} f'(w)
 \;\;\neq\;\; N_A + N_B
-\quad\text{whenever either parent was thresholded}
-\tag{B5}
+\quad\text{whenever either parent was thresholded} & \text{(B5)}
+\end{array}
 ```
 
 Every `log_prob` is recomputed against $`N'`$. Two consequences follow, and both bite in practice:

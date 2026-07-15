@@ -41,20 +41,26 @@ one is to ask how much probability mass it assigns to text it has never seen: a 
 number of nats needed to encode each token under the model [[1]](#references):
 
 ```math
-H(W) = -\frac{1}{N}\sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i) \tag{S1}
+\begin{array}{lr}
+\displaystyle H(W) = -\frac{1}{N}\sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i) & \text{(S1)}
+\end{array}
 ```
 
 **Perplexity** is cross-entropy exponentiated back out of log space [[2]](#references):
 
 ```math
-\mathrm{PP}(W) \;=\; \exp\bigl(H(W)\bigr) \;=\; \exp\!\Bigl(-\frac{1}{N}\sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i)\Bigr) \tag{S2}
+\begin{array}{lr}
+\displaystyle \mathrm{PP}(W) \;=\; \exp\bigl(H(W)\bigr) \;=\; \exp\!\Bigl(-\frac{1}{N}\sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i)\Bigr) & \text{(S2)}
+\end{array}
 ```
 
 Equivalently — and this is the most useful way to *read* it — perplexity is the geometric mean
 of the model's inverse per-token probabilities:
 
 ```math
-\mathrm{PP}(W) \;=\; \Bigl(\prod_{i=1}^{N} \frac{1}{\mathbb{P}(w_i \mid h_i)}\Bigr)^{1/N} \tag{S3}
+\begin{array}{lr}
+\displaystyle \mathrm{PP}(W) \;=\; \Bigl(\prod_{i=1}^{N} \frac{1}{\mathbb{P}(w_i \mid h_i)}\Bigr)^{1/N} & \text{(S3)}
+\end{array}
 ```
 
 ### The branching-factor intuition
@@ -67,7 +73,9 @@ Two anchors make the scale concrete. Suppose the model were uniform, $`\mathbb{P
 for every token. Substituting into $`(\mathrm{S3})`$ gives
 
 ```math
-\mathrm{PP}(W) = \Bigl(\prod_{i=1}^{N} \lvert V \rvert\Bigr)^{1/N} = \lvert V \rvert \tag{S4}
+\begin{array}{lr}
+\displaystyle \mathrm{PP}(W) = \Bigl(\prod_{i=1}^{N} \lvert V \rvert\Bigr)^{1/N} = \lvert V \rvert & \text{(S4)}
+\end{array}
 ```
 
 so **uniform guessing scores exactly $`\lvert V \rvert`$** — the worst any sane model should do.
@@ -103,7 +111,9 @@ The context of token $`i`$ is the window of up to $`n - 1`$ preceding tokens **w
 sentence**, truncated at the sentence start:
 
 ```math
-h_i = w_{\max(1,\; i-n+1)} \ldots w_{i-1} \tag{S5}
+\begin{array}{lr}
+\displaystyle h_i = w_{\max(1,\; i-n+1)} \ldots w_{i-1} & \text{(S5)}
+\end{array}
 ```
 
 Sentences are scored independently — no context crosses a sentence boundary — which is why
@@ -118,7 +128,9 @@ sentences at once (a token-weighted, not sentence-weighted, average).
 log-probability sinks to the uniform floor that MKN reserves for unknown words,
 
 ```math
-\log \mathbb{P}(w_i \mid h_i) \;\leq\; \texttt{oov\_log\_prob} \;=\; -\log \lvert V \rvert \tag{S6}
+\begin{array}{lr}
+\displaystyle \log \mathbb{P}(w_i \mid h_i) \;\leq\; \texttt{oov\_log\_prob} \;=\; -\log \lvert V \rvert & \text{(S6)}
+\end{array}
 ```
 
 which by $`(\mathrm{S4})`$ is exactly "this token did no better than uniform guessing".
@@ -141,7 +153,9 @@ cosmetic — choosing wrong silently corrupts a ranking.
 The raw score is the **sum** of $`(\mathrm{S1})`$'s summands, un-normalized:
 
 ```math
-\ell(W) \;=\; \sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i) \tag{S7}
+\begin{array}{lr}
+\displaystyle \ell(W) \;=\; \sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i) & \text{(S7)}
+\end{array}
 ```
 
 Because every $`\log \mathbb{P}(w_i \mid h_i) < 0`$, appending a word can only *decrease*
@@ -150,9 +164,11 @@ systematically prefers the shortest, regardless of fluency. Dividing the bias ou
 per-token score and its exponential:
 
 ```math
-\bar{\ell}(W) = \frac{\ell(W)}{N},
+\begin{array}{lr}
+\displaystyle \bar{\ell}(W) = \frac{\ell(W)}{N},
 \qquad
-\mathrm{PP}(W) = \exp\bigl(-\bar{\ell}(W)\bigr) \tag{S8}
+\mathrm{PP}(W) = \exp\bigl(-\bar{\ell}(W)\bigr) & \text{(S8)}
+\end{array}
 ```
 
 $`\bar{\ell}`$ (`normalized_log_prob`) and $`\mathrm{PP}`$ (`perplexity`) are length-invariant

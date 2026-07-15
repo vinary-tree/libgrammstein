@@ -30,7 +30,8 @@ and is candid about the two places where its behaviour will surprise you.
 Composed, the retriever is a four-stage function:
 
 ```math
-\mathrm{query}(q)
+\begin{array}{lr}
+\displaystyle \mathrm{query}(q)
 \;=\;
 \underbrace{\mathrm{rank}}_{4}
 \;\circ\;
@@ -39,7 +40,8 @@ Composed, the retriever is a four-stage function:
 \underbrace{\mathrm{index.query}(\cdot,\, k)}_{2}
 \;\circ\;
 \underbrace{E}_{1}
-\;\bigl(q\bigr) \tag{Q1}
+\;\bigl(q\bigr) & \text{(Q1)}
+\end{array}
 ```
 
 Stage 1 is the only one that touches a neural network; stage 2 is the only one that touches
@@ -74,13 +76,15 @@ sorted by score, descending.
 Each candidate is tested against a conjunction of three predicates:
 
 ```math
-\phi(\text{meta},\, s)
+\begin{array}{lr}
+\displaystyle \phi(\text{meta},\, s)
 \;=\;
 \underbrace{\bigl(s \geq \tau\bigr)}_{\text{score floor}}
 \;\wedge\;
 \underbrace{\bigl(\text{explicit} \Rightarrow \texttt{include\_explicit\_synopsis}\bigr)}_{\text{provenance gate}}
 \;\wedge\;
-\underbrace{\bigl(\neg\,\text{explicit} \Rightarrow \texttt{include\_generated\_synopsis}\bigr)}_{\text{provenance gate}} \tag{Q2}
+\underbrace{\bigl(\neg\,\text{explicit} \Rightarrow \texttt{include\_generated\_synopsis}\bigr)}_{\text{provenance gate}} & \text{(Q2)}
+\end{array}
 ```
 
 where *explicit* abbreviates `meta.synopsis_source == SynopsisSource::Explicit`.
@@ -141,8 +145,10 @@ Because `enumerate()` precedes `filter`, `rank` is the candidate's **position am
 top-$`k`$**, not its position in the returned list. Formally, for the $`i`$-th candidate (0-based):
 
 ```math
-\mathrm{rank}_i \;=\; i + 1
-\qquad\text{regardless of how many of } \{0, \dots, i-1\} \text{ were filtered out} \tag{Q3}
+\begin{array}{lr}
+\displaystyle \mathrm{rank}_i \;=\; i + 1
+\qquad\text{regardless of how many of } \{0, \dots, i-1\} \text{ were filtered out} & \text{(Q3)}
+\end{array}
 ```
 
 Two consequences follow, and both are visible to callers:

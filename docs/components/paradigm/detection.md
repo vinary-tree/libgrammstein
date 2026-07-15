@@ -61,7 +61,9 @@ A pattern matches at position $`i`$ when its whole token sequence is present the
 lower-case and **literally** — no wildcards, no character classes, no regular expressions:
 
 ```math
-M_\pi = \bigl\{\, i \ :\ 0 \le i \le n - \ell_\pi \ \wedge\ \mathrm{lc}(t_{i+j}) = s_{\pi,j} \ \text{ for all } 0 \le j < \ell_\pi \,\bigr\} \tag{D1}
+\begin{array}{lr}
+\displaystyle M_\pi = \bigl\{\, i \ :\ 0 \le i \le n - \ell_\pi \ \wedge\ \mathrm{lc}(t_{i+j}) = s_{\pi,j} \ \text{ for all } 0 \le j < \ell_\pi \,\bigr\} & \text{(D1)}
+\end{array}
 ```
 
 Of the 170 shipped patterns, 169 have $`\ell_\pi = 1`$; the sole two-token pattern is
@@ -74,23 +76,29 @@ A match may be discounted by its surroundings. Let $`W_\pi(i)`$ be the **context
 lower-cased tokens within $`\omega`$ positions either side of the match:
 
 ```math
-W_\pi(i) = \bigl\{\, \mathrm{lc}(t_j) \ :\ \max(0,\ i - \omega) \le j < \min(n,\ i + \ell_\pi + \omega) \,\bigr\} \tag{D2}
+\begin{array}{lr}
+\displaystyle W_\pi(i) = \bigl\{\, \mathrm{lc}(t_j) \ :\ \max(0,\ i - \omega) \le j < \min(n,\ i + \ell_\pi + \omega) \,\bigr\} & \text{(D2)}
+\end{array}
 ```
 
 The **context factor** $`\kappa`$ is the fraction of the pattern's required-context tokens actually
 present in that window — and is $`1`$ by definition when the pattern requires no context:
 
 ```math
-\kappa(\pi, i) = \begin{cases}
+\begin{array}{lr}
+\displaystyle \kappa(\pi, i) = \begin{cases}
 1 & R_\pi = \varnothing \\[4pt]
 \dfrac{\bigl\lvert \{\, r \in R_\pi \ :\ r \in W_\pi(i) \,\} \bigr\rvert}{\lvert R_\pi \rvert} & \text{otherwise}
-\end{cases} \tag{D3}
+\end{cases} & \text{(D3)}
+\end{array}
 ```
 
 Confidence adds a bonus for strong patterns and clamps to $`1`$:
 
 ```math
-\mathrm{conf}(\pi, i) = \min\Bigl(1,\ \kappa(\pi, i) + \tfrac{1}{10}\, b \, \sigma_\pi \Bigr) \tag{D4}
+\begin{array}{lr}
+\displaystyle \mathrm{conf}(\pi, i) = \min\Bigl(1,\ \kappa(\pi, i) + \tfrac{1}{10}\, b \, \sigma_\pi \Bigr) & \text{(D4)}
+\end{array}
 ```
 
 > **Corollary (confidence is inert for 169 of the 170 patterns).** If $`R_\pi = \varnothing`$ then
@@ -106,7 +114,9 @@ Confidence adds a bonus for strong patterns and clamps to $`1`$:
 The raw score of a paradigm is its total matched weight, scaled by the paradigm's multiplier:
 
 ```math
-S_p \;=\; \mu_p \sum_{\pi \in \Pi_p} \ \sum_{i \in M_\pi} w_\pi \cdot \mathrm{conf}(\pi, i) \tag{D5}
+\begin{array}{lr}
+\displaystyle S_p \;=\; \mu_p \sum_{\pi \in \Pi_p} \ \sum_{i \in M_\pi} w_\pi \cdot \mathrm{conf}(\pi, i) & \text{(D5)}
+\end{array}
 ```
 
 $`S_p`$ is unbounded: it grows with the size of the sample. To make samples comparable, and only
@@ -114,7 +124,9 @@ when `normalize_scores` is set and at least one pattern matched, the detector co
 **density** — matched weight per one hundred tokens — and caps it at $`1`$:
 
 ```math
-\hat{S}_p \;=\; \min\Bigl(1,\ S_p \cdot \frac{100}{\max(n,\ 1)}\Bigr) \tag{D6}
+\begin{array}{lr}
+\displaystyle \hat{S}_p \;=\; \min\Bigl(1,\ S_p \cdot \frac{100}{\max(n,\ 1)}\Bigr) & \text{(D6)}
+\end{array}
 ```
 
 > **`normalize_scores` does not make the scores sum to one.** $`(\mathrm{D6})`$ is a *per-paradigm*

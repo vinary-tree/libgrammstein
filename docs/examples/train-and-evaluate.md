@@ -242,8 +242,9 @@ let vocab   = hybrid.ngram_model().vocab_size();
 The `Linear` strategy computes
 
 ```math
-\mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n(w \mid h) + (1 - \alpha)\,\mathbb{P}_e(w \mid h)
-\tag{T1}
+\begin{array}{lr}
+\displaystyle \mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n(w \mid h) + (1 - \alpha)\,\mathbb{P}_e(w \mid h) & \text{(T1)}
+\end{array}
 ```
 
 and `HybridLanguageModel::score` returns its **natural logarithm**. `HybridConfig::default()`
@@ -263,8 +264,9 @@ Perplexity is the exponentiated per-token cross-entropy: the model's average bra
 Lower is better.
 
 ```math
-\mathrm{PP}(W) \;=\; \exp\!\Bigl(-\tfrac{1}{N} \sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i)\Bigr)
-\tag{T2}
+\begin{array}{lr}
+\displaystyle \mathrm{PP}(W) \;=\; \exp\!\Bigl(-\tfrac{1}{N} \sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i)\Bigr) & \text{(T2)}
+\end{array}
 ```
 
 `Perplexity` evaluates an **`NgramModel`** over a whole corpus in one streaming pass:

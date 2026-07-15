@@ -37,23 +37,26 @@ corpus is the average number of nats it spends encoding each token — that is, 
 is, on average:
 
 ```math
-H(W) \;=\; -\frac{1}{N} \sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i)
-\tag{P1}
+\begin{array}{lr}
+\displaystyle H(W) \;=\; -\frac{1}{N} \sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i) & \text{(P1)}
+\end{array}
 ```
 
 Perplexity is that entropy exponentiated back out of log space:
 
 ```math
-\mathrm{PP}(W) \;=\; \exp\bigl(H(W)\bigr)
-            \;=\; \exp\!\Bigl(-\tfrac{1}{N} \sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i)\Bigr)
-\tag{P2}
+\begin{array}{lr}
+\displaystyle \mathrm{PP}(W) \;=\; \exp\bigl(H(W)\bigr)
+            \;=\; \exp\!\Bigl(-\tfrac{1}{N} \sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i)\Bigr) & \text{(P2)}
+\end{array}
 ```
 
 Equivalently, $`\mathrm{PP}`$ is the **geometric mean of the inverse probabilities**:
 
 ```math
-\mathrm{PP}(W) \;=\; \Bigl(\prod_{i=1}^{N} \frac{1}{\mathbb{P}(w_i \mid h_i)}\Bigr)^{1/N}
-\tag{P3}
+\begin{array}{lr}
+\displaystyle \mathrm{PP}(W) \;=\; \Bigl(\prod_{i=1}^{N} \frac{1}{\mathbb{P}(w_i \mid h_i)}\Bigr)^{1/N} & \text{(P3)}
+\end{array}
 ```
 
 **The branching-factor intuition.** A model that spread its mass uniformly over $`k`$ words at
@@ -345,9 +348,10 @@ is the cheapest useful corpus filter there is.
 Fix a threshold $`\tau`$ and keep sentence $`s`$ when
 
 ```math
-\mathrm{PP}(s) \;=\; \exp\!\Bigl(-\tfrac{1}{\lvert s \rvert} \sum_{i=1}^{\lvert s \rvert}
-                      \log \mathbb{P}(w_i \mid h_i)\Bigr) \;\leq\; \tau
-\tag{P4}
+\begin{array}{lr}
+\displaystyle \mathrm{PP}(s) \;=\; \exp\!\Bigl(-\tfrac{1}{\lvert s \rvert} \sum_{i=1}^{\lvert s \rvert}
+                      \log \mathbb{P}(w_i \mid h_i)\Bigr) \;\leq\; \tau & \text{(P4)}
+\end{array}
 ```
 
 Note the **per-token** normalization: without it, long sentences would be penalized purely for

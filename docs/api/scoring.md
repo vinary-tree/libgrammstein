@@ -67,7 +67,9 @@ The reported value is the exponentiated per-token cross-entropy over **all** tok
 sentences (a token-weighted average, not a mean of per-sentence perplexities):
 
 ```math
-\mathrm{PP} = \exp\!\Bigl(-\frac{1}{N}\sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i)\Bigr) \tag{A1}
+\begin{array}{lr}
+\displaystyle \mathrm{PP} = \exp\!\Bigl(-\frac{1}{N}\sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i)\Bigr) & \text{(A1)}
+\end{array}
 ```
 
 where $`N`$ is `total_tokens` and $`h_i`$ is the window of up to `order - 1` preceding tokens
@@ -99,7 +101,9 @@ Perplexity: 142.87 | Tokens: 51234 | OOV: 3.12% | Sentences: 2410
 token's score against the model's uniform floor:
 
 ```math
-\log \mathbb{P}(w_i \mid h_i) \;\leq\; \texttt{model.oov\_log\_prob()} \;=\; -\log \lvert V \rvert \tag{A2}
+\begin{array}{lr}
+\displaystyle \log \mathbb{P}(w_i \mid h_i) \;\leq\; \texttt{model.oov\_log\_prob()} \;=\; -\log \lvert V \rvert & \text{(A2)}
+\end{array}
 ```
 
 This fires for every genuinely unseen word, and *also* for a known-but-extremely-improbable one

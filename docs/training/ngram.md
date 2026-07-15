@@ -48,8 +48,10 @@ bundle.
 Every sentence of length $`\ell`$ emits n-grams of every order up to $`n`$:
 
 ```math
-\#\{\text{n-grams emitted}\} = \sum_{k=1}^{\min(n,\ell)} (\ell - k + 1)
-\;\approx\; n\,\ell \qquad (\ell \gg n) \tag{N1}
+\begin{array}{lr}
+\displaystyle \#\{\text{n-grams emitted}\} = \sum_{k=1}^{\min(n,\ell)} (\ell - k + 1)
+\;\approx\; n\,\ell \qquad (\ell \gg n) & \text{(N1)}
+\end{array}
 ```
 
 so emitted work grows as $`O(n \cdot T)`$. The number of **distinct** n-grams grows more slowly —
@@ -110,9 +112,11 @@ essentially only *San*, so it deserves almost no fallback mass, while *city* fol
 deserves a lot. This phase walks every key, splits it into $`(h, w)`$, and accumulates
 
 ```math
-N_{1+}(\bullet, w) = \bigl\lvert \{\, h : c(h\,w) > 0 \,\} \bigr\rvert,
+\begin{array}{lr}
+\displaystyle N_{1+}(\bullet, w) = \bigl\lvert \{\, h : c(h\,w) > 0 \,\} \bigr\rvert,
 \qquad
-N_{1+}(h, \bullet) = \bigl\lvert \{\, w : c(h\,w) > 0 \,\} \bigr\rvert \tag{N2}
+N_{1+}(h, \bullet) = \bigl\lvert \{\, w : c(h\,w) > 0 \,\} \bigr\rvert & \text{(N2)}
+\end{array}
 ```
 
 and writes both back into the entries. It is a **second, in-memory pass over every n-gram**, held in
@@ -124,10 +128,12 @@ reach 2–5 GiB; this is the pass that most often ends a from-scratch build on a
 Goodman estimators evaluated [[2]](#references):
 
 ```math
-Y = \frac{n_1}{n_1 + 2 n_2}, \qquad
+\begin{array}{lr}
+\displaystyle Y = \frac{n_1}{n_1 + 2 n_2}, \qquad
 D_1 = 1 - 2Y\frac{n_2}{n_1}, \qquad
 D_2 = 2 - 3Y\frac{n_3}{n_2}, \qquad
-D_{3+} = 3 - 4Y\frac{n_4}{n_3} \tag{N3}
+D_{3+} = 3 - 4Y\frac{n_4}{n_3} & \text{(N3)}
+\end{array}
 ```
 
 If **any** of $`n_1 \ldots n_4`$ is zero — a tiny or highly repetitive corpus — the estimators are
@@ -283,7 +289,9 @@ The CLI wires the same statistics into an `indicatif` bar; `--no-progress` and `
 Perplexity on held-out text is the measurement that matters:
 
 ```math
-\mathrm{PPL} = \exp\!\left(-\frac{1}{N}\sum_{i=1}^{N}\log \mathbb{P}_{\mathrm{MKN}}(w_i \mid h_i)\right) \tag{N4}
+\begin{array}{lr}
+\displaystyle \mathrm{PPL} = \exp\!\left(-\frac{1}{N}\sum_{i=1}^{N}\log \mathbb{P}_{\mathrm{MKN}}(w_i \mid h_i)\right) & \text{(N4)}
+\end{array}
 ```
 
 ```bash

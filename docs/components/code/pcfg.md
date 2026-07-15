@@ -59,14 +59,18 @@ A PCFG requires that the probabilities of all rules sharing a left-hand side for
 [[1]](#references):
 
 ```math
-\sum_{\alpha} \mathbb{P}(A \to \alpha) = 1 \quad \text{for every } A \in V \tag{P1}
+\begin{array}{lr}
+\displaystyle \sum_{\alpha} \mathbb{P}(A \to \alpha) = 1 \quad \text{for every } A \in V & \text{(P1)}
+\end{array}
 ```
 
 The maximum-likelihood estimate of each rule probability is its **relative frequency** — its count
 divided by the total count of all rules with the same LHS:
 
 ```math
-\mathbb{P}(A \to \alpha) = \frac{c(A \to \alpha)}{\sum_{\beta} c(A \to \beta)} \tag{P2}
+\begin{array}{lr}
+\displaystyle \mathbb{P}(A \to \alpha) = \frac{c(A \to \alpha)}{\sum_{\beta} c(A \to \beta)} & \text{(P2)}
+\end{array}
 ```
 
 This is exactly what `WeightedCFG::probability` computes: `weight(production)` is the numerator and
@@ -80,16 +84,20 @@ Under the context-free independence assumption, the probability of a parse tree 
 **product** of the probabilities of the rules used to build it:
 
 ```math
-\mathbb{P}(\tau) = \prod_{(A \to \alpha) \in \tau} \mathbb{P}(A \to \alpha) \tag{P3}
+\begin{array}{lr}
+\displaystyle \mathbb{P}(\tau) = \prod_{(A \to \alpha) \in \tau} \mathbb{P}(A \to \alpha) & \text{(P3)}
+\end{array}
 ```
 
 A string can have several parses; its probability marginalizes over them, and its most probable parse
 is the Viterbi derivation:
 
 ```math
-\mathbb{P}(s) = \sum_{\tau \,:\, \mathrm{yield}(\tau) = s} \mathbb{P}(\tau),
+\begin{array}{lr}
+\displaystyle \mathbb{P}(s) = \sum_{\tau \,:\, \mathrm{yield}(\tau) = s} \mathbb{P}(\tau),
 \qquad
-\hat{\tau}(s) = \arg\max_{\tau \,:\, \mathrm{yield}(\tau) = s} \mathbb{P}(\tau) \tag{P4}
+\hat{\tau}(s) = \arg\max_{\tau \,:\, \mathrm{yield}(\tau) = s} \mathbb{P}(\tau) & \text{(P4)}
+\end{array}
 ```
 
 Because a product of many small probabilities underflows, scoring is done in **log space**, where the
@@ -97,7 +105,9 @@ product $`(\mathrm{P3})`$ becomes a sum — this is `PcfgScorer::score_parse` (s
 [WFST Export](wfst-export.md)):
 
 ```math
-\log \mathbb{P}(\tau) = \sum_{(A \to \alpha) \in \tau} \log \mathbb{P}(A \to \alpha) \tag{P5}
+\begin{array}{lr}
+\displaystyle \log \mathbb{P}(\tau) = \sum_{(A \to \alpha) \in \tau} \log \mathbb{P}(A \to \alpha) & \text{(P5)}
+\end{array}
 ```
 
 `WeightedCFG::log_probability` returns $`\log \mathbb{P}(A \to \alpha)`$, and defines

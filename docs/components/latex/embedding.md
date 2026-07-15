@@ -113,10 +113,11 @@ enumerate the candidate substitutions the vectors actually know about.
 ### Cosine similarity, and why the OOV vector is silent
 
 ```math
-\cos(a, b) \;=\; \frac{a \cdot b}{\lVert a \rVert\,\lVert b \rVert}
+\begin{array}{lr}
+\displaystyle \cos(a, b) \;=\; \frac{a \cdot b}{\lVert a \rVert\,\lVert b \rVert}
 \;=\; \frac{\sum_{i=1}^{d} a_i b_i}
-            {\sqrt{\textstyle\sum_{i=1}^{d} a_i^2}\ \sqrt{\textstyle\sum_{i=1}^{d} b_i^2}}
-\tag{E1}
+            {\sqrt{\textstyle\sum_{i=1}^{d} a_i^2}\ \sqrt{\textstyle\sum_{i=1}^{d} b_i^2}} & \text{(E1)}
+\end{array}
 ```
 
 Cosine measures the **angle** between two vectors and ignores their magnitudes, so a frequent
@@ -125,12 +126,13 @@ command and a rare one that occur in the same contexts still count as near neigh
 the coordinates, and it is guarded twice:
 
 ```math
-\cos(a, b) \;=\; 0
+\begin{array}{lr}
+\displaystyle \cos(a, b) \;=\; 0
 \qquad\text{whenever}\qquad
 \lvert a \rvert \neq \lvert b \rvert
 \ \ \lor\ \ \lvert a \rvert = 0
-\ \ \lor\ \ \lVert a \rVert \, \lVert b \rVert = 0
-\tag{E2}
+\ \ \lor\ \ \lVert a \rVert \, \lVert b \rVert = 0 & \text{(E2)}
+\end{array}
 ```
 
 The last clause is the interesting one. An unknown command's vector is $`\mathbf{0}`$ — the
@@ -146,13 +148,14 @@ A sequence of commands is embedded by averaging the vectors of the commands the 
 knows:
 
 ```math
-\bar{v}(s) \;=\; \frac{1}{\lvert s \cap V \rvert} \sum_{c \,\in\, s \cap V} v_c,
+\begin{array}{lr}
+\displaystyle \bar{v}(s) \;=\; \frac{1}{\lvert s \cap V \rvert} \sum_{c \,\in\, s \cap V} v_c,
 \qquad
 \hat{v}(s) \;=\; \begin{cases}
 \bar{v}(s) \big/ \lVert \bar{v}(s) \rVert & \text{if \texttt{config.normalize}} \\
 \bar{v}(s) & \text{otherwise}
-\end{cases}
-\tag{E3}
+\end{cases} & \text{(E3)}
+\end{array}
 ```
 
 Mean-of-vectors is the standard cheap composition operator, and the same one the
@@ -210,11 +213,12 @@ scratch memory. The bounded heap keeps only $`k`$ live entries, and each candida
 one $`O(\log k)`$ push and one $`O(\log k)`$ pop:
 
 ```math
-\underbrace{O\bigl(n\,d \;+\; n \log k\bigr)}_{\text{bounded min-heap}}
+\begin{array}{lr}
+\displaystyle \underbrace{O\bigl(n\,d \;+\; n \log k\bigr)}_{\text{bounded min-heap}}
 \qquad\text{versus}\qquad
 \underbrace{O\bigl(n\,d \;+\; n \log n\bigr)}_{\text{sort-then-truncate}},
-\qquad \text{memory } O(k) \text{ versus } O(n)
-\tag{E4}
+\qquad \text{memory } O(k) \text{ versus } O(n) & \text{(E4)}
+\end{array}
 ```
 
 For the realistic case $`k = 10`$ against a vocabulary of $`n = 5000`$ commands, $`\log_2 k \approx 3.3`$

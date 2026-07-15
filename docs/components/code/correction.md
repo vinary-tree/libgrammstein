@@ -51,7 +51,9 @@ pub struct Correction {
 The semantics of a correction are exactly one string splice:
 
 ```math
-\mathrm{apply}(s, c) \;=\; s\bigl[0,\, b_0\bigr) \;\Vert\; c.\text{replacement} \;\Vert\; s\bigl[b_1,\, \lvert s \rvert\bigr) \tag{R1}
+\begin{array}{lr}
+\displaystyle \mathrm{apply}(s, c) \;=\; s\bigl[0,\, b_0\bigr) \;\Vert\; c.\text{replacement} \;\Vert\; s\bigl[b_1,\, \lvert s \rvert\bigr) & \text{(R1)}
+\end{array}
 ```
 
 `Correction::new` sets `confidence` to `1.0`, `source` to `Unknown`, and `context` to `None`; three
@@ -103,7 +105,9 @@ does not filter them, so consumers that *apply* corrections may wish to.
 Ten variants, each with a `description()`. The `is_semantic()` predicate partitions them exactly:
 
 ```math
-K_{\mathrm{sem}} \;=\; \{\,\texttt{VariableMisuse},\; \texttt{TypeError},\; \texttt{MissingImport}\,\} \tag{R2}
+\begin{array}{lr}
+\displaystyle K_{\mathrm{sem}} \;=\; \{\,\texttt{VariableMisuse},\; \texttt{TypeError},\; \texttt{MissingImport}\,\} & \text{(R2)}
+\end{array}
 ```
 
 | Kind | `description()` | Semantic? | Analysis that finds it |
@@ -240,9 +244,11 @@ The invariant is maintained on **every** insertion: `add` pushes, re-sorts the w
 descending confidence, and truncates to $`k`$. So at all times
 
 ```math
-\mathrm{ranked}(C) \;=\; \bigl\langle c_1, \dots, c_m \bigr\rangle, \quad
+\begin{array}{lr}
+\displaystyle \mathrm{ranked}(C) \;=\; \bigl\langle c_1, \dots, c_m \bigr\rangle, \quad
 m = \min\bigl(\lvert C \rvert,\, k\bigr), \quad
-\gamma(c_1) \ge \gamma(c_2) \ge \dots \ge \gamma(c_m) \tag{R3}
+\gamma(c_1) \ge \gamma(c_2) \ge \dots \ge \gamma(c_m) & \text{(R3)}
+\end{array}
 ```
 
 | Method | Behavior |

@@ -79,17 +79,21 @@ let index = RagIndex::with_exact_backend(config);
 The index and the backend are two maps over ids, and the index is the **authority on existence**:
 
 ```math
-\mathcal{I} \;=\; \mathrm{dom}\,\mu
-\qquad\text{is the set of documents that exist} \tag{I1}
+\begin{array}{lr}
+\displaystyle \mathcal{I} \;=\; \mathrm{dom}\,\mu
+\qquad\text{is the set of documents that exist} & \text{(I1)}
+\end{array}
 ```
 
 `query` never trusts the backend alone. It asks the backend for candidates, then *joins* them
 against $`\mu`$, discarding any id the metadata map does not recognize:
 
 ```math
-\mathrm{query}(v_q, k)
+\begin{array}{lr}
+\displaystyle \mathrm{query}(v_q, k)
 \;=\;
-\Bigl[\, \bigl(\mu(i),\, s\bigr) \;\Big|\; (i, s) \in \beta\text{-}\mathrm{top}_k(v_q),\ \ i \in \mathcal{I} \,\Bigr] \tag{I2}
+\Bigl[\, \bigl(\mu(i),\, s\bigr) \;\Big|\; (i, s) \in \beta\text{-}\mathrm{top}_k(v_q),\ \ i \in \mathcal{I} \,\Bigr] & \text{(I2)}
+\end{array}
 ```
 
 In Rust that projection is exactly one `filter_map`:
@@ -157,9 +161,11 @@ set — but two operations silently assume that ids are **dense and insertion-or
 document $`i`$ was the $`i`$-th vector added:
 
 ```math
-\text{Assumption (A):}\qquad \mathcal{I} = \{0, 1, \dots, n-1\}
+\begin{array}{lr}
+\displaystyle \text{Assumption (A):}\qquad \mathcal{I} = \{0, 1, \dots, n-1\}
 \quad\text{and}\quad
-\text{id } i \text{ occupies row } i \text{ of the backend matrix} \tag{I3}
+\text{id } i \text{ occupies row } i \text{ of the backend matrix} & \text{(I3)}
+\end{array}
 ```
 
 - **`set_topic_model`** maps each document to its topic assignment with

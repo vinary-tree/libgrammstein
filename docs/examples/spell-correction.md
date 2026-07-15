@@ -40,10 +40,11 @@ OCR, autocorrect) turned it into $`x`$. Recover the intent by maximizing the pos
 [[1]](#references)[[2]](#references):
 
 ```math
-\hat{w} \;=\; \arg\max_{w} \mathbb{P}(w \mid x)
+\begin{array}{lr}
+\displaystyle \hat{w} \;=\; \arg\max_{w} \mathbb{P}(w \mid x)
         \;=\; \arg\max_{w} \; \underbrace{\mathbb{P}(w)}_{\text{prior}} \cdot
-                              \underbrace{\mathbb{P}(x \mid w)}_{\text{channel}}
-\tag{S1}
+                              \underbrace{\mathbb{P}(x \mid w)}_{\text{channel}} & \text{(S1)}
+\end{array}
 ```
 
 The denominator $`\mathbb{P}(x)`$ is dropped because it is constant across candidates. Two factors
@@ -59,9 +60,10 @@ becomes $`\arg\min`$. Maximizing a probability is *identical* to finding a **min
 through a weighted lattice under the tropical semiring $`(\min, +)`$ [[3]](#references):
 
 ```math
-\hat{w} \;=\; \arg\min_{w} \Bigl[\;\underbrace{-\log \mathbb{P}(x \mid w)}_{\text{channel cost}}
-                          \;+\; \underbrace{-\log \mathbb{P}(w)}_{\text{prior cost}}\;\Bigr]
-\tag{S2}
+\begin{array}{lr}
+\displaystyle \hat{w} \;=\; \arg\min_{w} \Bigl[\;\underbrace{-\log \mathbb{P}(x \mid w)}_{\text{channel cost}}
+                          \;+\; \underbrace{-\log \mathbb{P}(w)}_{\text{prior cost}}\;\Bigr] & \text{(S2)}
+\end{array}
 ```
 
 That is why the corrector is a lattice search and not a loop over candidate strings: the lattice
@@ -80,8 +82,9 @@ the two costs — it interpolates them with the weight $`\lambda`$ (`lm_weight`)
 weight $`w`$ as
 
 ```math
-w' \;=\; (1 - \lambda)\cdot w \;+\; \lambda \cdot \bigl(-\log \mathbb{P}(\text{token} \mid h)\bigr)
-\tag{S3}
+\begin{array}{lr}
+\displaystyle w' \;=\; (1 - \lambda)\cdot w \;+\; \lambda \cdot \bigl(-\log \mathbb{P}(\text{token} \mid h)\bigr) & \text{(S3)}
+\end{array}
 ```
 
 so $`\lambda = 0`$ is pure edit distance (the closest string wins, however nonsensical) and

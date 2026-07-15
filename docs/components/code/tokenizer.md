@@ -24,7 +24,9 @@ Formally, the token stream is the projection of the AST onto its leaves, in sour
 through an inclusion filter $`\phi`$:
 
 ```math
-S(A) = \bigl[\; \ell : \ell \in \mathrm{leaves}(A),\; \phi(\ell) \;\bigr] \tag{T1}
+\begin{array}{lr}
+\displaystyle S(A) = \bigl[\; \ell : \ell \in \mathrm{leaves}(A),\; \phi(\ell) \;\bigr] & \text{(T1)}
+\end{array}
 ```
 
 where $`\mathrm{leaves}(A)`$ are the childless nodes of the tree $`A`$ and $`\phi`$ drops

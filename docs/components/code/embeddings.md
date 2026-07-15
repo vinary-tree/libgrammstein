@@ -174,7 +174,9 @@ println!("d = {}", v.len());
 from anywhere:
 
 ```math
-\cos(u, v) \;=\; \frac{u \cdot v}{\lVert u \rVert \; \lVert v \rVert} \;\in\; [-1, 1] \tag{E1}
+\begin{array}{lr}
+\displaystyle \cos(u, v) \;=\; \frac{u \cdot v}{\lVert u \rVert \; \lVert v \rVert} \;\in\; [-1, 1] & \text{(E1)}
+\end{array}
 ```
 
 It is defensive rather than panicking: if the two slices differ in length, or if either norm is
@@ -203,7 +205,9 @@ embeds the context and the concatenation, takes their cosine, and rescales it fr
 a probability-shaped $`[0,1]`$:
 
 ```math
-\mathrm{score}(x, y) \;=\; \frac{\cos\bigl(\phi(x),\; \phi(x \Vert y)\bigr) + 1}{2} \;\in\; [0, 1] \tag{E2}
+\begin{array}{lr}
+\displaystyle \mathrm{score}(x, y) \;=\; \frac{\cos\bigl(\phi(x),\; \phi(x \Vert y)\bigr) + 1}{2} \;\in\; [0, 1] & \text{(E2)}
+\end{array}
 ```
 
 > **$`(\mathrm{E2})`$ is a coherence proxy, not a likelihood.** It measures how little the

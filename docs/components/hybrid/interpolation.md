@@ -44,7 +44,9 @@ A convex combination of the two **probabilities** — the classic interpolated e
 [[1]](#references):
 
 ```math
-\mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n(w \mid h) + (1 - \alpha)\,\mathbb{P}_e(w \mid h) \tag{H1}
+\begin{array}{lr}
+\displaystyle \mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n(w \mid h) + (1 - \alpha)\,\mathbb{P}_e(w \mid h) & \text{(H1)}
+\end{array}
 ```
 
 $`\alpha = 1`$ is pure n-gram; $`\alpha = 0`$ is pure embedding. Predictable and a good default.
@@ -55,7 +57,9 @@ A convex combination in **log space** — a geometric mean, i.e. a product-of-ex
 [[2]](#references):
 
 ```math
-\log \mathbb{P}(w \mid h) = \alpha \log \mathbb{P}_n(w \mid h) + (1 - \alpha) \log \mathbb{P}_e(w \mid h) \tag{H2}
+\begin{array}{lr}
+\displaystyle \log \mathbb{P}(w \mid h) = \alpha \log \mathbb{P}_n(w \mid h) + (1 - \alpha) \log \mathbb{P}_e(w \mid h) & \text{(H2)}
+\end{array}
 ```
 
 This is the right choice when $`\mathbb{P}_n`$ and $`\mathbb{P}_e`$ live on different scales,
@@ -68,10 +72,12 @@ A hard switch: trust the n-gram when the word is in-vocabulary, otherwise defer 
 embedding.
 
 ```math
-\mathbb{P}(w \mid h) = \begin{cases}
+\begin{array}{lr}
+\displaystyle \mathbb{P}(w \mid h) = \begin{cases}
 \mathbb{P}_n(w \mid h) & \text{if } w \in V \\
 \mathbb{P}_e(w \mid h) & \text{otherwise}
-\end{cases} \tag{H3}
+\end{cases} & \text{(H3)}
+\end{array}
 ```
 
 Membership is tested by $`c(w) > 0`$ (a non-zero unigram count). There is no interpolation
@@ -83,9 +89,11 @@ Linear interpolation whose weight **grows with the available context**, trusting
 as the history lengthens (where local statistics are most reliable):
 
 ```math
-\alpha(h) = \min\bigl(\alpha_0 + \kappa \cdot \lvert h \rvert,\ \alpha_{\max}\bigr),
+\begin{array}{lr}
+\displaystyle \alpha(h) = \min\bigl(\alpha_0 + \kappa \cdot \lvert h \rvert,\ \alpha_{\max}\bigr),
 \qquad
-\mathbb{P}(w \mid h) = \alpha(h)\,\mathbb{P}_n + (1 - \alpha(h))\,\mathbb{P}_e \tag{H4}
+\mathbb{P}(w \mid h) = \alpha(h)\,\mathbb{P}_n + (1 - \alpha(h))\,\mathbb{P}_e & \text{(H4)}
+\end{array}
 ```
 
 The three parameters are the struct fields `base_alpha` ($`\alpha_0`$), `alpha_per_context`
@@ -99,9 +107,11 @@ libgrammstein forms the context vector $`v_h`$ as the mean of the context words'
 $`v_w`$, scales by temperature $`\tau`$, and works in log space:
 
 ```math
-\cos(v_w, v_h) = \frac{v_w \cdot v_h}{\lVert v_w \rVert\,\lVert v_h \rVert},
+\begin{array}{lr}
+\displaystyle \cos(v_w, v_h) = \frac{v_w \cdot v_h}{\lVert v_w \rVert\,\lVert v_h \rVert},
 \qquad
-\log \mathbb{P}_e(w \mid h) \approx \frac{\cos(v_w, v_h)}{\tau} - 1 \tag{H5}
+\log \mathbb{P}_e(w \mid h) \approx \frac{\cos(v_w, v_h)}{\tau} - 1 & \text{(H5)}
+\end{array}
 ```
 
 The result is floored at $`\log(\varepsilon)`$ with $`\varepsilon =`$ `embedding_smoothing`

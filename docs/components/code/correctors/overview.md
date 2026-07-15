@@ -71,7 +71,9 @@ pub trait CodeCorrector: Send + Sync {
 A `Correction` is a **span replacement** carrying provenance and a confidence:
 
 ```math
-x = \bigl(\, \kappa,\ [b_0, b_1),\ o,\ r,\ c,\ s \,\bigr) \tag{C1}
+\begin{array}{lr}
+\displaystyle x = \bigl(\, \kappa,\ [b_0, b_1),\ o,\ r,\ c,\ s \,\bigr) & \text{(C1)}
+\end{array}
 ```
 
 where $`\kappa`$ is the `CorrectionKind`, $`[b_0, b_1)`$ a half-open **byte** range into the
@@ -80,7 +82,9 @@ $`c \in [0,1]`$ the confidence, and $`s`$ the `CorrectionSource`. Applying it sp
 the span — exactly `Correction::apply`:
 
 ```math
-\mathrm{apply}(x, S) \;=\; S[0 \mathbin{..} b_0) \;\cdot\; r \;\cdot\; S[b_1 \mathbin{..} \lvert S \rvert) \tag{C2}
+\begin{array}{lr}
+\displaystyle \mathrm{apply}(x, S) \;=\; S[0 \mathbin{..} b_0) \;\cdot\; r \;\cdot\; S[b_1 \mathbin{..} \lvert S \rvert) & \text{(C2)}
+\end{array}
 ```
 
 Two degenerate spans are meaningful and both are used: $`b_0 = b_1`$ is a pure **insertion**
@@ -120,9 +124,11 @@ source to `Combined`.
 For a token $`t`$, each source contributes a candidate set and the ensemble ranks their union:
 
 ```math
-\mathcal{X}(t) \;=\; \bigcup_{s \in \mathcal{S}} \mathcal{X}_s(t),
+\begin{array}{lr}
+\displaystyle \mathcal{X}(t) \;=\; \bigcup_{s \in \mathcal{S}} \mathcal{X}_s(t),
 \qquad
-\text{output} \;=\; \text{top-}K \bigl\{\, x \in \mathcal{X}(t) \;:\; \hat{c}(x) \geq \theta \,\bigr\} \tag{C3}
+\text{output} \;=\; \text{top-}K \bigl\{\, x \in \mathcal{X}(t) \;:\; \hat{c}(x) \geq \theta \,\bigr\} & \text{(C3)}
+\end{array}
 ```
 
 ordered by descending aggregated confidence $`\hat{c}`$, where $`\theta`$ is `min_confidence` and

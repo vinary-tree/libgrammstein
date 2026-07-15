@@ -82,8 +82,10 @@ was unbounded; exactly one mechanism bounds it.
 Peak heap decomposes as
 
 ```math
-H_{\text{peak}} \;\leq\; H_{\text{overlay}} \;+\; H_{\text{tx}} \;+\; H_{\text{vocab}}
-\;+\; H_{\text{parse}} \;+\; H_{\text{alloc}} \tag{M1}
+\begin{array}{lr}
+\displaystyle H_{\text{peak}} \;\leq\; H_{\text{overlay}} \;+\; H_{\text{tx}} \;+\; H_{\text{vocab}}
+\;+\; H_{\text{parse}} \;+\; H_{\text{alloc}} & \text{(M1)}
+\end{array}
 ```
 
 and the strategy is to bound each term independently. Sections 3–7 take them in order of
@@ -102,34 +104,42 @@ the shards that are simultaneously resident. Each shard's slice is floored, so t
 count or a small global budget cannot drive eviction into thrashing:
 
 ```math
-b_s \;=\; \max\!\left( \frac{G}{n_{\text{resident}}},\; 64\,\text{MiB} \right) \tag{M2}
+\begin{array}{lr}
+\displaystyle b_s \;=\; \max\!\left( \frac{G}{n_{\text{resident}}},\; 64\,\text{MiB} \right) & \text{(M2)}
+\end{array}
 ```
 
 The resident count itself depends on the sharding granularity, because the two granularity
 families keep different numbers of shards open at once:
 
 ```math
-n_{\text{resident}} =
+\begin{array}{lr}
+\displaystyle n_{\text{resident}} =
 \begin{cases}
 S & \text{hash-based routing, or an unlimited shard cap} \\[4pt]
 \min\bigl(\texttt{max\_open\_shards},\, S\bigr) & \text{prefix-based routing with an LRU cap}
-\end{cases} \tag{M3}
+\end{cases} & \text{(M3)}
+\end{array}
 ```
 
 Summing $`(\mathrm{M2})`$ over the resident set gives the actual bound on the overlay term:
 
 ```math
-H_{\text{overlay}} \;\leq\; n_{\text{resident}} \cdot b_s
-\;=\; \max\bigl(\,G,\;\; n_{\text{resident}} \cdot 64\,\text{MiB}\,\bigr) \tag{M4}
+\begin{array}{lr}
+\displaystyle H_{\text{overlay}} \;\leq\; n_{\text{resident}} \cdot b_s
+\;=\; \max\bigl(\,G,\;\; n_{\text{resident}} \cdot 64\,\text{MiB}\,\bigr) & \text{(M4)}
+\end{array}
 ```
 
 **When does the global budget actually hold?** Reading $`(\mathrm{M4})`$, the intended bound
 $`H_{\text{overlay}} \leq G`$ is achieved exactly when the 64 MiB floor does **not** bind:
 
 ```math
-n_{\text{resident}} \;\leq\; \frac{G}{64\,\text{MiB}}
+\begin{array}{lr}
+\displaystyle n_{\text{resident}} \;\leq\; \frac{G}{64\,\text{MiB}}
 \qquad\Longleftrightarrow\qquad
-H_{\text{overlay}} \;\leq\; G \tag{M5}
+H_{\text{overlay}} \;\leq\; G & \text{(M5)}
+\end{array}
 ```
 
 With the default $`G = 10\ \text{GiB}`$, that threshold is $`n_{\text{resident}} \leq 160`$ shards.
@@ -233,7 +243,9 @@ file with 50–100 M entries, buffering the whole file would cost gigabytes per 
 transaction commits in **fixed-size chunks**:
 
 ```math
-H_{\text{tx}} \;\leq\; W \cdot \theta_{\text{tx}} \cdot s_{\text{entry}} \tag{M6}
+\begin{array}{lr}
+\displaystyle H_{\text{tx}} \;\leq\; W \cdot \theta_{\text{tx}} \cdot s_{\text{entry}} & \text{(M6)}
+\end{array}
 ```
 
 With the default $`\theta_{\text{tx}} = 500\,000`$ and $`W = 8`$ workers, $`(\mathrm{M6})`$ holds
@@ -243,9 +255,11 @@ the in-flight buffer to a few hundred megabytes regardless of how large the pref
 incrementing one. Assignment is **idempotent**, so replaying it is harmless:
 
 ```math
-\mathrm{set}(k, v) \circ \mathrm{set}(k, v) \;=\; \mathrm{set}(k, v)
+\begin{array}{lr}
+\displaystyle \mathrm{set}(k, v) \circ \mathrm{set}(k, v) \;=\; \mathrm{set}(k, v)
 \qquad\text{whereas}\qquad
-\mathrm{inc}(k, v) \circ \mathrm{inc}(k, v) \;=\; \mathrm{inc}(k, 2v) \tag{M7}
+\mathrm{inc}(k, v) \circ \mathrm{inc}(k, v) \;=\; \mathrm{inc}(k, 2v) & \text{(M7)}
+\end{array}
 ```
 
 $`(\mathrm{M7})`$ is what makes crash recovery trivial. Committed chunks are durable in the WAL;
@@ -400,7 +414,8 @@ live in the storage layer:
 Substituting the per-term bounds back into $`(\mathrm{M1})`$:
 
 ```math
-H_{\text{peak}} \;\leq\;
+\begin{array}{lr}
+\displaystyle H_{\text{peak}} \;\leq\;
 \underbrace{\max\bigl(G,\, n_{\text{resident}} \cdot 64\,\text{MiB}\bigr)}_{\text{eviction, §3}}
 \;+\;
 \underbrace{W \cdot \theta_{\text{tx}} \cdot s_{\text{entry}}}_{\text{chunking, §4}}
@@ -409,7 +424,8 @@ H_{\text{peak}} \;\leq\;
 \;+\;
 \underbrace{O(W)}_{\text{zero-alloc parse, §6}}
 \;+\;
-\underbrace{O(1)}_{\text{mimalloc arenas, §7}} \tag{M8}
+\underbrace{O(1)}_{\text{mimalloc arenas, §7}} & \text{(M8)}
+\end{array}
 ```
 
 Every term on the right of $`(\mathrm{M8})`$ is a function of the **configuration** — $`G`$,

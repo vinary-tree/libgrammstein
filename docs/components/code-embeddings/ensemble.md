@@ -59,12 +59,13 @@ quantitative rather than aspirational.
 ### The ensemble map
 
 ```math
-\hat{u} \;=\; \nu\bigl(\Phi(v_1, \ldots, v_N)\bigr),
+\begin{array}{lr}
+\displaystyle \hat{u} \;=\; \nu\bigl(\Phi(v_1, \ldots, v_N)\bigr),
 \qquad
 v_i = f_i(c, \ell),
 \qquad
-\nu(u) = \begin{cases} u / \lVert u \rVert_2 & \texttt{normalize\_final} \\ u & \text{otherwise} \end{cases}
-\tag{E1}
+\nu(u) = \begin{cases} u / \lVert u \rVert_2 & \texttt{normalize\_final} \\ u & \text{otherwise} \end{cases} & \text{(E1)}
+\end{array}
 ```
 
 `normalize_final` defaults to `true` and is togglable via `set_normalize_final`. Every member is
@@ -73,7 +74,8 @@ handed the *same* $`(c, \ell)`$; the ensemble adds no tokenization or caching of
 ### The four strategies
 
 ```math
-\Phi(v_1, \ldots, v_N) \;=\;
+\begin{array}{lr}
+\displaystyle \Phi(v_1, \ldots, v_N) \;=\;
 \begin{cases}
 \bigl[\, v_1 \,\Vert\, v_2 \,\Vert\, \cdots \,\Vert\, v_N \,\bigr]
   & \texttt{Concatenate} \quad \text{(the default)} \\[6pt]
@@ -83,7 +85,8 @@ handed the *same* $`(c, \ell)`$; the ensemble adds no tokenization or caching of
   & \texttt{MeanPooling} \\[10pt]
 \Bigl(\, \max_{1 \leq i \leq N} v_{i,k} \,\Bigr)_{k=1}^{d}
   & \texttt{MaxPooling}
-\end{cases} \tag{E2}
+\end{cases} & \text{(E2)}
+\end{array}
 ```
 
 Only `Concatenate` tolerates members of differing width; the other three are coordinate-wise and
@@ -91,11 +94,13 @@ therefore demand that every $`d_i`$ agree. `with_strategy` enforces exactly that
 width is
 
 ```math
-d_{\mathrm{ens}} \;=\;
+\begin{array}{lr}
+\displaystyle d_{\mathrm{ens}} \;=\;
 \begin{cases}
 \sum_{i=1}^{N} d_i & \texttt{Concatenate} \\[4pt]
 d_1 \quad\text{(with } d_1 = d_2 = \cdots = d_N \text{ enforced at construction)} & \text{otherwise}
-\end{cases} \tag{E3}
+\end{cases} & \text{(E3)}
+\end{array}
 ```
 
 With the three shipped models this means $`d_{\mathrm{ens}} = 256 + 768 + 768 = 1792`$ under
@@ -168,10 +173,11 @@ Drop the unit-norm hypothesis (i.e. set some member's `normalize: false`) and $`
 generalizes to a *norm-weighted* mean — the same algebra, without the simplifications:
 
 ```math
-\cos\bigl(\hat{u}(a), \hat{u}(b)\bigr)
+\begin{array}{lr}
+\displaystyle \cos\bigl(\hat{u}(a), \hat{u}(b)\bigr)
 = \frac{\displaystyle\sum_{i=1}^{N} \lVert v_i(a) \rVert_2 \, \lVert v_i(b) \rVert_2 \, \cos\bigl(v_i(a), v_i(b)\bigr)}
-       {\sqrt{\displaystyle\sum_{i=1}^{N} \lVert v_i(a) \rVert_2^{2}} \;\cdot\; \sqrt{\displaystyle\sum_{i=1}^{N} \lVert v_i(b) \rVert_2^{2}}}
-\tag{E5}
+       {\sqrt{\displaystyle\sum_{i=1}^{N} \lVert v_i(a) \rVert_2^{2}} \;\cdot\; \sqrt{\displaystyle\sum_{i=1}^{N} \lVert v_i(b) \rVert_2^{2}}} & \text{(E5)}
+\end{array}
 ```
 
 A member whose raw vectors happen to be long therefore **silently dominates** the ensemble, in
@@ -181,10 +187,12 @@ member unless you have a specific reason not to — it is what makes the fusion 
 ### `MeanPooling` and uniform `WeightedAverage` are the same thing
 
 ```math
-\text{For any } \gamma > 0: \quad
+\begin{array}{lr}
+\displaystyle \text{For any } \gamma > 0: \quad
 \nu\Bigl(\textstyle\sum_i \gamma \, v_i\Bigr)
 = \nu\Bigl(\gamma N \cdot \tfrac{1}{N}\textstyle\sum_i v_i\Bigr)
-= \nu\Bigl(\tfrac{1}{N}\textstyle\sum_i v_i\Bigr) \tag{E6}
+= \nu\Bigl(\tfrac{1}{N}\textstyle\sum_i v_i\Bigr) & \text{(E6)}
+\end{array}
 ```
 
 because $`\nu`$ is invariant under multiplication by a positive scalar. Two corollaries you can act
@@ -209,10 +217,12 @@ $`\mathrm{Corr}(\varepsilon_i, \varepsilon_j) = \rho`$ for $`i \neq j`$. By $`(\
 the ensemble score is the mean $`\bar{s} = \frac{1}{N}\sum_i s_i`$, whose variance is
 
 ```math
-\mathrm{Var}(\bar{s})
+\begin{array}{lr}
+\displaystyle \mathrm{Var}(\bar{s})
 = \frac{\sigma^{2}}{N^{2}} \Bigl( N + N(N-1)\rho \Bigr)
 = \frac{\sigma^{2}}{N}\bigl(1 + (N-1)\rho\bigr)
-\;\xrightarrow[N \to \infty]{}\; \rho \, \sigma^{2} \tag{E7}
+\;\xrightarrow[N \to \infty]{}\; \rho \, \sigma^{2} & \text{(E7)}
+\end{array}
 ```
 
 Read $`(\mathrm{E7})`$ carefully, because it is the whole business case:
@@ -308,9 +318,11 @@ Both facts follow directly from the source and both are load-bearing:
   therefore additive, not parallel:
 
   ```math
-  T_{\mathrm{ens}}(c) \;=\; \sum_{i=1}^{N} T_i(c),
+\begin{array}{lr}
+\displaystyle   T_{\mathrm{ens}}(c) \;=\; \sum_{i=1}^{N} T_i(c),
   \qquad
-  \mathrm{RAM}_{\mathrm{ens}} \;=\; \sum_{i=1}^{N} \mathrm{RAM}_i \tag{E8}
+  \mathrm{RAM}_{\mathrm{ens}} \;=\; \sum_{i=1}^{N} \mathrm{RAM}_i & \text{(E8)}
+\end{array}
   ```
 
   Nothing about this is inherent — each member has its own `Session` behind its own mutex, so the

@@ -53,11 +53,13 @@ paired positive, and every other member of the batch serving as a negative, the 
 [[4]](#references) is
 
 ```math
-\mathcal{L}_{\mathrm{con}}
+\begin{array}{lr}
+\displaystyle \mathcal{L}_{\mathrm{con}}
 = -\frac{1}{\lvert B \rvert} \sum_{i \in B}
 \log
 \frac{\exp\bigl(\cos(v_i, v_i^{+}) / \tau\bigr)}
-     {\sum_{j \in B} \exp\bigl(\cos(v_i, v_j) / \tau\bigr)} \tag{T1}
+     {\sum_{j \in B} \exp\bigl(\cos(v_i, v_j) / \tau\bigr)} & \text{(T1)}
+\end{array}
 ```
 
 Minimizing $`(\mathrm{T1})`$ maximizes $`\cos(v_i, v_i^{+})`$ while pushing $`\cos(v_i, v_j)`$
@@ -125,9 +127,11 @@ yields the empty prefix and is skipped.
 Tokenization then truncates **hard** to `max_length`:
 
 ```math
-\mathrm{ids} \;=\; \bigl(\mathrm{enc}_0, \ldots, \mathrm{enc}_{L-1}\bigr),
+\begin{array}{lr}
+\displaystyle \mathrm{ids} \;=\; \bigl(\mathrm{enc}_0, \ldots, \mathrm{enc}_{L-1}\bigr),
 \qquad
-L \;=\; \min\bigl(\lvert \mathrm{enc} \rvert,\ \texttt{max\_length}\bigr) \tag{T2}
+L \;=\; \min\bigl(\lvert \mathrm{enc} \rvert,\ \texttt{max\_length}\bigr) & \text{(T2)}
+\end{array}
 ```
 
 There is no sliding window and no chunk-and-pool: tokens past `max_length` are **discarded**. A
@@ -140,12 +144,14 @@ The ids and mask are shaped into $`[1, L]`$ `i64` tensors, the session mutex is 
 graph is run. Its output is dispatched on the rank $`r`$:
 
 ```math
-v \;=\;
+\begin{array}{lr}
+\displaystyle v \;=\;
 \begin{cases}
 \textsf{data} & r = 2 \;\;\text{— shape } [1, d]\text{: the graph already pooled} \\[6pt]
 \dfrac{1}{L}\displaystyle\sum_{i=0}^{L-1} H_i & r = 3 \;\;\text{— shape } [1, L, d']\text{: mean-pool} \\[10pt]
 \textsf{Err}(\textsf{Inference}) & \text{otherwise}
-\end{cases} \tag{T3}
+\end{cases} & \text{(T3)}
+\end{array}
 ```
 
 The $`r = 3`$ branch additionally rejects a batch axis greater than $`1`$

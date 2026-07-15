@@ -176,7 +176,9 @@ See [Memory Optimization §6](memory-optimization.md#6--bounding-the-parse-path-
 The importer wants one count per n-gram, not one per $`(\text{n-gram}, \text{year})`$ row:
 
 ```math
-c(g) \;=\; \sum_{y \in Y} \mathrm{match\_count}(g, y) \tag{G1}
+\begin{array}{lr}
+\displaystyle c(g) \;=\; \sum_{y \in Y} \mathrm{match\_count}(g, y) & \text{(G1)}
+\end{array}
 ```
 
 where $`Y`$ is the configured year filter (all years by default; `--year-range` narrows it, which
@@ -197,9 +199,11 @@ Each token is mapped to a vocabulary index and the index is LEB128-encoded; the 
 concatenation of its tokens' varints:
 
 ```math
-\mathrm{key}(w_1 \cdots w_k) \;=\;
+\begin{array}{lr}
+\displaystyle \mathrm{key}(w_1 \cdots w_k) \;=\;
 \mathrm{leb128}\bigl(\iota(w_1)\bigr) \;\Vert\; \cdots \;\Vert\;
-\mathrm{leb128}\bigl(\iota(w_k)\bigr) \tag{G2}
+\mathrm{leb128}\bigl(\iota(w_k)\bigr) & \text{(G2)}
+\end{array}
 ```
 
 LEB128 is self-terminating, so no delimiter byte is needed — which matters here more than
@@ -224,11 +228,13 @@ first token always lands in the same shard regardless of order. Two families of 
 exist:
 
 ```math
-\mathrm{shard}(g) =
+\begin{array}{lr}
+\displaystyle \mathrm{shard}(g) =
 \begin{cases}
 h(w_1) \bmod S & \textbf{hash-based} \;(\texttt{CpuProportional}) \\[4pt]
 \mathrm{prefix}_p(w_1) & \textbf{prefix-based} \;(\texttt{FirstChar},\ \texttt{TwoChar},\ \texttt{Adaptive},\ \texttt{Custom})
-\end{cases} \tag{G3}
+\end{cases} & \text{(G3)}
+\end{array}
 ```
 
 Prefix extraction lowercases, keeps only alphabetic characters, and takes the first $`p`$ of them.
@@ -297,9 +303,11 @@ Re-importing a prefix would be a disaster under increment semantics — every al
 count would double. So the transactional inserts **assign** rather than increment:
 
 ```math
-\mathrm{set}(k, v) \circ \mathrm{set}(k, v) = \mathrm{set}(k, v)
+\begin{array}{lr}
+\displaystyle \mathrm{set}(k, v) \circ \mathrm{set}(k, v) = \mathrm{set}(k, v)
 \qquad\text{whereas}\qquad
-\mathrm{inc}(k, v) \circ \mathrm{inc}(k, v) = \mathrm{inc}(k, 2v) \tag{G4}
+\mathrm{inc}(k, v) \circ \mathrm{inc}(k, v) = \mathrm{inc}(k, 2v) & \text{(G4)}
+\end{array}
 ```
 
 This works precisely *because* each prefix file is complete and self-contained: the file contains
@@ -387,7 +395,9 @@ function import_prefix_transactional(file, prefix, order):
 The chunk boundary is what bounds the in-flight buffer:
 
 ```math
-H_{\text{tx}} \;\leq\; W \cdot \theta_{\text{tx}} \cdot s_{\text{entry}} \tag{G5}
+\begin{array}{lr}
+\displaystyle H_{\text{tx}} \;\leq\; W \cdot \theta_{\text{tx}} \cdot s_{\text{entry}} & \text{(G5)}
+\end{array}
 ```
 
 with $`\theta_{\text{tx}}`$ = `--tx-chunk-size` (default 500 000). Note the asymmetry that makes
@@ -465,7 +475,9 @@ overlay snapshot has been published into its durable image, the tail evicts that
 resident overlay nodes** down to its slice of a global budget:
 
 ```math
-b_s \;=\; \max\!\left( \frac{G}{n_{\text{resident}}},\; 64\,\text{MiB} \right) \tag{G6}
+\begin{array}{lr}
+\displaystyle b_s \;=\; \max\!\left( \frac{G}{n_{\text{resident}}},\; 64\,\text{MiB} \right) & \text{(G6)}
+\end{array}
 ```
 
 Eviction is **lossless**, and the invariant is exactly:
@@ -563,10 +575,12 @@ shards computes, per order:
   three times, four times — from which the three discounts follow [[2]](#references):
 
 ```math
-Y = \frac{n_1}{n_1 + 2 n_2}, \qquad
+\begin{array}{lr}
+\displaystyle Y = \frac{n_1}{n_1 + 2 n_2}, \qquad
 D_1 = 1 - 2Y\frac{n_2}{n_1}, \qquad
 D_2 = 2 - 3Y\frac{n_3}{n_2}, \qquad
-D_{3+} = 3 - 4Y\frac{n_4}{n_3} \tag{G7}
+D_{3+} = 3 - 4Y\frac{n_4}{n_3} & \text{(G7)}
+\end{array}
 ```
 
 - the **continuation counts** $`N_{1+}(\bullet, w)`$ and $`N_{1+}(w, \bullet)`$, which is what lets

@@ -70,7 +70,9 @@ $`-6`$ dB/octave spectral tilt of voiced speech (`apply_pre_emphasis`). The firs
 through unchanged:
 
 ```math
-y[0] = x[0], \qquad y[n] = x[n] - \alpha\,x[n-1] \quad (n \geq 1) \tag{F1}
+\begin{array}{lr}
+\displaystyle y[0] = x[0], \qquad y[n] = x[n] - \alpha\,x[n-1] \quad (n \geq 1) & \text{(F1)}
+\end{array}
 ```
 
 Setting $`\alpha = 0`$ (i.e. `pre_emphasis = 0.0`) disables the stage and copies the input.
@@ -82,7 +84,9 @@ at sample $`tS`$. Each frame is copied into a length-$`K`$ zero-padded buffer an
 point-wise by a window $`w[n]`$ (`extract_frame`, `build_window`):
 
 ```math
-x_t[n] = y[tS + n]\ (0 \le n < N), \qquad \tilde{x}_t[n] = w[n]\,x_t[n] \tag{F2}
+\begin{array}{lr}
+\displaystyle x_t[n] = y[tS + n]\ (0 \le n < N), \qquad \tilde{x}_t[n] = w[n]\,x_t[n] & \text{(F2)}
+\end{array}
 ```
 
 Windowing tapers each frame to zero at its edges so that the FFT does not see the abrupt frame
@@ -102,14 +106,18 @@ A real-input FFT (from the `realfft` crate, planned once at construction) transf
 frame; keeping the non-redundant half gives $`K/2 + 1`$ frequency bins (`compute_spectrum`):
 
 ```math
-X_t[k] = \sum_{n=0}^{K-1} \tilde{x}_t[n]\, e^{-\mathrm{i}\,2\pi k n / K}, \qquad 0 \le k \le \tfrac{K}{2} \tag{F3}
+\begin{array}{lr}
+\displaystyle X_t[k] = \sum_{n=0}^{K-1} \tilde{x}_t[n]\, e^{-\mathrm{i}\,2\pi k n / K}, \qquad 0 \le k \le \tfrac{K}{2} & \text{(F3)}
+\end{array}
 ```
 
 The bin is reduced to a real energy — the squared magnitude when `use_power` is set (the default),
 otherwise the magnitude:
 
 ```math
-P_t[k] = \begin{cases} \lvert X_t[k] \rvert^2 & \texttt{use\_power} = \text{true} \\ \lvert X_t[k] \rvert & \text{otherwise} \end{cases} \tag{F4}
+\begin{array}{lr}
+\displaystyle P_t[k] = \begin{cases} \lvert X_t[k] \rvert^2 & \texttt{use\_power} = \text{true} \\ \lvert X_t[k] \rvert & \text{otherwise} \end{cases} & \text{(F4)}
+\end{array}
 ```
 
 `extract_spectrogram` returns this $`P_t`$ directly, one $`K/2+1`$-vector per frame.
@@ -120,9 +128,11 @@ Frequency in Hz is warped to the mel scale so that equal steps correspond to equ
 pitch [[2]](#references):
 
 ```math
-\mathrm{mel}(f) = 2595 \, \log_{10}\!\left(1 + \frac{f}{700}\right),
+\begin{array}{lr}
+\displaystyle \mathrm{mel}(f) = 2595 \, \log_{10}\!\left(1 + \frac{f}{700}\right),
 \qquad
-f(\mathrm{mel}) = 700 \left(10^{\,\mathrm{mel}/2595} - 1\right) \tag{F5}
+f(\mathrm{mel}) = 700 \left(10^{\,\mathrm{mel}/2595} - 1\right) & \text{(F5)}
+\end{array}
 ```
 
 `build_filters` lays down $`M + 2`$ points equally spaced on the mel axis between
@@ -132,11 +142,13 @@ $`b_i = f_i / (f_s / K)`$. Filter $`m \in [0, M)`$ is the triangle rising from $
 center $`b_{m+1}`$ and falling to $`b_{m+2}`$:
 
 ```math
-H_m[k] = \begin{cases}
+\begin{array}{lr}
+\displaystyle H_m[k] = \begin{cases}
 \dfrac{k - b_m}{b_{m+1} - b_m} & b_m \le k < b_{m+1} \\[8pt]
 \dfrac{b_{m+2} - k}{b_{m+2} - b_{m+1}} & b_{m+1} \le k < b_{m+2} \\[4pt]
 0 & \text{otherwise}
-\end{cases} \tag{F6}
+\end{cases} & \text{(F6)}
+\end{array}
 ```
 
 Because the points are uniform in mel but the mel scale is compressive, the triangles are narrow
@@ -145,7 +157,9 @@ filter is stored sparsely (a `start_bin` and a short `weights` run), so applying
 handful of multiply-adds per channel:
 
 ```math
-E_t[m] = \sum_{k} H_m[k]\, P_t[k] \tag{F7}
+\begin{array}{lr}
+\displaystyle E_t[m] = \sum_{k} H_m[k]\, P_t[k] & \text{(F7)}
+\end{array}
 ```
 
 ![Triangular mel filterbank binning a linear-frequency power spectrum into M perceptual channels, narrow at low Hz and wide at high Hz](../../diagrams/acoustic-mel-filterbank.svg)
@@ -156,7 +170,9 @@ The mel energies are compressed by a natural logarithm, with a small floor $`\va
 keeps the logarithm finite when a band has no energy:
 
 ```math
-L_t[m] = \ln\!\bigl(E_t[m] + \varepsilon\bigr), \qquad \varepsilon = 10^{-10} \tag{F8}
+\begin{array}{lr}
+\displaystyle L_t[m] = \ln\!\bigl(E_t[m] + \varepsilon\bigr), \qquad \varepsilon = 10^{-10} & \text{(F8)}
+\end{array}
 ```
 
 `extract_log_mel` returns $`L_t`$ directly, *without* the normalization of $`(\mathrm{F10})`$ —
@@ -171,10 +187,12 @@ structure. libgrammstein uses the orthonormal DCT-II, whose DC row is scaled sep
 (`DctTransform`):
 
 ```math
-c_t[j] = \begin{cases}
+\begin{array}{lr}
+\displaystyle c_t[j] = \begin{cases}
 \sqrt{\dfrac{1}{M}} \displaystyle\sum_{m=0}^{M-1} L_t[m] & j = 0 \\[12pt]
 \sqrt{\dfrac{2}{M}} \displaystyle\sum_{m=0}^{M-1} L_t[m] \cos\!\left(\dfrac{\pi\,j\,(m + \tfrac12)}{M}\right) & 1 \le j < J
-\end{cases} \tag{F9}
+\end{cases} & \text{(F9)}
+\end{array}
 ```
 
 ### Normalization and delta features
@@ -185,12 +203,16 @@ for safety (`normalize`). With `normalize_mean` (default on) and `normalize_vari
 off):
 
 ```math
-\mu[m] = \frac{1}{T}\sum_{t=0}^{T-1} L_t[m], \qquad \hat{L}_t[m] = L_t[m] - \mu[m] \tag{F10}
+\begin{array}{lr}
+\displaystyle \mu[m] = \frac{1}{T}\sum_{t=0}^{T-1} L_t[m], \qquad \hat{L}_t[m] = L_t[m] - \mu[m] & \text{(F10)}
+\end{array}
 ```
 
 ```math
-\sigma[m] = \max\!\left(\sqrt{\tfrac{1}{T}\textstyle\sum_{t} \hat{L}_t[m]^2},\ 10^{-10}\right),
-\qquad \hat{L}_t[m] \leftarrow \hat{L}_t[m] \,/\, \sigma[m] \tag{F11}
+\begin{array}{lr}
+\displaystyle \sigma[m] = \max\!\left(\sqrt{\tfrac{1}{T}\textstyle\sum_{t} \hat{L}_t[m]^2},\ 10^{-10}\right),
+\qquad \hat{L}_t[m] \leftarrow \hat{L}_t[m] \,/\, \sigma[m] & \text{(F11)}
+\end{array}
 ```
 
 The same normalization is applied to MFCC vectors when MFCC is the chosen feature. **Delta**
@@ -199,7 +221,9 @@ regression over a $`\pm\Theta`$ window, with the frame index clamped at the utte
 (`compute_delta`):
 
 ```math
-\Delta c_t[j] = \frac{\displaystyle\sum_{\theta=1}^{\Theta} \theta\,\bigl(c_{t+\theta}[j] - c_{t-\theta}[j]\bigr)}{2\displaystyle\sum_{\theta=1}^{\Theta} \theta^2} \tag{F12}
+\begin{array}{lr}
+\displaystyle \Delta c_t[j] = \frac{\displaystyle\sum_{\theta=1}^{\Theta} \theta\,\bigl(c_{t+\theta}[j] - c_{t-\theta}[j]\bigr)}{2\displaystyle\sum_{\theta=1}^{\Theta} \theta^2} & \text{(F12)}
+\end{array}
 ```
 
 Delta-delta is $`(\mathrm{F12})`$ applied to the deltas. When enabled the streams are
@@ -210,7 +234,9 @@ concatenated per frame as $`[\,c_t,\ \Delta c_t,\ \Delta^2 c_t\,]`$, tripling th
 For $`L`$ audio samples the extractor produces (`num_frames`)
 
 ```math
-T = \left\lfloor \frac{L - N}{S} \right\rfloor + 1 \quad (L > N) \tag{F13}
+\begin{array}{lr}
+\displaystyle T = \left\lfloor \frac{L - N}{S} \right\rfloor + 1 \quad (L > N) & \text{(F13)}
+\end{array}
 ```
 
 frames; a non-empty utterance with $`L \le N`$ yields a single frame, and $`L = 0`$ yields none.

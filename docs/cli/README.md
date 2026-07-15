@@ -290,7 +290,9 @@ grammstein eval perplexity <MODEL> <TEST_CORPUS> [OPTIONS]
 Reports the corpus perplexity
 
 ```math
-\mathrm{PPL} = \exp\!\left(-\frac{1}{N}\sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i)\right) \tag{E1}
+\begin{array}{lr}
+\displaystyle \mathrm{PPL} = \exp\!\left(-\frac{1}{N}\sum_{i=1}^{N} \log \mathbb{P}(w_i \mid h_i)\right) & \text{(E1)}
+\end{array}
 ```
 
 where $`N`$ is the total token count and $`h_i`$ the history of token $`w_i`$. Lower is better; the

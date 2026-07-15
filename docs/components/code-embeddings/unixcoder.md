@@ -37,8 +37,9 @@ In addition to the [overview's notation](overview.md#notation):
 A self-attention head computes, for a length-$`L`$ sequence,
 
 ```math
-\mathrm{Attn}(Q, K, V) \;=\; \mathrm{softmax}\!\left(\frac{Q K^{\top}}{\sqrt{d_k}} + M\right) V
-\tag{U1}
+\begin{array}{lr}
+\displaystyle \mathrm{Attn}(Q, K, V) \;=\; \mathrm{softmax}\!\left(\frac{Q K^{\top}}{\sqrt{d_k}} + M\right) V & \text{(U1)}
+\end{array}
 ```
 
 The mask $`M`$ is *additive* and takes only two values. Adding $`0`$ leaves a logit untouched;
@@ -52,12 +53,14 @@ UniXcoder's insight is that the *architecture* need not change to change the beh
 $`M`$ must [[1]](#references):
 
 ```math
-M_{ij} \;=\;
+\begin{array}{lr}
+\displaystyle M_{ij} \;=\;
 \begin{cases}
 0 & \text{always} & \text{(encoder-only: full bidirectional attention)} \\[4pt]
 0 \ \text{if}\ j \leq i,\ \ -\infty \ \text{otherwise} & & \text{(decoder-only: causal)} \\[4pt]
 0 \ \text{if}\ j \leq i \ \text{or}\ j \in \mathrm{prefix},\ \ -\infty \ \text{otherwise} & & \text{(encoder-decoder: causal-prefix)}
-\end{cases} \tag{U2}
+\end{cases} & \text{(U2)}
+\end{array}
 ```
 
 Which row of $`(\mathrm{U2})`$ applies is chosen by a **mode token** prepended to the input:
@@ -166,14 +169,18 @@ This is the sharper of the two. The reference computes a **mask-weighted mean** 
 embeddings:
 
 ```math
-v^{\mathrm{ref}} \;=\; \frac{\sum_{i=0}^{L-1} m_i \, H_i}{\sum_{i=0}^{L-1} m_i} \tag{U3}
+\begin{array}{lr}
+\displaystyle v^{\mathrm{ref}} \;=\; \frac{\sum_{i=0}^{L-1} m_i \, H_i}{\sum_{i=0}^{L-1} m_i} & \text{(U3)}
+\end{array}
 ```
 
 libgrammstein instead slices the first row of the hidden-state tensor — CLS pooling:
 
 ```math
-v^{\mathrm{shipped}} \;=\; H_0
-\qquad\text{(the Rust is \texttt{data[..hidden\_dim]})} \tag{U4}
+\begin{array}{lr}
+\displaystyle v^{\mathrm{shipped}} \;=\; H_0
+\qquad\text{(the Rust is \texttt{data[..hidden\_dim]})} & \text{(U4)}
+\end{array}
 ```
 
 These are different vectors, and $`(\mathrm{U4})`$ is not the representation the sentence-level

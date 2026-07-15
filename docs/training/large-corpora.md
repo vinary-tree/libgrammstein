@@ -30,11 +30,13 @@ tells you which of the three training modes to use.
 Three quantities scale with the corpus, and only one of them is the corpus itself:
 
 ```math
-\underbrace{T}_{\text{tokens — streamed, never resident}}
+\begin{array}{lr}
+\displaystyle \underbrace{T}_{\text{tokens — streamed, never resident}}
 \qquad
 \underbrace{U \le n\,T}_{\text{distinct n-grams — resident}}
 \qquad
-\underbrace{\lvert V \rvert}_{\text{vocabulary — resident, but Heaps-slow}} \tag{L1}
+\underbrace{\lvert V \rvert}_{\text{vocabulary — resident, but Heaps-slow}} & \text{(L1)}
+\end{array}
 ```
 
 The corpus text is never the problem: every reader streams. The **n-gram table** is the problem, and
@@ -58,7 +60,9 @@ Every `CorpusReader` yields sentences lazily, and the trainer wraps the reader i
 `rayon` workers drain it. The queue is capped at a fraction of system RAM:
 
 ```math
-\text{queue bytes} \;\lesssim\; 0.10 \cdot R \qquad (\texttt{ram\_fraction} = 0.10) \tag{L2}
+\begin{array}{lr}
+\displaystyle \text{queue bytes} \;\lesssim\; 0.10 \cdot R \qquad (\texttt{ram\_fraction} = 0.10) & \text{(L2)}
+\end{array}
 ```
 
 So corpus size does not enter the resident set at all — a 50 GB dump streams through a 4 GB process
@@ -215,7 +219,9 @@ download streams and the Tokio worker pool.
 For the n-gram table, with $`U`$ distinct n-grams:
 
 ```math
-\text{bytes} \;\approx\; U \cdot \bigl(\underbrace{16}_{\texttt{NgramEntry}} + \bar{k} + \omega\bigr) \tag{L3}
+\begin{array}{lr}
+\displaystyle \text{bytes} \;\approx\; U \cdot \bigl(\underbrace{16}_{\texttt{NgramEntry}} + \bar{k} + \omega\bigr) & \text{(L3)}
+\end{array}
 ```
 
 where $`\bar{k}`$ is the mean key length in bytes and $`\omega`$ the per-node trie overhead

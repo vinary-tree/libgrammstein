@@ -35,9 +35,11 @@ The objective is **held-out perplexity** — the exponentiated per-token cross-e
 model has never seen:
 
 ```math
-\mathrm{PPL}(\theta) = \exp\!\left(-\frac{1}{N}\sum_{i=1}^{N}\log \mathbb{P}_{\theta}(w_i \mid h_i)\right),
+\begin{array}{lr}
+\displaystyle \mathrm{PPL}(\theta) = \exp\!\left(-\frac{1}{N}\sum_{i=1}^{N}\log \mathbb{P}_{\theta}(w_i \mid h_i)\right),
 \qquad
-\theta^{*} = \arg\min_{\theta \in \Theta}\ \mathrm{PPL}(\theta) \tag{T1}
+\theta^{*} = \arg\min_{\theta \in \Theta}\ \mathrm{PPL}(\theta) & \text{(T1)}
+\end{array}
 ```
 
 Perplexity is the *effective branching factor*: a model with $`\mathrm{PPL} = 100`$ is, on average,
@@ -75,21 +77,25 @@ tail -n $((total / 10)) corpus.txt > test.txt
 Let $`C`$ be the cost of one pass over the corpus. Then, per candidate:
 
 ```math
-\underbrace{C_{\text{ngram}} \approx 2C}_{\text{count} \;+\; \text{continuation pass}}
+\begin{array}{lr}
+\displaystyle \underbrace{C_{\text{ngram}} \approx 2C}_{\text{count} \;+\; \text{continuation pass}}
 \qquad
 \underbrace{C_{\text{emb}} \approx (1 + E)\,C}_{\text{vocabulary} \;+\; E \text{ epochs}}
 \qquad
-\underbrace{C_{\text{hybrid}} \approx 0}_{\text{two model loads}} \tag{T2}
+\underbrace{C_{\text{hybrid}} \approx 0}_{\text{two model loads}} & \text{(T2)}
+\end{array}
 ```
 
 The consequence is stark. A grid over $`\{n\} \times \{d\} \times \{\alpha\}`$ with 3, 3 and 6
 values costs
 
 ```math
-\lvert \{n\} \rvert \cdot C_{\text{ngram}}
+\begin{array}{lr}
+\displaystyle \lvert \{n\} \rvert \cdot C_{\text{ngram}}
 \;+\; \lvert \{d\} \rvert \cdot C_{\text{emb}}
 \;+\; \underbrace{\lvert \{n\} \rvert \cdot \lvert \{d\} \rvert \cdot \lvert \{\alpha\} \rvert \cdot 0}_{\text{the } \alpha \text{ sweep is free}}
-\;=\; 3\cdot 2C + 3\cdot 6C = 24C \tag{T3}
+\;=\; 3\cdot 2C + 3\cdot 6C = 24C & \text{(T3)}
+\end{array}
 ```
 
 if you fit each expert **once** per value and re-assemble for $`\alpha`$ — and $`54 \times`$ that

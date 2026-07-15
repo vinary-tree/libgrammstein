@@ -75,10 +75,11 @@ from another field of mathematics.
 ### Similarity
 
 ```math
-\mathrm{sim}(q, e_i) \;=\; \cos(q, e_i)
+\begin{array}{lr}
+\displaystyle \mathrm{sim}(q, e_i) \;=\; \cos(q, e_i)
 \;=\; \frac{\sum_{j=1}^{d} q_j\, e_{ij}}
-            {\sqrt{\textstyle\sum_{j=1}^{d} q_j^2}\ \sqrt{\textstyle\sum_{j=1}^{d} e_{ij}^2}}
-\tag{Q1}
+            {\sqrt{\textstyle\sum_{j=1}^{d} q_j^2}\ \sqrt{\textstyle\sum_{j=1}^{d} e_{ij}^2}} & \text{(Q1)}
+\end{array}
 ```
 
 with the same guards as the [embedder's](embedding.md) cosine — mismatched lengths, an empty vector,
@@ -87,19 +88,21 @@ or a zero denominator all yield $`0`$, so a degenerate vector can never masquera
 ### The result list
 
 ```math
-\mathcal{C} \;=\;
+\begin{array}{lr}
+\displaystyle \mathcal{C} \;=\;
 \begin{cases}
 \{\, i \;:\; \mathrm{dom}(i) = \delta \,\} & \text{for a domain-filtered query} \\
 \{\, 1, \dots, n \,\} & \text{otherwise}
-\end{cases}
-\tag{Q2}
+\end{cases} & \text{(Q2)}
+\end{array}
 ```
 
 ```math
-\mathcal{R} \;=\;
+\begin{array}{lr}
+\displaystyle \mathcal{R} \;=\;
 \Bigl(\text{the } k \text{ largest of } \bigl\{\, i \in \mathcal{C} \;:\; \mathrm{sim}(q, e_i) \geq \tau \,\bigr\}
-\text{ by } \mathrm{sim}(q, e_i),\ \text{descending}\Bigr)
-\tag{Q3}
+\text{ by } \mathrm{sim}(q, e_i),\ \text{descending}\Bigr) & \text{(Q3)}
+\end{array}
 ```
 
 Each element of $`\mathcal{R}`$ is materialized as a `RetrievalResult { document, similarity, rank }`,
@@ -158,9 +161,10 @@ function cached_retrieve(q):                          ▸ EquationRetriever::ret
 **8-bit quantization** of it:
 
 ```math
-Q(x)_j \;=\; \mathrm{trunc}\Bigl( \bigl[\, 127\,x_j \,\bigr]_{-128}^{\,127} \Bigr)
-\;\in\; \{-128, \dots, 127\}
-\tag{Q4}
+\begin{array}{lr}
+\displaystyle Q(x)_j \;=\; \mathrm{trunc}\Bigl( \bigl[\, 127\,x_j \,\bigr]_{-128}^{\,127} \Bigr)
+\;\in\; \{-128, \dots, 127\} & \text{(Q4)}
+\end{array}
 ```
 
 (`trunc` rounds *toward zero*, which is what Rust's `as i8` cast does to an `f32`; the cast also
@@ -174,10 +178,11 @@ exact and small.
 **Proposition (cache substitution error).** Let $`x, y \in [-1, 1]^d`$ with $`Q(x) = Q(y)`$. Then
 
 ```math
-\lVert x - y \rVert_\infty \;<\; \frac{1}{127} \;\approx\; 7.9 \times 10^{-3},
+\begin{array}{lr}
+\displaystyle \lVert x - y \rVert_\infty \;<\; \frac{1}{127} \;\approx\; 7.9 \times 10^{-3},
 \qquad
-\lVert x - y \rVert_2 \;<\; \frac{\sqrt{d}}{127}
-\tag{Q5}
+\lVert x - y \rVert_2 \;<\; \frac{\sqrt{d}}{127} & \text{(Q5)}
+\end{array}
 ```
 
 *Proof.* On $`[-1, 1]`$ we have $`127 x_j \in [-127, 127]`$, so the clamp in $`(\mathrm{Q4})`$ is
@@ -193,11 +198,12 @@ $`\blacksquare`$
 every $`e_i`$ are unit vectors, then for every indexed equation
 
 ```math
-\bigl\lvert \cos(x, e_i) - \cos(y, e_i) \bigr\rvert
+\begin{array}{lr}
+\displaystyle \bigl\lvert \cos(x, e_i) - \cos(y, e_i) \bigr\rvert
 \;=\; \bigl\lvert \langle x - y,\; e_i \rangle \bigr\rvert
 \;\leq\; \lVert x - y \rVert_2 \, \lVert e_i \rVert_2
-\;<\; \frac{\sqrt{d}}{127}
-\tag{Q6}
+\;<\; \frac{\sqrt{d}}{127} & \text{(Q6)}
+\end{array}
 ```
 
 by Cauchy-Schwarz. At the default $`d = 128`$ that is $`\sqrt{128}/127 \approx 0.089`$ — so a cache

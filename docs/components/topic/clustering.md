@@ -32,9 +32,11 @@ Documents are compared by the angle between their embeddings, not their magnitud
 similarity** of two vectors and the derived **cosine distance** are
 
 ```math
-\cos(v_i, v_j) = \frac{v_i \cdot v_j}{\lVert v_i \rVert\,\lVert v_j \rVert},
+\begin{array}{lr}
+\displaystyle \cos(v_i, v_j) = \frac{v_i \cdot v_j}{\lVert v_i \rVert\,\lVert v_j \rVert},
 \qquad
-d(v_i, v_j) = \bigl[\,1 - \cos(v_i, v_j)\,\bigr]^{+} \tag{C1}
+d(v_i, v_j) = \bigl[\,1 - \cos(v_i, v_j)\,\bigr]^{+} & \text{(C1)}
+\end{array}
 ```
 
 where $`[x]^{+} = \max(x, 0)`$. The implementation
@@ -50,7 +52,9 @@ the **upper triangle** of a symmetric matrix. libgrammstein packs them into a *c
 the same layout SciPy uses — indexed by
 
 ```math
-\mathrm{idx}(i, j) = n\,i - \frac{i\,(i+1)}{2} + j - i - 1, \qquad i < j \tag{C2}
+\begin{array}{lr}
+\displaystyle \mathrm{idx}(i, j) = n\,i - \frac{i\,(i+1)}{2} + j - i - 1, \qquad i < j & \text{(C2)}
+\end{array}
 ```
 
 Each cell is an `AtomicU64` holding the bit pattern of the `f64` distance, so the matrix can be
@@ -67,8 +71,10 @@ underlying points, the **Lance-Williams recurrence** expresses the new distance 
 combination of distances that are already known [[1]](#references):
 
 ```math
-d(C_i \cup C_j,\, C_k) =
-\alpha_i\,d_{ik} + \alpha_j\,d_{jk} + \beta\,d_{ij} + \gamma\,\lvert d_{ik} - d_{jk} \rvert \tag{C3}
+\begin{array}{lr}
+\displaystyle d(C_i \cup C_j,\, C_k) =
+\alpha_i\,d_{ik} + \alpha_j\,d_{jk} + \beta\,d_{ij} + \gamma\,\lvert d_{ik} - d_{jk} \rvert & \text{(C3)}
+\end{array}
 ```
 
 The four linkage methods of
@@ -88,8 +94,10 @@ to exactly these), and evaluates average and Ward from their closed forms. The W
 is
 
 ```math
-d(C_i \cup C_j,\, C_k) =
-\frac{(n_i + n_k)\,d_{ik} + (n_j + n_k)\,d_{jk} - n_k\,d_{ij}}{n_i + n_j + n_k} \tag{C4}
+\begin{array}{lr}
+\displaystyle d(C_i \cup C_j,\, C_k) =
+\frac{(n_i + n_k)\,d_{ik} + (n_j + n_k)\,d_{jk} - n_k\,d_{ij}}{n_i + n_j + n_k} & \text{(C4)}
+\end{array}
 ```
 
 **Choosing a method.** Ward (the default) minimizes the increase in within-cluster variance and

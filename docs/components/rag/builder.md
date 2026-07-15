@@ -72,9 +72,11 @@ They take **`&self`**, not `&mut self`, because `ModernBertEmbedder::embed_docum
 *one* encoder and *one* summarizer. Memory for model weights is
 
 ```math
-\Theta(1) \quad\text{in } p
+\begin{array}{lr}
+\displaystyle \Theta(1) \quad\text{in } p
 \qquad\text{rather than}\qquad
-\Theta(p) \tag{C1}
+\Theta(p) & \text{(C1)}
+\end{array}
 ```
 
 which is the difference between a $`16`$-thread build that fits in RAM and one that does not — at
@@ -101,13 +103,17 @@ Only the map is parallel, so **Amdahl's law** [[1]](#references) bounds the spee
 parallelizable fraction $`f`$,
 
 ```math
-S(p) \;=\; \frac{1}{(1 - f) + \dfrac{f}{p}} \tag{C2}
+\begin{array}{lr}
+\displaystyle S(p) \;=\; \frac{1}{(1 - f) + \dfrac{f}{p}} & \text{(C2)}
+\end{array}
 ```
 
 and here $`f`$ is the share of time spent embedding and summarizing rather than inserting:
 
 ```math
-f \;=\; \frac{t_e}{t_e + t_i} \tag{C3}
+\begin{array}{lr}
+\displaystyle f \;=\; \frac{t_e}{t_e + t_i} & \text{(C3)}
+\end{array}
 ```
 
 The asymmetry between $`t_e`$ and $`t_i`$ is enormous. Embedding one document is a full transformer

@@ -39,7 +39,8 @@ $`m = \lvert a \rvert`$, $`n = \lvert b \rvert`$, and let $`D_{i,j}`$ be the dis
 length-$`i`$ prefix of $`a`$ and the length-$`j`$ prefix of $`b`$. Then
 
 ```math
-D_{i,j} =
+\begin{array}{lr}
+\displaystyle D_{i,j} =
 \begin{cases}
 i & j = 0 \\
 j & i = 0 \\
@@ -48,8 +49,8 @@ j & i = 0 \\
   D_{i,j-1} + 1 & \text{(insert } b_j \text{)} \\
   D_{i-1,j-1} + \mathbb{1}\bigl[a_i \neq b_j\bigr] & \text{(substitute / match)}
 \end{cases} & \text{otherwise}
-\end{cases}
-\tag{L1}
+\end{cases} & \text{(L1)}
+\end{array}
 ```
 
 and $`d_L(a,b) = D_{m,n}`$. Note that a **transposition** is *not* a primitive: `pritn` and
@@ -63,7 +64,9 @@ What the corrector actually needs is not one distance but a **set**: every dicti
 $`d`$ of the query.
 
 ```math
-\mathcal{M}(q, d) \;=\; \bigl\{\, t \in D \;:\; 0 < d_L(q,t) \leq d \,\bigr\} \tag{L2}
+\begin{array}{lr}
+\displaystyle \mathcal{M}(q, d) \;=\; \bigl\{\, t \in D \;:\; 0 < d_L(q,t) \leq d \,\bigr\} & \text{(L2)}
+\end{array}
 ```
 
 The strict lower bound $`0 < d_L`$ excludes the query itself: a token that is *already* in the
@@ -74,7 +77,9 @@ automaton**. For a fixed query $`q`$ and bound $`d`$ there is a nondeterministic
 $`A(q,d)`$ whose language is exactly the set of strings within $`d`$ edits of $`q`$:
 
 ```math
-L\bigl(A(q,d)\bigr) \;=\; \bigl\{\, t \in \Sigma^{*} \;:\; d_L(q,t) \leq d \,\bigr\} \tag{L3}
+\begin{array}{lr}
+\displaystyle L\bigl(A(q,d)\bigr) \;=\; \bigl\{\, t \in \Sigma^{*} \;:\; d_L(q,t) \leq d \,\bigr\} & \text{(L3)}
+\end{array}
 ```
 
 so that $`\mathcal{M}(q,d) = \bigl( D \cap L(A(q,d)) \bigr) \setminus \{q\}`$ — a **language
@@ -92,7 +97,9 @@ A candidate's confidence decays linearly with the number of edits required, floo
 distant match keeps a little mass:
 
 ```math
-c(d_L) \;=\; 1 \;-\; \min\bigl(d_L \cdot p,\; 0.9\bigr), \qquad p = \texttt{edit\_penalty} \tag{L4}
+\begin{array}{lr}
+\displaystyle c(d_L) \;=\; 1 \;-\; \min\bigl(d_L \cdot p,\; 0.9\bigr), \qquad p = \texttt{edit\_penalty} & \text{(L4)}
+\end{array}
 ```
 
 With the defaults ($`p = 0.15`$, $`d \leq 2`$) only two values are reachable:

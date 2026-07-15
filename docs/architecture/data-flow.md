@@ -122,8 +122,10 @@ For each sentence $`s`$ and each order $`k \leq \min(n, \lvert s \rvert)`$, ever
 of length $`k`$ is one n-gram. The number of n-grams produced by a sentence is therefore
 
 ```math
-\#\text{ngrams}(s) \;=\; \sum_{k=1}^{\min(n,\,\lvert s \rvert)} \bigl(\lvert s \rvert - k + 1\bigr)
-\;\approx\; n \cdot \lvert s \rvert \quad\text{for } \lvert s \rvert \gg n \tag{D1}
+\begin{array}{lr}
+\displaystyle \#\text{ngrams}(s) \;=\; \sum_{k=1}^{\min(n,\,\lvert s \rvert)} \bigl(\lvert s \rvert - k + 1\bigr)
+\;\approx\; n \cdot \lvert s \rvert \quad\text{for } \lvert s \rvert \gg n & \text{(D1)}
+\end{array}
 ```
 
 Summing $`(\mathrm{D1})`$ over the corpus gives the $`O(C \cdot n)`$ training cost quoted in the
@@ -141,10 +143,12 @@ the vocabulary, the index is encoded as an LEB128 varint, and the n-gram key is 
 **concatenation of its words' varints**:
 
 ```math
-\mathrm{key}(w_1\,w_2 \cdots w_k) \;=\;
+\begin{array}{lr}
+\displaystyle \mathrm{key}(w_1\,w_2 \cdots w_k) \;=\;
 \mathrm{leb128}\bigl(\iota(w_1)\bigr) \;\Vert\;
 \mathrm{leb128}\bigl(\iota(w_2)\bigr) \;\Vert\; \cdots \;\Vert\;
-\mathrm{leb128}\bigl(\iota(w_k)\bigr) \tag{D2}
+\mathrm{leb128}\bigl(\iota(w_k)\bigr) & \text{(D2)}
+\end{array}
 ```
 
 where $`\Vert`$ is byte concatenation and $`\iota : \text{word} \to \mathbb{N}`$ is the
@@ -189,10 +193,12 @@ The counting pass is followed by a single reduction over the trie that computes 
 times, four times — from which MKN's three discounts follow [[2]](#references):
 
 ```math
-Y = \frac{n_1}{n_1 + 2\,n_2}, \qquad
+\begin{array}{lr}
+\displaystyle Y = \frac{n_1}{n_1 + 2\,n_2}, \qquad
 D_1 = 1 - 2Y\frac{n_2}{n_1}, \qquad
 D_2 = 2 - 3Y\frac{n_3}{n_2}, \qquad
-D_{3+} = 3 - 4Y\frac{n_4}{n_3} \tag{D3}
+D_{3+} = 3 - 4Y\frac{n_4}{n_3} & \text{(D3)}
+\end{array}
 ```
 
 This is the *only* stage that must see the whole corpus at once, and it sees it as four integers
@@ -212,9 +218,11 @@ On a miss, the n-gram expert evaluates the MKN recursion — a discounted higher
 weighted lower-order term:
 
 ```math
-\mathbb{P}_{\mathrm{MKN}}(w \mid h) =
+\begin{array}{lr}
+\displaystyle \mathbb{P}_{\mathrm{MKN}}(w \mid h) =
 \frac{\bigl[\,c(h\,w) - D\,\bigr]^{+}}{c(h)}
-\;+\; \lambda(h)\,\mathbb{P}_{\mathrm{MKN}}(w \mid h') \tag{D4}
+\;+\; \lambda(h)\,\mathbb{P}_{\mathrm{MKN}}(w \mid h') & \text{(D4)}
+\end{array}
 ```
 
 The recursion peels the **leftmost (oldest)** word of the history at each level, so a 5-gram
@@ -230,7 +238,9 @@ mean of the context words' subword vectors, and the candidate's score is the cos
 $`v_w`$, tempered and taken in log space:
 
 ```math
-\log \mathbb{P}_e(w \mid h) \;\approx\; \frac{\cos(v_w, v_h)}{\tau} - 1 \tag{D5}
+\begin{array}{lr}
+\displaystyle \log \mathbb{P}_e(w \mid h) \;\approx\; \frac{\cos(v_w, v_h)}{\tau} - 1 & \text{(D5)}
+\end{array}
 ```
 
 $`(\mathrm{D5})`$ is deliberately **unnormalized** — the true softmax denominator would require a
@@ -243,8 +253,10 @@ n-gram side supplies the calibration. See
 The two experts are fused under the configured strategy — by default the convex combination
 
 ```math
-\mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n(w \mid h) + (1 - \alpha)\,\mathbb{P}_e(w \mid h),
-\qquad \alpha = 0.8 \tag{D6}
+\begin{array}{lr}
+\displaystyle \mathbb{P}(w \mid h) = \alpha\,\mathbb{P}_n(w \mid h) + (1 - \alpha)\,\mathbb{P}_e(w \mid h),
+\qquad \alpha = 0.8 & \text{(D6)}
+\end{array}
 ```
 
 — and the result is written back into the cache. Both log-probabilities are clamped to

@@ -74,9 +74,11 @@ scale before the triangular filters are laid down, so the filters are uniformly 
 even though they widen in *Hz*:
 
 ```math
-\mathrm{mel}(f) = 2595 \, \log_{10}\!\left(1 + \frac{f}{700}\right),
+\begin{array}{lr}
+\displaystyle \mathrm{mel}(f) = 2595 \, \log_{10}\!\left(1 + \frac{f}{700}\right),
 \qquad
-f(\mathrm{mel}) = 700 \left(10^{\,\mathrm{mel}/2595} - 1\right) \tag{A1}
+f(\mathrm{mel}) = 700 \left(10^{\,\mathrm{mel}/2595} - 1\right) & \text{(A1)}
+\end{array}
 ```
 
 The full stage-by-stage mathematics — pre-emphasis, windowing, the power spectrum, the triangular
@@ -84,7 +86,9 @@ filters, log compression, the DCT, and the delta regression — is derived in
 [Feature Extraction](features.md#theory). The number of frames an utterance yields is
 
 ```math
-T = \left\lfloor \frac{L - N}{S} \right\rfloor + 1 \qquad (L > N) \tag{A2}
+\begin{array}{lr}
+\displaystyle T = \left\lfloor \frac{L - N}{S} \right\rfloor + 1 \qquad (L > N) & \text{(A2)}
+\end{array}
 ```
 
 for an audio length of $`L`$ samples; a non-empty utterance shorter than one frame yields a

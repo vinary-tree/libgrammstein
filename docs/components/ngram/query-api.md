@@ -86,9 +86,11 @@ return a strictly positive number: a seen word yields $`c(w)/T > 0`$ (or its con
 analogue), and an **unseen** word falls to the uniform floor
 
 ```math
-\mathbb{P}(w) = \frac{1}{\lvert V \rvert} > 0
+\begin{array}{lr}
+\displaystyle \mathbb{P}(w) = \frac{1}{\lvert V \rvert} > 0
 \qquad\Longleftrightarrow\qquad
-\texttt{oov\_log\_prob()} = -\log \lvert V \rvert \tag{Q1}
+\texttt{oov\_log\_prob()} = -\log \lvert V \rvert & \text{(Q1)}
+\end{array}
 ```
 
 Two further guards protect the interpolated levels above the base case: an unseen n-gram substitutes
@@ -111,9 +113,11 @@ log-probabilities. For token $`i`$ the context is the preceding $`n-1`$ tokens, 
 start of the sentence:
 
 ```math
-h_i = w_{\max(1,\, i-n+1)} \dots w_{i-1},
+\begin{array}{lr}
+\displaystyle h_i = w_{\max(1,\, i-n+1)} \dots w_{i-1},
 \qquad
-\log \mathbb{P}(w_1 \dots w_m) = \sum_{i=1}^{m} \log \mathbb{P}\bigl(w_i \mid h_i\bigr) \tag{Q2}
+\log \mathbb{P}(w_1 \dots w_m) = \sum_{i=1}^{m} \log \mathbb{P}\bigl(w_i \mid h_i\bigr) & \text{(Q2)}
+\end{array}
 ```
 
 The $`\max(1, \cdot)`$ is `i.saturating_sub(order - 1)` in the code: the first token is scored as a
@@ -149,8 +153,10 @@ Perplexity is the exponentiated per-token cross-entropy — the average branchin
 faces. Lower is better; it is *the* number by which two language models are compared.
 
 ```math
-\mathrm{PP}(w_1 \dots w_m) = \exp\!\left(-\frac{1}{m}\sum_{i=1}^{m} \log \mathbb{P}\bigl(w_i \mid h_i\bigr)\right)
-= \exp\!\left(-\frac{\log \mathbb{P}(w_1 \dots w_m)}{m}\right) \tag{Q3}
+\begin{array}{lr}
+\displaystyle \mathrm{PP}(w_1 \dots w_m) = \exp\!\left(-\frac{1}{m}\sum_{i=1}^{m} \log \mathbb{P}\bigl(w_i \mid h_i\bigr)\right)
+= \exp\!\left(-\frac{\log \mathbb{P}(w_1 \dots w_m)}{m}\right) & \text{(Q3)}
+\end{array}
 ```
 
 `NgramModel` deliberately does **not** expose `perplexity` itself — it lives in

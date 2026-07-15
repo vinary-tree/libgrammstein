@@ -79,8 +79,9 @@ this module is about frequency.
 frequent has
 
 ```math
-f(r) \;\approx\; \frac{C}{(r+1)^{s}}, \qquad s \approx 1 \ \text{for natural language}
-\tag{Z1}
+\begin{array}{lr}
+\displaystyle f(r) \;\approx\; \frac{C}{(r+1)^{s}}, \qquad s \approx 1 \ \text{for natural language} & \text{(Z1)}
+\end{array}
 ```
 
 Two consequences follow immediately. The head is tiny and carries everything: a few hundred types
@@ -92,8 +93,9 @@ singletons are overwhelmingly typos, OCR debris, and scanning artefacts, which i
 **Heaps' law** [[2]](#references) says the vocabulary never stops growing:
 
 ```math
-\lvert V \rvert \;\approx\; K \, N^{\beta}, \qquad \beta \approx 0.4 \ \text{–} \ 0.6
-\tag{Z2}
+\begin{array}{lr}
+\displaystyle \lvert V \rvert \;\approx\; K \, N^{\beta}, \qquad \beta \approx 0.4 \ \text{–} \ 0.6 & \text{(Z2)}
+\end{array}
 ```
 
 so doubling the corpus does *not* double the vocabulary — but it never converges either. You cannot
@@ -104,9 +106,10 @@ derivable from $`(\mathrm{Z1})`$ in finite systems [[2]](#references).)
 vocabulary at threshold $`\theta`$:
 
 ```math
-C(\theta) \;=\; \frac{\displaystyle\sum_{w \,:\, f(w) \geq \theta} f(w)}{N}
-\;=\; 1 \;-\; \underbrace{\frac{\displaystyle\sum_{w \,:\, f(w) < \theta} f(w)}{N}}_{\text{the OOV mass}}
-\tag{Z3}
+\begin{array}{lr}
+\displaystyle C(\theta) \;=\; \frac{\displaystyle\sum_{w \,:\, f(w) \geq \theta} f(w)}{N}
+\;=\; 1 \;-\; \underbrace{\frac{\displaystyle\sum_{w \,:\, f(w) < \theta} f(w)}{N}}_{\text{the OOV mass}} & \text{(Z3)}
+\end{array}
 ```
 
 Under $`(\mathrm{Z1})`$ this is the crate's central bargain: raising $`\theta`$ from 1 to 2 deletes

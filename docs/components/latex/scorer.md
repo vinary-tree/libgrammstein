@@ -70,15 +70,16 @@ tokens, and $`b_\circ`$ and $`m_\circ`$ the number of braces and math delimiters
 at end of input:
 
 ```math
-\mathrm{structural}(T) \;=\;
+\begin{array}{lr}
+\displaystyle \mathrm{structural}(T) \;=\;
 \Bigl[\; 1
 \;-\; 0.20\,b_\times
 \;-\; 0.30\,m_\times
 \;-\; 0.10\,u
 \;-\; 0.15\,b_\circ
 \;-\; 0.20\,m_\circ
-\;\Bigr]^{+}
-\tag{S1}
+\;\Bigr]^{+} & \text{(S1)}
+\end{array}
 ```
 
 An empty stream scores $`0`$. The penalty schedule encodes a judgement about which defects are
@@ -102,13 +103,14 @@ The fluency proxy averages a hand-built **transition score** over adjacent token
 it with a **density score** that rewards an idiomatic proportion of commands:
 
 ```math
-\mathrm{fluency}(T) \;=\;
+\begin{array}{lr}
+\displaystyle \mathrm{fluency}(T) \;=\;
 \Biggl[\;
 0.85 \cdot \underbrace{\frac{1}{N-1}\sum_{p=1}^{N-1} \varphi(t_p,\, t_{p+1})}_{\text{transition score}}
 \;+\;
 0.15 \cdot \underbrace{\bigl[\,1 - 1.5\,\lvert \rho - 0.20 \rvert \,\bigr]_{0.35}^{1.0}}_{\text{density score}}
-\;\Biggr]_{0}^{1}
-\tag{S2}
+\;\Biggr]_{0}^{1} & \text{(S2)}
+\end{array}
 ```
 
 with two base cases: an empty stream scores $`0`$, and a single token scores $`0.25`$ if it is
@@ -159,14 +161,15 @@ many adjacent command pairs are *categorically* compatible, and how badly the st
 unlexable tokens:
 
 ```math
-\mathrm{coherence}(T) \;=\;
+\begin{array}{lr}
+\displaystyle \mathrm{coherence}(T) \;=\;
 \Bigl[\; 0.55\,\alpha \;+\; 0.45\,\chi \;-\; 0.35\,\upsilon \;\Bigr]_{0}^{1},
 \qquad
 \chi \;=\; \begin{cases}
 1 & \text{if fewer than two commands} \\[2pt]
 \dfrac{\#\{\,p \;:\; \kappa(c_p) \sim \kappa(c_{p+1})\,\}}{\#\{\text{commands}\} - 1} & \text{otherwise}
-\end{cases}
-\tag{S3}
+\end{cases} & \text{(S3)}
+\end{array}
 ```
 
 Here $`\alpha`$ is the fraction of tokens whose `token_mode` equals `sequence_mode(T)` (see
@@ -178,25 +181,27 @@ The compatibility relation $`\sim`$ is worth reading carefully, because it is **
 symmetric**:
 
 ```math
-\kappa_1 \sim \kappa_2
+\begin{array}{lr}
+\displaystyle \kappa_1 \sim \kappa_2
 \quad\Longleftrightarrow\quad
 \kappa_1 = \kappa_2
 \ \ \lor\ \ \kappa_1 = \mathrm{Spacing}
 \ \ \lor\ \ \kappa_2 = \mathrm{Spacing}
-\ \ \lor\ \ (\kappa_1, \kappa_2) \in C
-\tag{S4}
+\ \ \lor\ \ (\kappa_1, \kappa_2) \in C & \text{(S4)}
+\end{array}
 ```
 
 ```math
-C = \left\{
+\begin{array}{lr}
+\displaystyle C = \left\{
 \begin{aligned}
 &(\mathrm{Operator}, \mathrm{GreekLetter}),\ (\mathrm{Operator}, \mathrm{Function}),\
  (\mathrm{Function}, \mathrm{GreekLetter}),\ (\mathrm{Function}, \mathrm{Operator}), \\
 &(\mathrm{Relation}, \mathrm{GreekLetter}),\ (\mathrm{Relation}, \mathrm{Function}),\
  (\mathrm{Accent}, \mathrm{GreekLetter}),\ (\mathrm{Accent}, \mathrm{Function})
 \end{aligned}
-\right\}
-\tag{S5}
+\right\} & \text{(S5)}
+\end{array}
 ```
 
 (the reflexive pairs $`(\kappa, \kappa)`$ — `GreekLetter` beside `GreekLetter`, `Delimiter` beside
@@ -214,9 +219,10 @@ between any two commands without breaking their coherence.
 ### Fusion
 
 ```math
-\mathrm{score}(T) \;=\; \frac{\sum_{j \in J} n_j\, w_j}{\sum_{j \in J} w_j},
-\qquad J = \{\,\text{structural},\ \text{ngram},\ \text{embedding}\,\}
-\tag{S6}
+\begin{array}{lr}
+\displaystyle \mathrm{score}(T) \;=\; \frac{\sum_{j \in J} n_j\, w_j}{\sum_{j \in J} w_j},
+\qquad J = \{\,\text{structural},\ \text{ngram},\ \text{embedding}\,\} & \text{(S6)}
+\end{array}
 ```
 
 Dividing by the **realized** weight sum — rather than assuming the five configured weights add to
@@ -234,12 +240,13 @@ compute.
 ### Confidence by agreement
 
 ```math
-\bar{n} = \frac{1}{\lvert J \rvert}\sum_{j \in J} n_j,
+\begin{array}{lr}
+\displaystyle \bar{n} = \frac{1}{\lvert J \rvert}\sum_{j \in J} n_j,
 \qquad
 \varsigma = \sqrt{\frac{1}{\lvert J \rvert}\sum_{j \in J} \bigl(n_j - \bar{n}\bigr)^{2}},
 \qquad
-\mathrm{confidence} = \Bigl[\, 1 - 2\,\min\bigl(\varsigma,\ \tfrac{1}{2}\bigr) \Bigr]^{+}
-\tag{S7}
+\mathrm{confidence} = \Bigl[\, 1 - 2\,\min\bigl(\varsigma,\ \tfrac{1}{2}\bigr) \Bigr]^{+} & \text{(S7)}
+\end{array}
 ```
 
 $`\varsigma`$ is the **population** standard deviation (the denominator is $`\lvert J \rvert`$, not

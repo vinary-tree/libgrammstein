@@ -56,16 +56,20 @@ $`P`$ is the number of *distinct trees* that contain it (multiple occurrences wi
 not raise support), and the **support ratio** normalizes that by the forest size:
 
 ```math
-\mathrm{support}(P) = \bigl\lvert \{\, t : P \text{ occurs in tree } t \,\} \bigr\rvert,
+\begin{array}{lr}
+\displaystyle \mathrm{support}(P) = \bigl\lvert \{\, t : P \text{ occurs in tree } t \,\} \bigr\rvert,
 \qquad
-\mathrm{support\_ratio}(P) = \frac{\mathrm{support}(P)}{m} \tag{S1}
+\mathrm{support\_ratio}(P) = \frac{\mathrm{support}(P)}{m} & \text{(S1)}
+\end{array}
 ```
 
 A pattern is **frequent** when its support meets a threshold derived from the configured minimum
 support fraction $`\sigma \in [0, 1]`$:
 
 ```math
-\mathrm{support}(P) \;\ge\; \max\!\bigl(\lceil \sigma\, m \rceil,\; 1\bigr) \tag{S2}
+\begin{array}{lr}
+\displaystyle \mathrm{support}(P) \;\ge\; \max\!\bigl(\lceil \sigma\, m \rceil,\; 1\bigr) & \text{(S2)}
+\end{array}
 ```
 
 The right-hand side is [`MiningResult::min_support_count`](../../../src/code/subtree/treeminer.rs).

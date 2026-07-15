@@ -55,10 +55,11 @@ that a **data-flow graph** is the better structure to hand a transformer, becaus
 Formally, for a snippet $`c`$:
 
 ```math
-\mathcal{G}(c) = (V, E),
+\begin{array}{lr}
+\displaystyle \mathcal{G}(c) = (V, E),
 \qquad
-(v_i, v_j) \in E \iff \text{the value of } v_j \text{ is computed from the value of } v_i
-\tag{G1}
+(v_i, v_j) \in E \iff \text{the value of } v_j \text{ is computed from the value of } v_i & \text{(G1)}
+\end{array}
 ```
 
 Each $`v \in V`$ is an *occurrence* of a variable, not a variable name — so the two $`x`$s in
@@ -81,7 +82,9 @@ DFG is appended to it, and the attention mask is used to teach the model which p
 sequence may see which. The input is
 
 ```math
-X \;=\; \bigl[\,\texttt{[CLS]},\ C,\ \texttt{[SEP]},\ W,\ \texttt{[SEP]},\ V\,\bigr] \tag{G2}
+\begin{array}{lr}
+\displaystyle X \;=\; \bigl[\,\texttt{[CLS]},\ C,\ \texttt{[SEP]},\ W,\ \texttt{[SEP]},\ V\,\bigr] & \text{(G2)}
+\end{array}
 ```
 
 and the **graph-guided** mask $`M`$, plugged into the additive attention of
@@ -89,13 +92,15 @@ and the **graph-guided** mask $`M`$, plugged into the additive attention of
 when it is licensed by the sequence or by the graph:
 
 ```math
-M_{ij} =
+\begin{array}{lr}
+\displaystyle M_{ij} =
 \begin{cases}
 0 & \text{if } x_i, x_j \in C \cup W & \text{(text and code attend freely)} \\[4pt]
 0 & \text{if } x_i \in V,\ x_j \in V,\ (v_i, v_j) \in E & \text{(a vertex sees its data-flow neighbours)} \\[4pt]
 0 & \text{if } x_i \in V,\ x_j \in C,\ (v_i, x_j) \in E' & \text{(a vertex sees the token it came from)} \\[4pt]
 -\infty & \text{otherwise} & \text{(everything else is blocked)}
-\end{cases} \tag{G3}
+\end{cases} & \text{(G3)}
+\end{array}
 ```
 
 $`(\mathrm{G3})`$ is the whole mechanism: structure enters the transformer as *permission to
@@ -113,10 +118,12 @@ Edge prediction is a binary decision per candidate pair, scored from the two ver
 representations and trained with BCE:
 
 ```math
-p_{ij} = \sigma\bigl(\langle v_i, v_j \rangle\bigr),
+\begin{array}{lr}
+\displaystyle p_{ij} = \sigma\bigl(\langle v_i, v_j \rangle\bigr),
 \qquad
 \mathcal{L}_{\mathrm{edge}} = -\!\!\sum_{(i,j) \in E_{\mathrm{mask}}}\!\!
-\Bigl[\, \delta_{ij} \log p_{ij} + (1 - \delta_{ij}) \log (1 - p_{ij}) \,\Bigr] \tag{G4}
+\Bigl[\, \delta_{ij} \log p_{ij} + (1 - \delta_{ij}) \log (1 - p_{ij}) \,\Bigr] & \text{(G4)}
+\end{array}
 ```
 
 This is what bakes data-flow awareness **into the weights** — a fact that will matter a great deal
@@ -199,9 +206,11 @@ starts at $`0`$ and therefore selects the two reserved rows at the bottom of tha
 every subsequent position by two:
 
 ```math
-\text{shipped: } (0, 1, \ldots, L-1)
+\begin{array}{lr}
+\displaystyle \text{shipped: } (0, 1, \ldots, L-1)
 \qquad\text{versus}\qquad
-\text{RoBERTa convention: } (2, 3, \ldots, L+1) \tag{G5}
+\text{RoBERTa convention: } (2, 3, \ldots, L+1) & \text{(G5)}
+\end{array}
 ```
 
 If your export computes positions internally from `input_ids` — the common case, and the reason

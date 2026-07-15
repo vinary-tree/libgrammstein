@@ -119,10 +119,11 @@ lock-*sharded*. Under a uniform hash, the probability that two given workers tou
 the same step is
 
 ```math
-\Pr[\text{collision}] \;=\; \frac{1}{S}
+\begin{array}{lr}
+\displaystyle \Pr[\text{collision}] \;=\; \frac{1}{S}
 \qquad\text{and, for } P \text{ workers,}\qquad
-\mathbb{E}[\text{contending pairs}] \;=\; \binom{P}{2}\frac{1}{S}
-\tag{X1}
+\mathbb{E}[\text{contending pairs}] \;=\; \binom{P}{2}\frac{1}{S} & \text{(X1)}
+\end{array}
 ```
 
 so contention falls linearly in $`S`$. But $`(\mathrm{X1})`$ assumes a uniform key distribution, and
@@ -186,12 +187,13 @@ extractor.add_sentences_parallel(sentences.par_iter().map(String::as_str));
 The map's hasher is `SafeGxBuildHasher`, which dispatches on key length:
 
 ```math
-h(w) \;=\;
+\begin{array}{lr}
+\displaystyle h(w) \;=\;
 \begin{cases}
 \texttt{gxhash64}(w) & \lvert w \rvert \geq 16 \text{ bytes} \\
 \texttt{xxh3\_64}(w) & \text{otherwise}
-\end{cases}
-\tag{X2}
+\end{cases} & \text{(X2)}
+\end{array}
 ```
 
 The split is a *safety* requirement, not a micro-optimisation: gxhash's AES/SIMD path reads 16-byte
@@ -230,8 +232,9 @@ startling: on ordinary English prose, moving $`\theta`$ from 1 to 2 typically ha
 `entries_filtered` is the one that computes probabilities, as the maximum-likelihood unigram estimate
 
 ```math
-\log p(w) \;=\; \ln \frac{f(w)}{N}
-\tag{X3}
+\begin{array}{lr}
+\displaystyle \log p(w) \;=\; \ln \frac{f(w)}{N} & \text{(X3)}
+\end{array}
 ```
 
 with $`N`$ = `total_tokens()`, i.e. the *accepted* token count. When $`N = 0`$ it yields

@@ -111,13 +111,15 @@ built on. It performs four steps: probe the cache; evaluate both experts; fuse t
 configured strategy; memoize.
 
 ```math
-\texttt{score}(w, h) \;=\;
+\begin{array}{lr}
+\displaystyle \texttt{score}(w, h) \;=\;
 \begin{cases}
 \alpha\,\mathbb{P}_n + (1-\alpha)\,\mathbb{P}_e & \text{Linear} \\[2pt]
 \alpha \log \mathbb{P}_n + (1-\alpha) \log \mathbb{P}_e & \text{LogLinear} \\[2pt]
 \log \mathbb{P}_n \ \text{ if } c(w) > 0, \ \text{else } \log \mathbb{P}_e & \text{NgramWithEmbeddingFallback} \\[2pt]
 \alpha(h)\,\mathbb{P}_n + (1-\alpha(h))\,\mathbb{P}_e & \text{Dynamic}
-\end{cases} \tag{HM1}
+\end{cases} & \text{(HM1)}
+\end{array}
 ```
 
 taking the logarithm of the Linear and Dynamic branches. The four strategies, their trade-offs, and
@@ -129,7 +131,9 @@ the derivation of $`\mathbb{P}_e`$ from cosine similarity are given in
 **The clamp.** Before fusion, both experts' log-probabilities are floored at $`-50`$:
 
 ```math
-\widetilde{\log \mathbb{P}} = \max\bigl(\log \mathbb{P},\ -50\bigr) \tag{HM2}
+\begin{array}{lr}
+\displaystyle \widetilde{\log \mathbb{P}} = \max\bigl(\log \mathbb{P},\ -50\bigr) & \text{(HM2)}
+\end{array}
 ```
 
 so that one expert returning a catastrophically small value cannot annihilate the score. (The n-gram
@@ -152,11 +156,15 @@ finite by construction.
 width, even under a strategy that leans on the embedding) and sums:
 
 ```math
-\log \mathbb{P}(w_1 \dots w_m) = \sum_{i=1}^{m} \texttt{score}\bigl(w_i,\ w_{\max(1,\,i-n+1)} \dots w_{i-1}\bigr) \tag{HM3}
+\begin{array}{lr}
+\displaystyle \log \mathbb{P}(w_1 \dots w_m) = \sum_{i=1}^{m} \texttt{score}\bigl(w_i,\ w_{\max(1,\,i-n+1)} \dots w_{i-1}\bigr) & \text{(HM3)}
+\end{array}
 ```
 
 ```math
-\mathrm{PP}(w_1 \dots w_m) = \exp\!\left(-\frac{1}{m}\log \mathbb{P}(w_1 \dots w_m)\right) \tag{HM4}
+\begin{array}{lr}
+\displaystyle \mathrm{PP}(w_1 \dots w_m) = \exp\!\left(-\frac{1}{m}\log \mathbb{P}(w_1 \dots w_m)\right) & \text{(HM4)}
+\end{array}
 ```
 
 An empty word slice yields $`0.0`$ from `sentence_log_prob` (the log of the empty product) and

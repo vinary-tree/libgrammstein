@@ -43,7 +43,9 @@ The probability of a sentence factorizes exactly, with no approximation, by the 
 probability**:
 
 ```math
-\mathbb{P}(w_1 \dots w_m) = \prod_{i=1}^{m} \mathbb{P}\bigl(w_i \mid w_1 \dots w_{i-1}\bigr) \tag{N1}
+\begin{array}{lr}
+\displaystyle \mathbb{P}(w_1 \dots w_m) = \prod_{i=1}^{m} \mathbb{P}\bigl(w_i \mid w_1 \dots w_{i-1}\bigr) & \text{(N1)}
+\end{array}
 ```
 
 $`(\mathrm{N1})`$ is useless as it stands. The final factor conditions on an *entire* preceding
@@ -55,7 +57,9 @@ The **Markov assumption** rescues it: assume a word depends only on the $`n-1`$ 
 and truncate the history.
 
 ```math
-\mathbb{P}\bigl(w_i \mid w_1 \dots w_{i-1}\bigr) \;\approx\; \mathbb{P}\bigl(w_i \mid w_{i-n+1} \dots w_{i-1}\bigr) \tag{N2}
+\begin{array}{lr}
+\displaystyle \mathbb{P}\bigl(w_i \mid w_1 \dots w_{i-1}\bigr) \;\approx\; \mathbb{P}\bigl(w_i \mid w_{i-n+1} \dots w_{i-1}\bigr) & \text{(N2)}
+\end{array}
 ```
 
 This is the *only* approximation in the model, and it is the one that makes it work: there are far
@@ -79,7 +83,9 @@ The **Maximum-Likelihood Estimate** is the obvious estimator — divide the coun
 by the count of its context:
 
 ```math
-\mathbb{P}_{\mathrm{MLE}}(w \mid h) = \frac{c(h\,w)}{c(h)} \tag{N3}
+\begin{array}{lr}
+\displaystyle \mathbb{P}_{\mathrm{MLE}}(w \mid h) = \frac{c(h\,w)}{c(h)} & \text{(N3)}
+\end{array}
 ```
 
 $`(\mathrm{N3})`$ assigns probability **zero** to every n-gram absent from training. Because
@@ -96,7 +102,9 @@ Models are compared by **perplexity** — the exponentiated per-token cross-entr
 the average number of equally-likely choices the model faces at each token. Lower is better.
 
 ```math
-\mathrm{PP}(w_1 \dots w_m) = \exp\!\left(-\frac{1}{m} \sum_{i=1}^{m} \log \mathbb{P}\bigl(w_i \mid w_{i-n+1} \dots w_{i-1}\bigr)\right) \tag{N4}
+\begin{array}{lr}
+\displaystyle \mathrm{PP}(w_1 \dots w_m) = \exp\!\left(-\frac{1}{m} \sum_{i=1}^{m} \log \mathbb{P}\bigl(w_i \mid w_{i-n+1} \dots w_{i-1}\bigr)\right) & \text{(N4)}
+\end{array}
 ```
 
 Note that $`(\mathrm{N4})`$ **sums logarithms** rather than multiplying probabilities. This is not a
@@ -122,9 +130,11 @@ atomics, no worker ever takes a lock.
 *versatility*, so a second sweep derives two statistics per entry:
 
 ```math
-N_{1+}(\bullet, w) = \bigl\lvert \{\, h : c(h\,w) > 0 \,\} \bigr\rvert,
+\begin{array}{lr}
+\displaystyle N_{1+}(\bullet, w) = \bigl\lvert \{\, h : c(h\,w) > 0 \,\} \bigr\rvert,
 \qquad
-N_{1+}(h, \bullet) = \bigl\lvert \{\, w : c(h\,w) > 0 \,\} \bigr\rvert \tag{N5}
+N_{1+}(h, \bullet) = \bigl\lvert \{\, w : c(h\,w) > 0 \,\} \bigr\rvert & \text{(N5)}
+\end{array}
 ```
 
 The first counts the distinct contexts a word *completes*; the second counts the distinct words a
@@ -185,9 +195,11 @@ it. MKN subtracts a count-dependent *absolute discount* $`D(c)`$ and redistribut
 a recursively-backed-off lower order, weighted by $`\lambda(h)`$:
 
 ```math
-\mathbb{P}_{\mathrm{MKN}}(w \mid h) =
+\begin{array}{lr}
+\displaystyle \mathbb{P}_{\mathrm{MKN}}(w \mid h) =
 \frac{\bigl[\,c(h\,w) - D(c(h\,w))\,\bigr]^{+}}{c(h)}
-\;+\; \lambda(h)\,\mathbb{P}_{\mathrm{MKN}}(w \mid h') \tag{N6}
+\;+\; \lambda(h)\,\mathbb{P}_{\mathrm{MKN}}(w \mid h') & \text{(N6)}
+\end{array}
 ```
 
 where $`[x]^{+} = \max(x, 0)`$ and $`h'`$ is $`h`$ with its **oldest** (leftmost) word removed. The

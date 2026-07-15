@@ -50,16 +50,20 @@ BPE is greedy agglomeration. Given the current segmentation of the corpus, it re
 the adjacent pair with the highest frequency and merges it into a new symbol:
 
 ```math
-p^{\star} = \arg\max_{p = (\ell, r)} c(p),
+\begin{array}{lr}
+\displaystyle p^{\star} = \arg\max_{p = (\ell, r)} c(p),
 \qquad
-V_{t+1} = V_t \cup \{\, \ell r \,\} \quad\text{if } c(p^{\star}) \geq \texttt{min\_frequency} \tag{B1}
+V_{t+1} = V_t \cup \{\, \ell r \,\} \quad\text{if } c(p^{\star}) \geq \texttt{min\_frequency} & \text{(B1)}
+\end{array}
 ```
 
 Training stops when the vocabulary reaches its target size or no pair clears the frequency floor:
 
 ```math
-\text{halt when } \lvert V_t \rvert \geq \texttt{vocab\_size}
-\quad\text{or}\quad c(p^{\star}) < \texttt{min\_frequency} \tag{B2}
+\begin{array}{lr}
+\displaystyle \text{halt when } \lvert V_t \rvert \geq \texttt{vocab\_size}
+\quad\text{or}\quad c(p^{\star}) < \texttt{min\_frequency} & \text{(B2)}
+\end{array}
 ```
 
 Each accepted merge is recorded as an ordered `MergeOp`; the **order is the priority** used at
@@ -144,7 +148,9 @@ The word is wrapped in boundary markers and *every* character n-gram of length
 $`n \in [\texttt{min\_n}, \texttt{max\_n}]`$ is emitted:
 
 ```math
-G(w) = \bigl\{\, (\texttt{<}\,w\,\texttt{>})[i \mathbin{:} i+n] \ :\ \texttt{min\_n} \leq n \leq \texttt{max\_n},\ 0 \leq i \leq \lvert \texttt{<}\,w\,\texttt{>} \rvert - n \,\bigr\} \tag{B3}
+\begin{array}{lr}
+\displaystyle G(w) = \bigl\{\, (\texttt{<}\,w\,\texttt{>})[i \mathbin{:} i+n] \ :\ \texttt{min\_n} \leq n \leq \texttt{max\_n},\ 0 \leq i \leq \lvert \texttt{<}\,w\,\texttt{>} \rvert - n \,\bigr\} & \text{(B3)}
+\end{array}
 ```
 
 For $`w = \texttt{hello}`$ (marked $`\texttt{<hello>}`$, $`7`$ characters), with the defaults
