@@ -127,7 +127,7 @@ Tokenization then truncates **hard** to `max_length`:
 ```math
 \mathrm{ids} \;=\; \bigl(\mathrm{enc}_0, \ldots, \mathrm{enc}_{L-1}\bigr),
 \qquad
-L \;=\; \min\bigl(\lvert \mathrm{enc} \rvert,\ \texttt{max\_length}\bigr) \tag{T2}
+L \;=\; \min\bigl(\lvert \mathrm{enc} \rvert,\ \texttt{max_length}\bigr) \tag{T2}
 ```
 
 There is no sliding window and no chunk-and-pool: tokens past `max_length` are **discarded**. A

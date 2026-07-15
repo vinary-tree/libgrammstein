@@ -112,7 +112,7 @@ families keep different numbers of shards open at once:
 n_{\text{resident}} =
 \begin{cases}
 S & \text{hash-based routing, or an unlimited shard cap} \\[4pt]
-\min\bigl(\texttt{max\_open\_shards},\, S\bigr) & \text{prefix-based routing with an LRU cap}
+\min\bigl(\texttt{max_open_shards},\, S\bigr) & \text{prefix-based routing with an LRU cap}
 \end{cases} \tag{M3}
 ```
 

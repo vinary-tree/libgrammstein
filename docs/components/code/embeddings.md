@@ -307,7 +307,7 @@ For a snippet of $`L`$ tokens and width $`d`$:
 | `embed` (cache hit) | $`O(d)`$ — a hash probe and a clone of the vector |
 | `embed_batch` of $`b`$ uncached snippets | one forward pass over the padded batch |
 | `cosine_similarity` | $`O(d)`$ |
-| eviction sweep | $`O(\text{cache\_size} / 10)`$, amortized over that many inserts |
+| eviction sweep | $`O(\text{cache_size} / 10)`$, amortized over that many inserts |
 
 Every scoring method takes `&self` and the cache is a `DashMap`, so one embedder serves a thread
 pool without locking:

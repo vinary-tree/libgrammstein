@@ -18,32 +18,32 @@ title CorrectionPipeline::analyze — six phases
 
 start
 :source: &str;
-#546E7A:**Phase 1 — Parse**
-CodeParser::parse ▷ ParsedCode;
-#EF6C00:**Phase 2 — Tokenize**
-CodeTokenizer ▷ Vec<CodeToken>;
+:**Phase 1 — Parse**
+CodeParser::parse ▷ ParsedCode; <<#546E7A>>
+:**Phase 2 — Tokenize**
+CodeTokenizer ▷ Vec<CodeToken>; <<#EF6C00>>
 if (config.full_semantic_analysis?) then (yes)
-  #EF6C00:**Phase 3 — Analyze**
-CodePropertyGraph::from_parsed_code;
+  :**Phase 3 — Analyze**
+CodePropertyGraph::from_parsed_code; <<#EF6C00>>
 else (no)
-  #ECEFF1:skip CPG;
+  :skip CPG; <<#ECEFF1>>
 endif
-#C62828:**Phase 4 — Diagnostics**
-collect ERROR / MISSING spans;
+:**Phase 4 — Diagnostics**
+collect ERROR / MISSING spans; <<#C62828>>
 partition "Phase 5 — Correct (streaming)" {
-  #1565C0:per token ▷ EnsembleCorrector.correct_token;
-  #2E7D32:if CPG ▷ EnsembleCorrector.analyze_full;
-  #455A64:StreamingCorrectionCollector.add
+  :per token ▷ EnsembleCorrector.correct_token; <<#1565C0>>
+  :if CPG ▷ EnsembleCorrector.analyze_full; <<#2E7D32>>
+  :StreamingCorrectionCollector.add
 prune < min_confidence · dedupe (start,end,replacement)
-bounded min-heap of size max_corrections;
+bounded min-heap of size max_corrections; <<#455A64>>
 }
-#455A64:**Phase 6 — Rank**
-collector.finalize ▷ sort desc by confidence;
+:**Phase 6 — Rank**
+collector.finalize ▷ sort desc by confidence; <<#455A64>>
 :**AnalysisResult**
 { source, has_parse_errors, error_count,
   tokens, corrections, diagnostics };
 if (auto_apply_threshold set?) then (yes)
-  #EF6C00:apply_corrections ▷ end-to-start splice;
+  :apply_corrections ▷ end-to-start splice; <<#EF6C00>>
 else (no)
   :return suggestions;
 endif

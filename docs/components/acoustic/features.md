@@ -109,7 +109,7 @@ The bin is reduced to a real energy — the squared magnitude when `use_power` i
 otherwise the magnitude:
 
 ```math
-P_t[k] = \begin{cases} \lvert X_t[k] \rvert^2 & \texttt{use\_power} = \text{true} \\ \lvert X_t[k] \rvert & \text{otherwise} \end{cases} \tag{F4}
+P_t[k] = \begin{cases} \lvert X_t[k] \rvert^2 & \texttt{use_power} = \text{true} \\ \lvert X_t[k] \rvert & \text{otherwise} \end{cases} \tag{F4}
 ```
 
 `extract_spectrogram` returns this $`P_t`$ directly, one $`K/2+1`$-vector per frame.
@@ -126,7 +126,7 @@ f(\mathrm{mel}) = 700 \left(10^{\,\mathrm{mel}/2595} - 1\right) \tag{F5}
 ```
 
 `build_filters` lays down $`M + 2`$ points equally spaced on the mel axis between
-$`\mathrm{mel}(\texttt{low\_freq})`$ and $`\mathrm{mel}(\texttt{high\_freq})`$, converts each back
+$`\mathrm{mel}(\texttt{low_freq})`$ and $`\mathrm{mel}(\texttt{high_freq})`$, converts each back
 to Hz via $`(\mathrm{F5})`$, and then to a fractional FFT-bin position
 $`b_i = f_i / (f_s / K)`$. Filter $`m \in [0, M)`$ is the triangle rising from $`b_m`$ to its
 center $`b_{m+1}`$ and falling to $`b_{m+2}`$:

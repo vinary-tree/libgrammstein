@@ -118,7 +118,7 @@ sentences at once (a token-weighted, not sentence-weighted, average).
 log-probability sinks to the uniform floor that MKN reserves for unknown words,
 
 ```math
-\log \mathbb{P}(w_i \mid h_i) \;\leq\; \texttt{oov\_log\_prob} \;=\; -\log \lvert V \rvert \tag{S6}
+\log \mathbb{P}(w_i \mid h_i) \;\leq\; \texttt{oov_log_prob} \;=\; -\log \lvert V \rvert \tag{S6}
 ```
 
 which by $`(\mathrm{S4})`$ is exactly "this token did no better than uniform guessing".

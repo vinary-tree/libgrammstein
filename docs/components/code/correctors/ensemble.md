@@ -68,7 +68,7 @@ c_1 \, w_1 & \lvert g \rvert = 1 \\[8pt]
 \tag{E2}
 ```
 
-where $`\beta = \texttt{agreement\_boost\_factor}`$ when `agreement_boost` is enabled and
+where $`\beta = \texttt{agreement_boost_factor}`$ when `agreement_boost` is enabled and
 $`\lvert g \rvert > 1`$, and $`\beta = 1`$ otherwise. A merged group additionally:
 
 - inherits the **kind, span, and replacement of its highest-scoring member**, the argmax of

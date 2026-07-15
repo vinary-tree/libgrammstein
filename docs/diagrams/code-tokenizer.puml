@@ -17,23 +17,23 @@ title CodeTokenizer — Leaf Extraction, Classification, Context
 start
 :Tree + source
 (tokenize · or tokenize_errors);
-#EF6C00:traverse_node(node, depth, in_error)
-in_error |= node.is_error();
+:traverse_node(node, depth, in_error)
+in_error |= node.is_error(); <<#EF6C00>>
 if (child_count == 0? ▷ leaf) then (yes)
-  #EF6C00:text = node.utf8_text(source);
-  #1565C0:token_type = language.classify_token(text, node_kind);
+  :text = node.utf8_text(source); <<#EF6C00>>
+  :token_type = language.classify_token(text, node_kind); <<#1565C0>>
   if (Whitespace and not include_whitespace?
 or Comment and not include_comments?) then (drop)
-    #C62828:skip token;
+    :skip token; <<#C62828>>
   else (keep)
-    #EF6C00:CodeToken { text, byte_offset, line, column,
-token_type, node_kind };
-    #2E7D32:enrich TokenContext
-depth · parent_node_type · sibling_types · in_error_region;
+    :CodeToken { text, byte_offset, line, column,
+token_type, node_kind }; <<#EF6C00>>
+    :enrich TokenContext
+depth · parent_node_type · sibling_types · in_error_region; <<#2E7D32>>
     :push CodeToken;
   endif
 else (interior)
-  #EF6C00:recurse into children (depth + 1);
+  :recurse into children (depth + 1); <<#EF6C00>>
 endif
 :**Vec<CodeToken>**
 is_correctable() · is_in_error();

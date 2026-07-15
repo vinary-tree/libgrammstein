@@ -58,7 +58,7 @@ Every `CorpusReader` yields sentences lazily, and the trainer wraps the reader i
 `rayon` workers drain it. The queue is capped at a fraction of system RAM:
 
 ```math
-\text{queue bytes} \;\lesssim\; 0.10 \cdot R \qquad (\texttt{ram\_fraction} = 0.10) \tag{L2}
+\text{queue bytes} \;\lesssim\; 0.10 \cdot R \qquad (\texttt{ram_fraction} = 0.10) \tag{L2}
 ```
 
 So corpus size does not enter the resident set at all — a 50 GB dump streams through a 4 GB process

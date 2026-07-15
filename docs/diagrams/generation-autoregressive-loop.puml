@@ -21,10 +21,10 @@ title TextGenerator — autoregressive decoding loop
 
 start
 :prompt → context: Vec<String>;
-#1565C0:context_width ← order.saturating_sub(1);
+:context_width ← order.saturating_sub(1); <<#1565C0>>
 repeat
-  #1565C0:ctx ← last context_width tokens;
-  #1565C0:score vocabulary V\nℓ_w = log ℙ(w | ctx)  for w ∈ V;
+  :ctx ← last context_width tokens; <<#1565C0>>
+  :score vocabulary V\nℓ_w = log ℙ(w | ctx)  for w ∈ V; <<#1565C0>>
   if (temperature ≤ 0 ?) then (greedy)
     :next ← argmax_w ℓ_w  (best_token);
   else (sample)

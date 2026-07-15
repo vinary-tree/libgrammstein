@@ -306,7 +306,7 @@ The filter is exactly:
 
 ```math
 \mathrm{keep}(g) \iff \neg\,\mathrm{is\_whitespace}(g_0) \;\wedge\;
-\bigl(\texttt{include\_punctuation} \vee \neg\,\mathrm{is\_ascii\_punctuation}(g_0)\bigr)
+\bigl(\texttt{include_punctuation} \vee \neg\,\mathrm{is\_ascii\_punctuation}(g_0)\bigr)
 \tag{L4}
 ```
 

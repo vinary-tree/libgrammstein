@@ -296,7 +296,7 @@ The training flow holds a bounded working set at every stage:
 | Stage | Resident data | Bound |
 |---|---|---|
 | Reader | one sentence | $`O(\lvert s \rvert)`$ |
-| Prefetch channel | $`\text{buffer\_batches} \times B`$ sentences | auto-tuned to ≈10 % of free RAM |
+| Prefetch channel | $`\text{buffer_batches} \times B`$ sentences | auto-tuned to ≈10 % of free RAM |
 | Rayon worker | one sentence's tokens + one key | $`O(\lvert s \rvert + n)`$ per thread |
 | Trie | the whole index | memory-mapped; resident set bounded by eviction — see [Memory Optimization](memory-optimization.md) |
 

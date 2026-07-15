@@ -78,9 +78,9 @@ Each candidate is tested against a conjunction of three predicates:
 \;=\;
 \underbrace{\bigl(s \geq \tau\bigr)}_{\text{score floor}}
 \;\wedge\;
-\underbrace{\bigl(\text{explicit} \Rightarrow \texttt{include\_explicit\_synopsis}\bigr)}_{\text{provenance gate}}
+\underbrace{\bigl(\text{explicit} \Rightarrow \texttt{include_explicit_synopsis}\bigr)}_{\text{provenance gate}}
 \;\wedge\;
-\underbrace{\bigl(\neg\,\text{explicit} \Rightarrow \texttt{include\_generated\_synopsis}\bigr)}_{\text{provenance gate}} \tag{Q2}
+\underbrace{\bigl(\neg\,\text{explicit} \Rightarrow \texttt{include_generated_synopsis}\bigr)}_{\text{provenance gate}} \tag{Q2}
 ```
 
 where *explicit* abbreviates `meta.synopsis_source == SynopsisSource::Explicit`.

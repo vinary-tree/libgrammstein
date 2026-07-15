@@ -189,7 +189,7 @@ The map's hasher is `SafeGxBuildHasher`, which dispatches on key length:
 h(w) \;=\;
 \begin{cases}
 \texttt{gxhash64}(w) & \lvert w \rvert \geq 16 \text{ bytes} \\
-\texttt{xxh3\_64}(w) & \text{otherwise}
+\texttt{xxh3_64}(w) & \text{otherwise}
 \end{cases}
 \tag{X2}
 ```

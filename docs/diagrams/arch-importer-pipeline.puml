@@ -26,67 +26,67 @@ title Importer pipeline — one prefix file, three concurrent actors
 
 |#F3F5F7|Worker  (×W · tokio)|
 start
-#546E7A:**Claim job** (order, prefix)
-from the async job queue;
-#546E7A:**Fetch** the .gz prefix file
+:**Claim job** (order, prefix)
+from the async job queue; <<#546E7A>>
+:**Fetch** the .gz prefix file
 HTTP stream — or, with --cache-files, download it
-to local disk first and then stream from there;
-#546E7A:**Gunzip** into lines;
-#1565C0:**Parse** — zero-allocation
+to local disk first and then stream from there; <<#546E7A>>
+:**Gunzip** into lines; <<#546E7A>>
+:**Parse** — zero-allocation
 byte-scan for tabs, yielding a borrowed record whose
-n-gram text points back into the line buffer;
-#1565C0:**Aggregate years**
+n-gram text points back into the line buffer; <<#1565C0>>
+:**Aggregate years**
 <latex>c(g) = \sum_{y \in Y} \text{match\_count}(g, y)</latex>
 only one n-gram is buffered at a time, because the
-files arrive sorted by n-gram;
+files arrive sorted by n-gram; <<#1565C0>>
 
 |#EDF3F8|Storage  (NgramStorage)|
-#00838F:**Encode the key**
+:**Encode the key**
 each token becomes a vocabulary index, then a LEB128
 varint. The key is the concatenated varints, so no
-delimiter character is ever needed;
-#00838F:**Route to a shard**
+delimiter character is ever needed; <<#00838F>>
+:**Route to a shard**
 by the hash of the first token (default),
-or by that token's character prefix;
+or by that token's character prefix; <<#00838F>>
 
 if (which write path?) then (prefix-based granularity)
-  #00838F:**Chunked transaction**, SET semantics
-  buffer each insert into a document transaction;
+  :**Chunked transaction**, SET semantics
+  buffer each insert into a document transaction; <<#00838F>>
   if (buffered ≥ --tx-chunk-size?) then (yes)
-    #00838F:**commit_and_renew_prefix_tx**
+    :**commit_and_renew_prefix_tx**
     flush this chunk to the WAL, then open a fresh
-    transaction for the same prefix and shard;
+    transaction for the same prefix and shard; <<#00838F>>
   else (no)
   endif
-  #00838F:**commit_prefix_tx**
-  commit the final chunk **and** mark the prefix complete;
+  :**commit_prefix_tx**
+  commit the final chunk **and** mark the prefix complete; <<#00838F>>
 else (hash-based granularity — the default)
-  #00838F:**Per-record increment_cas**
+  :**Per-record increment_cas**
   a lock-free CAS straight into the shard's overlay,
   bounded by the flush threshold and the overlay
-  budget rather than by a transaction;
+  budget rather than by a transaction; <<#00838F>>
 endif
 
 |#EBF3F3|Cron thread  (×1)|
-#546E7A:**Wake** every checkpoint_interval_ms;
-#00838F:**Rotate the vocabulary WAL first**
+:**Wake** every checkpoint_interval_ms; <<#546E7A>>
+:**Rotate the vocabulary WAL first**
 so that word indices are durable //before// any prefix
-can be claimed complete;
-#00838F:**Sync and checkpoint the shards** (rayon, ≤8 at once)
-publishing each overlay snapshot into its durable image;
-#006064:**Eviction tail**
+can be claimed complete; <<#00838F>>
+:**Sync and checkpoint the shards** (rayon, ≤8 at once)
+publishing each overlay snapshot into its durable image; <<#00838F>>
+:**Eviction tail**
 evict the coldest resident overlay nodes down to
-<latex>\max(G / n_{\text{resident}},\ 64\,\text{MiB})</latex> — **losslessly**;
-#00838F:**Save the checkpoint metadata** — last, never first;
+<latex>\max(G / n_{\text{resident}},\ 64\,\text{MiB})</latex> — **losslessly**; <<#006064>>
+:**Save the checkpoint metadata** — last, never first; <<#00838F>>
 
 |#EDF3F8|Storage  (NgramStorage)|
-#00838F:**Final vocabulary compaction**
-one full image, written exactly once;
-#1565C0:**MKN aggregation** (rayon over the shards)
+:**Final vocabulary compaction**
+one full image, written exactly once; <<#00838F>>
+:**MKN aggregation** (rayon over the shards)
 <latex>n_1 \ldots n_4 \Rightarrow Y, D_1, D_2, D_{3+}</latex>
-together with <latex>N_{1+}(\bullet, w)</latex> and <latex>N_{1+}(w, \bullet)</latex>;
-#00838F:**Merge the shards** into the output trie
-by <latex>O(\log N)</latex> parallel reduction;
+together with <latex>N_{1+}(\bullet, w)</latex> and <latex>N_{1+}(w, \bullet)</latex>; <<#1565C0>>
+:**Merge the shards** into the output trie
+by <latex>O(\log N)</latex> parallel reduction; <<#00838F>>
 stop
 
 note right

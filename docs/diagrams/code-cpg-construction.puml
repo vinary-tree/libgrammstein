@@ -17,25 +17,25 @@ title Code Property Graph — Three Construction Passes
 start
 :ParsedCode.root() ▷ AstNode::from_ts_node;
 partition "Pass 1 — build_from_ast  (syntax)" {
-  #EF6C00:classify_ast_node(kind) ▷ CpgNodeKind;
-  #EF6C00:add CpgNode · AstChild edge to parent
-· AstSibling edge between children;
-  #EF6C00:record Variable / Parameter names
-into variable_defs;
+  :classify_ast_node(kind) ▷ CpgNodeKind; <<#EF6C00>>
+  :add CpgNode · AstChild edge to parent
+· AstSibling edge between children; <<#EF6C00>>
+  :record Variable / Parameter names
+into variable_defs; <<#EF6C00>>
 }
 partition "Pass 2 — build_cfg  (control flow)" {
-  #EF6C00:Function ▷ entry_node;
-  #EF6C00:Return ▷ exit_nodes;
-  #EF6C00:Branch ▷ CfgTrue / CfgFalse edges;
-  #EF6C00:Loop ▷ CfgTrue(body) · CfgBack · CfgFalse(exit);
+  :Function ▷ entry_node; <<#EF6C00>>
+  :Return ▷ exit_nodes; <<#EF6C00>>
+  :Branch ▷ CfgTrue / CfgFalse edges; <<#EF6C00>>
+  :Loop ▷ CfgTrue(body) · CfgBack · CfgFalse(exit); <<#EF6C00>>
 }
 partition "Pass 3 — build_dfg  (data flow)" {
-  #EF6C00:Assignment ▷ DfgWrite(lhs) · DfgRead(rhs);
-  #EF6C00:Variable use ▷ DfgFlow from each def;
+  :Assignment ▷ DfgWrite(lhs) · DfgRead(rhs); <<#EF6C00>>
+  :Variable use ▷ DfgFlow from each def; <<#EF6C00>>
 }
-#00838F:**CodePropertyGraph**
+:**CodePropertyGraph**
 petgraph DiGraph<CpgNode, CpgEdge>
-+ location_map + variable_defs;
++ location_map + variable_defs; <<#00838F>>
 :queries ▷ cfg_successors · data_flow_for_variable
 · find_by_kind · compute_depths;
 stop

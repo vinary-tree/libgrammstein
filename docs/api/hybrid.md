@@ -181,7 +181,7 @@ impl<D: MappedDictionary<Value = NgramEntry> + Send + Sync> HybridLanguageModel<
 |---|---|---|
 | `score(word, context)` | `f64` | The interpolated **log**-probability, per the configured strategy. Memoized. |
 | `sentence_log_prob(words)` | `f64` | $`\sum_i \texttt{score}(w_i, h_i)`$, sliding a window of up to `order - 1` context words. `0.0` for an empty slice. |
-| `perplexity(words)` | `f64` | $`\exp(-\texttt{sentence\_log\_prob} / N)`$. **`f64::INFINITY`** for an empty slice. |
+| `perplexity(words)` | `f64` | $`\exp(-\texttt{sentence_log_prob} / N)`$. **`f64::INFINITY`** for an empty slice. |
 | `predict_next(context, candidates)` | `Option<(String, f64)>` | The highest-scoring candidate and its score. `None` **only** if `candidates` is empty. |
 | `clear_cache()` | — | Empties the score cache. Takes `&self` (the cache is interior-mutable). |
 

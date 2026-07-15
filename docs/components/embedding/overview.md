@@ -63,7 +63,7 @@ from the subwords it shares with *fast* and *quickly*.
 ### Step 1 — subword decomposition
 
 libgrammstein wraps the word in boundary markers $`\texttt{<}\,w\,\texttt{>}`$ and enumerates
-every character n-gram of length $`n \in [\,\texttt{min\_subword\_len},\ \texttt{max\_subword\_len}\,]`$
+every character n-gram of length $`n \in [\,\texttt{min_subword_len},\ \texttt{max_subword_len}\,]`$
 (default $`[3, 6]`$). The markers let the model distinguish a prefix/suffix from an interior
 occurrence — $`\texttt{<he}`$ (word start) differs from $`\texttt{he}`$ inside *the*. For
 $`w = \texttt{hello}`$ the marked form is $`\texttt{<hello>}`$ and:

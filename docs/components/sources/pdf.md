@@ -281,7 +281,7 @@ with convenience methods `page_count()`, `equation_count()` (summed over pages),
 The equation heuristic counts delimiter occurrences on the pre-post-processed LaTeX:
 
 ```math
-\texttt{equation\_count} =
+\texttt{equation_count} =
 \#\{\texttt{\textbackslash begin\{equation\}}\} + \#\{\texttt{\textbackslash[}\} + \#\{\texttt{\$\$}\}
 \;\;(+\; \#\{\texttt{\textbackslash begin\{align\}}\} \text{ for Nougat})
 \tag{P4}

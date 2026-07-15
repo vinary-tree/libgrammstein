@@ -18,31 +18,31 @@ title AST Parsing & Incremental Reparse
 
 start
 :**source: &str** (+ optional old Tree, EditInfo);
-#546E7A:safe_hash(source) ▷ parse-cache probe
-(≤ 16 entries, cleared on overflow);
+:safe_hash(source) ▷ parse-cache probe
+(≤ 16 entries, cleared on overflow); <<#546E7A>>
 if (cached source matches?) then (hit)
-  #00838F:reuse cached Tree;
+  :reuse cached Tree; <<#00838F>>
 else (miss)
-  #546E7A:tree-sitter Parser::parse(source, old_tree);
+  :tree-sitter Parser::parse(source, old_tree); <<#546E7A>>
   if (tree produced?) then (yes)
-    #EF6C00:insert (source, tree) into cache;
+    :insert (source, tree) into cache; <<#EF6C00>>
   else (no)
-    #C62828:AstError::ParseFailed;
+    :AstError::ParseFailed; <<#C62828>>
     stop
   endif
 endif
-#EF6C00:root_node().has_error()?;
+:root_node().has_error()?; <<#EF6C00>>
 if (has errors?) then (yes)
-  #EF6C00:collect_errors ▷ Vec<ErrorRange>
-(ERROR / MISSING spans);
+  :collect_errors ▷ Vec<ErrorRange>
+(ERROR / MISSING spans); <<#EF6C00>>
 else (clean)
-  #EF6C00:error_ranges = [];
+  :error_ranges = []; <<#EF6C00>>
 endif
 :**ParsedCode**
 { tree, source, language_name,
   has_errors, error_ranges };
-#EF6C00:AstNode::from_ts_node ▷ owned
-depth-first AST (kind, span, text);
+:AstNode::from_ts_node ▷ owned
+depth-first AST (kind, span, text); <<#EF6C00>>
 :descendants() · find_by_kind() · find_errors();
 stop
 

@@ -52,14 +52,14 @@ the adjacent pair with the highest frequency and merges it into a new symbol:
 ```math
 p^{\star} = \arg\max_{p = (\ell, r)} c(p),
 \qquad
-V_{t+1} = V_t \cup \{\, \ell r \,\} \quad\text{if } c(p^{\star}) \geq \texttt{min\_frequency} \tag{B1}
+V_{t+1} = V_t \cup \{\, \ell r \,\} \quad\text{if } c(p^{\star}) \geq \texttt{min_frequency} \tag{B1}
 ```
 
 Training stops when the vocabulary reaches its target size or no pair clears the frequency floor:
 
 ```math
-\text{halt when } \lvert V_t \rvert \geq \texttt{vocab\_size}
-\quad\text{or}\quad c(p^{\star}) < \texttt{min\_frequency} \tag{B2}
+\text{halt when } \lvert V_t \rvert \geq \texttt{vocab_size}
+\quad\text{or}\quad c(p^{\star}) < \texttt{min_frequency} \tag{B2}
 ```
 
 Each accepted merge is recorded as an ordered `MergeOp`; the **order is the priority** used at
@@ -124,9 +124,9 @@ pub struct BpeTokenizer {
   inserted into the final vocabulary **first** (ids $`0, 1, \dots`$) before the learned tokens.
 - **Trainer knobs.** `BpeTrainer::new(vocab_size)` defaults `min_frequency = 2` and
   `special_tokens = ["<unk>"]`; both are overridable via `with_min_frequency` / `with_special_tokens`.
-- **Complexity.** The training loop is the costly part: each of up to $`\texttt{vocab\_size}`$
+- **Complexity.** The training loop is the costly part: each of up to $`\texttt{vocab_size}`$
   iterations re-counts all adjacent pairs across the corpus splits, giving roughly
-  $`O(\texttt{vocab\_size} \cdot N)`$ where $`N`$ is the total symbol count. `count_word_frequencies`
+  $`O(\texttt{vocab_size} \cdot N)`$ where $`N`$ is the total symbol count. `count_word_frequencies`
   buffers `reader.sentences()` into memory and counts them with Rayon.
 - **Encoding cost.** `encode_word` is $`O(L^2)`$ in the worst case for a word of $`L`$ symbols
   (each merge rescans the shrinking symbol list); results are memoized in the `DashMap` cache.
@@ -141,14 +141,14 @@ tokenizer is attached.** It is deterministic and requires no training.
 ### `extract_subwords`
 
 The word is wrapped in boundary markers and *every* character n-gram of length
-$`n \in [\texttt{min\_n}, \texttt{max\_n}]`$ is emitted:
+$`n \in [\texttt{min_n}, \texttt{max_n}]`$ is emitted:
 
 ```math
-G(w) = \bigl\{\, (\texttt{<}\,w\,\texttt{>})[i \mathbin{:} i+n] \ :\ \texttt{min\_n} \leq n \leq \texttt{max\_n},\ 0 \leq i \leq \lvert \texttt{<}\,w\,\texttt{>} \rvert - n \,\bigr\} \tag{B3}
+G(w) = \bigl\{\, (\texttt{<}\,w\,\texttt{>})[i \mathbin{:} i+n] \ :\ \texttt{min_n} \leq n \leq \texttt{max_n},\ 0 \leq i \leq \lvert \texttt{<}\,w\,\texttt{>} \rvert - n \,\bigr\} \tag{B3}
 ```
 
 For $`w = \texttt{hello}`$ (marked $`\texttt{<hello>}`$, $`7`$ characters), with the defaults
-$`\texttt{min\_n} = 3`$, $`\texttt{max\_n} = 6`$:
+$`\texttt{min_n} = 3`$, $`\texttt{max_n} = 6`$:
 
 | $`n`$ | emitted subwords |
 |---|---|
@@ -157,7 +157,7 @@ $`\texttt{min\_n} = 3`$, $`\texttt{max\_n} = 6`$:
 | 5 | $`\texttt{<hell}`$, $`\texttt{hello}`$, $`\texttt{ello>}`$ |
 | 6 | $`\texttt{<hello}`$, $`\texttt{hello>}`$ |
 
-If the word is shorter than $`\texttt{min\_n}`$ after marking, $`G(w)`$ is empty and the caller
+If the word is shorter than $`\texttt{min_n}`$ after marking, $`G(w)`$ is empty and the caller
 returns a zero vector. (Unlike canonical FastText, no dedicated whole-word token is appended — the
 whole marked word only appears when its length falls inside the n-gram range, as $`\texttt{<hello>}`$
 would at $`n = 7`$.)
@@ -184,7 +184,7 @@ pub fn hash_subword(subword: &str, num_buckets: usize) -> usize {
 FNV-1a is chosen for speed and good avalanche on short byte strings; the modulo folds an unbounded
 subword space into the fixed table $`E_{\mathrm{sub}}`$ of $`B`$ rows. This is exactly
 $`h(g)`$ from $`(\mathrm{E1})`$ in [Subword Embeddings](overview.md), and the pair
-$`(\texttt{extract\_subwords}, \texttt{hash\_subword})`$ is what powers both `word_vector` and the
+$`(\texttt{extract_subwords}, \texttt{hash_subword})`$ is what powers both `word_vector` and the
 subword-gradient step of [skip-gram training](skip-gram.md).
 
 ### How the two mechanisms relate

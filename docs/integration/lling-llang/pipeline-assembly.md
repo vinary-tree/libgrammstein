@@ -98,7 +98,7 @@ The LM rescorer interpolates the correction cost with fluency in cost space:
 
 ```math
 w' \;=\; (1-\lambda)\,w \;+\; \lambda\,\bigl(-\log P(\text{word} \mid \text{context})\bigr),
-\qquad \lambda = \texttt{lm\_weight}.
+\qquad \lambda = \texttt{lm_weight}.
 ```
 
 A correction edge carries a positive edit-distance cost $`w`$ relative to the

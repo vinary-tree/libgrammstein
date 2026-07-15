@@ -134,7 +134,7 @@ An article is emitted exactly when
 ```math
 \bigl(\mathrm{ns} \in F\bigr)
 \;\wedge\;
-\neg\bigl(\text{skip\_redirects} \wedge \text{text starts with \#REDIRECT}\bigr)
+\neg\bigl(\text{skip_redirects} \wedge \text{text starts with \#REDIRECT}\bigr)
 \;\wedge\;
 \bigl(\lvert \text{text} \rvert \geq \ell\bigr)
 \;\wedge\;

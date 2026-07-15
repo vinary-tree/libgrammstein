@@ -133,7 +133,7 @@ vacuous); each subsequent sentence maximizes $`(\mathrm{D4})`$ over the candidat
 libgrammstein derives $`\lambda`$ from the summarizer's `diversity_threshold` (default $`0.3`$):
 
 ```math
-\lambda \;=\; 1 - \texttt{diversity\_threshold} \;=\; 0.7 \tag{D5}
+\lambda \;=\; 1 - \texttt{diversity_threshold} \;=\; 0.7 \tag{D5}
 ```
 
 so the default weighting is $`70\%`$ relevance against $`30\%`$ diversity. Raising

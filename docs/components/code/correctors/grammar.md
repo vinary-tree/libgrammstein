@@ -116,7 +116,7 @@ credible typo.
 
 ### The three repair operators
 
-Let $`\beta_0 = \texttt{base\_confidence}`$ (default $`0.8`$). For an observed token $`o`$ with
+Let $`\beta_0 = \texttt{base_confidence}`$ (default $`0.8`$). For an observed token $`o`$ with
 byte span $`[b_0, b_1)`$ and an admissible set $`\mathcal{A}`$:
 
 ```math
@@ -264,7 +264,7 @@ function token_probability(a, _context):              ▸ eq. (G3) — ignores _
 Note that `correct_token` concatenates the three operators' outputs **without** a final sort or
 truncation: `suggest_replacements` truncates to `max_candidates` internally, `suggest_insertions`
 truncates via `suggest_completions`, and `suggest_deletions` adds at most one. A single token can
-thus yield up to $`2 \cdot \texttt{max\_candidates} + 1`$ corrections ($`11`$ by default). Ranking
+thus yield up to $`2 \cdot \texttt{max_candidates} + 1`$ corrections ($`11`$ by default). Ranking
 is left to the [Ensemble](ensemble.md).
 
 ![GrammarCorrector: from the admissible set to replace, delete, and insert repairs](../../../diagrams/codecorr-grammar.svg)

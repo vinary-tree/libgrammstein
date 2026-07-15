@@ -173,7 +173,7 @@ libgrammstein instead slices the first row of the hidden-state tensor — CLS po
 
 ```math
 v^{\mathrm{shipped}} \;=\; H_0
-\qquad\text{(the Rust is \texttt{data[..hidden\_dim]})} \tag{U4}
+\qquad\text{(the Rust is \texttt{data[..hidden_dim]})} \tag{U4}
 ```
 
 These are different vectors, and $`(\mathrm{U4})`$ is not the representation the sentence-level

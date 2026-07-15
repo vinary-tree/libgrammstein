@@ -51,7 +51,7 @@ and how to move it.
 
 ## 2. What the importer actually does
 
-For each order in $`[\text{min\_order}, \text{max\_order}]`$ and each prefix partition of that
+For each order in $`[\text{min_order}, \text{max_order}]`$ and each prefix partition of that
 order, a worker fetches one `.gz` file, parses its records into
 $`(\text{n-gram}, \text{year}, \text{count})`$ triples, applies the year and frequency filters, and
 folds the surviving counts into a shard of the persistent trie. When every file is done, the shards are merged into the single

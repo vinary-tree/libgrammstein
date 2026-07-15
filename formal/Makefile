@@ -16,6 +16,7 @@ JQ ?= jq
 RUSTFMT ?= rustfmt
 TIMEOUT ?= timeout
 XARGS ?= xargs
+RAKU ?= raku
 TLC_JAVA_OPTS ?= -XX:+UseParallelGC -Xmx768m
 TLC_OPTS ?=
 TLC_WORKERS ?= 1
@@ -66,9 +67,9 @@ TLAPS_FILES := CheckpointStateMachineProofs.tla \
 	ImporterLifecycleProofs.tla PersistentStorageBridgeProofs.tla \
 	QuerySemanticsBridgeProofs.tla
 
-.PHONY: check complete complete-with-dependencies dependency-contracts strict-dependency-contracts dependency-imported-tlc dependency-io-uring dependency-miri-unsafe dependency-warning-hygiene rocq tlaps tla-safety tla-liveness apalache rust-alignment source-hygiene source-hygiene-fast source-hygiene-full local-warning-hygiene stress clean
+.PHONY: check complete complete-with-dependencies dependency-contracts strict-dependency-contracts dependency-imported-tlc dependency-io-uring dependency-miri-unsafe dependency-warning-hygiene rocq tlaps tla-safety tla-liveness apalache rust-alignment source-hygiene source-hygiene-fast source-hygiene-full local-warning-hygiene lint-docs lint-diagrams stress clean
 
-check: source-hygiene-fast rocq tla-safety tla-liveness apalache rust-alignment
+check: source-hygiene-fast lint-diagrams rocq tla-safety tla-liveness apalache rust-alignment
 
 complete: check stress tlaps source-hygiene-full
 
@@ -200,7 +201,21 @@ rust-alignment:
 
 source-hygiene: source-hygiene-fast source-hygiene-full
 
-source-hygiene-fast:
+# Documentation conformance: GitHub-MathJax and PlantUML defects that render wrong but fail silently.
+# Text-only rules, so this stays fast enough for source-hygiene-fast. Run with --fix to repair the
+# auto-fixable kinds; see scripts/lint-docs.raku --list-rules.
+lint-docs:
+	@command -v $(RAKU) >/dev/null 2>&1 || { echo "$(RAKU) is required for documentation linting"; exit 127; }
+	@cd .. && $(RAKU) scripts/lint-docs.raku
+
+# The rendered-SVG diagnostics: deprecated syntax, error graphics, leaked <latex> and dropped glyphs.
+# PlantUML exits 0 and reports all of these INSIDE the image, so they can only be found by rendering.
+# Separate from source-hygiene-fast because it renders every diagram under a JVM (~2 min).
+lint-diagrams:
+	@command -v $(RAKU) >/dev/null 2>&1 || { echo "$(RAKU) is required for diagram linting"; exit 127; }
+	@cd .. && $(RAKU) scripts/lint-docs.raku --render
+
+source-hygiene-fast: lint-docs
 	$(FIND) ../src ../tests ../benches -name '*.rs' -print0 | $(XARGS) -0 $(RUSTFMT) --edition 2021 --check
 	$(GIT) -C .. diff --check
 	@command -v $(RG) >/dev/null 2>&1 || { echo "$(RG) is required for source marker hygiene"; exit 127; }

@@ -45,6 +45,39 @@ plantuml -tsvg docs/diagrams/correction-component-map.puml
   Unicode (box-drawing, flow arrows, bullet separators) stays as glyphs (see the
   Notation note in
   [`../integration/lling-llang/hierarchical-correction.md`](../integration/lling-llang/hierarchical-correction.md)).
+- **Colour activities with the suffix form.** In activity diagrams write
+  `:label; <<#546E7A>>`, never the prefix form `#546E7A:label;`. The prefix form is
+  deprecated and **PlantUML silently discards the colour**, so the node renders
+  uncoloured *and* the image gains a "This syntax is deprecated" banner. Enforced by
+  `deprecated-activity-colour` below.
+
+## Linting
+
+```sh
+raku scripts/lint-docs.raku              # text rules: fast, no JVM
+raku scripts/lint-docs.raku --render     # + rendered-SVG diagnostics (~2 min, renders all 147)
+raku scripts/lint-docs.raku --fix        # repair the auto-fixable kinds in place
+raku scripts/lint-docs.raku --list-rules # what each rule is and why it exists
+```
+
+Wired into the formal gate: `make -C formal lint-docs` (part of `source-hygiene-fast`)
+and `make -C formal lint-diagrams` (part of `check`). Exit codes: `0` clean, `1`
+violations, `2` usage/environment error.
+
+**Why a linter at all.** Every rule encodes a defect that shipped and that nothing
+caught, because both renderers **fail silently**:
+
+| Failure mode | Why it is invisible |
+|---|---|
+| Deprecated activity colour | PlantUML exits `0`, prints nothing to stderr, and writes the warning *into the image*. `-checkonly` reports nothing. |
+| Error graphics, leaked `<latex>` | Same — rendered into the SVG, exit `0`. |
+| Dropped glyph | A missing glyph is still a well-formed `<image>`, so counting images proves nothing; the rule decodes each embedded LaTeX image and asserts it drew ≥1 path. This is the `\otimes`/Java-26 class described above. |
+| `\text{a\_b}` in Markdown | MathJax does not expand backslash macros inside `\text{}`, so it renders a **literal backslash**. Note this is *renderer-specific*: JLaTeXMath handles `\_` correctly, so the rule is Markdown-scoped and diagram sources are left alone. |
+| `\operatorname`, `` `$x$` `` | GitHub refuses to render the span, or renders it as inert code. |
+
+`--render` **pins Java 21** for the same reason the render command above does: under
+Java 26 the `U+00AD` regression would make the dropped-glyph rule fire on every
+`\otimes`.
 
 ## Index
 

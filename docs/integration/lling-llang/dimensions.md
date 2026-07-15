@@ -130,8 +130,8 @@ literally **characters $`\rightarrow`$ term-ids $`\rightarrow`$ n-gram windows**
 1. **$`T_{\text{lex}}`$ (characters $`\rightarrow`$ term-ids)** folds Dimensions 1 and 2 into one
    stage. A Levenshtein / articulatory automaton maps a token's *characters* to
    candidate vocabulary **term-ids**, scoring each with
-   $`\text{cost} = \text{edit\_distance} + \text{phonetic\_cost}`$: the sound-alike
-   discount of Dimension 2 ($`\text{phonetic\_cost} \le 0`$) is *fused into* the
+   $`\text{cost} = \text{edit_distance} + \text{phonetic_cost}`$: the sound-alike
+   discount of Dimension 2 ($`\text{phonetic_cost} \le 0`$) is *fused into* the
    orthographic cost rather than applied as a separate rescore. Same Damerau–Levenshtein
    metric as Dimension 1, over the character alphabet.
 
