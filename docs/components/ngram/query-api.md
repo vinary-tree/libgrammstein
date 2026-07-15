@@ -88,7 +88,7 @@ analogue), and an **unseen** word falls to the uniform floor
 ```math
 \mathbb{P}(w) = \frac{1}{\lvert V \rvert} > 0
 \qquad\Longleftrightarrow\qquad
-\texttt{oov_log_prob()} = -\log \lvert V \rvert \tag{Q1}
+\texttt{oov\_log\_prob()} = -\log \lvert V \rvert \tag{Q1}
 ```
 
 Two further guards protect the interpolated levels above the base case: an unseen n-gram substitutes

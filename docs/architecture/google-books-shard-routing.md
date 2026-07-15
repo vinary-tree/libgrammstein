@@ -85,7 +85,7 @@ importer doc):
 
 LEB128 is self-terminating, so the boundaries between tokens are recoverable **without** any
 separator byte. The vocabulary reserves index $`0`$ (indices start at
-$`\texttt{FIRST_VALID_INDEX} = 1`$) so a varint byte is never `\x00`, which keeps n-gram keys
+$`\texttt{FIRST\_VALID\_INDEX} = 1`$) so a varint byte is never `\x00`, which keeps n-gram keys
 disjoint from the `\x00`-prefixed metadata keys that share the trie.
 
 ## 3 · Routing is a function of the first token's characters — never the term-id value

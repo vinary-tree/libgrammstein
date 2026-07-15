@@ -30,10 +30,19 @@ deprecated in favour of the suffix form C<:label; E<lt>E<lt>#COLORE<gt>E<gt>>. T
 PlantUML B<silently drops the colour entirely> and stamps a warning into the rendered image. It exits
 0 and writes nothing to stderr, so C<-checkonly> and stderr scanning both see nothing.
 
-=item B<escaped-underscore-in-text> — MathJax does not expand backslash macros inside C<\text{}>
-unless the C<textmacros> extension is loaded, so C<\text{a\_b}> renders a B<literal backslash>.
-Confirmed against MathJax's own SVG glyph output. Math-mode macros (C<\mathrm> et al.) are the
-opposite: there C<\_> is B<correct> and a bare C<_> would subscript — so they must never be flagged.
+=item B<unescaped-underscore-in-text> — inside C<\text{}> an underscore must be written C<\_>. A bare
+C<_> is math-mode-only in LaTeX, and GitHub rejects the B<whole span> with
+C<'_' allowed only in math mode>. Math-mode macros (C<\mathrm> et al.) are unaffected: there C<\_> is
+likewise correct, and a bare C<_> is a legitimate subscript — so they are never flagged.
+
+Beware the trap this rule was originally written backwards to fall into: whether C<\text{a\_b}> is
+correct depends on the renderer's B<package list>, not on LaTeX. C<\text> itself is MathJax's C<base>
+package, but the parser for its I<contents> is a hook — C<ParseUtil.internalMath> delegates to
+C<options.internalMath> only if something installed it, and only the C<textmacros> package does.
+Without C<textmacros>, C<\_> is never expanded and renders a B<literal backslash>; with it, C<\_> is an
+underscore and a bare C<_> is an error. GitHub loads C<textmacros>. A local previewer that does not is
+I<more permissive than the publishing target> and will silently green-light source that GitHub
+rejects — measure the renderer, do not infer it.
 
 =item B<inverted-math-delimiters> — GitHub-flavored Markdown inline math is a backtick span wrapped in
 dollars, C<$`x`$>. The inverted C<`$x$`> is an ordinary code span and renders as literal text.
@@ -262,25 +271,30 @@ my $rule-activity = Rule.new(
     fix         => &fix-activity-colour,
 );
 
-#| `\text{a\_b}` -> `\text{a_b}`, rewriting ONLY inside the text-macro's own braces so that a
-#| `\mathrm{a\_b}` sharing the region is left untouched (there `\_` is correct).
+#| A bare underscore — one NOT already escaped. The negative lookbehind is what makes the fixer
+#| idempotent: without it, a second pass would turn `\_` into `\\_`.
+my regex bare-underscore { <!after '\\'> '_' }
+
+#| `\text{a_b}` -> `\text{a\_b}`, rewriting ONLY inside the text-macro's own braces so that a
+#| `\mathrm{a_b}` sharing the region is left untouched (there a bare `_` is a legitimate subscript).
 sub fix-underscore-region(Str $math --> Str) {
-    $math.subst(/ <text-macro> <braced-body> /, { $/.Str.subst('\\_', '_', :g) }, :g);
+    $math.subst(/ <text-macro> <braced-body> /,
+                { $/.Str.subst(&bare-underscore, '\\_', :g) }, :g);
 }
 
 my $rule-underscore = Rule.new(
-    name        => 'escaped-underscore-in-text',
+    name        => 'unescaped-underscore-in-text',
     applies     => 'md',
-    description => 'Escaped `\_` inside a text-mode macro (\text/\texttt/…). MathJax renders a literal backslash. Use a bare `_`. Math-mode macros (\mathrm) are correct and never flagged.',
+    description => 'Bare `_` inside a text-mode macro (\text/\texttt/…). `_` is math-mode-only in LaTeX, so GitHub rejects the whole span with "\'_\' allowed only in math mode". Write `\_`. Math-mode macros (\mathrm) are unaffected and never flagged.',
     detect      => sub (Str $file, Str $text) {
         my @v;
         for md-lines($text) -> ($lno, $line, $mode) {
             for math-regions($line, $mode) -> $math {
                 for $math ~~ m:g/ <text-macro> <braced-body> / -> $m {
                     @v.push: Violation.new(
-                        :$file, line => $lno, kind => 'escaped-underscore-in-text',
+                        :$file, line => $lno, kind => 'unescaped-underscore-in-text',
                         excerpt => $m.Str.substr(0, 72),
-                    ) if $m.Str ~~ / '\\_' /;
+                    ) if $m.Str ~~ &bare-underscore;
                 }
             }
         }

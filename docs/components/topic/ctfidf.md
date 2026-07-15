@@ -64,7 +64,7 @@ times by a full factor of ten):
 
 ```math
 \mathrm{tf}^{\star}(t, c) = \begin{cases}
-1 + \ln f(t, c) & \text{if } \texttt{sublinear_tf} \text{ (the default)} \\
+1 + \ln f(t, c) & \text{if } \texttt{sublinear\_tf} \text{ (the default)} \\
 f(t, c) & \text{otherwise}
 \end{cases} \tag{T2}
 ```
@@ -86,14 +86,14 @@ so an unseen term can never divide by zero.
 
 Before scoring, terms are pruned by length and by document frequency
 ([`AtomicVocabulary`](../../../src/topic/ctfidf.rs)). A token joins the vocabulary only if its
-byte length lies in $`[\texttt{min_term_length}, \texttt{max_term_length}]`$; then
+byte length lies in $`[\texttt{min\_term\_length}, \texttt{max\_term\_length}]`$; then
 [`filter_by_df`](../../../src/topic/ctfidf.rs) keeps term $`t`$ iff
 
 ```math
-\texttt{min_df} \;\le\; \mathrm{df}(t) \;\le\; \bigl\lfloor \texttt{max_df_ratio} \cdot T \bigr\rfloor \tag{T3}
+\texttt{min\_df} \;\le\; \mathrm{df}(t) \;\le\; \bigl\lfloor \texttt{max\_df\_ratio} \cdot T \bigr\rfloor \tag{T3}
 ```
 
-The lower bound $`\texttt{min_df}`$ removes typos and one-off noise; the upper bound removes
+The lower bound $`\texttt{min\_df}`$ removes typos and one-off noise; the upper bound removes
 near-ubiquitous terms (the topic-modeling analogue of stop words) by capping document frequency at
 a fraction of the topic count $`T`$. Terms outside the band contribute nothing to any keyword
 list.

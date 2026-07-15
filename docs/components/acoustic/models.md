@@ -162,7 +162,7 @@ frame weight every other frame [[1]](#references):
 
 ```math
 \mathrm{Attn}(Q, K, V) = \mathrm{softmax}\!\left(\frac{Q K^{\top}}{\sqrt{d_k}}\right) V,
-\qquad d_k = \frac{H}{\text{num_heads}} \tag{M4}
+\qquad d_k = \frac{H}{\text{num\_heads}} \tag{M4}
 ```
 
 with $`Q = \mathbf{x}W_Q`$, $`K = \mathbf{x}W_K`$, $`V = \mathbf{x}W_V`$ reshaped into
@@ -274,7 +274,7 @@ for frame in &posteriors {
 
 Models run on any Candle `Device` — `Device::Cpu`, `Device::cuda_if_available(0)`, or Metal on
 Apple silicon. The Linear model is $`O(T \cdot (FH + HU))`$; the Transformer adds
-$`O(\text{num_layers} \cdot (T^2 H + T H\,\text{ff_dim}))`$, the $`T^2`$ term being the
+$`O(\text{num\_layers} \cdot (T^2 H + T H\,\text{ff\_dim}))`$, the $`T^2`$ term being the
 attention over all frame pairs. Preset sizes trade cost against accuracy:
 
 | Preset | `hidden_dim` | `num_layers` | `num_heads` | Use case |

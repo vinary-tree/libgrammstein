@@ -459,7 +459,7 @@ realizations, selected by `use_phonetics` (which defaults to on iff the
 - **Articulatory path** (feature `phonetic-correction`) — a
   `PhoneticTransducerChar::with_articulatory_costs(vocabulary, nfa, k, ArticulatoryCosts::default())`
   over the vocabulary, read out by `query_values_sorted(token)`. Each candidate's
-  `cost = edit_distance + phonetic_cost`, where $`\text{phonetic_cost} \le 0`$ is a
+  `cost = edit_distance + phonetic_cost`, where $`\text{phonetic\_cost} \le 0`$ is a
   *sound-alike discount*: a substitution between articulatorily close graphemes
   (the `f` ↔ `ph` of `fone → phone`) costs a fraction of a full edit, so a genuine
   homophone outranks an arbitrary distance-2 neighbor.

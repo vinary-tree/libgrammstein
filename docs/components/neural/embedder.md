@@ -143,7 +143,7 @@ pub fn embed_query(&self, query: &str) -> Result<Vec<f32>>;
 `embed_document` truncates with a **character** heuristic — roughly four characters per token:
 
 ```math
-\text{max_chars} \;=\; 4 \cdot \texttt{max_seq_len} \;=\; 32\,768 \ \text{(default)} \tag{E5}
+\text{max\_chars} \;=\; 4 \cdot \texttt{max\_seq\_len} \;=\; 32\,768 \ \text{(default)} \tag{E5}
 ```
 
 and then backs off to the last whitespace so a word is not cut in half.

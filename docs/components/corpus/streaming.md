@@ -119,7 +119,7 @@ B \;=\; \mathrm{clamp}\!\left(
 \tag{S2}
 ```
 
-and with auto-tuning off it simply takes $`B = \mathrm{clamp}(\texttt{buffer_batches}, 2, 64)`$.
+and with auto-tuning off it simply takes $`B = \mathrm{clamp}(\texttt{buffer\_batches}, 2, 64)`$.
 The two clamps differ on purpose: an explicit setting is trusted further (up to 64) than a derived
 one (up to 32).
 

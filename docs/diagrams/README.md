@@ -72,12 +72,36 @@ caught, because both renderers **fail silently**:
 | Deprecated activity colour | PlantUML exits `0`, prints nothing to stderr, and writes the warning *into the image*. `-checkonly` reports nothing. |
 | Error graphics, leaked `<latex>` | Same — rendered into the SVG, exit `0`. |
 | Dropped glyph | A missing glyph is still a well-formed `<image>`, so counting images proves nothing; the rule decodes each embedded LaTeX image and asserts it drew ≥1 path. This is the `\otimes`/Java-26 class described above. |
-| `\text{a\_b}` in Markdown | MathJax does not expand backslash macros inside `\text{}`, so it renders a **literal backslash**. Note this is *renderer-specific*: JLaTeXMath handles `\_` correctly, so the rule is Markdown-scoped and diagram sources are left alone. |
+| `\text{a_b}` in Markdown | A bare `_` is math-mode-only in LaTeX, so GitHub rejects the **whole span**: `'_' allowed only in math mode`. Write `\_`. Math-mode macros (`\mathrm`) are unaffected — there a bare `_` is a legitimate subscript. |
 | `\operatorname`, `` `$x$` `` | GitHub refuses to render the span, or renders it as inert code. |
 
 `--render` **pins Java 21** for the same reason the render command above does: under
 Java 26 the `U+00AD` regression would make the dropped-glyph rule fire on every
 `\otimes`.
+
+### The underscore trap
+
+Whether `\text{a\_b}` is correct depends on the renderer's **package list**, not on
+LaTeX — and getting this backwards cost a full revert, so it is worth stating plainly.
+
+`\text` itself is MathJax's `base` package, but the parser for its *contents* is a
+hook: `ParseUtil.internalMath` delegates to `options.internalMath` only if something
+installed it, and **only the `textmacros` package does**. So the same source renders
+two different ways:
+
+| | `\text{a\_b}` (escaped — **correct**) | `\text{a_b}` (bare) |
+|---|---|---|
+| **with** `textmacros` — GitHub, and vinary-viewer as of `textmacros` being added | `a_b` ✓ | **error** `'_' allowed only in math mode` |
+| **without** `textmacros` | `a\_b` — a **literal backslash** | `a_b` — silently accepted |
+
+A previewer lacking `textmacros` is *more permissive than the publishing target*: it
+green-lights source GitHub rejects while mangling source GitHub renders. That is
+strictly worse than being strict, and it is how this defect survived — the local
+preview and GitHub disagreed **in both directions at once**. The fix belonged in the
+viewer, not the documents.
+
+JLaTeXMath (the `<latex>` diagram labels) accepts **both** forms — measured, identical
+glyph geometry — so the rule is Markdown-scoped and `.puml` sources are left alone.
 
 ## Index
 

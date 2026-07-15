@@ -231,7 +231,7 @@ None` **and** the open-only `view_for`.
 
 An n-gram order $`\le 5`$ means one `correct()` score touches at most ~5 distinct
 first-token shards. Under the default `CpuProportional` granularity
-$`\text{num_shards} = \max(2C, 8)`$ which is $`\le`$ the historical default cap
+$`\text{num\_shards} = \max(2C, 8)`$ which is $`\le`$ the historical default cap
 of 32, so hash routing does not thrash; prefix granularities (676 shards) with a small cap
 would. Query mode sidesteps the question entirely: `max_open_shards = 0` keeps every
 touched shard resident and never evicts, so residency is all-resident by construction. The

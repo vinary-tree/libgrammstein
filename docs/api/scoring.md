@@ -99,7 +99,7 @@ Perplexity: 142.87 | Tokens: 51234 | OOV: 3.12% | Sentences: 2410
 token's score against the model's uniform floor:
 
 ```math
-\log \mathbb{P}(w_i \mid h_i) \;\leq\; \texttt{model.oov_log_prob()} \;=\; -\log \lvert V \rvert \tag{A2}
+\log \mathbb{P}(w_i \mid h_i) \;\leq\; \texttt{model.oov\_log\_prob()} \;=\; -\log \lvert V \rvert \tag{A2}
 ```
 
 This fires for every genuinely unseen word, and *also* for a known-but-extremely-improbable one

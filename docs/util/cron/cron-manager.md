@@ -197,7 +197,7 @@ The contract for a task closure `F: FnMut() -> bool + Send + 'static` follows di
 So `tasks_executed` counts **attempts**, and the three counters satisfy
 
 ```math
-\texttt{tasks_executed} \;=\; \underbrace{\bigl(\texttt{tasks_executed} - \texttt{tasks_failed} - \texttt{tasks_panicked}\bigr)}_{\text{successes}} \;+\; \texttt{tasks_failed} \;+\; \texttt{tasks_panicked}
+\texttt{tasks\_executed} \;=\; \underbrace{\bigl(\texttt{tasks\_executed} - \texttt{tasks\_failed} - \texttt{tasks\_panicked}\bigr)}_{\text{successes}} \;+\; \texttt{tasks\_failed} \;+\; \texttt{tasks\_panicked}
 \tag{C1}
 ```
 

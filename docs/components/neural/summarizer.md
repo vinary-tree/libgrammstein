@@ -96,7 +96,7 @@ document centroid $`\mathbf{c}`$ takes its place — the standard reduction of M
 The trade-off knob is inverted in the config: the field is a *diversity* threshold, so
 
 ```math
-\lambda \;=\; 1 - \delta, \qquad \delta = \texttt{diversity_threshold} \tag{S4}
+\lambda \;=\; 1 - \delta, \qquad \delta = \texttt{diversity\_threshold} \tag{S4}
 ```
 
 | `diversity_threshold` $`\delta`$ | $`\lambda`$ | Behavior |

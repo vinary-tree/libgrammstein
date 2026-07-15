@@ -63,7 +63,7 @@ quantitative rather than aspirational.
 \qquad
 v_i = f_i(c, \ell),
 \qquad
-\nu(u) = \begin{cases} u / \lVert u \rVert_2 & \texttt{normalize_final} \\ u & \text{otherwise} \end{cases}
+\nu(u) = \begin{cases} u / \lVert u \rVert_2 & \texttt{normalize\_final} \\ u & \text{otherwise} \end{cases}
 \tag{E1}
 ```
 

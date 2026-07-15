@@ -100,7 +100,7 @@ $`0.05`$) — there is no separate minimum floor:
 ```
 
 so $`\eta_0`$ at the first epoch down to $`\eta_0/E`$ at the last. The **window size** is itself
-randomized each center word — $`\texttt{window} \sim \mathrm{Uniform}\{1, \dots, \texttt{window_size}\}`$ —
+randomized each center word — $`\texttt{window} \sim \mathrm{Uniform}\{1, \dots, \texttt{window\_size}\}`$ —
 which effectively weights nearer context words more heavily.
 
 ### One shared matrix, not two

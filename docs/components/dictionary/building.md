@@ -51,7 +51,7 @@ Because the vector is sorted by descending frequency, a word's **index is its ra
 therefore a single hash probe with no comparison, sorting or scanning:
 
 ```math
-r(w) \;=\; \texttt{word_index}[w],
+r(w) \;=\; \texttt{word\_index}[w],
 \qquad
 r(w) = 0 \iff w \text{ is the most frequent word}
 \tag{B1}
@@ -90,7 +90,7 @@ share of corpus tokens the dictionary has chosen not to represent.
 
 This is a feature. A back-off or noisy-channel scorer *wants* to know how much probability to reserve
 for words outside the lexicon, and $`(\mathrm{B3})`$ hands it over for free. It is also a trap for
-anyone who assumes a dictionary is a normalised distribution — $`\sum_w \exp(\texttt{log_prob}(w))`$
+anyone who assumes a dictionary is a normalised distribution — $`\sum_w \exp(\texttt{log\_prob}(w))`$
 will not be $`1`$, and it is not supposed to be.
 
 If you *do* want a proper distribution over the retained vocabulary, renormalise explicitly:

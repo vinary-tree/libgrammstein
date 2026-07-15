@@ -92,7 +92,7 @@ A candidate's confidence decays linearly with the number of edits required, floo
 distant match keeps a little mass:
 
 ```math
-c(d_L) \;=\; 1 \;-\; \min\bigl(d_L \cdot p,\; 0.9\bigr), \qquad p = \texttt{edit_penalty} \tag{L4}
+c(d_L) \;=\; 1 \;-\; \min\bigl(d_L \cdot p,\; 0.9\bigr), \qquad p = \texttt{edit\_penalty} \tag{L4}
 ```
 
 With the defaults ($`p = 0.15`$, $`d \leq 2`$) only two values are reachable:

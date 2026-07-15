@@ -513,7 +513,7 @@ purely so that the *next* open does not have to replay a long WAL.
 
 ### 10.1 · The job queue
 
-Jobs are $`(\text{url}, \text{prefix}, \text{order}, \text{attempt}, \text{backoff}, \text{ready_at})`$
+Jobs are $`(\text{url}, \text{prefix}, \text{order}, \text{attempt}, \text{backoff}, \text{ready\_at})`$
 tuples on an async MPMC channel. $`W`$ workers drain it. A job whose `ready_at` lies in the future
 is **requeued rather than executed**, which is how backoff is implemented without a timer wheel.
 

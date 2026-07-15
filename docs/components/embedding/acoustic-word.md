@@ -105,7 +105,7 @@ $`10`$ ms. At the $`16`$ kHz default that is `frame_size = 400` samples advancin
 `frame_shift = 160`, so the number of frames is
 
 ```math
-T = \left\lfloor \frac{\lvert x \rvert - \texttt{frame_size}}{\texttt{frame_shift}} \right\rfloor + 1 \tag{A4}
+T = \left\lfloor \frac{\lvert x \rvert - \texttt{frame\_size}}{\texttt{frame\_shift}} \right\rfloor + 1 \tag{A4}
 ```
 
 Each frame is multiplied by a window (Hann by default) to taper its edges to zero, which suppresses
@@ -240,7 +240,7 @@ embeddings**, which is what makes cross-modal retrieval possible — spoken *"he
 *"hello"* become comparable by cosine:
 
 ```math
-v' = v P, \qquad P \in \mathbb{R}^{H \times D_{\text{text}}} \quad\text{(if \texttt{text_projection_dim} is set)} \tag{A12}
+v' = v P, \qquad P \in \mathbb{R}^{H \times D_{\text{text}}} \quad\text{(if \texttt{text\_projection\_dim} is set)} \tag{A12}
 ```
 
 ```math
