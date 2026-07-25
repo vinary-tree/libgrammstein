@@ -1,0 +1,62 @@
+name: CI
+
+# Added 2026-07. This repository previously had no CI at all, so a dependency
+# advisory, a formatting drift or a broken build could only be found by someone
+# running the commands locally.
+#
+# Note: `cargo test --all-features` is NOT run here. The all-features lib target
+# segfaults intermittently under parallel execution inside the system Vulkan ICD
+# loader (wgpu -> ash -> libGLX_nvidia), which is a host graphics-driver
+# interaction rather than anything this crate controls, and GitHub runners have no
+# GPU at all. The default feature set covers the library proper.
+#
+# `licenses` is omitted from cargo-deny: the first-party path dependency
+# rholang-tree-sitter declares no license field. See deny.toml.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+  schedule:
+    # Weekly, so the supply-chain job re-checks advisories against code that has
+    # not changed. Advisories are published, not introduced by commits.
+    - cron: "23 4 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+  # gxhash (via PathMap) requires AES-NI + SSE2 at compile time.
+  RUSTFLAGS: "-C target-feature=+aes,+sse2"
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: cargo build
+        run: cargo build --verbose
+      - name: cargo test
+        run: cargo test --no-fail-fast
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  # ---------------------------------------------------------------------
+  # Supply-chain gate: published advisories, banned crates, permitted
+  # sources. Configured in deny.toml.
+  #
+  # This job can fail on a commit that changes nothing, because advisories
+  # are published against already-merged code. That is the point.
+  # ---------------------------------------------------------------------
+  supply-chain:
+    name: Supply chain (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans sources
