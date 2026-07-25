@@ -39,7 +39,11 @@ libdictenstein = { path = "../libdictenstein", version = "0.2", features = ["per
 # ">=0.2.2, <0.4" matches the rest of the fleet; a bare "0.2" also admits
 # 0.2.0/0.2.1, which libdictenstein and liblevenshtein exclude.
 pathmap = ">=0.2.2, <0.4"
-ndarray = { version = "0.16", features = ["serde"] }
+# 0.17 to match ort 2.0.0-rc.12. `Tensor::from_array` is generic over ort's own
+# ndarray, so a version split here is not a duplicate-dependency nuisance -- it is
+# a hard compile error at every tensor construction site. Nothing else in the
+# graph pins ndarray, so aligning removes the second copy outright.
+ndarray = { version = "0.17", features = ["serde"] }
 ordered-float = "4.0"
 smallvec = "1.13"
 memmap2 = "0.9"
@@ -110,13 +114,12 @@ flate2 = { version = "1.0", optional = true }
 tokenizers = { version = "0.20", optional = true }
 
 # NER preprocessing via ONNX Runtime (optional)
-# PINNED EXACTLY. `ort` is a pre-release, and cargo treats "2.0.0-rc.10" as a
-# range that admits later rc.* releases. rc.12 made `Session::inputs`/`outputs`
-# private and changed the owned-tensor trait bounds, breaking src/neural/code/*.
-# That is an API migration on ONNX inference code, which cannot be verified
-# without model fixtures -- out of scope for a dependency upgrade, and no
-# advisory affects ort. Unpin and migrate deliberately when 2.0.0 final lands.
-ort = { version = "=2.0.0-rc.10", optional = true }
+# `ort` is a pre-release, so "2.0.0-rc.10" admits later rc.* releases. That is
+# intentional here -- the code tracks the current rc rather than freezing on an
+# old one -- but it does mean an rc bump can be a breaking change: rc.12 turned
+# `Session::inputs`/`outputs` from public fields into accessor methods, which the
+# src/neural/code/* models were migrated to.
+ort = { version = "2.0.0-rc.12", optional = true }
 
 # GPU acceleration (optional)
 wgpu = { version = "23", optional = true }

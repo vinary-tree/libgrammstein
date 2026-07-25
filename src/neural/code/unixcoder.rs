@@ -138,23 +138,23 @@ impl UniXcoderEmbedder {
 
         // Detect input/output names
         let input_ids_name = session
-            .inputs
+            .inputs()
             .iter()
-            .find(|i| i.name.contains("input_ids"))
-            .map(|i| i.name.to_string())
+            .find(|i| i.name().contains("input_ids"))
+            .map(|i| i.name().to_string())
             .unwrap_or_else(|| "input_ids".to_string());
 
         let attention_mask_name = session
-            .inputs
+            .inputs()
             .iter()
-            .find(|i| i.name.contains("attention_mask"))
-            .map(|i| i.name.to_string())
+            .find(|i| i.name().contains("attention_mask"))
+            .map(|i| i.name().to_string())
             .unwrap_or_else(|| "attention_mask".to_string());
 
         let output_name = session
-            .outputs
+            .outputs()
             .first()
-            .map(|o| o.name.to_string())
+            .map(|o| o.name().to_string())
             .unwrap_or_else(|| "last_hidden_state".to_string());
 
         let embedding_dim = config.embedding_dim;

@@ -171,24 +171,24 @@ impl CodeT5Embedder {
         // Get input/output names from the model (iterate without cloning)
         // Find input names (typically "input_ids" and "attention_mask")
         let input_ids_name = session
-            .inputs
+            .inputs()
             .iter()
-            .find(|i| i.name.contains("input_ids") || i.name == "input_ids")
-            .map(|i| i.name.to_string())
+            .find(|i| i.name().contains("input_ids") || i.name() == "input_ids")
+            .map(|i| i.name().to_string())
             .unwrap_or_else(|| "input_ids".to_string());
 
         let attention_mask_name = session
-            .inputs
+            .inputs()
             .iter()
-            .find(|i| i.name.contains("attention_mask") || i.name == "attention_mask")
-            .map(|i| i.name.to_string())
+            .find(|i| i.name().contains("attention_mask") || i.name() == "attention_mask")
+            .map(|i| i.name().to_string())
             .unwrap_or_else(|| "attention_mask".to_string());
 
         // Find output name
         let output_name = session
-            .outputs
+            .outputs()
             .first()
-            .map(|o| o.name.to_string())
+            .map(|o| o.name().to_string())
             .unwrap_or_else(|| "last_hidden_state".to_string());
 
         // Determine embedding dimension from config (output shape inspection not available in ort 2.0)
