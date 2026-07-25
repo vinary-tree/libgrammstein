@@ -35,7 +35,10 @@ impl CodeLanguage for MeTTa {
     }
 
     fn tree_sitter_language(&self) -> Language {
-        tree_sitter_metta::language()
+        // The grammar is published as a version-agnostic `LanguageFn`; `.into()`
+        // materializes it as the `tree_sitter::Language` of the linked
+        // `tree-sitter` release.
+        tree_sitter_metta::LANGUAGE.into()
     }
 
     fn keywords(&self) -> &[&str] {

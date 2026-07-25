@@ -136,7 +136,7 @@ impl TokenContext {
 /// impl CodeLanguage for Python {
 ///     fn name(&self) -> &str { "python" }
 ///     fn tree_sitter_language(&self) -> tree_sitter::Language {
-///         tree_sitter_python::language()
+///         tree_sitter_python::LANGUAGE.into()
 ///     }
 ///     fn keywords(&self) -> &[&str] {
 ///         &["def", "class", "if", "else", "elif", "for", "while", ...]

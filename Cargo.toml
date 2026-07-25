@@ -125,15 +125,34 @@ pdf = { version = "0.9", optional = true }
 # lling-llang integration (optional)
 lling-llang = { path = "../lling-llang", version = "0.2", features = ["lm-rerank"], optional = true }
 
-# Tree-sitter for incremental parsing (code module)
-tree-sitter = { version = "0.25", optional = true }
-tree-sitter-python = { version = "0.23", optional = true }
-tree-sitter-rust = { version = "0.23", optional = true }
-tree-sitter-javascript = { version = "0.23", optional = true }
+# Tree-sitter for incremental parsing (code module).
+#
+# `tree-sitter` declares `links = "tree-sitter"`, so Cargo permits exactly ONE
+# version of it per dependency graph. This pin is therefore shared with every
+# consumer: pgmcp links libgrammstein alongside libcpg, and both moved to
+# tree-sitter 0.26 (libcpg 0.1.1). Keep this in lockstep with them.
+tree-sitter = { version = "0.26", optional = true }
+# Grammar versions are aligned with pgmcp's pins on purpose. Each grammar crate
+# compiles a static archive exporting the C symbol `tree_sitter_<lang>`; if
+# libgrammstein and pgmcp resolved different versions of the same grammar, both
+# archives would define that symbol and the linker would silently satisfy every
+# reference from whichever it pulled first — one crate would then parse with the
+# other's grammar. Bump these together with pgmcp's, never independently.
+tree-sitter-python = { version = "0.25", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-javascript = { version = "0.25", optional = true }
 
-# Domain-specific language tree-sitter grammars (local paths)
+# Domain-specific language tree-sitter grammars (local paths).
+#
+# `tree-sitter-metta` points at the SHARED shim in libcpg rather than at
+# MeTTa-Compiler/tree-sitter-metta: the canonical crate pins `tree-sitter =
+# "0.25"` as a *normal* dependency and binds `tree_sitter_metta()` to
+# `tree_sitter::Language`, which the `links` rule above makes irreconcilable with
+# 0.26. The shim recompiles the SAME canonical C sources and republishes them as
+# a version-agnostic `LanguageFn`; see that directory's Cargo.toml for the full
+# rationale and the condition under which it is dropped.
 rholang-tree-sitter = { path = "../rholang-rs/rholang-tree-sitter", optional = true }
-tree-sitter-metta = { path = "../MeTTa-Compiler/tree-sitter-metta", optional = true }
+tree-sitter-metta = { package = "tree-sitter-metta", path = "../libcpg/vendor/tree-sitter-metta", optional = true }
 
 # Graph data structures for Code Property Graphs
 petgraph = { version = "0.6", optional = true }
@@ -188,8 +207,10 @@ vu128 = "1"
 stream-vbyte = "0.4"
 # Hash benchmark candidate
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-# Test-only grammar for code-corrector mock language implementations.
-tree-sitter-rust = "0.23"
+# Test-only grammar for code-corrector mock language implementations. Kept at the
+# same version as the optional `tree-sitter-rust` dependency above so a test build
+# links one `tree_sitter_rust` archive, not two.
+tree-sitter-rust = "0.24"
 
 [features]
 default = []
