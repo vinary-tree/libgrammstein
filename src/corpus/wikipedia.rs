@@ -26,6 +26,25 @@ lazy_static::lazy_static! {
     static ref FILE: regex::Regex = regex::Regex::new(r"\[\[(?:File|Image):[^\]]+\]\]").expect("valid regex");
 }
 
+/// Decode a text event's bytes and resolve its XML entity references.
+///
+/// quick-xml 0.41 removed `BytesText::unescape`, which used to do both steps in
+/// one call. The replacement `xml10_content()` performs only encoding decode and
+/// XML 1.0 end-of-line normalization — it does **not** resolve entities, so
+/// swapping one for the other alone would silently stop turning `&amp;` into `&`
+/// throughout every extracted Wikipedia article. MediaWiki dumps escape `&`, `<`
+/// and `>` pervasively, so that would be a quiet corpus-corruption bug rather
+/// than a visible failure. The free `quick_xml::escape::unescape` supplies the
+/// second half.
+///
+/// Returns `None` if either step fails, matching the previous `if let Ok(..)`
+/// behaviour of skipping undecodable text rather than aborting the parse.
+fn decode_and_unescape(event: &quick_xml::events::BytesText<'_>) -> Option<String> {
+    let decoded = event.xml10_content().ok()?;
+    let unescaped = quick_xml::escape::unescape(&decoded).ok()?;
+    Some(unescaped.into_owned())
+}
+
 /// Configuration for Wikipedia corpus reading.
 #[derive(Clone, Debug)]
 pub struct WikipediaConfig {
@@ -384,16 +403,12 @@ impl<R: BufRead + Send> Iterator for WikipediaIterator<R> {
                     _ => {}
                 },
                 Ok(Event::Text(e)) => {
-                    if self.in_title {
-                        if let Ok(text) = e.unescape() {
+                    if let Some(text) = decode_and_unescape(&e) {
+                        if self.in_title {
                             self.current_title.push_str(&text);
-                        }
-                    } else if self.in_text {
-                        if let Ok(text) = e.unescape() {
+                        } else if self.in_text {
                             self.current_text.push_str(&text);
-                        }
-                    } else if self.in_ns {
-                        if let Ok(text) = e.unescape() {
+                        } else if self.in_ns {
                             self.current_ns = text.parse().unwrap_or(0);
                         }
                     }

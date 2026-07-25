@@ -23,7 +23,7 @@
 
 use crate::ngram::store::IterableNgramStore;
 use crate::ngram::NgramModel;
-use rand::distributions::WeightedIndex;
+use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use std::collections::HashSet;
@@ -233,7 +233,7 @@ where
     pub fn generate_sampling(&self, prompt: &[&str]) -> Vec<String> {
         let mut rng: Box<dyn RngCore> = match self.config.seed {
             Some(seed) => Box::new(StdRng::seed_from_u64(seed)),
-            None => Box::new(rand::thread_rng()),
+            None => Box::new(rand::rng()),
         };
 
         let mut context: Vec<String> = prompt.iter().map(|s| s.to_string()).collect();

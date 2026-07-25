@@ -475,7 +475,7 @@ where
     pub fn save<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
         let file = std::fs::File::create(path)?;
         let writer = std::io::BufWriter::new(file);
-        bincode::serialize_into(writer, self)?;
+        crate::bincode_compat::serialize_into(writer, self)?;
         Ok(())
     }
 
@@ -489,7 +489,7 @@ where
     pub fn load<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
-        let model = bincode::deserialize_from(reader)?;
+        let model = crate::bincode_compat::deserialize_from(reader)?;
         Ok(model)
     }
 }
@@ -541,7 +541,7 @@ where
         let portable = self.to_portable();
         let file = std::fs::File::create(path)?;
         let writer = std::io::BufWriter::new(file);
-        bincode::serialize_into(writer, &portable)?;
+        crate::bincode_compat::serialize_into(writer, &portable)?;
         Ok(())
     }
 
@@ -563,7 +563,7 @@ where
     {
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
-        let portable: PortableHybridModel = bincode::deserialize_from(reader)?;
+        let portable: PortableHybridModel = crate::bincode_compat::deserialize_from(reader)?;
 
         // Reconstruct N-gram model
         let ngram = NgramModel::from_portable(portable.ngram, backend_factory)?;
@@ -613,7 +613,7 @@ where
     {
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
-        let portable: PortableHybridModel = bincode::deserialize_from(reader)?;
+        let portable: PortableHybridModel = crate::bincode_compat::deserialize_from(reader)?;
 
         // Reconstruct the N-gram model against a caller-owned vocabulary directory.
         let ngram = NgramModel::from_portable_at(portable.ngram, backend_factory, vocab_path)?;

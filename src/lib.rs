@@ -61,6 +61,13 @@
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
 
+/// bincode 1.x-compatible serialization shim over bincode 2.x (see the module
+/// docs: the `legacy()` fixint-LE config keeps persisted model files readable).
+///
+/// Gated on the same features that make the optional `bincode` dependency
+/// available, since the shim is a thin wrapper over it.
+#[cfg(any(feature = "serde-extras", feature = "rag"))]
+pub mod bincode_compat;
 pub mod corpus;
 pub mod dictionary;
 pub mod embedding;
@@ -133,7 +140,7 @@ pub mod error {
         /// Serialization error (bincode).
         #[cfg(feature = "serde-extras")]
         #[error("Serialization error: {0}")]
-        Serialization(#[from] bincode::Error),
+        Serialization(#[from] crate::bincode_compat::Error),
 
         /// Serialization error (general, e.g., JSON).
         #[error("Serialization error: {0}")]

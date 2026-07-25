@@ -506,13 +506,13 @@ impl RetrievalBackend for HnswBackend {
             embedding_dim: self.embedding_dim,
             version: 2, // v2 = batched format
         };
-        bincode::serialize_into(&mut writer, &header)
+        crate::bincode_compat::serialize_into(&mut writer, &header)
             .map_err(|e| RagError::Serialization(e.to_string()))?;
 
         // Serialize embeddings and IDs in batches to prevent OOM
         // For 1M docs × 768 dims = ~3GB if collected at once; batching reduces peak to ~30MB
         let num_batches = num_docs.div_ceil(SERIALIZATION_BATCH_SIZE);
-        bincode::serialize_into(&mut writer, &num_batches)
+        crate::bincode_compat::serialize_into(&mut writer, &num_batches)
             .map_err(|e| RagError::Serialization(e.to_string()))?;
 
         for batch_idx in 0..num_batches {
@@ -524,13 +524,13 @@ impl RetrievalBackend for HnswBackend {
                 .iter()
                 .map(|(embedding, _)| embedding)
                 .collect();
-            bincode::serialize_into(&mut writer, &batch_embeddings)
+            crate::bincode_compat::serialize_into(&mut writer, &batch_embeddings)
                 .map_err(|e| RagError::Serialization(e.to_string()))?;
 
             // Serialize batch of document IDs
             let batch_ids: Vec<DocumentId> =
                 points_guard[start..end].iter().map(|(_, id)| *id).collect();
-            bincode::serialize_into(&mut writer, &batch_ids)
+            crate::bincode_compat::serialize_into(&mut writer, &batch_ids)
                 .map_err(|e| RagError::Serialization(e.to_string()))?;
         }
 
@@ -560,7 +560,7 @@ impl RetrievalBackend for HnswBackend {
         let mapping_file = File::open(&mapping_path)?;
         let mut reader = BufReader::new(mapping_file);
 
-        let header: HnswHeader = bincode::deserialize_from(&mut reader)
+        let header: HnswHeader = crate::bincode_compat::deserialize_from(&mut reader)
             .map_err(|e| RagError::Serialization(e.to_string()))?;
 
         if header.embedding_dim != embedding_dim {
@@ -576,27 +576,29 @@ impl RetrievalBackend for HnswBackend {
         // Handle both v1 (unbatched) and v2 (batched) formats
         if header.version >= 2 {
             // v2 batched format: read num_batches, then process each batch
-            let num_batches: usize = bincode::deserialize_from(&mut reader)
+            let num_batches: usize = crate::bincode_compat::deserialize_from(&mut reader)
                 .map_err(|e| RagError::Serialization(e.to_string()))?;
 
             for _ in 0..num_batches {
                 // Deserialize batch of embeddings
-                let batch_embeddings: Vec<Vec<f32>> = bincode::deserialize_from(&mut reader)
-                    .map_err(|e| RagError::Serialization(e.to_string()))?;
+                let batch_embeddings: Vec<Vec<f32>> =
+                    crate::bincode_compat::deserialize_from(&mut reader)
+                        .map_err(|e| RagError::Serialization(e.to_string()))?;
 
                 // Deserialize batch of document IDs
-                let batch_ids: Vec<DocumentId> = bincode::deserialize_from(&mut reader)
-                    .map_err(|e| RagError::Serialization(e.to_string()))?;
+                let batch_ids: Vec<DocumentId> =
+                    crate::bincode_compat::deserialize_from(&mut reader)
+                        .map_err(|e| RagError::Serialization(e.to_string()))?;
 
                 // Combine embeddings and IDs
                 pending_points.extend(batch_embeddings.into_iter().zip(batch_ids));
             }
         } else {
             // v1 legacy format: all embeddings, then all IDs (for backwards compatibility)
-            let embeddings: Vec<Vec<f32>> = bincode::deserialize_from(&mut reader)
+            let embeddings: Vec<Vec<f32>> = crate::bincode_compat::deserialize_from(&mut reader)
                 .map_err(|e| RagError::Serialization(e.to_string()))?;
 
-            let ids: Vec<DocumentId> = bincode::deserialize_from(&mut reader)
+            let ids: Vec<DocumentId> = crate::bincode_compat::deserialize_from(&mut reader)
                 .map_err(|e| RagError::Serialization(e.to_string()))?;
 
             pending_points.extend(embeddings.into_iter().zip(ids));

@@ -726,7 +726,7 @@ fn rebuild_vocabulary_at(
 fn write_portable<P: AsRef<Path>>(portable: &PortableNgramModel, path: P) -> crate::Result<()> {
     let file = std::fs::File::create(path)?;
     let writer = std::io::BufWriter::new(file);
-    bincode::serialize_into(writer, portable)?;
+    crate::bincode_compat::serialize_into(writer, portable)?;
     Ok(())
 }
 
@@ -735,7 +735,7 @@ fn write_portable<P: AsRef<Path>>(portable: &PortableNgramModel, path: P) -> cra
 fn read_portable<P: AsRef<Path>>(path: P) -> crate::Result<PortableNgramModel> {
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
-    let portable = bincode::deserialize_from(reader)?;
+    let portable = crate::bincode_compat::deserialize_from(reader)?;
     Ok(portable)
 }
 

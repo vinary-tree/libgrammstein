@@ -199,7 +199,7 @@ fn corpus_sample(args: CorpusSampleArgs, verbose: bool) -> CliResult<()> {
     let mut rng = if let Some(seed) = args.seed {
         StdRng::seed_from_u64(seed)
     } else {
-        StdRng::from_entropy()
+        StdRng::from_os_rng()
     };
 
     // Collect all sentences (for small corpora) or use reservoir sampling

@@ -220,7 +220,7 @@ impl DictionaryExtractor {
         log::info!("Serializing dictionary to {:?}", output_path);
 
         // Serialize to bytes using bincode
-        let bytes = bincode::serialize(&dict).map_err(|e| {
+        let bytes = crate::bincode_compat::serialize(&dict).map_err(|e| {
             ExtractionError::Serialization(format!("Failed to serialize dictionary: {}", e))
         })?;
 
@@ -358,7 +358,7 @@ impl DictionaryExtractor {
         });
 
         // Serialize and write to file
-        let bytes = bincode::serialize(&dict).map_err(|e| {
+        let bytes = crate::bincode_compat::serialize(&dict).map_err(|e| {
             ExtractionError::Serialization(format!("Failed to serialize dictionary: {}", e))
         })?;
 

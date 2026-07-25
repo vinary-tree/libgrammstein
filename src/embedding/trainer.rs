@@ -379,7 +379,7 @@ impl EmbeddingTrainer {
                     let keep_prob =
                         ((freq / subsample_threshold).sqrt() + 1.0) * (subsample_threshold / freq);
 
-                    let mut rng = thread_rng();
+                    let mut rng = rand::rng();
                     if rng.gen::<f32>() > keep_prob {
                         continue;
                     }
@@ -811,7 +811,7 @@ impl EmbeddingTrainer {
                 let keep_prob =
                     ((freq / subsample_threshold).sqrt() + 1.0) * (subsample_threshold / freq);
 
-                let mut rng = thread_rng();
+                let mut rng = rand::rng();
                 if rng.gen::<f32>() > keep_prob {
                     continue;
                 }

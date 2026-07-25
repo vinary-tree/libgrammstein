@@ -211,7 +211,7 @@ impl TopicModel {
     pub fn save_bincode(&self, path: impl AsRef<Path>) -> Result<()> {
         let file = File::create(path.as_ref())?;
         let writer = BufWriter::new(file);
-        bincode::serialize_into(writer, self)?;
+        crate::bincode_compat::serialize_into(writer, self)?;
         Ok(())
     }
 
@@ -219,7 +219,7 @@ impl TopicModel {
     pub fn load_bincode(path: impl AsRef<Path>) -> Result<Self> {
         let file = File::open(path.as_ref())?;
         let reader = BufReader::new(file);
-        bincode::deserialize_from(reader).map_err(TopicError::from)
+        crate::bincode_compat::deserialize_from(reader).map_err(TopicError::from)
     }
 
     /// Get statistics about the model.

@@ -660,7 +660,7 @@ impl HierarchicalCorrector {
         let portable = {
             let file = std::fs::File::open(&model_path).map_err(crate::Error::from)?;
             let reader = std::io::BufReader::new(file);
-            bincode::deserialize_from::<_, crate::ngram::PortableNgramModel>(reader)
+            crate::bincode_compat::deserialize_from::<_, crate::ngram::PortableNgramModel>(reader)
                 .map_err(crate::Error::from)?
         };
         let model = NgramModel::from_portable_with_vocabulary(

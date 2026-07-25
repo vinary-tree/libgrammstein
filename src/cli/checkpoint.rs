@@ -139,7 +139,7 @@ impl CheckpointManager {
         let encoder = zstd::Encoder::new(writer, 3)
             .map_err(|e| CliError::io(format!("Failed to create zstd encoder: {}", e)))?
             .auto_finish();
-        bincode::serialize_into(encoder, checkpoint)
+        crate::bincode_compat::serialize_into(encoder, checkpoint)
             .map_err(|e| CliError::io(format!("Failed to serialize checkpoint: {}", e)))?;
 
         // Atomic rename
@@ -184,7 +184,7 @@ impl CheckpointManager {
         let reader = BufReader::new(file);
         let decoder = zstd::Decoder::new(reader)
             .map_err(|e| CliError::io(format!("Failed to create zstd decoder: {}", e)))?;
-        let checkpoint: NgramCheckpoint = bincode::deserialize_from(decoder)
+        let checkpoint: NgramCheckpoint = crate::bincode_compat::deserialize_from(decoder)
             .map_err(|e| CliError::io(format!("Failed to deserialize checkpoint: {}", e)))?;
 
         // Version check
@@ -349,7 +349,7 @@ impl CheckpointManager {
         let encoder = zstd::Encoder::new(writer, 3)
             .map_err(|e| CliError::io(format!("Failed to create zstd encoder: {}", e)))?
             .auto_finish();
-        bincode::serialize_into(encoder, checkpoint)
+        crate::bincode_compat::serialize_into(encoder, checkpoint)
             .map_err(|e| CliError::io(format!("Failed to serialize checkpoint: {}", e)))?;
 
         // Atomic rename
@@ -390,7 +390,7 @@ impl CheckpointManager {
         let reader = BufReader::new(file);
         let decoder = zstd::Decoder::new(reader)
             .map_err(|e| CliError::io(format!("Failed to create zstd decoder: {}", e)))?;
-        let checkpoint: EmbeddingCheckpoint = bincode::deserialize_from(decoder)
+        let checkpoint: EmbeddingCheckpoint = crate::bincode_compat::deserialize_from(decoder)
             .map_err(|e| CliError::io(format!("Failed to deserialize checkpoint: {}", e)))?;
 
         // Version check

@@ -273,7 +273,7 @@ impl SpellingDictionary {
         let mut data = Vec::new();
         reader.read_to_end(&mut data)?;
 
-        let mut dict: SpellingDictionary = bincode::deserialize(&data)
+        let mut dict: SpellingDictionary = crate::bincode_compat::deserialize(&data)
             .map_err(|e| DictionaryError::Serialization(e.to_string()))?;
 
         // Rebuild word index
@@ -302,8 +302,8 @@ impl SpellingDictionary {
         writer.write_all(&1u32.to_le_bytes())?;
 
         // Write bincode data
-        let data =
-            bincode::serialize(self).map_err(|e| DictionaryError::Serialization(e.to_string()))?;
+        let data = crate::bincode_compat::serialize(self)
+            .map_err(|e| DictionaryError::Serialization(e.to_string()))?;
         writer.write_all(&data)?;
 
         Ok(())

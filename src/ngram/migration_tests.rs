@@ -239,7 +239,7 @@ fn termid_portable_roundtrip_parity() {
     // Inspect the on-disk shape.
     let portable: PortableNgramModel = {
         let reader = std::io::BufReader::new(std::fs::File::open(file.path()).expect("open"));
-        bincode::deserialize_from(reader).expect("deserialize portable")
+        crate::bincode_compat::deserialize_from(reader).expect("deserialize portable")
     };
     assert_eq!(portable.key_encoding, KeyEncoding::TermIdBytes);
     assert!(!portable.entries_bytes.is_empty(), "byte entries present");
@@ -336,7 +336,7 @@ fn fingerprint_mismatch_is_rejected() {
 
     let portable: super::PortableNgramModel = {
         let reader = std::io::BufReader::new(std::fs::File::open(file.path()).expect("open"));
-        bincode::deserialize_from(reader).expect("deserialize")
+        crate::bincode_compat::deserialize_from(reader).expect("deserialize")
     };
 
     // A different vocabulary (different words) must fail the fingerprint check.

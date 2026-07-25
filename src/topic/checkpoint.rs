@@ -196,7 +196,7 @@ impl TopicExtractionCheckpoint {
         {
             let file = File::create(&temp_path)?;
             let writer = BufWriter::new(file);
-            bincode::serialize_into(writer, self)?;
+            crate::bincode_compat::serialize_into(writer, self)?;
         }
 
         // Atomic rename
@@ -208,7 +208,7 @@ impl TopicExtractionCheckpoint {
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        let checkpoint: Self = bincode::deserialize_from(reader)?;
+        let checkpoint: Self = crate::bincode_compat::deserialize_from(reader)?;
 
         // Verify version
         if checkpoint.version != Self::VERSION {

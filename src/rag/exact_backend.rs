@@ -157,19 +157,19 @@ impl RetrievalBackend for ExactCosineBackend {
             num_docs: self.doc_ids.len(),
             embedding_dim: self.embedding_dim,
         };
-        bincode::serialize_into(&mut writer, &header)
+        crate::bincode_compat::serialize_into(&mut writer, &header)
             .map_err(|e| RagError::Serialization(e.to_string()))?;
 
         // Write embeddings as flat array
         let flat: Vec<f32> = self.embeddings.iter().copied().collect();
-        bincode::serialize_into(&mut writer, &flat)
+        crate::bincode_compat::serialize_into(&mut writer, &flat)
             .map_err(|e| RagError::Serialization(e.to_string()))?;
 
         // Save document IDs
         let ids_path = path.join("doc_ids.bin");
         let ids_file = File::create(&ids_path)?;
         let ids_writer = BufWriter::new(ids_file);
-        bincode::serialize_into(ids_writer, &self.doc_ids)
+        crate::bincode_compat::serialize_into(ids_writer, &self.doc_ids)
             .map_err(|e| RagError::Serialization(e.to_string()))?;
 
         Ok(())
@@ -181,7 +181,7 @@ impl RetrievalBackend for ExactCosineBackend {
         let file = File::open(&embeddings_path)?;
         let mut reader = BufReader::new(file);
 
-        let header: EmbeddingsHeader = bincode::deserialize_from(&mut reader)
+        let header: EmbeddingsHeader = crate::bincode_compat::deserialize_from(&mut reader)
             .map_err(|e| RagError::Serialization(e.to_string()))?;
 
         if header.embedding_dim != embedding_dim {
@@ -191,7 +191,7 @@ impl RetrievalBackend for ExactCosineBackend {
             )));
         }
 
-        let flat: Vec<f32> = bincode::deserialize_from(&mut reader)
+        let flat: Vec<f32> = crate::bincode_compat::deserialize_from(&mut reader)
             .map_err(|e| RagError::Serialization(e.to_string()))?;
 
         let embeddings = Array2::from_shape_vec((header.num_docs, header.embedding_dim), flat)
@@ -201,7 +201,7 @@ impl RetrievalBackend for ExactCosineBackend {
         let ids_path = path.join("doc_ids.bin");
         let ids_file = File::open(&ids_path)?;
         let ids_reader = BufReader::new(ids_file);
-        let doc_ids: Vec<DocumentId> = bincode::deserialize_from(ids_reader)
+        let doc_ids: Vec<DocumentId> = crate::bincode_compat::deserialize_from(ids_reader)
             .map_err(|e| RagError::Serialization(e.to_string()))?;
 
         Ok(Self {

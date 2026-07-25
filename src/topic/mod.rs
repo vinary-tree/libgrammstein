@@ -146,8 +146,8 @@ pub enum TopicError {
     SerializationError(String),
 }
 
-impl From<bincode::Error> for TopicError {
-    fn from(err: bincode::Error) -> Self {
+impl From<crate::bincode_compat::Error> for TopicError {
+    fn from(err: crate::bincode_compat::Error) -> Self {
         TopicError::SerializationError(err.to_string())
     }
 }

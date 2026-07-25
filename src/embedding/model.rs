@@ -463,7 +463,7 @@ impl SubwordEmbedding {
     pub fn save<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
         let file = std::fs::File::create(path)?;
         let writer = std::io::BufWriter::new(file);
-        bincode::serialize_into(writer, self)?;
+        crate::bincode_compat::serialize_into(writer, self)?;
         Ok(())
     }
 
@@ -477,7 +477,7 @@ impl SubwordEmbedding {
     pub fn load<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
-        let model = bincode::deserialize_from(reader)?;
+        let model = crate::bincode_compat::deserialize_from(reader)?;
         Ok(model)
     }
 }
