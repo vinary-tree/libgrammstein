@@ -53,26 +53,6 @@ allow = [
 confidence-threshold = 0.9
 unused-allowed-license = "allow"
 
-# KNOWN GAP: the `licenses` check does not currently pass here. Run
-#     cargo deny check advisories bans sources
-# rather than a bare `cargo deny check` until this is resolved.
-#
-# `rholang-tree-sitter`, a first-party path dependency in a sibling repository,
-# declares no `license` field at all, so cargo-deny reports it as `unlicensed`.
-# That is not a licence-compatibility problem -- it is first-party code -- but
-# cargo-deny cannot distinguish "unlicensed" from "unknown", and the fix belongs in
-# that repository (add `license = "..."` to its Cargo.toml), not in a suppression
-# here. Asserting a licence for someone else's crate via a `clarify` entry would be
-# a claim this repository has no standing to make.
-#
-# The [licenses] configuration above is complete and correct for everything else,
-# so re-enabling the check is a one-word change once that sibling crate declares
-# its licence.
-#
-# NOTE: this repository has no .github/workflows, so there is no CI job to gate
-# this. Run cargo-deny locally, or add a workflow mirroring the one in
-# libdictenstein / liblevenshtein / lling-llang.
-
 [bans]
 # "warn": this is a ~750-package tree with many transitive duplicates that cannot
 # be resolved from here. Ratchet to "deny" only if that ever becomes achievable.
