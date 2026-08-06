@@ -25,7 +25,7 @@ all-features = true
 # Core dependencies
 # Note: persistent-artrie has its own WAL-based persistence for crash-safe training.
 # Serialization uses portable format (IterableDictionary) that doesn't require D: Serialize.
-liblevenshtein = { path = "../liblevenshtein-rust", version = "0.9", features = ["pathmap-backend", "persistent-artrie", "embedded-rules"] }
+liblevenshtein = { path = "../liblevenshtein-rust", version = "0.10", features = ["pathmap-backend", "persistent-artrie", "embedded-rules"] }
 
 # Global allocator: mimalloc avoids glibc's mmap/munmap per-allocation __mprotect
 # syscalls that consume ~45% CPU during large imports (thread-local segment heaps
