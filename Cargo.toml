@@ -174,8 +174,8 @@ tree-sitter-javascript = { version = "0.25", optional = true }
 # 0.26. The shim recompiles the SAME canonical C sources and republishes them as
 # a version-agnostic `LanguageFn`; see that directory's Cargo.toml for the full
 # rationale and the condition under which it is dropped.
-rholang-tree-sitter = { path = "../rholang-rs/rholang-tree-sitter", optional = true }
-tree-sitter-metta = { package = "tree-sitter-metta", path = "../libcpg/vendor/tree-sitter-metta", optional = true }
+rholang-tree-sitter = { git = "https://github.com/F1R3FLY-io/rholang-rs.git", rev = "5c4c9d213416efa4dca589bf5a21ae46ea4354fb", optional = true }
+tree-sitter-metta = { package = "tree-sitter-metta", git = "https://github.com/vinary-tree/libcpg.git", rev = "e6eb190a57b50d7a5f0a54747c977ffe587b62ba", optional = true }
 
 # Graph data structures for Code Property Graphs
 petgraph = { version = "0.6", optional = true }

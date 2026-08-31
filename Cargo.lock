@@ -5080,6 +5080,7 @@ checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 [[package]]
 name = "rholang-tree-sitter"
 version = "0.1.2"
+source = "git+https://github.com/F1R3FLY-io/rholang-rs.git?rev=5c4c9d213416efa4dca589bf5a21ae46ea4354fb#5c4c9d213416efa4dca589bf5a21ae46ea4354fb"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -6295,6 +6296,7 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 [[package]]
 name = "tree-sitter-metta"
 version = "0.1.0"
+source = "git+https://github.com/vinary-tree/libcpg.git?rev=e6eb190a57b50d7a5f0a54747c977ffe587b62ba#e6eb190a57b50d7a5f0a54747c977ffe587b62ba"
 dependencies = [
  "cc",
  "tree-sitter-language",
