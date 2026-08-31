@@ -4,10 +4,11 @@
 //! synthetic corpus of varying sizes, with a parameter sweep over n-gram
 //! order. Throughput here dominates real-corpus import time.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use libdictenstein::dynamic_dawg::DynamicDawg;
 use libgrammstein::corpus::PlaintextReader;
 use libgrammstein::ngram::{NgramEntry, TrainerBuilder};
+use std::hint::black_box;
 use std::io::Write;
 use tempfile::TempDir;
 

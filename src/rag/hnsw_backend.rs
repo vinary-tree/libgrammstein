@@ -464,7 +464,7 @@ impl RetrievalBackend for HnswBackend {
         self.needs_rebuild.store(true, Ordering::Release);
 
         // Rebuild periodically to keep index reasonably up-to-date
-        if new_count % 10000 == 0 {
+        if new_count.is_multiple_of(10000) {
             self.build_index()?;
         }
 

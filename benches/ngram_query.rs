@@ -5,11 +5,12 @@
 //! corpus before each benchmark group so the criterion measurements only
 //! cover query cost, not training.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use libdictenstein::dynamic_dawg::DynamicDawg;
 use libgrammstein::corpus::PlaintextReader;
 use libgrammstein::ngram::store::TermIdStore;
 use libgrammstein::ngram::{NgramEntry, NgramModel, TrainerBuilder};
+use std::hint::black_box;
 use std::io::Write;
 use tempfile::TempDir;
 

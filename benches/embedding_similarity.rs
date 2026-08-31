@@ -7,9 +7,10 @@
 //! (subword-hash composition), and the `most_similar` k-NN search
 //! (linear-scan over vocab × dim).
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use libgrammstein::corpus::PlaintextReader;
 use libgrammstein::embedding::{EmbeddingTrainerBuilder, SubwordEmbedding};
+use std::hint::black_box;
 use std::io::Write;
 use tempfile::TempDir;
 

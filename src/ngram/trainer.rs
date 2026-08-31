@@ -435,7 +435,7 @@ where
 
                 // Send progress periodically
                 let processed = stats.sentences_processed();
-                if processed as usize % progress_interval == 0 {
+                if (processed as usize).is_multiple_of(progress_interval) {
                     let _ = progress_tx.try_send(TrainingProgress {
                         sentences_processed: processed,
                         ngrams_counted: stats.ngrams_counted(),

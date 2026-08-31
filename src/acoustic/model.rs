@@ -327,7 +327,7 @@ struct SelfAttention {
 impl SelfAttention {
     fn new(hidden_dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
         assert!(
-            hidden_dim % num_heads == 0,
+            hidden_dim.is_multiple_of(num_heads),
             "hidden_dim must be divisible by num_heads"
         );
         let head_dim = hidden_dim / num_heads;

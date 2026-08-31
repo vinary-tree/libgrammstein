@@ -6,8 +6,9 @@
 //! - vu128: Prefix varint (length determinable from first byte)
 //! - stream-vbyte: Separated control/data streams for bulk SIMD
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use libgrammstein::ngram::{decode_varint, encode_varint};
+use std::hint::black_box;
 use stream_vbyte::scalar::Scalar;
 
 // ============================================================================

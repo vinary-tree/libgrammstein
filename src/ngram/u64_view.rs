@@ -226,6 +226,8 @@ where
     N::Unit: VarintByteUnit,
 {
     type Unit = u64;
+    type SnapshotCursor = N::SnapshotCursor;
+    type SnapshotGraphValueHandle = N::SnapshotGraphValueHandle;
 
     #[inline]
     fn is_final(&self) -> bool {

@@ -266,10 +266,10 @@ impl ModernBertModel {
 
         for (ids, &len) in ids_batch.iter().zip(&lengths) {
             padded_ids.extend(ids.iter().copied());
-            padded_ids.extend(std::iter::repeat(0).take(max_len - len));
+            padded_ids.extend(std::iter::repeat_n(0, max_len - len));
 
-            attention_mask.extend(std::iter::repeat(1.0).take(len));
-            attention_mask.extend(std::iter::repeat(0.0).take(max_len - len));
+            attention_mask.extend(std::iter::repeat_n(1.0, len));
+            attention_mask.extend(std::iter::repeat_n(0.0, max_len - len));
         }
 
         let input_tensor = Tensor::from_vec(padded_ids, (batch_size, max_len), &self.device)?;

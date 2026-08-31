@@ -3,11 +3,12 @@
 //! Tests the performance of parallel frequency count computation
 //! across sharded n-gram storage.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use libgrammstein::ngram::vocabulary::{create_vocabulary, encode_varint, SharedVocabARTrie};
 use libgrammstein::sources::google_books::sharding::{
     compute_shard_key_from_token, ShardConfig, ShardCoordinator, ShardGranularity,
 };
+use std::hint::black_box;
 use tempfile::TempDir;
 
 /// Store one n-gram the importer's way: first-token route + term-id varint key.

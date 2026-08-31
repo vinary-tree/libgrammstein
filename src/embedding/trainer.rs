@@ -189,7 +189,7 @@ impl NegativeSampler {
     /// Sample a negative word index.
     #[inline]
     fn sample<R: Rng>(&self, rng: &mut R) -> usize {
-        let idx = rng.gen_range(0..self.table_size);
+        let idx = rng.random_range(0..self.table_size);
         self.table[idx]
     }
 
@@ -380,12 +380,12 @@ impl EmbeddingTrainer {
                         ((freq / subsample_threshold).sqrt() + 1.0) * (subsample_threshold / freq);
 
                     let mut rng = rand::rng();
-                    if rng.gen::<f32>() > keep_prob {
+                    if rng.random::<f32>() > keep_prob {
                         continue;
                     }
 
                     // Dynamic window size
-                    let window = rng.gen_range(1..=self.config.window_size);
+                    let window = rng.random_range(1..=self.config.window_size);
 
                     // Get context words
                     let start = pos.saturating_sub(window);
@@ -669,13 +669,13 @@ impl EmbeddingTrainer {
         // Initialize word embeddings
         let word_emb = model.word_embeddings_mut();
         for elem in word_emb.iter_mut() {
-            *elem = (rng.gen::<f32>() - 0.5) * scale;
+            *elem = (rng.random::<f32>() - 0.5) * scale;
         }
 
         // Initialize subword embeddings
         let subword_emb = model.subword_embeddings_mut();
         for elem in subword_emb.iter_mut() {
-            *elem = (rng.gen::<f32>() - 0.5) * scale;
+            *elem = (rng.random::<f32>() - 0.5) * scale;
         }
     }
 
@@ -812,12 +812,12 @@ impl EmbeddingTrainer {
                     ((freq / subsample_threshold).sqrt() + 1.0) * (subsample_threshold / freq);
 
                 let mut rng = rand::rng();
-                if rng.gen::<f32>() > keep_prob {
+                if rng.random::<f32>() > keep_prob {
                     continue;
                 }
 
                 // Dynamic window size
-                let window = rng.gen_range(1..=config.window_size);
+                let window = rng.random_range(1..=config.window_size);
 
                 // Get context words
                 let start = pos.saturating_sub(window);

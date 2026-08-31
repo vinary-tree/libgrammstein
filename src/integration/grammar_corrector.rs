@@ -430,6 +430,7 @@ impl<P: NgramViewSource> GrammarCore<P> {
 
     /// Borrow the underlying n-gram view source (the routing seam). Used by the
     /// sharded corrector's opt-in all-shards `grammar_neighbors_fanout`.
+    #[cfg(feature = "google-books")]
     #[inline]
     pub(crate) fn source(&self) -> &P {
         &self.source

@@ -12,7 +12,8 @@
 //! - pack_states: HashMap -> Vec<u64> bitmap chunks
 //! - unpack_states: Vec<u64> bitmap chunks -> HashMap
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 
 // Include checkpoint module from libgrammstein
 use libgrammstein::sources::google_books::ImportCheckpoint;

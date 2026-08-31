@@ -29,8 +29,10 @@ use std::io::{Read, Write};
 /// working.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The value could not be encoded into the requested bincode stream.
     #[error("bincode encode error: {0}")]
     Encode(#[from] bincode::error::EncodeError),
+    /// The input stream could not be decoded as the requested value type.
     #[error("bincode decode error: {0}")]
     Decode(#[from] bincode::error::DecodeError),
 }

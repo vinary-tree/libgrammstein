@@ -7,9 +7,10 @@
 //!
 //! Uses n-gram words from `bak/english.vocab.artrie` for realistic benchmarking.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use libgrammstein::ngram::vocabulary::open_vocabulary;
 use libgrammstein::util::hash::{fnv1a, safe_hash, safe_hash_with_seed, GXHASH_MIN_SIZE};
+use std::hint::black_box;
 use std::path::Path;
 use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
 
